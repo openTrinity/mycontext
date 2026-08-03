@@ -55,6 +55,14 @@ export interface VaultPaths {
   agentHome: string
   /** 渠道 CLI 的配置目录（身份隔离的主防线，见实现处注释） */
   dwsHome: string
+  /**
+   * 飞书官方 CLI 的配置/日志/token 根目录。
+   *
+   * ★ 与 `dwsHome` 同一条理由（身份隔离的主防线），但飞书这条更彻底：
+   * 钉钉的 token 由系统钥匙串保管、隔离不了，而 lark-cli 的凭据可以整个
+   * 关在这个目录里（见 `LarkCli.env()` 里那套 HOME/XDG 重定向）。
+   */
+  feishuAuthRoot: string
 }
 
 export class VaultStore {
@@ -70,6 +78,15 @@ export class VaultStore {
 
   path(vaultId: string): string {
     return join(this.directory(vaultId), "core.sqlite")
+  }
+
+  /** A physically separate database for one external data source. */
+  sourcePath(vaultId: string, channelId: string): string {
+    return join(this.directory(vaultId), "sources", channelId, "core.sqlite")
+  }
+
+  sourceHandle(vaultId: string, channelId: string): StoreHandle {
+    return this.handleAt(`${vaultId}:source:${channelId}`, this.sourcePath(vaultId, channelId))
   }
 
   /**
@@ -169,22 +186,27 @@ export class VaultStore {
        * 原样搬进了新目录。
        */
       dwsHome: join(root, "channels", "dingtalk", "dws-home"),
+      feishuAuthRoot: join(root, "channels", "feishu"),
     }
   }
 
   /** 打开（或复用）指定 vault，按需应用 vault 迁移。 */
   handle(vaultId: string): StoreHandle {
-    const existing = this.open.get(vaultId)
+    return this.handleAt(vaultId, this.path(vaultId))
+  }
+
+  private handleAt(key: string, path: string): StoreHandle {
+    const existing = this.open.get(key)
     if (existing !== undefined) return existing
 
     const handle = openStore({
-      path: this.path(vaultId),
+      path,
       migrations: VAULT_MIGRATIONS,
       ...(this.options.logger === undefined ? {} : { logger: this.options.logger }),
       ...(this.options.now === undefined ? {} : { now: this.options.now }),
     })
-    this.open.set(vaultId, handle)
-    this.options.logger?.info("vault opened", { vaultId, version: handle.appliedVersion })
+    this.open.set(key, handle)
+    this.options.logger?.info("vault opened", { vaultId: key, version: handle.appliedVersion })
     return handle
   }
 
@@ -193,13 +215,18 @@ export class VaultStore {
   }
 
   close(vaultId: string): void {
-    const handle = this.open.get(vaultId)
-    if (handle === undefined) return
-    this.open.delete(vaultId)
-    try {
-      handle.close()
-    } catch {
-      // 关闭失败（通常是已被关闭）无需再处理：句柄已从表中移除。
+    const keys = [...this.open.keys()].filter(
+      (key) => key === vaultId || key.startsWith(`${vaultId}:source:`),
+    )
+    for (const key of keys) {
+      const handle = this.open.get(key)
+      if (handle === undefined) continue
+      this.open.delete(key)
+      try {
+        handle.close()
+      } catch {
+        // 关闭失败（通常是已被关闭）无需再处理：句柄已从表中移除。
+      }
     }
   }
 

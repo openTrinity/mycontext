@@ -343,6 +343,15 @@ export function FactsExplorer({
           {(data?.facts ?? []).map((fact) => (
             <Panel as="li" pad="ms" key={fact.id} className="flex flex-col gap-1.5">
               <div className="flex flex-wrap items-center gap-1.5">
+                {fact.channelId === undefined ? null : (
+                  <span className="typography-caption-400 shrink-0 rounded-full border border-[var(--border-base)] px-2 py-0.5 text-[var(--text-base-secondary)]">
+                    {fact.channelId === "feishu"
+                      ? "飞书"
+                      : fact.channelId === "dingtalk"
+                        ? "钉钉"
+                        : fact.channelId}
+                  </span>
+                )}
                 {/* 类型用一个色点 + 文字：色点给扫读，文字给确定性 */}
                 <span className="typography-caption-400 flex shrink-0 items-center gap-1 text-[var(--text-base-tertiary)]">
                   <span

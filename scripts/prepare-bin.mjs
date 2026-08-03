@@ -58,6 +58,7 @@ const binDir = join(root, "apps/desktop/resources/bin")
 const dwsCacheDir = join(root, ".dws-cache")
 const vendorForge = join(root, "vendor/forge")
 const forgeDir = join(root, "apps/desktop/resources/forge")
+const larkPackageDir = join(root, "node_modules/@larksuite/cli")
 
 /** 平台后缀：加 Windows 支持时只需把二进制放进 vendor，解析逻辑不用改。 */
 function platformSuffix() {
@@ -289,6 +290,33 @@ function prepareDws() {
 }
 
 // ---------------------------------------------------------------
+// lark-cli：官方 npm 包下载并校验的平台二进制
+// ---------------------------------------------------------------
+
+function prepareLarkCli() {
+  const source = join(
+    larkPackageDir,
+    "bin",
+    process.platform === "win32" ? "lark-cli.exe" : "lark-cli",
+  )
+  const target = join(binDir, binaryFileName("lark-cli"))
+  if (!existsSync(source)) {
+    console.error(
+      [
+        "未找到官方 lark-cli 平台二进制。",
+        "请确认 pnpm install 没有跳过 @larksuite/cli 的 postinstall。",
+        `期望位置：${source}`,
+      ].join("\n"),
+    )
+    process.exit(1)
+  }
+  mkdirSync(binDir, { recursive: true })
+  copyFileSync(source, target)
+  chmodSync(target, 0o755)
+  console.log(`已准备（官方 @larksuite/cli）：${target}`)
+}
+
+// ---------------------------------------------------------------
 // forge：必需（蒸馏引擎）
 // ---------------------------------------------------------------
 
@@ -406,6 +434,7 @@ function reportOpencode() {
 }
 
 prepareDws()
+prepareLarkCli()
 prepareForge()
 prepareOpencode()
 reportOpencode()

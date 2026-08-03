@@ -356,7 +356,7 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     return (last?.params?.prompt ?? []) as { type: string; text: string }[]
   }
 
-  it("resume 成功（未重建）→ prompt 只带问题本身，不回灌", async () => {
+  it("resume 成功（未重建）→ 不回灌历史，但仍带独立渠道召回块", async () => {
     const fake = fakeOpencode({ turnUpdates: [[messageChunk("答案一")], [messageChunk("答案二")]] })
     const ctx = makeService({ hasOpencode: true, fake })
     const session = ctx.service.create("问题")
@@ -364,8 +364,11 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     await ctx.service.prompt(session.id, "第二个问题")
 
     const blocks = lastPromptBlocks(fake.written)
-    expect(blocks).toHaveLength(1)
-    expect(blocks[0]?.text).toBe("第二个问题")
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0]?.text).toContain("<isolated_source_recall")
+    expect(blocks[0]?.text).toContain('channel="dingtalk"')
+    expect(blocks[0]?.text).not.toContain("<previous_conversation")
+    expect(blocks[1]?.text).toBe("第二个问题")
     ctx.close()
   })
 
@@ -381,8 +384,8 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     await ctx.service.prompt(session.id, "第二个问题")
 
     const blocks = lastPromptBlocks(fake.written)
-    // 回灌块 + 问题块（问题单独成块：别让模型把问题也当成资料的一部分）
-    expect(blocks).toHaveLength(2)
+    // 回灌块 + 隔离渠道召回块 + 问题块。
+    expect(blocks).toHaveLength(3)
     const replay = blocks[0]?.text ?? ""
     // ① 有边界：裸文本没有边界，模型分不清"给你看的"与"要你写的"
     expect(replay).toContain("<previous_conversation")
@@ -394,7 +397,8 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     // ③ 历史确实带上了（回灌的本意：别让它忘了聊过什么）
     expect(replay).toContain("第一个问题")
     // ④ 新问题独立成块、且不在回灌块里
-    expect(blocks[1]?.text).toBe("第二个问题")
+    expect(blocks[1]?.text).toContain("<isolated_source_recall")
+    expect(blocks[2]?.text).toBe("第二个问题")
     ctx.close()
   })
 

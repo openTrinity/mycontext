@@ -44,6 +44,7 @@ const ALL_KEYS: readonly (keyof VaultPaths)[] = [
   "agentWorkspaceRoot",
   "agentHome",
   "dwsHome",
+  "feishuAuthRoot",
 ]
 
 describe("每个落点都在 vault 目录内", () => {
@@ -67,6 +68,14 @@ describe("每个落点都在 vault 目录内", () => {
     const paths = vaults.paths("vault-a")
     expect(Object.keys(paths).sort()).toEqual([...ALL_KEYS].sort())
     for (const key of ALL_KEYS) expect(paths[key]).not.toBe("")
+  })
+
+  it("feishuAuthRoot 在 vault 内（与 dwsHome 对称：凭据跟着身份走）", () => {
+    const paths = vaults.paths("vault-a")
+    expect(paths.feishuAuthRoot.startsWith(paths.root)).toBe(true)
+    // ★ 与 dwsHome 各自独立：两个渠道的 CLI 配置不能互相看见
+    expect(paths.feishuAuthRoot.startsWith(paths.dwsHome)).toBe(false)
+    expect(paths.dwsHome.startsWith(paths.feishuAuthRoot)).toBe(false)
   })
 
   it("路径都是绝对路径（相对路径会落到进程 cwd，也就是仓库目录里）", () => {

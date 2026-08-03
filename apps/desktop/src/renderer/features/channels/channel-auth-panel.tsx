@@ -12,7 +12,7 @@
 import { Avatar, Button, DingTalkIcon, Panel, Tooltip, cn } from "@mycontext/design"
 import { REFRESH_EXPIRY_WARNING_DAYS } from "@mycontext/ipc-contract"
 import type { AuthProgress, AuthStatus, ChannelSummary } from "@mycontext/ipc-contract"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import type { ComponentType } from "react"
 import { Trans } from "react-i18next"
 import {
@@ -28,16 +28,7 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { StepSection } from "../onboarding/step-section.js"
 import { DwsSourceDisclosure } from "./dws-source-disclosure.js"
-import {
-  AppIcon,
-  CheckCircleIcon,
-  DINGTALK_BRAND,
-  ExchangeIcon,
-  KeyIcon,
-  ShieldIcon,
-  SpinnerIcon,
-  ToolsIcon,
-} from "./channel-icons.js"
+import { DINGTALK_BRAND, KeyIcon, ShieldIcon, SpinnerIcon, ToolsIcon } from "./channel-icons.js"
 
 /**
  * 渠道 id → 官方标识组件。
@@ -47,9 +38,17 @@ import {
  */
 const BRAND_ICONS: Record<string, ComponentType<{ className?: string }> | undefined> = {
   dingtalk: DingTalkIcon,
+  feishu: FeishuBrandIcon,
 }
 
-function formatTime(iso: string): string {
+const FEISHU_BRAND_LOGO_URL = new URL("./assets/channel-source-logo.png", import.meta.url).href
+
+function FeishuBrandIcon({ className }: { className?: string }) {
+  return <img alt="" className={cn("object-contain", className)} src={FEISHU_BRAND_LOGO_URL} />
+}
+
+function formatTime(iso: string | null): string {
+  if (iso === null) return "—"
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
   const pad = (value: number) => String(value).padStart(2, "0")
@@ -93,6 +92,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const [deviceCode, setDeviceCode] = useState<
     Extract<AuthProgress, { phase: "device-code" }> | undefined
   >(undefined)
+  const [onboardingExpanded, setOnboardingExpanded] = useState(false)
 
   useAuthProgress(channel.id, (next) => {
     setProgress(next)
@@ -104,6 +104,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const running = start.isPending
   const status = channel.status
   const authorized = status.state === "authorized"
+  const scopePrefix = channel.id === "feishu" ? "feishuScope" : "scope"
 
   /**
    * 渠道侧的昵称（钉钉叫花名）。
@@ -114,8 +115,10 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * ★ 用 `useSelfIdentity`（query）而不是 `useResolveSelf`（mutation）：
    * 后者每次都真调渠道并可能抛歧义错误 —— 见 queries.ts 里的注释。
    */
-  const selfIdentity = useSelfIdentity(authorized)
-
+  // The current identity IPC is the DingTalk/Persona identity. Feishu is a
+  // read-only knowledge source and deliberately has no Persona identity UI.
+  const usesPersonaIdentity = channel.id === "dingtalk"
+  const selfIdentity = useSelfIdentity(authorized && usesPersonaIdentity)
   /**
    * ★★ 这个**账号**自己连好了吗 —— 与「渠道 authorized」是两件事。
    *
@@ -144,7 +147,8 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * `undefined`（还在查）按"未连接"处理会让已连接的账号闪一下"去授权"，
    * 所以显式要求 `=== true`：查完之前两个分支都不进（见下面 `pending`）。
    */
-  const accountConnected = authorized && selfIdentity.data?.confirmed === true
+  const accountConnected =
+    authorized && (!usesPersonaIdentity || selfIdentity.data?.confirmed === true)
   /**
    * 身份还在查 —— 此时**不要**下结论。
    *
@@ -152,7 +156,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * 「已连接」。那种一闪而过的状态比慢 200ms 更让人困惑，
    * 而且会让人以为自己的授权掉了。
    */
-  const identityPending = authorized && selfIdentity.data === undefined
+  const identityPending = authorized && usesPersonaIdentity && selfIdentity.data === undefined
 
   /**
    * 与实名不同才显示，否则会得到"王强（王强）"。
@@ -227,18 +231,18 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * 只在已授权时查：未授权时答案必然是 null，而这个查询会跑一次
    * `auth status`（子进程）。
    */
-  const adoptable = useAdoptableSession(authorized)
+  const adoptable = useAdoptableSession(authorized && usesPersonaIdentity)
   const adopt = useAdoptSession()
 
   /**
-   * 本人头像 —— 授权后画在连接图右侧（见 `ConnectionGraph`）。
+   * 本人头像 —— 授权后用于设置页的账号行。
    *
    * 取账号里那份而不是重新去渠道拿：`startup.ts` 的 `onAuthorized` 已经
    * 在身份确认后自动取过一次并写进账号了（遵守 manual 优先），所以这里
    * **只是读**。拿不到时传 null，`Avatar` 自己退回首字母。
    */
   const bootstrap = useBootstrapState()
-  const selfAvatar = bootstrap.data?.session?.avatarUrl ?? null
+  const selfAvatar = usesPersonaIdentity ? (bootstrap.data?.session?.avatarUrl ?? null) : null
 
   /**
    * 上一次授权的失败原因。
@@ -269,6 +273,12 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
       : start.error !== null
         ? errorText(start.error)
         : undefined
+
+  // 授权进入等待或失败时保持详情可见，避免用户只看到一条静态平台行，
+  // 却不知道浏览器是否已打开、授权码在哪里或下一步该做什么。
+  useEffect(() => {
+    if (running || failure !== undefined) setOnboardingExpanded(true)
+  }, [failure, running])
 
   const begin = (mode: "loopback" | "device") => {
     setProgress(null)
@@ -330,18 +340,18 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         <div className="flex flex-col gap-0.5">
           <InfoRow
             icon={<ToolsIcon className="size-4" />}
-            title={t("scope.readTitle")}
-            description={t("scope.readDescription")}
+            title={t(`${scopePrefix}.readTitle`)}
+            description={t(`${scopePrefix}.readDescription`)}
           />
           <InfoRow
             icon={<ShieldIcon className="size-4" />}
-            title={t("scope.noSpeakTitle")}
-            description={t("scope.noSpeakDescription")}
+            title={t(`${scopePrefix}.noSpeakTitle`)}
+            description={t(`${scopePrefix}.noSpeakDescription`)}
           />
           <InfoRow
             icon={<KeyIcon className="size-4" />}
-            title={t("scope.credentialsTitle")}
-            description={t("scope.credentialsDescription")}
+            title={t(`${scopePrefix}.credentialsTitle`)}
+            description={t(`${scopePrefix}.credentialsDescription`)}
           />
         </div>
       )}
@@ -383,7 +393,9 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         </p>
       ) : null}
 
-      {authorized && status.daysUntilRefreshExpiry <= REFRESH_EXPIRY_WARNING_DAYS ? (
+      {authorized &&
+      status.daysUntilRefreshExpiry !== null &&
+      status.daysUntilRefreshExpiry <= REFRESH_EXPIRY_WARNING_DAYS ? (
         <p className="typography-body-small-400 radius-md bg-[var(--status-fill-warning-container)] px-3 py-2 text-[var(--status-warning)]">
           {t("settings.expiryWarning", { days: status.daysUntilRefreshExpiry })}
         </p>
@@ -415,71 +427,71 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
 
   if (variant === "onboarding") {
     return (
-      <div className="flex flex-col gap-[var(--gap-section-md)]">
-        {/*
-          连接关系 + 结论，居中成一块"英雄区"。
-          它讲的是"谁连到了谁"，所以图与那句话必须在一起、居中。
-        */}
-        <div className="flex flex-col items-center gap-[var(--gap-component-md)] py-2">
-          <ConnectionGraph
-            channelId={channel.id}
-            /**
-             * ★ 连接图按**账号连了吗**画，而不是渠道 authorized。
-             *
-             * 机器级登录态下画成"已连上"是这个误导的视觉部分 —— 一个绿勾
-             * 比任何文案都更让人相信"不用管了"。查身份期间（identityPending）
-             * 也当已连接画，避免闪一下断开。
-             */
-            authorized={accountConnected || identityPending}
-            running={running}
-            peerName={accountConnected ? status.userName : null}
-            peerAvatar={selfAvatar}
-          />
-          <div className="flex flex-col items-center gap-1 text-center">
-            <h2 className="typography-title-base-600 text-[var(--text-base-primary)]">
-              {t(
-                accountConnected || identityPending
-                  ? "onboarding.connectedTitle"
-                  : "onboarding.connectTitle",
-                { channel: t(channel.labelKey) },
+      <Panel pad="sm" className="flex flex-col gap-0 overflow-hidden">
+        <div className="flex min-h-16 items-center gap-3">
+          <ChannelBadge channelId={channel.id} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h2 className="typography-body-base-500 text-[var(--text-base-primary)]">
+                {t(
+                  accountConnected || identityPending
+                    ? "onboarding.connectedTitle"
+                    : "onboarding.connectTitle",
+                  { channel: t(channel.labelKey) },
+                )}
+              </h2>
+              <StateTag
+                available
+                state={
+                  accountConnected || identityPending
+                    ? status.state
+                    : status.state === "expired"
+                      ? "expired"
+                      : "unauthorized"
+                }
+              />
+            </div>
+            <div className="typography-caption-400 mt-0.5 flex min-w-0 items-center gap-1 text-[var(--text-base-tertiary)]">
+              {accountConnected ? (
+                channelNick === null ? (
+                  `${status.corpName} · ${status.userName}`
+                ) : (
+                  `${status.corpName} · ${status.userName}（${channelNick}）`
+                )
+              ) : identityPending ? (
+                <span>{status.corpName}</span>
+              ) : authorized && !identityPending ? (
+                <>
+                  <span className="shrink-0">{status.corpName}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="truncate">{t("onboarding.machineSessionHint")}</span>
+                </>
+              ) : (
+                t(channel.descriptionKey)
               )}
-            </h2>
-            {/*
-              ★ 授权后这里显示**身份**（谁），未授权时显示渠道能做什么。
-              授权成功后再念一遍"后续采集都基于这个授权"是废话 ——
-              用户刚点完那个按钮，他要确认的是连上的是不是自己。
-              花名与实名相同时不重复显示，否则会得到"高鹏（高鹏）"。
-
-              ★★ 「渠道 authorized 但这个账号没连」时**不显示身份** ——
-              那个身份属于本机上另一个账号（或一个过期 profile），
-              把它当成"你的"显示出来正是这个误导的核心。改为说清
-              "本机已有登录态，但要为当前账号确认一次"。
-            */}
-            <p className="typography-body-base-400 max-w-[420px] text-[var(--text-base-secondary)]">
-              {accountConnected
-                ? channelNick === null
-                  ? `${status.corpName} · ${status.userName}`
-                  : `${status.corpName} · ${status.userName}（${channelNick}）`
-                : authorized && !identityPending
-                  ? t("onboarding.machineSessionHint")
-                  : t(channel.descriptionKey)}
-            </p>
+            </div>
           </div>
-          <div className="flex justify-center">{actions}</div>
+          <Button
+            size="sm"
+            variant={onboardingExpanded ? "secondary" : "primary"}
+            aria-expanded={onboardingExpanded}
+            onClick={() => setOnboardingExpanded((open) => !open)}
+          >
+            {t(onboardingExpanded ? "actions.collapse" : "actions.configure")}
+          </Button>
         </div>
 
-        {/*
-          ★ 详情收进一个**带标题**的分区。
-          原来这三行凭证信息是个没有标题的灰框，读起来像报错。
-          未授权时这里是授权范围说明（读什么、不发言、凭证存哪），
-          那同样是"细则"而不是"结论"，所以共用这一个分区。
-        */}
-        <StepSection
-          title={t(accountConnected ? "onboarding.accountTitle" : "onboarding.scopeTitle")}
-        >
-          {body}
-        </StepSection>
-      </div>
+        {onboardingExpanded ? (
+          <div className="flex flex-col gap-[var(--gap-component-md)] border-t border-[var(--border-divider-light)] pt-[var(--gap-component-md)]">
+            <div className="flex justify-end">{actions}</div>
+            <StepSection
+              title={t(accountConnected ? "onboarding.accountTitle" : "onboarding.scopeTitle")}
+            >
+              {body}
+            </StepSection>
+          </div>
+        ) : null}
+      </Panel>
     )
   }
 
@@ -498,8 +510,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
           左边却还是一个渠道 logo，于是整行没有任何地方能让人
           一眼确认"连上的是我自己"。
 
-          引导页那一步（`ConnectionGraph`）早就是这么画的 ——
-          设置页与它保持同一个形态，而不是各自一套。
+          授权后的账号身份比渠道标识更重要，所以这里让头像成为主图标。
 
           ## 角标而不是替换
 
@@ -555,84 +566,8 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
 
       <div className="h-px bg-[var(--border-divider-light)]" />
       {body}
-      <SharedCredentialNote />
+      <SharedCredentialNote channelId={channel.id} />
     </Panel>
-  )
-}
-
-/**
- * 双图标 + 中间状态连线：讲清「应用 ↔ 渠道」的连接关系。
- *
- * ## ★ 授权后右侧换成**这个人的头像**
- *
- * 授权前右侧是渠道图标（此时还没有身份，画头像无从画起）。
- * 授权成功后就有身份了，而这时用户最需要确认的是「连上的是**谁**」——
- * 一个渠道图标回答不了那个问题（他刚才扫的就是这个渠道的码）。
- *
- * 头像不用额外去取：`startup.ts` 的 `onAuthorized` 在身份确认后会自动
- * 取一次本人头像并写进账号（遵守"manual 永不被覆盖"），所以
- * `session.avatarUrl` 这时通常已经有值。取不到时 `Avatar` 自己退回
- * 首字母色块 —— 那也是钉钉在没设头像时的做法，不是缺陷。
- *
- * 渠道图标降为**右下角角标**，而不是消失：「某平台的某个人」这两个信息
- * 都要在，而角标正是 IM 里表达这件事的标准形态。
- */
-function ConnectionGraph({
-  channelId,
-  authorized,
-  running,
-  peerName,
-  peerAvatar,
-}: {
-  channelId: string
-  authorized: boolean
-  running: boolean
-  /** 授权后的显示名（头像兜底要用它的首字母） */
-  peerName: string | null
-  peerAvatar: string | null
-}) {
-  return (
-    <div className="flex items-center">
-      <div className="flex size-12 shrink-0 items-center justify-center radius-xl border border-[var(--border-light)] bg-[var(--bg-card-z1)] text-[var(--text-accent-normal)]">
-        <AppIcon className="size-7" />
-      </div>
-      <div className="mx-1 flex flex-1 items-center">
-        <span className="h-px w-8 bg-[var(--border-light)]" />
-        {authorized ? (
-          <CheckCircleIcon className="mx-1.5 size-5 shrink-0 text-[var(--status-success)]" />
-        ) : running ? (
-          <SpinnerIcon className="mx-1.5 size-4 shrink-0 animate-spin text-[var(--text-base-tertiary)]" />
-        ) : (
-          <ExchangeIcon className="mx-1.5 size-4 shrink-0 text-[var(--text-base-tertiary)]" />
-        )}
-        <span className="h-px w-8 bg-[var(--border-light)]" />
-      </div>
-      {authorized ? (
-        /*
-          头像 + 渠道角标。`relative` 容器让角标能定位到右下角；
-          角标带一圈与页面同色的描边，让它从头像上"浮"起来而不是糊在一起。
-        */
-        <span className="relative shrink-0">
-          {/*
-            ★ **不要**在这里给 Avatar 加 ring。
-
-            原来有一圈 `ring-1 ring-[var(--border-divider-light)]`，那是一条
-            真实的灰线 —— 而 `Avatar` 现在明确不带边框了（见它的注释：
-            兜底色块本身是实色，再套描边等于加一道杂线）。从外面补回来
-            等于把那个决定又推翻一次，视觉上就是"头像有一圈不协调的边"。
-
-            照片的轮廓交给 squircle 的边界本身。
-          */}
-          <Avatar size="xl" name={peerName ?? "?"} src={peerAvatar} />
-          {/* ring 的圆角与角标同为 radius-md —— 不一致会在四角露出错位的缝隙 */}
-          <span className="absolute -bottom-0.5 -right-0.5 radius-md ring-2 ring-[var(--bg-card-z1)]">
-            <ChannelBadge channelId={channelId} size="sm" />
-          </span>
-        </span>
-      ) : (
-        <ChannelBadge channelId={channelId} size="lg" />
-      )}
-    </div>
   )
 }
 
@@ -648,7 +583,7 @@ function ChannelBadge({
   size = "md",
 }: {
   channelId: string
-  /** `sm` 是给"叠在头像右下角当角标"用的（见 ConnectionGraph） */
+  /** `sm` 是给"叠在头像右下角当角标"用的 */
   size?: "sm" | "md" | "lg"
 }) {
   const { t } = useDynamicTranslation("channels")
@@ -870,7 +805,7 @@ function ProgressBlock({
  * 应用与用户终端里的 dws 是同一份登录态，无法隔离。
  * 因此不提供「退出授权」按钮——那会连带清掉用户终端的登录态。
  */
-function SharedCredentialNote() {
+function SharedCredentialNote({ channelId }: { channelId: string }) {
   /**
    * 用 Trans 而不是 t()：文案里要嵌一个 <code> 标签。
    * 命令名作为插值参数传进去，而不是把句子拆成前后两半再拼——
@@ -880,8 +815,12 @@ function SharedCredentialNote() {
     <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
       <Trans
         ns="channels"
-        i18nKey="settings.sharedCredentialNote"
-        values={{ command: "dws auth logout" }}
+        i18nKey={
+          channelId === "feishu" ? "settings.feishuCredentialNote" : "settings.sharedCredentialNote"
+        }
+        values={{
+          command: channelId === "feishu" ? "lark-cli auth logout --json" : "dws auth logout",
+        }}
         components={{ 1: <code className="font-mono-token" /> }}
       />
     </p>

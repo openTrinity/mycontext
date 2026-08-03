@@ -183,6 +183,8 @@ export interface GraphQueryOptions {
   egoCandidateLimit?: number
   /** 现在几点（时间范围过滤要用）。注入让测试可复现 */
   now: () => number
+  /** 这一个查询实例对应的物理图库渠道。 */
+  sourceChannelId?: string
 }
 
 const MS_PER_DAY = 86_400_000
@@ -548,7 +550,16 @@ export class GraphQueryService {
         returned: result.rows.length,
         hasKeyword: input.keyword.trim() !== "",
       })
-      return { available: true, reason, total: result.total, facts: result.rows }
+      return {
+        available: true,
+        reason,
+        total: result.total,
+        facts: result.rows.map((row) => ({
+          ...row,
+          id: `${this.options.sourceChannelId ?? "dingtalk"}:${row.id}`,
+          channelId: this.options.sourceChannelId ?? "dingtalk",
+        })),
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       this.options.logger.warn("read graph facts failed", { detail })

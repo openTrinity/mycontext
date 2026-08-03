@@ -1466,9 +1466,9 @@ export const authStatusSchema = z.discriminatedUnion("state", [
     corpName: z.string(),
     userId: z.string(),
     userName: z.string(),
-    accessExpiresAt: z.string(),
-    refreshExpiresAt: z.string(),
-    daysUntilRefreshExpiry: z.number(),
+    accessExpiresAt: z.string().nullable(),
+    refreshExpiresAt: z.string().nullable(),
+    daysUntilRefreshExpiry: z.number().nullable(),
   }),
 ])
 
@@ -2534,6 +2534,8 @@ export const klGraphFactsSchema = z.object({
       type: z.string(),
       confidence: z.number(),
       at: z.number().nullable(),
+      /** 事实来自哪个物理隔离的渠道图库。旧数据/旧客户端可不带。 */
+      channelId: z.string().min(1).optional(),
       /** 这条事实在说谁/什么（最多 4 个实体名） */
       entities: z.array(z.string()),
     }),

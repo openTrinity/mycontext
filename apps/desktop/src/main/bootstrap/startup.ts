@@ -66,9 +66,11 @@ import { PersonaService } from "../services/persona.service.js"
 import { PersonaGate } from "../services/persona-gate.js"
 import { SearchService } from "../services/search.service.js"
 import { KlServerService } from "../services/kl-server.service.js"
+import { MultiKlServerService } from "../services/multi-kl-server.service.js"
 import { ensurePythonEnv } from "../services/python-env.js"
 import { GraphQueryService } from "../services/graph-query.service.js"
 import { DashboardTrendsService } from "../services/dashboard-trends.service.js"
+import { MultiGraphQueryService } from "../services/multi-graph-query.service.js"
 import { AdvancedAiService } from "../services/advanced-ai.service.js"
 import { RuntimeConfigService } from "../services/runtime-config.service.js"
 import { SecretStore } from "../services/secret-store.js"
@@ -105,7 +107,10 @@ export interface AppContext {
   /** 搜索模块。生命周期同样跟随 vault */
   search: SearchService
   /** kl 检索服务子进程（懒启动，应用级句柄但数据按 vault 隔离） */
-  klServer: KlServerService
+  klServer: Pick<
+    KlServerService,
+    "status" | "ensureReady" | "stop" | "rebuildGraph" | "optimizeGraph" | "graphOverview"
+  >
   /** 图谱只读查询（ego 图 + 事实检索）。与 klServer 分开，见构造处注释 */
   graphQuery: GraphQueryService
   /** 仪表盘的时序 + 消化漏斗（独立通道 + 按 changelog head 缓存） */
@@ -354,7 +359,23 @@ export function bootstrapApp(mainDir: string): AppContext {
     logger: logger.child("DingTalk"),
     openExternal: (url) => shell.openExternal(url),
   })
-  const registry = createRegistry([dingtalk, createFeishuPlugin()])
+  const feishu = createFeishuPlugin({
+    processes,
+    logger: logger.child("Feishu"),
+    openExternal: (url) => shell.openExternal(url),
+    /**
+     * ★ 空串占位 —— 真实目录在**挂载时**按 vault 给（见 `VaultStore.paths()`
+     * 的 `feishuAuthRoot`）。凭据必须跟着身份走，与 `dwsHome` 同一条理由。
+     */
+    authRoot: "",
+    executable: join(
+      paths.binDir,
+      process.platform === "win32"
+        ? `lark-cli-${process.platform}-${process.arch === "x64" ? "x64" : process.arch}.exe`
+        : `lark-cli-${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`,
+    ),
+  })
+  const registry = createRegistry([dingtalk, feishu])
 
   let window: BrowserWindow | null = null
   /**
@@ -367,6 +388,7 @@ export function bootstrapApp(mainDir: string): AppContext {
    * `vaultDb()` 返回 null 就是"还没登录"，调用方据此降级。
    */
   let mountedVault: SqliteDatabase | null = null
+  const mountedSourceVaults = new Map<string, SqliteDatabase>()
   const vaultDb = (): SqliteDatabase | null => mountedVault
 
   const feed = new FeedService({
@@ -495,6 +517,30 @@ export function bootstrapApp(mainDir: string): AppContext {
         const since = dataPlane.snapshot().backfill.since
         return since === null ? undefined : Math.max(0, systemClock.now() - since)
       },
+    },
+  })
+
+  const feishuFeed = new FeedService({
+    clock: systemClock,
+    logger: logger.child("Pipeline:Feishu"),
+    embedding: () => ({
+      baseUrl: runtimeConfig.resolved().llmBaseUrl,
+      model: runtimeConfig.resolved().embedModel,
+      dim: 2048,
+    }),
+    localEmbedding: { model: runtimeConfig.resolved().embedModel, dim: 1024 },
+    llm: () => ({
+      baseUrl: runtimeConfig.resolved().klBaseUrl,
+      model: runtimeConfig.resolved().klModel,
+    }),
+    autoBuild: {
+      enabled: () => {
+        const r = runtimeConfig.resolved()
+        return r.klBaseUrl.trim() !== "" && r.klApiKey.trim() !== ""
+      },
+      ready: () => !feishuKlServer.status().building,
+      graphExists: () => feishuKlServer.graphOverview().available,
+      trigger: async () => (await feishuKlServer.rebuildGraph(false)).ok,
     },
   })
 
@@ -1116,6 +1162,57 @@ export function bootstrapApp(mainDir: string): AppContext {
   // 回填给上面那个 onChange —— 改网关后重起 kl（见那里的注释）。
   klServerRef = klServer
 
+  const feishuKlServer = new KlServerService({
+    clock: systemClock,
+    logger: logger.child("KlServer:Feishu"),
+    processes,
+    klRoot: paths.klRoot,
+    /** 与主渠道同理：空串占位，挂载时 `rebind()` 换成该 vault 下飞书那一份。 */
+    dataDir: "",
+    exportDir: "",
+    port: klPort + 1,
+    // The combined status UI is owned by the primary service; this source
+    // remains independently queryable without racing the same IPC event.
+    getWindow: () => null,
+    preparePython: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
+    gateway: () => {
+      const r = runtimeConfig.resolved()
+      const base =
+        r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
+      const key =
+        r.klApiKey.trim() !== ""
+          ? r.klApiKey
+          : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
+      return {
+        llmBaseUrl: base,
+        llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
+        embedBaseUrl: base === "" ? "" : `${base.replace(/\/$/, "")}/v1`,
+        embedModel: r.embedModel,
+        apiKey: key,
+        embeddingDim: 2048,
+        sendDimensions: true,
+      }
+    },
+  })
+
+  const appKlServer = new MultiKlServerService(klServer, [
+    {
+      service: feishuKlServer,
+      enabled: () => {
+        const db = mountedSourceVaults.get(feishu.meta.id)
+        if (db === undefined) return false
+        try {
+          return (
+            (db.prepare<[], { count: number }>("SELECT count(*) AS count FROM messages").get()
+              ?.count ?? 0) > 0
+          )
+        } catch {
+          return false
+        }
+      },
+    },
+  ])
+
   /**
    * 图谱的**只读查询**（ego 图 + 事实检索）。
    *
@@ -1172,6 +1269,7 @@ export function bootstrapApp(mainDir: string): AppContext {
      * `edges: 26558`。不接这条的话「它认识的人与事」永远是空面板。
      */
     factsOfEntity: (entityId) => klServer.factsOfEntity(entityId),
+    sourceChannelId: dingtalk.meta.id,
   })
 
   /**
@@ -1188,10 +1286,34 @@ export function bootstrapApp(mainDir: string): AppContext {
     klDataDir: () => vaultPaths?.klRoot ?? "",
   })
 
+  const feishuGraphQuery = new GraphQueryService({
+    logger: logger.child("GraphQuery:Feishu"),
+    /**
+     * 与主渠道同款：**函数**而非值 —— 挂载时才知道是哪个 vault。
+     * 飞书的图在主渠道 `klRoot` 下的子目录里（一个 vault 一份图谱根，
+     * 每渠道一个子目录），所以两个渠道的图天然不互相覆盖。
+     */
+    dataDir: () => (vaultPaths === null ? "" : join(vaultPaths.klRoot, feishu.meta.id)),
+    now: () => systemClock.now(),
+    sourceChannelId: feishu.meta.id,
+    getSelfNames: () => [],
+    getChannelByConversation: () => {
+      const db = mountedSourceVaults.get(feishu.meta.id)
+      if (db === undefined) return new Map<string, string>()
+      try {
+        return new ConversationRepository(db).channelByExternalId()
+      } catch {
+        return new Map<string, string>()
+      }
+    },
+  })
+  const appGraphQuery = new MultiGraphQueryService(graphQuery, [feishuGraphQuery])
+
   const dataPlane = new DataPlaneService({
     clock: systemClock,
     logger: logger.child("DataPlane"),
     plugin: dingtalk,
+    sources: [{ plugin: feishu, feed: feishuFeed }],
     feed,
     getWindow: () => window,
     /**
@@ -1887,8 +2009,8 @@ export function bootstrapApp(mainDir: string): AppContext {
     preferences,
     dataPlane,
     search,
-    klServer,
-    graphQuery,
+    klServer: appKlServer,
+    graphQuery: appGraphQuery,
     dashboardTrends,
     advancedAi,
     runtimeConfig,
@@ -1921,8 +2043,8 @@ export function bootstrapApp(mainDir: string): AppContext {
     preferences,
     dataPlane,
     search,
-    klServer,
-    graphQuery,
+    klServer: appKlServer,
+    graphQuery: appGraphQuery,
     dashboardTrends,
     advancedAi,
     runtimeConfig,
@@ -1971,7 +2093,7 @@ export function bootstrapApp(mainDir: string): AppContext {
       await runShutdownStep(runner, "distill", () => distill.detach())
       await runShutdownStep(runner, "persona", () => persona.detach())
       // kl 子进程同样优雅停（SIGTERM→SIGKILL，无孤儿）。
-      await runShutdownStep(runner, "klServer", () => klServer.stop())
+      await runShutdownStep(runner, "klServer", () => appKlServer.stop())
       await runShutdownStep(runner, "dataPlane", () => dataPlane.detach())
       await runShutdownStep(runner, "db", () => {
         vaults.closeAll()

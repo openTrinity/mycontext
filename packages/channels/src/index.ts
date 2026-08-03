@@ -78,7 +78,21 @@ export {
   daysUntil,
 } from "./plugins/dingtalk/parse.js"
 
-export { createFeishuPlugin } from "./plugins/feishu/index.js"
+export {
+  createFeishuPlugin,
+  FeishuAuth,
+  LarkCli,
+  assertAllowedLarkCommand,
+  extractLarkJson,
+  createFeishuIngest,
+  createFeishuIdentity,
+  LARK_AUTH_SCOPES,
+  parseLarkAuthStatus,
+  parseLarkDeviceGrant,
+  parseLarkDrivePage,
+  parseLarkMessagePage,
+} from "./plugins/feishu/index.js"
+export type { FeishuPluginOptions } from "./plugins/feishu/index.js"
 
 export {
   parseLocalTime,

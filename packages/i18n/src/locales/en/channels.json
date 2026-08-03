@@ -14,7 +14,10 @@
     "description": "Connects to Lark conversations as a custom app (planned).",
     "steps": {
       "createApp": "Create a custom app on the Lark developer console and get its App ID and App Secret",
-      "subscribe": "Enter the credentials here and subscribe to message events"
+      "subscribe": "Enter the credentials here and subscribe to message events",
+      "openBrowser": "Click Authorize to open the official Lark CLI authorization page",
+      "confirm": "Approve read-only message search, message and Drive search scopes",
+      "backToApp": "Return to the app; Lark content will enter the local database and knowledge graph"
     }
   },
   "state": {
@@ -27,7 +30,9 @@
     "start": "Authorize",
     "reauthorize": "Re-authorize",
     "useCode": "Use a code",
-    "useCodeHint": "If the browser cannot open, finish on another device with a code"
+    "useCodeHint": "If the browser cannot open, finish on another device with a code",
+    "configure": "Configure",
+    "collapse": "Collapse"
   },
   "scope": {
     "readTitle": "Reads your work data",
@@ -75,12 +80,21 @@
     "expiredHint": "Authorization expired — you'll need to scan again",
     "expiryWarning": "This authorization expires in {{days}} days. Re-authorizing now is a good idea.",
     "identityMismatch": "Identity misconfigured: this data is bound to \"{{boundCorp}}\", but the channel config directory currently resolves to \"{{channelCorp}}\". These should always match (each identity keeps its own data and config) — re-authorize to \"{{boundCorp}}\" to restore it, or switch to \"{{channelCorp}}\" and its own data.",
-    "sharedCredentialNote": "The official DingTalk CLI stores credentials in your system keychain, shared with the CLI in your terminal. To clear them completely, run <1>{{command}}</1> in a terminal."
+    "sharedCredentialNote": "The official DingTalk CLI stores credentials in your system keychain, shared with the CLI in your terminal. To clear them completely, run <1>{{command}}</1> in a terminal.",
+    "feishuCredentialNote": "Lark credentials are isolated inside this app's user directory and do not reuse your terminal CLI session. To clear them, run <1>{{command}}</1> in the app's isolated environment."
   },
   "progress": {
     "browserOpened": "DingTalk sign-in opened — scan the code to continue",
     "enterCode": "Enter the code in your browser to finish",
     "scopeAuthorization": "Signed in — confirm the DWS authorization scope in the newly opened page",
     "manualUrl": "Browser didn't open? Visit this URL: {{url}}"
+  },
+  "feishuScope": {
+    "readTitle": "Reads Lark data",
+    "readDescription": "Read-only search of accessible Lark messages and Drive documents for the local database, graph and Q&A.",
+    "noSpeakTitle": "No Lark Persona",
+    "noSpeakDescription": "Lark data never enters the auto-reply or send path, and no write scopes are requested.",
+    "credentialsTitle": "Isolated authorization directory",
+    "credentialsDescription": "The official Lark CLI handles authorization; credentials stay inside this app's isolated user directory."
   }
 }

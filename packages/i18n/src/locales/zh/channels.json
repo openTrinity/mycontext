@@ -14,7 +14,10 @@
     "description": "以自建应用身份接入飞书会话（规划中）。",
     "steps": {
       "createApp": "在飞书开放平台创建自建应用并获取 App ID 与 App Secret",
-      "subscribe": "在应用内填写凭据并订阅消息事件"
+      "subscribe": "在应用内填写凭据并订阅消息事件",
+      "openBrowser": "点击「开始授权」，应用会通过飞书官方 CLI 打开授权页面",
+      "confirm": "确认消息搜索、消息只读和云文档搜索权限",
+      "backToApp": "授权完成后回到应用，飞书内容会进入本地数据库和知识图谱"
     }
   },
   "state": {
@@ -27,7 +30,9 @@
     "start": "开始授权",
     "reauthorize": "重新授权",
     "useCode": "用授权码",
-    "useCodeHint": "无法打开浏览器时，用授权码在其他设备完成"
+    "useCodeHint": "无法打开浏览器时，用授权码在其他设备完成",
+    "configure": "配置",
+    "collapse": "收起"
   },
   "scope": {
     "readTitle": "读取工作数据",
@@ -75,12 +80,21 @@
     "expiredHint": "授权已过期，需要重新扫码",
     "expiryWarning": "授权将在 {{days}} 天后过期，建议现在重新授权。",
     "identityMismatch": "身份配置异常：这份数据绑定的是「{{boundCorp}}」，而渠道配置目录里当前生效的是「{{channelCorp}}」。正常情况下两者应当一致（每个身份有自己独立的一份数据与配置）—— 请重新授权到「{{boundCorp}}」把它恢复，或切换到「{{channelCorp}}」自己的那份数据。",
-    "sharedCredentialNote": "授权凭据由钉钉官方 CLI 保存在系统钥匙串，与你在终端里的登录态共用。如需彻底清除，请在终端执行 <1>{{command}}</1>。"
+    "sharedCredentialNote": "授权凭据由钉钉官方 CLI 保存在系统钥匙串，与你在终端里的登录态共用。如需彻底清除，请在终端执行 <1>{{command}}</1>。",
+    "feishuCredentialNote": "飞书凭据隔离保存在本应用用户目录，不复用你终端的默认 CLI 登录态。如需清除，请在应用对应的隔离环境执行 <1>{{command}}</1>。"
   },
   "progress": {
     "browserOpened": "已打开钉钉登录页，请扫码确认",
     "enterCode": "在浏览器中输入授权码完成授权",
     "scopeAuthorization": "登录成功，请在新打开的页面确认 DWS 授权范围",
     "manualUrl": "浏览器未自动打开？手动访问：{{url}}"
+  },
+  "feishuScope": {
+    "readTitle": "读取飞书数据",
+    "readDescription": "只读搜索你可访问的飞书消息与云文档，写入本地数据库用于建图和搜索问答。",
+    "noSpeakTitle": "不启用飞书数字分身",
+    "noSpeakDescription": "飞书数据不会进入自动回复或发消息链路，也不申请任何写权限。",
+    "credentialsTitle": "授权目录独立隔离",
+    "credentialsDescription": "授权由飞书官方 CLI 完成，凭据只保存在本应用的独立用户目录。"
   }
 }

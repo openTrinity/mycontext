@@ -28,7 +28,7 @@
  * 所以目标是把**静默**的错位变成**可见**的。这一组就锁那个可见性。
  */
 import { afterEach, describe, expect, it } from "vitest"
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { I18nextProvider } from "react-i18next"
 import { createI18n } from "@mycontext/i18n"
@@ -294,5 +294,21 @@ describe("★★ 机器级登录态不能显示成「这个账号已连接」", 
 
     await waitFor(() => expect(screen.getByText(/^已连接钉钉$/)).toBeTruthy())
     expect(screen.getAllByText(/组织甲/).length).toBeGreaterThan(0)
+  })
+})
+
+describe("引导页的平台卡片保持紧凑", () => {
+  it("默认只显示平台横条，点配置后才展开授权详情", async () => {
+    installApi(CORP_BOUND)
+    wrap({ state: "unauthorized" }, "onboarding")
+
+    await waitFor(() => expect(screen.getByText(/^连接钉钉$/)).toBeTruthy())
+    expect(screen.queryByText("开始授权")).toBeNull()
+    expect(screen.queryByText("授权范围")).toBeNull()
+
+    fireEvent.click(screen.getByRole("button", { name: "配置" }))
+    expect(screen.getByRole("button", { name: "收起" })).toBeTruthy()
+    expect(screen.getByText("开始授权")).toBeTruthy()
+    expect(screen.getByText("授权范围")).toBeTruthy()
   })
 })

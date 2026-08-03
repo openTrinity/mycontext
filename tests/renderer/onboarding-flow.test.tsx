@@ -91,6 +91,13 @@ function installApi(steps: OnboardingStepView[]): Recorded {
             available: true,
             status: { state: "unauthorized" },
           },
+          {
+            id: "feishu",
+            labelKey: "channels:feishu.label",
+            descriptionKey: "channels:feishu.description",
+            available: true,
+            status: { state: "unauthorized" },
+          },
         ]),
       /**
        * 授权进度订阅。
@@ -556,10 +563,14 @@ describe("★ 进度来自数据库，不是组件 state", () => {
     ])
     renderView()
 
-    // 第 1 步会渲染渠道面板；这里只断言**不是**第 3 步
+    // 第 1 步从渠道注册表动态渲染，不硬编码某一个渠道。
     await waitFor(() => {
-      expect(screen.queryByText("时间范围")).toBeNull()
+      expect(screen.getByRole("heading", { name: "连接钉钉" })).toBeTruthy()
+      expect(screen.getByRole("heading", { name: "连接飞书" })).toBeTruthy()
     })
+    const sourceLogo = document.querySelector<HTMLImageElement>('img[alt=""]')
+    expect(sourceLogo?.src).toContain("channel-source-logo.png")
+    expect(screen.queryByText("时间范围")).toBeNull()
   })
 
   it("★ 表单从库里的 payload 回填（不是每次重新填）", async () => {

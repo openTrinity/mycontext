@@ -46,6 +46,21 @@ describe("按 vault 隔离", () => {
   it("同一 vaultId 复用同一个句柄（重复打开会各持一份 WAL 状态）", () => {
     expect(vaults.handle("vault-a")).toBe(vaults.handle("vault-a"))
   })
+
+  it("同一账号的钉钉与飞书也使用不同文件、数据互不可见", () => {
+    const dingtalk = new SettingsRepository(vaults.handle("vault-a").db, "vault_settings")
+    const feishu = new SettingsRepository(
+      vaults.sourceHandle("vault-a", "feishu").db,
+      "vault_settings",
+    )
+    dingtalk.set("source.marker", "dingtalk-only", "now")
+    feishu.set("source.marker", "feishu-only", "now")
+
+    expect(dingtalk.get("source.marker")).toBe("dingtalk-only")
+    expect(feishu.get("source.marker")).toBe("feishu-only")
+    expect(vaults.sourcePath("vault-a", "feishu")).not.toBe(vaults.path("vault-a"))
+    expect(existsSync(vaults.sourcePath("vault-a", "feishu"))).toBe(true)
+  })
 })
 
 describe("迁移", () => {
@@ -80,6 +95,12 @@ describe("生命周期", () => {
     vaults.close("vault-a")
     expect(vaults.isOpen("vault-a")).toBe(false)
     expect(() => vaults.handle("vault-a")).not.toThrow()
+  })
+
+  it("close 主 vault 时一并关闭它的渠道库", () => {
+    const source = vaults.sourceHandle("vault-a", "feishu")
+    vaults.close("vault-a")
+    expect(() => source.db.prepare("SELECT 1").get()).toThrow()
   })
 
   it("closeAll 关掉全部（登出时账号级数据不该仍可读）", () => {

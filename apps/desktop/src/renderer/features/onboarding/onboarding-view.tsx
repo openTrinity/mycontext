@@ -436,9 +436,11 @@ export function OnboardingView() {
                     {tc("app.retry")}
                   </Button>
                 </div>
-              ) : dingtalk === undefined ? null : (
+              ) : list.length === 0 ? null : (
                 <div className="flex flex-col gap-[var(--gap-component-md)]">
-                  <ChannelAuthPanel channel={dingtalk} variant="onboarding" />
+                  {list.map((channel) => (
+                    <ChannelAuthPanel key={channel.id} channel={channel} variant="onboarding" />
+                  ))}
                   {/*
                    * 已授权但身份还没确认（同名多 ID 的歧义情形）——就地给确认入口。
                    *

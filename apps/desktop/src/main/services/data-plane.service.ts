@@ -40,6 +40,8 @@ export interface DataPlaneOptions {
   clock: Clock
   logger: Logger
   plugin: ChannelPlugin
+  /** Additional sources. Each is attached to its own physical database. */
+  sources?: readonly { plugin: ChannelPlugin; feed: FeedService }[]
   feed: FeedService
   getWindow: () => BrowserWindow | null
   /** 关闭自动定时器（测试用） */
@@ -70,6 +72,17 @@ export interface DataPlaneOptions {
     documentsMs?: number
     activeScanMs?: number
   }
+}
+
+export interface DataPlaneSourceAttachment {
+  channelId: string
+  db: SqliteDatabase
+  dbPath: string
+  /**
+   * 这个渠道的导出/图谱落点。★ 与主渠道一样按 vault 分（见 `FeedDirs`）——
+   * 少了它飞书的导出会落回主渠道的目录并互相覆盖。
+   */
+  feedDirs: FeedDirs
 }
 
 /** 采集轮询周期配置（`dh_settings.ingestIntervals`）。全字段可选。 */
@@ -184,6 +197,10 @@ function pickDefined(patch: IngestIntervalsPatch): Partial<IngestIntervals> {
 
 export class DataPlaneService {
   private ingest: IngestService | null = null
+  private readonly sourceIngest = new Map<string, IngestService>()
+  private readonly sourceDatabases = new Map<string, SqliteDatabase>()
+  private sourceAttachments: DataPlaneSourceAttachment[] = []
+  private readonly activeChannels = new Set<string>()
   private db: SqliteDatabase | null = null
   /**
    * 当前 vault 的库路径。留着是为了 `intervalsSave` 能**原地重挂**采集
@@ -233,11 +250,23 @@ export class DataPlaneService {
    * 所以拆开：未绑身份时仍然挂库（纯本地、无副作用），只是不起定时器与长连接。
    * 绑上身份后走 `switchTo()` → `mount()`，那时 `pollingEnabled` 为真，
    * `attach` 重跑一遍把它们起起来。
+   *
+   * ## `sourceAttachments` —— 其余渠道各自的物理库
+   *
+   * 飞书一个独立 SQLite。每个 attachment 会得到自己的 `IngestService` ——
+   * 那样 FTS/蒸馏/数字人三个 Outbox 消费者天然跟着走，不用给它们各加一次
+   * "要不要处理这个渠道"的判据。
    */
   async attach(
     db: SqliteDatabase,
     dbPath: string,
     feedDirs: FeedDirs,
+    /**
+     * 其余渠道各自的物理库。★ 放在 `options` **之前**：它是位置参数里
+     * 更"数据面"的那一个，而 `options` 是可选开关 —— 与既有调用点
+     * （只传前三个）都兼容。
+     */
+    sourceAttachments: readonly DataPlaneSourceAttachment[] = [],
     options: { pollingEnabled?: boolean } = {},
   ): Promise<void> {
     const pollingEnabled = options.pollingEnabled !== false
@@ -250,6 +279,7 @@ export class DataPlaneService {
      * 传错的机会，而传错的表现是导出物落到别的身份目录下且不报错。
      */
     this.feedDirs = feedDirs
+    this.sourceAttachments = [...sourceAttachments]
 
     const ingest = new IngestService({
       db,
@@ -314,13 +344,28 @@ export class DataPlaneService {
     ingest.events.on("backfill.changed", () => this.pushSnapshotThrottled())
 
     /**
-     * ★ 没身份时**不起定时器** —— 但 `this.ingest` 仍然赋值。
+     * ★★ 两道门**都要过**，而它们问的不是同一件事：
      *
-     * `ingest` 这个实例本身是无副作用的（构造只是读几个仓储），而快照、
-     * `resolveSelf`/`confirmSelf` 都要经过它。不赋值的话状态页与身份解析
-     * 一起失效，而那正是这次要修的死锁。
+     * · `pollingEnabled` —— **有没有绑身份**。没绑时挂库但不起定时器/长连接，
+     *   否则渠道命令不带 `--profile`，会跟着 CLI 的全局身份读到别人的数据。
+     *   （`this.ingest` 仍然赋值：那个实例本身无副作用，而快照与
+     *   `resolveSelf`/`confirmSelf` 都要经过它 —— 不赋值就是另一个死锁。）
+     * · `primaryAuthorized` —— **这个渠道授权了没**。没授权时它的 CLI 会一直
+     *   失败刷日志，但 vault 级的消费者（FTS/蒸馏/数字人）仍要存在。
+     *
+     * 合起来：定时器只在"绑了身份**且**这个渠道授权了"时起。
+     * 少任何一个判据都会让一类环境静默出错 —— 前者读到别人的数据，
+     * 后者刷满失败日志。
      */
-    if (pollingEnabled) ingest.start()
+    // Some capability-only test plugins omit auth; treat those as already usable.
+    const primaryStatus =
+      this.options.plugin.auth === undefined
+        ? ({ state: "authorized" } as const)
+        : await this.options.plugin.auth.status().catch(() => null)
+    const primaryAuthorized = primaryStatus?.state === "authorized"
+    // Shared vault consumers must exist even when DingTalk is disconnected.
+    ingest.start(pollingEnabled && primaryAuthorized)
+    if (primaryAuthorized) this.activeChannels.add(this.options.plugin.meta.id)
     this.ingest = ingest
     /**
      * ★ 导出落点跟着 vault 走（见 FeedDirs）—— 由这一层透传。
@@ -328,6 +373,47 @@ export class DataPlaneService {
      * 多一层"它也存一份路径"会多一个可能过期的副本。
      */
     await this.options.feed.attach(db, feedDirs)
+
+    /**
+     * 其余渠道：**每个一套独立的 `IngestService`**（各自的物理库）。
+     *
+     * ★ 为什么是"多起一个实例"而不是"让 IngestService 支持多库"：
+     * 它内部注册了 FTS / 蒸馏 / 数字人三个 Outbox 消费者，多起一个实例
+     * 那三个天然跟着走；改成多库支持则要给每个消费者各加一次
+     * "这条记录属于哪个渠道"的判据，而漏一处就是静默不处理。
+     */
+    for (const sourceOption of this.options.sources ?? []) {
+      const plugin = sourceOption.plugin
+      if (plugin.ingest === undefined) continue
+      const attachment = sourceAttachments.find((item) => item.channelId === plugin.meta.id)
+      if (attachment === undefined) continue
+      const source = new IngestService({
+        db: attachment.db,
+        dbPath: attachment.dbPath,
+        clock: this.options.clock,
+        logger: this.options.logger.child(`Ingest:${plugin.meta.id}`),
+        plugin,
+        ...(this.options.autoStart === undefined ? {} : { autoStart: this.options.autoStart }),
+        ...(() => {
+          const iv = this.options.intervals ?? readIngestIntervals(attachment.db)
+          return iv === undefined ? {} : { intervals: iv }
+        })(),
+      })
+      source.events.on("batch.persisted", () => this.pushSnapshotThrottled())
+      this.sourceIngest.set(plugin.meta.id, source)
+      this.sourceDatabases.set(plugin.meta.id, attachment.db)
+      await sourceOption.feed.attach(attachment.db, attachment.feedDirs)
+
+      /**
+       * 未授权的渠道**不起采集**：它的 CLI 会一直失败，而那些失败会刷满日志
+       * 并让状态页显示"正在采集"。授权成功时走 `activateChannel()` 补起来。
+       */
+      const status = await plugin.auth.status().catch(() => null)
+      if (status?.state === "authorized") {
+        source.start()
+        this.activeChannels.add(plugin.meta.id)
+      }
+    }
 
     /**
      * 实时事件长连接（渠道支持时）。收到事件 → 定向补拉那个会话，让
@@ -394,6 +480,12 @@ export class DataPlaneService {
     // 会写到已关闭的连接上，抛出无人 catch 的
     // `The database connection is not open`（实测 logout 时稳定复现）。
     await this.ingest?.stop()
+    await Promise.all([...this.sourceIngest.values()].map((source) => source.stop()))
+    await Promise.all((this.options.sources ?? []).map((source) => source.feed.detach()))
+    this.sourceIngest.clear()
+    this.sourceDatabases.clear()
+    this.sourceAttachments = []
+    this.activeChannels.clear()
     this.ingest = null
     this.db = null
     this.dbPath = null
@@ -432,6 +524,7 @@ export class DataPlaneService {
   async intervalsSave(patch: IngestIntervalsPatch): Promise<IngestIntervalsView> {
     const db = this.db
     const dbPath = this.dbPath
+    const sourceAttachments = [...this.sourceAttachments]
     if (db === null || dbPath === null) {
       throw new AppError("DB_UNAVAILABLE", "尚未登录，无法保存采集周期")
     }
@@ -441,11 +534,21 @@ export class DataPlaneService {
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
                                         updated_at = excluded.updated_at`,
     ).run("ingestIntervals", JSON.stringify(next), this.options.clock.now())
+    for (const source of sourceAttachments) {
+      source.db
+        .prepare(
+          `INSERT INTO dh_settings (key, value_json, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                            updated_at = excluded.updated_at`,
+        )
+        .run("ingestIntervals", JSON.stringify(next), this.options.clock.now())
+    }
 
     this.options.logger.info("ingest intervals saved", { ...next })
     // 重挂让新周期生效（见方法注释）。attach 内部会先 detach。
-    // ★ 复用 attach 时记下的那套目录（见 feedDirs 的注释）
-    await this.attach(db, dbPath, this.requireFeedDirs())
+    // ★ 两样都复用 attach 时记下的（见 feedDirs 与 sourceAttachments 的注释）：
+    // 让调用方再传一次等于给了一个传错的机会，而传错不报错。
+    await this.attach(db, dbPath, this.requireFeedDirs(), this.sourceAttachments)
     this.pushSnapshot()
     return next
   }
@@ -456,7 +559,7 @@ export class DataPlaneService {
   }
 
   snapshot(): IngestSnapshot {
-    const ingest = this.ingest
+    const ingest = this.snapshotIngest()
     if (ingest === null) {
       // 未登录时给一个"全零"快照而不是抛错：状态页在登录前也会渲染。
       return {
@@ -500,7 +603,7 @@ export class DataPlaneService {
       }
     }
     // 事件通路健康由 DataPlane 持有（长连接不在采集层）——覆盖 ingest 的 null。
-    const health = this.eventStream?.health()
+    const health = ingest === this.ingest ? this.eventStream?.health() : undefined
     return {
       ...ingest.snapshot(),
       eventStream:
@@ -526,13 +629,45 @@ export class DataPlaneService {
   async runOnce(): Promise<{ changed: number; unchanged: number }> {
     const ingest = this.ingest
     if (ingest === null) return { changed: 0, unchanged: 0 }
-    // 手动同步是用户的显式意图：先清退避，否则"点了没反应"（本轮被跳过）。
-    ingest.clearBackoff()
-    // 先探针再拉正文：手动同步时用户期望的是"把最新的都拿下来"
-    await ingest.tickProbe()
-    const result = await ingest.tickPull()
+    const active = [
+      ...(this.activeChannels.has(this.options.plugin.meta.id) ? [ingest] : []),
+      ...[...this.sourceIngest.entries()]
+        .filter(([channelId]) => this.activeChannels.has(channelId))
+        .map(([, source]) => source),
+    ]
+    const results = await Promise.all(
+      active.map(async (source) => {
+        source.clearBackoff()
+        await source.tickProbe()
+        return source.tickPull()
+      }),
+    )
+    const result = results.reduce(
+      (total, current) => ({
+        changed: total.changed + current.changed,
+        unchanged: total.unchanged + current.unchanged,
+      }),
+      { changed: 0, unchanged: 0 },
+    )
     this.pushSnapshot()
     return result
+  }
+
+  /** Start a secondary source immediately after its authorization succeeds. */
+  activateChannel(channelId: string): void {
+    if (channelId === this.options.plugin.meta.id) {
+      this.ingest?.clearBlocked()
+      this.ingest?.start(true)
+      this.activeChannels.add(channelId)
+      return
+    }
+    const source = this.sourceIngest.get(channelId)
+    if (source === undefined) {
+      throw new AppError("CHANNEL_UNSUPPORTED", `未知数据源：${channelId}`)
+    }
+    source.clearBlocked()
+    source.start()
+    this.activeChannels.add(channelId)
   }
 
   clearBlocked(): void {
@@ -601,9 +736,10 @@ export class DataPlaneService {
    * 而身份错了后面全错且不可逆。所以这里只给出候选，
    * 由用户在 UI 上核对「姓名 + 工号 + 已识别到 N 条本人消息」后确认。
    */
-  async resolveSelf(): Promise<SelfIdentityView> {
-    const db = this.db
-    const identity = this.options.plugin.identity
+  async resolveSelf(channelId: string = this.options.plugin.meta.id): Promise<SelfIdentityView> {
+    const db = this.database(channelId)
+    const plugin = this.plugin(channelId)
+    const identity = plugin.identity
     if (db === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，无法解析身份")
     if (identity === undefined) {
       throw new AppError("CHANNEL_UNSUPPORTED", "该渠道不支持身份解析")
@@ -659,7 +795,7 @@ export class DataPlaneService {
     this.options.logger.info("self identity resolved", { source: resolved.source })
     const repository = new SelfIdentityRepository(db)
     repository.upsert({
-      channelId: this.options.plugin.meta.id,
+      channelId: plugin.meta.id,
       userId: resolved.userId,
       openIds: resolved.openIds,
       displayNames: resolved.displayNames,
@@ -667,9 +803,9 @@ export class DataPlaneService {
       corpName: resolved.corpName,
     })
 
-    const stored = repository.get(this.options.plugin.meta.id)
+    const stored = repository.get(plugin.meta.id)
     return {
-      channelId: this.options.plugin.meta.id,
+      channelId: plugin.meta.id,
       userId: resolved.userId,
       openIds: resolved.openIds,
       displayNames: resolved.displayNames,
@@ -722,10 +858,12 @@ export class DataPlaneService {
   }
 
   /** 确认身份 → 回填历史消息的 is_self 与「@我」。 */
-  confirmSelf(): { backfilled: number; mentionsBackfilled: number } {
-    const db = this.db
+  confirmSelf(channelId: string = this.options.plugin.meta.id): {
+    backfilled: number
+    mentionsBackfilled: number
+  } {
+    const db = this.database(channelId)
     if (db === null) throw new AppError("DB_UNAVAILABLE", "尚未登录")
-    const channelId = this.options.plugin.meta.id
     const repository = new SelfIdentityRepository(db)
     const identity = repository.get(channelId)
     if (identity === null) {
@@ -773,7 +911,42 @@ export class DataPlaneService {
   }
 
   export(): ExportResultView {
-    return this.options.feed.export()
+    const primary = this.options.feed.export()
+    const results = [primary, ...(this.options.sources ?? []).map((source) => source.feed.export())]
+    return {
+      sourceCount: results.reduce((sum, item) => sum + item.sourceCount, 0),
+      totalMessages: results.reduce((sum, item) => sum + item.totalMessages, 0),
+      totalMinutes: results.reduce((sum, item) => sum + item.totalMinutes, 0),
+      totalDocuments: results.reduce((sum, item) => sum + item.totalDocuments, 0),
+      headSeq: results.reduce((sum, item) => sum + item.headSeq, 0),
+      exportDir: primary.exportDir,
+    }
+  }
+
+  private plugin(channelId: string): ChannelPlugin {
+    if (this.options.plugin.meta.id === channelId) return this.options.plugin
+    const source = (this.options.sources ?? []).find((item) => item.plugin.meta.id === channelId)
+    if (source === undefined) throw new AppError("CHANNEL_UNSUPPORTED", `未知渠道：${channelId}`)
+    return source.plugin
+  }
+
+  private database(channelId: string): SqliteDatabase | null {
+    return channelId === this.options.plugin.meta.id
+      ? this.db
+      : (this.sourceDatabases.get(channelId) ?? null)
+  }
+
+  private snapshotIngest(): IngestService | null {
+    if (
+      this.ingest !== null &&
+      (this.activeChannels.size === 0 || this.activeChannels.has(this.options.plugin.meta.id))
+    ) {
+      return this.ingest
+    }
+    for (const [channelId, source] of this.sourceIngest) {
+      if (this.activeChannels.has(channelId)) return source
+    }
+    return this.ingest
   }
 
   /**

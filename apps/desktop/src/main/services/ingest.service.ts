@@ -473,6 +473,14 @@ export interface IngestServiceOptions {
   /** 单元测试里关掉定时器，只手动 tick */
   autoStart?: boolean
   /**
+   * FTS/distill/persona are vault-wide consumers and must only be registered once.
+   * Secondary channel ingesters set this to false; their changelog rows are still
+   * picked up by the primary consumer.
+   */
+  registerSharedConsumers?: boolean
+  /** Let a secondary ingester wake the single vault-wide consumer owner. */
+  afterPull?: () => Promise<void>
+  /**
    * 数字人管控层。给了就挂 `persona-inbox` 消费者。
    *
    * 可选是刻意的：单测里不需要数字人，而"没有 supervisor 就不投递"
@@ -908,6 +916,7 @@ export class IngestService {
             clock: options.clock,
             supervisor,
             logger: options.logger,
+            channelIds: [options.plugin.meta.id],
           })
     this.personaConsumer =
       supervisor === undefined || createdPersonaHandler === null
@@ -962,6 +971,7 @@ export class IngestService {
             clock: options.clock,
             supervisor,
             logger: options.logger,
+            channelIds: [options.plugin.meta.id],
           })
     if (this.personaFastPath !== null) {
       this.events.on("inbound.message", (message: MessageRow) => {
@@ -994,8 +1004,11 @@ export class IngestService {
   }
 
   /** 启动。幂等：重复调用不会起两套定时器。 */
-  start(): void {
-    if (this.running) return
+  start(poll = true): void {
+    if (this.running) {
+      if (poll) this.resumePolling()
+      return
+    }
     if (this.options.plugin.ingest === undefined) {
       this.options.logger.info("channel has no ingest capability, skipping", {
         channelId: this.options.plugin.meta.id,
@@ -1003,65 +1016,51 @@ export class IngestService {
       return
     }
     this.running = true
-    this.ftsConsumer.register()
-    this.distillConsumer.register()
-    this.personaConsumer?.register()
+    if (this.options.registerSharedConsumers !== false) {
+      this.ftsConsumer.register()
+      this.distillConsumer.register()
+      this.personaConsumer?.register()
+    }
     // 启动时跑一次索引完整性自检：索引与源表失配是静默故障。
     const check = new FtsIndexRepository(this.options.db).integrityCheck()
     if (!check.ok) {
       this.options.logger.error("fts integrity check failed", { detail: check.error })
     }
 
-    if (this.options.autoStart !== false) {
-      this.scheduleProbe()
-      this.pullTimer = setInterval(() => void this.tickPull(), this.pullIntervalMs)
-      // 立刻跑一轮，不等第一个周期到
-      void this.tickPull()
-
-      // 听记：低频。会议是稀疏事件（实测该账号 20 条 / hasMore），
-      // 按消息那样 2 分钟一轮纯属浪费子进程时间。
-      if (this.options.plugin.minutes !== undefined) {
-        this.minutesTimer = setInterval(() => void this.tickMinutes(), this.minutesIntervalMs)
-        void this.tickMinutes()
-      }
-
-      /**
-       * 文档：最低频的一路（默认 60 分钟）。
-       *
-       * ★ 与听记一样**挂载时也跑一轮**：不跑的话首次登录要等一小时才有文档，
-       * 而引导跑完用户就想看到"文档也采到了"。
-       */
-      if (this.options.plugin.documents !== undefined) {
-        this.scheduleDocuments()
-        void this.tickDocuments()
-      }
-
-      /**
-       * ★★ 轮转扫描（L1.5）：补探针那 87% 的盲区。
-       *
-       * 实测探针覆盖率只有 13.3%（23/173），盲区里有 33 个会话在 48 小时内
-       * 有新消息 —— 因为 `list-unread-conversations` 只返回**有未读红点**的，
-       * 而"你读过"恰恰说明那是最活跃的会话。详见 `ACTIVE_SCAN_INTERVAL_MS`。
-       *
-       * 需要 `conversations`（会话目录）与 `pullConversation`（定向补拉）
-       * 两个能力：前者给"渠道说的最后消息时间"，后者去补。
-       * 缺任一就整个跳过 —— 那是骨架渠道的正常状态，不是错误。
-       *
-       * 挂载时**不**立刻跑一轮：`start()` 已经排了 `tickPull`（全量兜底），
-       * 两个一起跑会在登录那一刻抢同一把 `busy` 锁。等第一个周期到就行 ——
-       * 30 秒之内新消息本来就由探针那一路负责。
-       */
-      if (
-        this.options.plugin.conversations !== undefined &&
-        this.options.plugin.ingest?.pullConversation !== undefined
-      ) {
-        this.activeScanTimer = setInterval(
-          () => void this.tickActiveScan(),
-          this.activeScanIntervalMs,
-        )
-      }
-    }
+    if (poll) this.resumePolling()
     this.options.logger.info("ingest started", { channelId: this.options.plugin.meta.id })
+  }
+
+  /** Begin channel polling after a restored or newly completed authorization. */
+  private resumePolling(): void {
+    if (!this.running || this.options.autoStart === false || this.pullTimer !== null) return
+    this.scheduleProbe()
+    this.pullTimer = setInterval(() => void this.tickPull(), this.pullIntervalMs)
+    // 立刻跑一轮，不等第一个周期到
+    void this.tickPull()
+
+    if (this.options.plugin.minutes !== undefined) {
+      this.minutesTimer = setInterval(() => void this.tickMinutes(), this.minutesIntervalMs)
+      void this.tickMinutes()
+    }
+
+    /** 文档与听记同样在恢复渠道轮询时立即跑一轮，再进入低频周期。 */
+    if (this.options.plugin.documents !== undefined) {
+      this.scheduleDocuments()
+      void this.tickDocuments()
+    }
+
+    // L1.5 轮转扫描补 unread 探针盲区；挂载时不立即执行，避免和首轮全量拉取抢锁。
+    if (
+      this.options.plugin.conversations !== undefined &&
+      this.options.plugin.ingest?.pullConversation !== undefined &&
+      this.activeScanTimer === null
+    ) {
+      this.activeScanTimer = setInterval(
+        () => void this.tickActiveScan(),
+        this.activeScanIntervalMs,
+      )
+    }
   }
 
   /**
@@ -1120,9 +1119,11 @@ export class IngestService {
     this.inFlightPull = null
     this.inFlightMinutes = null
     this.inFlightDocuments = null
-    this.ftsConsumer.release()
-    this.distillConsumer.release()
-    this.personaConsumer?.release()
+    if (this.options.registerSharedConsumers !== false) {
+      this.ftsConsumer.release()
+      this.distillConsumer.release()
+      this.personaConsumer?.release()
+    }
   }
 
   /**
@@ -2379,31 +2380,8 @@ export class IngestService {
         })
       }
 
-      // FTS 增量建索引：紧跟入库，支撑「新消息 1s 内可搜到」
-      await this.ftsConsumer.runOnce()
-      /**
-       * 蒸馏与数字人两个消费者也在这里推进。
-       *
-       * 放在同一个 tick 里而不是各起一个定时器：它们都很快（只做本地
-       * 入队/投递），而各起定时器会让"有几个后台循环在跑"变得难以说清。
-       * 各自的 try 隔离：一个失败不该影响另一个（也不该影响采集）。
-       */
-      try {
-        await this.distillConsumer.runOnce()
-      } catch (error) {
-        this.options.logger.warn("distill consumer failed", {
-          detail: error instanceof Error ? error.message : String(error),
-        })
-      }
-      if (this.personaConsumer !== null) {
-        try {
-          await this.personaConsumer.runOnce()
-        } catch (error) {
-          this.options.logger.warn("persona consumer failed", {
-            detail: error instanceof Error ? error.message : String(error),
-          })
-        }
-      }
+      if (this.options.registerSharedConsumers === false) await this.options.afterPull?.()
+      else await this.runSharedConsumersOnce()
     } catch (error) {
       this.scheduler.failWindow(error instanceof Error ? error.message : String(error))
       await this.recordError(error)
@@ -2411,6 +2389,27 @@ export class IngestService {
     }
     // busy 的复位在 `tickPull` 的 finally 里（与 in-flight 记账放在一处）。
     return totals
+  }
+
+  /** Advance the one set of vault-wide FTS/distill/persona consumers. */
+  async runSharedConsumersOnce(): Promise<void> {
+    await this.ftsConsumer.runOnce()
+    try {
+      await this.distillConsumer.runOnce()
+    } catch (error) {
+      this.options.logger.warn("distill consumer failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    }
+    if (this.personaConsumer !== null) {
+      try {
+        await this.personaConsumer.runOnce()
+      } catch (error) {
+        this.options.logger.warn("persona consumer failed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
   }
 
   /**

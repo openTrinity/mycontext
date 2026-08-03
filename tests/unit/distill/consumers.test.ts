@@ -40,11 +40,15 @@ const NOW = 1_785_000_000_000
 const logger = createLogger("Test", { level: "error" })
 
 /** 造一个 vault，放一个会话与若干条消息，并把变更写进 changelog。 */
-function seed(options: { messages: { id: string; sentAt: number; isSelf: boolean }[] }) {
+function seed(options: {
+  messages: { id: string; sentAt: number; isSelf: boolean }[]
+  channelId?: "dingtalk" | "feishu"
+}) {
   const vault = openTestVault()
+  const channelId = options.channelId ?? "dingtalk"
   new ConversationRepository(vault.db).upsert({
     id: "conv-1",
-    channelId: "dingtalk",
+    channelId,
     externalId: "cid-1",
     type: "group",
     title: "沙箱项目群",
@@ -54,7 +58,7 @@ function seed(options: { messages: { id: string; sentAt: number; isSelf: boolean
   new MessageRepository(vault.db).upsertMany(
     options.messages.map((item) => ({
       id: item.id,
-      channelId: "dingtalk" as const,
+      channelId,
       conversationId: "conv-1",
       externalId: `ext-${item.id}`,
       senderExternalId: item.isSelf ? "me" : "other",
@@ -73,7 +77,7 @@ function seed(options: { messages: { id: string; sentAt: number; isSelf: boolean
       op: "upsert" as const,
       entityType: "message" as const,
       entityId: item.id,
-      channelId: "dingtalk" as const,
+      channelId,
       domain: "chat" as const,
       occurredAt: item.sentAt,
       emittedAt: NOW,
@@ -321,6 +325,25 @@ describe("★ persona 消费者：只投递，不处理", () => {
     expect(result.skipped).toBe(1)
     // ★ 仍然没有处理 —— 只是入队
     expect(handled).toHaveLength(0)
+    vault.close()
+  })
+
+  it("★ 飞书消息不进入钉钉数字分身", () => {
+    const vault = seed({
+      channelId: "feishu",
+      messages: [{ id: "m1", sentAt: NOW, isSelf: false }],
+    })
+    new PersonaConfigRepository(vault.db).upsert("conv-1", { triggerMode: "all" }, NOW)
+    const { supervisor } = makeSupervisor(vault)
+    const handler = createPersonaInboxHandler({
+      db: vault.db,
+      clock: new ManualClock(NOW),
+      supervisor,
+      logger,
+      channelIds: ["dingtalk"],
+    })
+
+    expect(handler(batchOf(vault))).toEqual({ processed: 0, skipped: 1 })
     vault.close()
   })
 

@@ -51,6 +51,8 @@ export interface ExecResult {
 export interface SpawnSpec extends ExecSpec {
   /** 每收到一行 stdout/stderr 调用一次（已按行切分，去掉行尾换行） */
   onLine: (line: string, stream: "stdout" | "stderr") => void
+  /** 授权 URL 等可能在进程阻塞前不换行；这类协议需要直接观察 chunk。 */
+  onChunk?: (chunk: string, stream: "stdout" | "stderr") => void
 }
 
 /**
@@ -104,7 +106,7 @@ export class ProcessRunner {
    * 解析进度（授权码、URL）靠调用方在 onLine 里做，本层不理解语义。
    */
   spawn(spec: SpawnSpec): Promise<ExecResult> {
-    return this.run(spec, spec.onLine)
+    return this.run(spec, spec.onLine, spec.onChunk)
   }
 
   /**
@@ -246,6 +248,7 @@ export class ProcessRunner {
   private run(
     spec: ExecSpec,
     onLine?: (line: string, stream: "stdout" | "stderr") => void,
+    onChunk?: (chunk: string, stream: "stdout" | "stderr") => void,
   ): Promise<ExecResult> {
     const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const maxOutputBytes = spec.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
@@ -335,6 +338,8 @@ export class ProcessRunner {
         }
         if (stream === "stdout") stdout += chunk
         else stderr += chunk
+
+        onChunk?.(chunk, stream)
 
         if (onLine === undefined) return
         const merged = partial[stream] + chunk

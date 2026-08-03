@@ -186,6 +186,11 @@ interface AgentHandle {
 
 export class SearchService {
   private db: SqliteDatabase | null = null
+  /**
+   * 渠道知识库保持物理隔离：这里仅保存只读查询入口，绝不把数据复制进主库。
+   * key 是 channelId（当前为 feishu；主库固定视为 dingtalk）。
+   */
+  private readonly sourceDbs = new Map<string, SqliteDatabase>()
   private sessions: SearchSessionRepository | null = null
 
   /**
@@ -222,15 +227,22 @@ export class SearchService {
     return this.opencodeResolver()
   }
 
-  attach(db: SqliteDatabase, dirs: AgentDirs): void {
+  attach(
+    db: SqliteDatabase,
+    dirs: AgentDirs,
+    sources: readonly { channelId: string; db: SqliteDatabase }[] = [],
+  ): void {
     this.db = db
     this.dirs = dirs
+    this.sourceDbs.clear()
+    for (const source of sources) this.sourceDbs.set(source.channelId, source.db)
     this.sessions = new SearchSessionRepository(db)
   }
 
   detach(): void {
     this.db = null
     this.dirs = null
+    this.sourceDbs.clear()
     this.sessions = null
     // 换库（登出/切 vault）时旧 session 的流式状态作废。
     this.reducers.clear()
@@ -359,7 +371,6 @@ export class SearchService {
    */
   async prompt(sessionId: string, query: string): Promise<void> {
     const sessions = this.requireSessions()
-    const db = this.requireDb()
     const now = this.options.clock.now()
 
     // 用户消息先落库：这样刷新页面也看得到自己刚问的问题。
@@ -388,7 +399,7 @@ export class SearchService {
       }
 
       // ② 第二档降级：只做召回，不生成答案。
-      const items = this.recallOnly(db, sessionId, query)
+      const items = this.recallOnly(sessionId, query)
       sessions.appendMessages(items.map((item) => toAppendInput(sessionId, item)))
       sessions.setState(sessionId, "idle", this.options.clock.now())
       this.pushStream(sessionId, [], true, this.degradedReason())
@@ -915,8 +926,9 @@ export class SearchService {
     agent: AgentHandle,
     acpSessionId: string,
   ): { type: "text"; text: string }[] {
+    const sourceContext = this.buildSourceRecallContext(query)
     if (!agent.supervisor.needsContextReplay(acpSessionId)) {
-      return [{ type: "text", text: query }]
+      return [sourceContext, { type: "text", text: query }]
     }
     const sessions = this.requireSessions()
     const history = sessions
@@ -941,8 +953,37 @@ ${history}
 </previous_conversation>
 以上是这个会话早前的记录，仅用于让你知道聊过什么。**不要复述它、不要重复回答里面的问题、不要提及这段记录的存在**。只回答下面这一个新问题：`,
       },
+      sourceContext,
       { type: "text", text: query },
     ]
+  }
+
+  /**
+   * 先分别查每个物理库，再把带渠道边界的证据交给上层 Agent 汇总。
+   * Agent 只能看到结果副本，不能跨库执行 JOIN，也不能把一边写进另一边。
+   */
+  private buildSourceRecallContext(query: string): { type: "text"; text: string } {
+    const recalled = this.recallBySource(query, 12)
+    const sections = recalled.sources.map((source) => {
+      const label =
+        source.channelId === "dingtalk"
+          ? "钉钉"
+          : source.channelId === "feishu"
+            ? "飞书"
+            : source.channelId
+      const lines = source.hits.map((hit) => {
+        const when = new Date(hit.message.sentAt).toISOString().slice(0, 16).replace("T", " ")
+        return `- ${when} ${hit.message.senderDisplayName ?? "未知"}：${(hit.message.contentText ?? "").slice(0, 240)}`
+      })
+      return `<source channel="${source.channelId}" label="${label}">\n${lines.length > 0 ? lines.join("\n") : "（无命中）"}\n</source>`
+    })
+    return {
+      type: "text",
+      text: `<isolated_source_recall note="各渠道已分别查询，来源边界不可混淆">
+${sections.join("\n")}
+</isolated_source_recall>
+以上证据来自彼此物理隔离的渠道库。请综合回答用户的新问题；涉及事实时明确区分钉钉与飞书来源，不要把一边的记录归到另一边。`,
+    }
   }
   /**
    * 本轮降级的人类可读原因（走了召回时用）。
@@ -981,10 +1022,8 @@ ${history}
    * 一个 message（按相关性排序的原文摘要）。
    * 形状与 agent 路径一致，所以 UI 不用分支。
    */
-  private recallOnly(db: SqliteDatabase, sessionId: string, query: string): ChatItem[] {
+  private recallOnly(sessionId: string, query: string): ChatItem[] {
     const sessions = this.requireSessions()
-    const fts = new FtsIndexRepository(db)
-    const messages = new MessageRepository(db)
     const startedAt = this.options.clock.now()
 
     /**
@@ -995,11 +1034,26 @@ ${history}
      * 这里刻意不再复制一份逻辑：两份实现早晚不一致，而"两处检索口径不同"
      * 这种 bug 极难发现（两边都返回结果，只是不是同一批）。
      */
-    const recalled = recallMessages({ fts, messages }, query, { limit: FALLBACK_RECALL_LIMIT })
-    const lines = recalled.hits.map((hit, index) => {
-      const when = new Date(hit.message.sentAt).toISOString().slice(0, 16).replace("T", " ")
-      return `[${String(index + 1)}] ${when} ${hit.message.senderDisplayName ?? "未知"}：${(hit.message.contentText ?? "").slice(0, 160)}`
-    })
+    const recalled = this.recallBySource(query, FALLBACK_RECALL_LIMIT)
+    const lines = recalled.sources
+      .flatMap((source) => {
+        const label =
+          source.channelId === "dingtalk"
+            ? "钉钉"
+            : source.channelId === "feishu"
+              ? "飞书"
+              : source.channelId
+        return source.hits.map((hit) => {
+          const when = new Date(hit.message.sentAt).toISOString().slice(0, 16).replace("T", " ")
+          return {
+            score: hit.score,
+            text: `[${label}] ${when} ${hit.message.senderDisplayName ?? "未知"}：${(hit.message.contentText ?? "").slice(0, 160)}`,
+          }
+        })
+      })
+      .sort((a, b) => a.score - b.score)
+      .slice(0, FALLBACK_RECALL_LIMIT)
+      .map((row, index) => `[${String(index + 1)}] ${row.text}`)
 
     let seq = sessions.nextSeq(sessionId)
     const turnId = `turn_${startedAt}`
@@ -1013,8 +1067,8 @@ ${history}
       content: [
         textBlock(
           recalled.relaxed
-            ? `命中 ${String(recalled.hits.length)} 条（已放宽词序）`
-            : `命中 ${String(recalled.hits.length)} 条`,
+            ? `已分别查询钉钉和飞书，汇总命中 ${String(lines.length)} 条（部分渠道已放宽词序）`
+            : `已分别查询钉钉和飞书，汇总命中 ${String(lines.length)} 条`,
         ),
       ],
       toolName: "mycontext_local_recall",
@@ -1039,6 +1093,44 @@ ${history}
       createdAt: this.options.clock.now(),
     }
     return [toolItem, answerItem]
+  }
+
+  private recallBySource(
+    query: string,
+    perSourceLimit: number,
+  ): {
+    relaxed: boolean
+    sources: Array<{
+      channelId: string
+      hits: ReturnType<typeof recallMessages>["hits"]
+    }>
+  } {
+    const databases: Array<{ channelId: string; db: SqliteDatabase }> = [
+      { channelId: "dingtalk", db: this.requireDb() },
+      ...[...this.sourceDbs.entries()].map(([channelId, sourceDb]) => ({
+        channelId,
+        db: sourceDb,
+      })),
+    ]
+    let relaxed = false
+    const sources = databases.map(({ channelId, db }) => {
+      try {
+        const result = recallMessages(
+          { fts: new FtsIndexRepository(db), messages: new MessageRepository(db) },
+          query,
+          { limit: perSourceLimit },
+        )
+        relaxed ||= result.relaxed
+        return { channelId, hits: result.hits }
+      } catch (error) {
+        this.options.logger.warn("isolated source recall failed", {
+          channelId,
+          detail: error instanceof Error ? error.message : String(error),
+        })
+        return { channelId, hits: [] }
+      }
+    })
+    return { relaxed, sources }
   }
 
   private pushStream(

@@ -63,11 +63,11 @@ export type AuthStatus =
       userId: string
       userName: string
       /** access token 到期时间（DWS 会自动刷新，仅供展示） */
-      accessExpiresAt: string
+      accessExpiresAt: string | null
       /** refresh token 到期时间：到点必须重新扫码 */
-      refreshExpiresAt: string
+      refreshExpiresAt: string | null
       /** 距 refresh 到期还有几天；UI 据此决定是否显示提醒 */
-      daysUntilRefreshExpiry: number
+      daysUntilRefreshExpiry: number | null
     }
 
 /** 授权方式。loopback 自动拉浏览器并回调；device 显示授权码手动输入。 */

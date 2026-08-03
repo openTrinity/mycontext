@@ -33,6 +33,8 @@ export interface PersonaHandlerOptions {
   clock: Clock
   supervisor: PersonaSupervisor
   logger?: Logger
+  /** Only these channels may enter Persona. Omit to preserve the legacy all-channel behaviour. */
+  channelIds?: readonly string[]
 }
 
 /**
@@ -62,6 +64,9 @@ export function deliverMessage(
   if (message === null) return false
   const conversation = repos.conversations.findById(message.conversationId)
   if (conversation === null) return false
+  if (options.channelIds !== undefined && !options.channelIds.includes(conversation.channelId)) {
+    return false
+  }
 
   /**
    * 「@我」从 message_mentions 读，而不是重新解析正文。
