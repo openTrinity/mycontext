@@ -1,0 +1,119 @@
+{
+  "app": {
+    "name": "MyContext",
+    "starting": "MyContext 启动中…",
+    "loading": "加载中…",
+    "retry": "重试",
+    "mountMissing": "未找到 #root 挂载点"
+  },
+  "actions": {
+    "cancel": "取消",
+    "signOut": "退出登录",
+    "newSearch": "新建搜索",
+    "close": "关闭"
+  },
+  "sidebar": {
+    "nav": "主导航",
+    "expand": "展开侧边栏",
+    "expandHint": "展开侧边栏（悬停可临时预览）",
+    "pin": "固定侧边栏",
+    "pinHint": "固定侧边栏，保持展开",
+    "collapse": "收起侧边栏",
+    "resize": "调整侧边栏宽度"
+  },
+  "modules": {
+    "comingSoon": "暂未开放",
+    "comingSoonTitle": "{{module}} · 暂未开放",
+    "dashboard": {
+      "label": "仪表盘",
+      "description": "四条链路的真实指标：采集、知识管道、画像蒸馏、数字分身。"
+    },
+    "persona": {
+      "label": "数字分身",
+      "description": "IM 数字分身：蒸馏个人画像并自动生成回复。将在钉钉数据链路打通后开放。"
+    },
+    "search": {
+      "label": "搜索",
+      "description": "跨渠道知识检索，答案带可回跳的来源引用。将在索引建立后开放。"
+    },
+    "status": {
+      "label": "运行状态",
+      "description": "基建自检：目录、数据库迁移与配置注入来源。"
+    },
+    "settings": {
+      "label": "设置",
+      "description": "渠道授权与应用信息。"
+    }
+  },
+  "theme": {
+    "label": "主题：{{value}}",
+    "system": "跟随系统",
+    "light": "亮色",
+    "dark": "暗色",
+    "menuLabel": "主题"
+  },
+  "language": {
+    "label": "语言",
+    "system": "跟随系统"
+  },
+  "imagePicker": {
+    "tooLarge": "图片太大了（上限 4MB）",
+    "rejected": "这个格式不支持，请用 PNG / JPEG / GIF / WEBP",
+    "uploading": "上传中…",
+    "pick": "上传本地图片",
+    "replace": "换一张"
+  },
+  "quit": {
+    "confirmTitle": "退出 MyContext？",
+    "confirmDetail": "正在进行的采集、数字分身草稿与搜索回答会立刻中断。已保存的内容不受影响。",
+    "confirmAction": "退出",
+    "dontAskAgain": "下次不再提醒",
+    "overlayTitle": "正在退出 MyContext",
+    "overlaySubtitle": "正在结束采集、保存草稿并关闭数据库…"
+  },
+  "stream": {
+    "thinking": "思考中",
+    "waiting": {
+      "thinking": "正在思考…",
+      "reading": "正在整理线索…",
+      "reasoning": "正在推敲…",
+      "composing": "正在组织回答…",
+      "extended": "复杂的问题要多想一会儿，仍在处理中"
+    },
+    "thoughtToggle": "查看思考过程",
+    "toolRunning": "执行中",
+    "toolSuccess": "完成",
+    "toolError": "已取消",
+    "planTitle": "计划",
+    "citations": "来源",
+    "retry": "重试",
+    "toolGraph": "知识图谱",
+    "toolRecall": "本地检索",
+    "toolAction": {
+      "graph": "查知识图谱",
+      "execute": "执行命令",
+      "read": "读取文件",
+      "edit": "修改文件",
+      "search": "搜索内容",
+      "fetch": "获取网页内容",
+      "think": "分析问题",
+      "skill": "使用技能",
+      "generic": "使用工具"
+    },
+    "group": {
+      "action": "{{count}} 个操作",
+      "processing": "处理中…",
+      "failed": "部分已取消",
+      "cancelled": "已取消",
+      "skipped": "已跳过",
+      "separator": "、",
+      "more": "…"
+    },
+    "toolPending": "等待中",
+    "toolSkipped": "已跳过",
+    "detail": {
+      "command": "命令",
+      "result": "结果"
+    }
+  }
+}

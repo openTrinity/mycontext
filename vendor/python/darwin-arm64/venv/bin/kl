@@ -1,0 +1,25 @@
+#!/bin/bash
+# 由 mycontext 生成（scripts/lib/python-env.mjs）——不要手改。
+# 上游的 kl-graph/kl 硬编码了它自己的 .venv 路径，在这里不成立。
+#
+# ★★ 路径全部**相对自身**推出，文件里没有任何绝对路径。
+#
+# 这个 wrapper 跟整个 venv 一起入 git。写绝对路径的话，别人 clone 下来
+# 它指的是**生成它那台机器**的目录 —— 实测症状：搜索 agent 跑裸 `kl` 报
+# `cd: <别人的 home>/kl-graph: No such file or directory`，
+# 而 kl-server 自己好得很（主进程用绝对路径 spawn，绕过 wrapper）。
+# 那个不对称让它看起来像「检索坏了」而不是「wrapper 路径错了」。
+#
+# ★ 上面那句示例写成 `<别人的 home>` 而不是真的绝对路径 —— 否则
+# 「grep 一下这个文件里还有没有绝对路径」会被自己的注释绊住（试过，
+# 新加的那条测试当场报 kl 有残留，而它其实是干净的）。
+#
+# 层数：bin ← venv ← <platform> ← python ← vendor ← 仓库根 = 5 级。
+_self="${BASH_SOURCE[0]}"
+# 软链要跟到底 —— 有人可能把 kl 链到 /usr/local/bin 图省事。
+while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
+_bin="$(cd -- "$(dirname -- "$_self")" && pwd)"
+_repo="$(cd -- "$_bin/../../../../.." && pwd)"
+cd "$_repo/kl-graph" || exit 1
+# 同目录的 python 是相对软链（../../python/bin/python3），也与位置无关。
+exec "$_bin/python" kl_cli.py "$@"

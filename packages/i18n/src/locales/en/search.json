@@ -1,0 +1,42 @@
+{
+  "greeting": {
+    "morning": "Good morning",
+    "afternoon": "Good afternoon",
+    "evening": "Good evening",
+    "lateNight": "Working late"
+  },
+  "welcome": {
+    "separator": ", ",
+    "description": "Ask anything — I'll find it in your chat history."
+  },
+  "composer": {
+    "placeholder": "Search messages, documents, or just ask…",
+    "attach": "Add files",
+    "send": "Send",
+    "stop": "Stop"
+  },
+  "sessions": {
+    "title": "Search history",
+    "empty": "No searches yet",
+    "groups": {
+      "pinned": "Pinned",
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "week": "Past 7 days",
+      "earlier": "Earlier"
+    },
+    "actions": {
+      "rename": "Rename",
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "delete": "Delete",
+      "more": "More actions"
+    },
+    "untitled": "Untitled"
+  },
+  "degraded": {
+    "noAgent": "Showing local recall results directly; answers are not agent-composed yet",
+    "noGraph": "Graph service isn't running — results come from the local index",
+    "noVector": "Vector index unavailable — full-text search only"
+  }
+}

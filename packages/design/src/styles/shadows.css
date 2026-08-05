@@ -1,0 +1,32 @@
+/**
+ * 阴影 token。分层与语义层同一套思路：组件只引用 --shadow-*。
+ */
+
+:root,
+:root[data-theme="light"] {
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.08), 0 1px 2px -1px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 10px -2px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 12px 28px -6px rgba(0, 0, 0, 0.14), 0 4px 10px -4px rgba(0, 0, 0, 0.08);
+  --shadow-focus-ring: 0 0 0 3px var(--brand-brand-10);
+  /**
+   * 输入框的浮起阴影。
+   *
+   * 比 --shadow-md 更"贴地"：输入框是常驻元素，太重的投影会让整页显得脏。
+   * 两层：一层贴边描线（让它在浅背景上有边界），一层柔和外扩。
+   */
+  --shadow-inputbox:
+    0 0 0 1px rgba(20, 20, 20, 0.06), 0 6px 16px -8px rgba(0, 0, 0, 0.12),
+    0 2px 6px -4px rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme="dark"] {
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.5), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 10px -2px rgba(0, 0, 0, 0.55), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 28px -6px rgba(0, 0, 0, 0.65), 0 4px 10px -4px rgba(0, 0, 0, 0.45);
+  --shadow-focus-ring: 0 0 0 3px var(--brand-brand-20);
+  --shadow-inputbox:
+    0 0 0 1px rgba(255, 255, 255, 0.08), 0 6px 16px -8px rgba(0, 0, 0, 0.5),
+    0 2px 6px -4px rgba(0, 0, 0, 0.35);
+}

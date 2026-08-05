@@ -1,0 +1,104 @@
+{
+  "id": "en",
+  "version": "1",
+  "displayName": "English, workplace chat (Slack/Teams register)",
+  "_comment": "A LOCALE PACK — see forge/locales/zh-CN.json for the contract. This pack is authored from how English work chat actually reads, NOT translated from the Chinese pack. Where the two disagree in structure, English wins here: the register is different (more auxiliary verbs, more softeners carried by modals than by particles), and a pack that mirrored another language's shape would mismeasure.",
+  "scripts": [
+    "Latin"
+  ],
+  "wordBoundaries": true,
+  "quoteMaxLength": 90,
+  "_quoteMaxLengthComment": "Overrides thresholds.escapeHatches.quoteMaxLength from signals.json. That default is calibrated in CODEPOINTS, and a codepoint carries far less meaning in an alphabetic script than in a logographic one — 40 codepoints of English is a fragment where 40 of Chinese is a full sentence. Without this override, every real English escape hatch is discarded as 'too long'.",
+  "_wordBoundariesComment": "true = whitespace splits words, so vocabulary mining counts words and bigrams rather than sliding character n-grams.",
+  "style": {
+    "_comment": "Counted per 1k characters of the owner's own text. \\\\b anchors matter here in a way they do not in Han script: without them 'so' matches 'also' and every transition count is inflated.",
+    "question": "[?]|\\b(can|could|would|should|do|does|did|is|are|will|any|what|why|how|when|who|which)\\b.*[?]|\\bright\\?|\\bno\\?$",
+    "certaintyHigh": "\\b(definitely|absolutely|certainly|clearly|obviously|must|always|never|for sure|no doubt|guaranteed|100%)\\b",
+    "certaintyLow": "\\b(maybe|perhaps|probably|possibly|might|could be|i think|i guess|i'?d say|seems|sounds like|not sure|fairly|somewhat|kind of|kinda|iirc|afaik)\\b",
+    "transition": "\\b(but|however|though|although|actually|anyway|also|besides|so|therefore|that said|either way)\\b",
+    "conclusionFirst": "\\b(tl;?dr|bottom line|short answer|in short|net net|upshot|the gist|summary)\\b",
+    "analogy": "\\b(like|as if|sort of like|think of it as|analogous to|basically the same as|equivalent to)\\b",
+    "laughter": "(haha+|hah|hehe+|lol|lmao|rofl|😂|🤣|\\bheh\\b)",
+    "casual": "\\b(yeah|yep|yup|nah|nope|ok|okay|k|cool|sure|gotcha|got it|np|thx|ty|fyi|btw|imo|tbh|ish|-ish|gonna|wanna|dunno|lemme)\\b",
+    "warmth": "\\b(thanks|thank you|appreciate it|nice work|great work|well done|no worries|no rush|take your time|hope you'?re|good luck|kudos)\\b",
+    "rough": "\\b(damn|shit|crap|wtf|hell|sucks|broken as|garbage|ridiculous|insane|nightmare|ugh)\\b",
+    "hedge": "\\b(i think|i'?ll try|maybe we|let me|hold on|one sec|give me a|i'?ll get back|not sure yet|circling back|later today)\\b",
+    "directive": "\\b(please|can you|could you|make sure|be sure to|needs to|by (eod|eow|tomorrow|monday|friday)|asap|top priority|let'?s align|action item)\\b",
+    "enumerate": "((^|\\n)\\s*([1-9][.)]|[-*•])\\s*\\S+.*){2,}"
+  },
+  "scene": {
+    "product": "\\b(requirement|spec|specs?|design|review|prd|rfc|metric|kpi|data|user|feature|iteration|sprint|priority|integration|api|endpoint|schema|contract)\\b",
+    "formalReport": "\\b(report|weekly|standup|stand-?up|summary|retro|retrospective|postmortem|post-?mortem|takeaway|progress|status|risk|roadmap|timeline|plan)\\b",
+    "escalation": "\\b(blocked|blocker|stuck|outage|down|incident|sev-?[012]|p[012]|urgent|critical|rollback|roll back|hotfix|firefight|escalat|breaking|regression)\\b",
+    "external": "\\b(client|customer|vendor|supplier|partner|external|third-?party|counterparty|prospect|procurement|their team|your company)\\b"
+  },
+  "askKinds": {
+    "_comment": "Keys are FIXED across every pack (compose.ASK_KIND_LABEL maps onto them); patterns are English idiom. Order matters — first match wins.",
+    "decision_request": "\\b(what do you think|thoughts\\?|your call|you decide|up to you|should we|shall we|do we want|which (one|option)|do you agree|are you ok(ay)? with|sign off|approve this|green.?light|go/no.?go|weigh in)\\b",
+    "approval_or_commit": "\\b(can you commit|commit to|promise|guarantee|confirm the (date|time)|lock in|when can you|by when|deadline|due date|eta|sow|quote|budget|how much|cost|pricing|invoice|contract)\\b",
+    "help_request": "\\b(can you (take a )?look|could you look|take a look|have a look|help me|give me a hand|need a hand|review (this|my)|pr review|approve my pr|merge (this|it)|send me|share the|walk me through|set up a (call|meeting)|jump on a call|loop me in)\\b",
+    "status_chase": "\\b(any update|update on|status on|where are we|where do we stand|how'?s it going with|is it done|done yet|ready yet|still waiting|following up|circling back|bumping this|gentle (ping|nudge)|ping on this|any luck)\\b",
+    "technical_question": "\\b(how do(es)? (i|we|you|it)|how come|why (is|does|did|are|isn'?t)|what'?s causing|what causes|is it supposed to|error|exception|traceback|stack ?trace|failing|fails|broken|not working|doesn'?t work|bug|crash|timeout|502|500)\\b",
+    "disagreement": "\\b(i disagree|don'?t agree|not sure that'?s right|that'?s not|i don'?t think (that|this|it)|doesn'?t make sense|pushing back|push back|concern(ed|s)? (about|that)|why would we|seems wrong|isn'?t that)\\b",
+    "ack_or_fyi": "\\b(fyi|heads up|just so you know|for visibility|noted|got it|understood|acknowledged|thanks for|sharing (this|the)|as discussed|per our)\\b"
+  },
+  "riskTags": {
+    "_comment": "Keys are FIXED (compose.RISK_LABEL maps onto them). These are the classes the persona must never settle alone.",
+    "commitment": "\\b(i promise|we promise|guarantee|we (will|'ll) (definitely|absolutely)|you have my word|committing to|we commit|on the record|binding)\\b",
+    "approval": "\\b(approv(e|ed|al)|sign ?off|signed off|authoriz|greenlight|green.?light|lgtm|rubber ?stamp|permission to|go ahead and)\\b",
+    "money": "\\b(budget|price|pricing|quote|cost|costs|how much|payment|invoice|refund|discount|salary|compensation|spend|expense|contract value|credits?|\\$[0-9])",
+    "scheduling": "\\b(deadline|due date|eta|timeline|schedule|reschedul|book (a|the)|calendar|by (eod|eow|cob)|next (week|month|sprint)|what time|pto|time off|vacation|leave request|out of office|ooo)\\b",
+    "personnel": "\\b(performance review|perf review|promotion|promote|raise|comp|headcount|hiring|hire|interview (feedback|result)|offer letter|onboard|pip|terminat|lay ?off|resign|quit|hr\\b|people team|bonus|rating|calibration)\\b",
+    "external_position": "\\b(the customer|to the client|externally|public statement|official (line|position|response)|on the record|legal|counsel|contract terms|nda|msa|press|pr team|media|announcement)\\b",
+    "org_decision": "\\b(re-?org|restructur|who owns|owner of|dri\\b|reporting (line|to)|team change|headcount|new team|split the team|org chart|responsibility for|accountab)\\b",
+    "destructive": "\\b(drop (the )?(table|database|db)|delete|remove (the|all)|wipe|purge|truncate|deprecat|shut down|shutdown|take down|decommission|roll ?back|revoke|disable|reset (the )?(password|token|key)|force ?push)\\b"
+  },
+  "openerShapes": {
+    "_comment": "Anchored at the start of a reply. English carries stance in the first clause much more than in a particle, so these are more discriminating here than in Han script.",
+    "hedged_judgment": "^(i think|i'?d say|i guess|i suspect|probably|maybe|might be|seems|sounds like|not sure|my sense is|iirc|afaik)",
+    "direct_answer": "^(yes|yep|yeah|yup|no|nope|nah|correct|right|exactly|true|false|sure|ok|okay|k\\b|done|agreed|lgtm|👍)",
+    "counter_question": "^(what|why|how|when|who|which|where|do you|did you|are you|is it|can you|could you|any\\b|so\\b.*\\?)",
+    "action_statement": "^(i'?ll|i will|i'?m going to|i'?m gonna|let me|on it|taking a look|looking (at|into)|i can|i just|doing it|will do|i'?ve got)",
+    "deferral": "^(later|tomorrow|next week|after|once|hold on|one sec|give me|in a bit|eod|not right now|can'?t right now|circling back)",
+    "causal_explain": "^(because|since|the reason|that'?s because|it'?s because|due to|mainly)",
+    "handoff": "^(you'?d have to ask|ask |that'?s |better to ask|@|talk to|check with|loop in|. would know|not my|i don'?t own)",
+    "self_state": "^(i'?m (currently|still|just|already)|i (just|already|still|haven'?t|was|had))"
+  },
+  "replyShapes": {
+    "handoff": "\\b(ask \\S+|you'?d have to ask|you'?ll have to ask|better ask|check with|talk to|loop in|not my (call|area|team)|i don'?t own (this|that)|i'?m not the right person|@\\S+|i'?ll check with|let me ask|i'?ll find out|not sure, i'?ll)\\b",
+    "defer": "\\b(later|tomorrow|next week|after (lunch|standup|the)|once i|hold on|one sec|give me (a|an|\\d)|in a bit|by eod|circling back|i'?ll get back|when i (get|have)|after i finish|not right now|swamped|no bandwidth)\\b",
+    "settle": "\\b(sure|yes|yep|ok|okay|sounds good|works for me|go ahead|do it|ship it|lgtm|approved|agreed|let'?s do|no objection|fine by me|i'?ll (do it|handle|take care of|take it)|on it|done|confirmed|that works)\\b",
+    "decline": "\\b(no|nope|can'?t|cannot|won'?t work|not going to work|not possible|not feasible|i'?d rather not|let'?s not|i don'?t think we should|not a good idea|my concern is|i'?m worried|the problem is|blocker here is|not this sprint)\\b",
+    "clarify": "\\b(which one|which of|which \\w+ (exactly|specifically)|do you mean|you mean|are you referring|referring to|what exactly|meaning which)\\b",
+    "_clarifyComment": "Asking the counterpart to NARROW DOWN before answering — not a refusal and not a handoff, but a request to identify which thing is meant. Mined so the persona can ask in the owner's own words when the corpus mentions a subject but does not settle the question. Kept tight on purpose: a rhetorical or idle question is not a clarification, and matching it would flood the layer with lines that clarify nothing.",
+    "deferSubject": "\\b(i|i'?ll|i'?m|we|we'?ll|me|my|us|let me|give me|after i|after we|once i|once we|until i|until we)\\b",
+    "_deferSubjectNote": "Deliberately excludes bare time words. A sentence can name a time while being about someone else entirely, which is not the owner postponing anything — so the subject must be first-person or the pending work.",
+    "_comment": "How a reply DISPOSES of an ask — the decision layer's core vocabulary. The engine labels each reply with the most consequential match in a fixed order (decline, settle, handoff, defer, clarify, else plain answer), because a reply that both defers and settles is a settle and settling is what needs a gate. `clarify` is deliberately LAST: a reply that narrows the question down while also agreeing to something is an agreement first."
+  },
+  "responseGate": {
+    "genuineAsk": "([?]|\\b(can|could|would|should|do|does|did|is|are|will|have|has)\\s+(you|we|i|it|they)\\b|\\b(how|why|what|when|who|which|where)\\b|\\b(take a look|have a look|help me|review this|confirm|let me know|any update|thoughts|your call|is it done|ready yet|where are we|eta)\\b)",
+    "chitchatReply": "^(haha+|hehe+|lol|lmao|[.…]+|[👍👌🙏😂🤣✅]+|ok(ay)?|k|yep|yup|yeah|sure|cool|nice|thanks|thx|ty|np|got it|gotcha|noted|done|same|true|right|morning|gm|gn|night|good ?night)[\\s!.…]*$"
+  },
+  "bots": {
+    "_comment": "Matched on SENDER NAME only — see zh-CN.json _whySenderOnly for why message-text filtering was tried and removed.",
+    "namePattern": "(\\bbot\\b|^bot|bot$|assistant|helper|notification|notifier|reminder|announce|digest|newsletter|subscri|alert|alarm|monitor|monitoring|oncall|on-?call|pager|pagerduty|sentry|datadog|grafana|nagios|jenkins|circleci|travis|buildkite|github|gitlab|bitbucket|jira|confluence|pipeline|deploy(er|bot)?|ci\\b|cd\\b|webhook|daemon|cron|noreply|no-reply|donotreply|do-not-reply|mailer|system$|service$|platform$|admin$|support$|helpdesk|ticket|workflow|zapier|integration)",
+    "_namePatternNote": "The named vendors here are cross-industry infrastructure whose bots appear in most companies. Anything specific to ONE company's internal tooling belongs in the operator's data root, not in a distributed pack."
+  },
+  "sensitiveTitlePattern": "\\b(hr\\b|human resources|people (team|ops|partner)|recruit|talent|finance|financial|controller|accounting|legal|counsel|attorney|compliance|audit|director|head of|vp\\b|vice president|chief|ceo|cto|coo|cfo|cpo|clo|founder|partner|board member|president|exec)\\b",
+  "stopwords": "the a an and or but if of to in on at for it its this that these those is are was were be been being have has had do does did will would can could should i you he she we they me him her us them my your his their our not no so as with from by about into over after before then than there here what which who when how all any some very just also too only more most other same such own out up down off again once",
+  "guidance": {
+    "neverWrite": [
+      "synergy · leverage (as a verb) · circle back · touch base · move the needle · low-hanging fruit · boil the ocean · double-click on · take this offline · drink from the firehose",
+      "\"Great question!\" / \"Happy to help!\" / \"I hope this message finds you well\"",
+      "\"First… Second… Finally…\" as a three-part scaffold in a chat message",
+      "exclamation-heavy enthusiasm (Awesome!! Perfect!!) and emoji strings",
+      "explaining that you are an assistant, or apologizing for a delay in a chat"
+    ],
+    "manufacturedOpeners": "Sure! / Great question / I think / So,",
+    "hedgeMarkers": "I think / seems / probably",
+    "assertMarkers": "definitely / must",
+    "decisionMarkers": "what do you think / should we / your call / are you okay with",
+    "shortReferentExamples": "sounds good / sure / that works",
+    "_shortReferentComment": "Short replies that carry no meaning without the line they answer. Quoted in the persona's step-0 rule so the agent recognizes the shape and reads the live conversation before drafting."
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "auth": {
+    "invalidEmail": "That email address doesn't look valid",
+    "weakPassword": "Password must be at least {{min}} characters",
+    "emailTaken": "That email is already registered",
+    "invalidCredentials": "Email or password is incorrect"
+  },
+  "channel": {
+    "unknown": "Unknown channel: {{id}}",
+    "unsupported": "This channel isn't available yet",
+    "authInProgress": "This channel is already being authorized",
+    "authFailed": "Authorization failed: {{detail}}",
+    "authNotDetected": "The authorization flow finished but no valid session was found — please try again"
+  },
+  "process": {
+    "spawnFailed": "Could not start the required program",
+    "failed": "The program failed: {{detail}}",
+    "timeout": "The operation timed out after {{ms}} ms and was stopped",
+    "cancelled": "Operation cancelled",
+    "outputLimit": "The program produced too much output and was stopped"
+  },
+  "runtime": {
+    "binaryMissing": "Missing bundled program {{file}}. Expected at {{path}} — run {{command}} to prepare it.",
+    "binaryNotExecutable": "Could not make {{file}} executable ({{path}})"
+  },
+  "db": {
+    "unavailable": "Could not open the database: {{detail}}",
+    "migrationFailed": "Database upgrade failed: {{detail}}",
+    "migrationChanged": "Migration v{{version}} ({{name}}) no longer matches the applied version; published migrations must not be edited"
+  },
+  "config": {
+    "invalid": "Configuration is invalid: {{detail}}"
+  },
+  "ipc": {
+    "badRequest": "Invalid request"
+  },
+  "byCode": {
+    "CONFIG_INVALID": "Configuration is invalid — check your environment variables or .env",
+    "DB_MIGRATION_FAILED": "Database upgrade failed",
+    "DB_UNAVAILABLE": "The database is unavailable",
+    "AUTH_EMAIL_TAKEN": "That email is already registered",
+    "AUTH_INVALID_CREDENTIALS": "Email or password is incorrect",
+    "AUTH_WEAK_PASSWORD": "That password is too weak",
+    "AUTH_INVALID_EMAIL": "That email address doesn't look valid",
+    "AUTH_NOT_SIGNED_IN": "Please sign in first",
+    "IPC_BAD_REQUEST": "Invalid request",
+    "RUNTIME_BINARY_MISSING": "A required bundled program is missing",
+    "PROCESS_FAILED": "An external program failed",
+    "PROCESS_TIMEOUT": "An external program timed out",
+    "PROCESS_CANCELLED": "Operation cancelled",
+    "CHANNEL_UNKNOWN": "Unknown channel",
+    "CHANNEL_AUTH_IN_PROGRESS": "This channel is already being authorized",
+    "CHANNEL_AUTH_FAILED": "Channel authorization failed",
+    "CHANNEL_UNSUPPORTED": "This channel isn't available yet",
+    "SELF_IDENTITY_AMBIGUOUS": "Couldn't identify you uniquely — please confirm manually",
+    "SELF_IDENTITY_CONFLICT": "This account is already bound to a different identity (org or member id). Create a new account, or re-authorize with the original identity.",
+    "PARSE_FAILED": "Couldn't parse data from the external source",
+    "SESSION_EXPIRED": "Your sign-in expired — please authorize again",
+    "PERMISSION_REQUIRED": "Approve the permission in the source app first",
+    "GRANT_REVOKED": "The permission was revoked — please authorize again",
+    "RESOURCE_FORBIDDEN": "This conversation is confidential — its messages cannot be read",
+    "FORBIDDEN": "That action isn't allowed",
+    "FTS_QUERY_INVALID": "Couldn't process that search — try rewording it",
+    "DISTILL_NO_EVIDENCE": "No source evidence for this conclusion; not written to the profile",
+    "INTERNAL": "Something unexpected went wrong"
+  }
+}

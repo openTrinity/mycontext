@@ -1,0 +1,45 @@
+/**
+ * 间距 token。
+ *
+ * 注意：不在 @theme 中注册 --spacing-*。Tailwind v4 的 @theme --spacing-*
+ * 会整体替换默认间距比例，导致 p-6 / max-w-lg 等标准工具类解析成自定义值。
+ * 这里只在 :root 暴露 CSS 变量，组件用 var(--spacing-*) 引用。
+ */
+
+:root {
+  --spacing-none: 0px;
+  --spacing-xxs: 2px;
+  --spacing-xs: 4px;
+  --spacing-sm: 6px;
+  --spacing-md: 8px;
+  --spacing-l: 10px;
+  --spacing-lg: 12px;
+  --spacing-xl: 16px;
+  --spacing-xxl: 20px;
+  --spacing-xxxl: 24px;
+  --spacing-xxxxl: 32px;
+
+  /* component 级 gap */
+  --gap-component-xxs: var(--spacing-xxs);
+  --gap-component-xs: var(--spacing-xs);
+  --gap-component-sm: var(--spacing-sm);
+  --gap-component-md: var(--spacing-md);
+  --gap-component-lg: var(--spacing-l);
+
+  /* section 级 gap */
+  --gap-section-sm: var(--spacing-lg);
+  --gap-section-md: 14px;
+  --gap-section-lg: var(--spacing-xl);
+  --gap-section-xl: var(--spacing-xxl);
+  --gap-section-xxl: var(--spacing-xxxl);
+  --gap-section-xxxl: 28px;
+  --gap-section-xxxxl: var(--spacing-xxxxl);
+
+  /* 圆角阶梯 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 20px;
+}

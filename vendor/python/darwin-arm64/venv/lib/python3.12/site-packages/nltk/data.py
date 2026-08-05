@@ -1,0 +1,1841 @@
+# Natural Language Toolkit: Utility functions
+#
+# Copyright (C) 2001-2026 NLTK Project
+# Author: Edward Loper <edloper@gmail.com>
+# Author: ekaf (Restricting and switching pickles)
+# URL: <https://www.nltk.org/>
+# For license information, see LICENSE.TXT
+
+"""
+Functions to find and load NLTK resource files, such as corpora,
+grammars, and saved processing objects.  Resource files are identified
+using URLs, such as ``nltk:corpora/abc/rural.txt`` or
+``https://raw.githubusercontent.com/nltk/nltk/develop/nltk/test/toy.cfg``.
+The following URL protocols are supported:
+
+  - ``file:path``: Specifies the file whose path is *path*.
+    Both relative and absolute paths may be used.
+
+  - ``https://host/path``: Specifies the file stored on the web
+    server *host* at path *path*.
+
+  - ``nltk:path``: Specifies the file stored in the NLTK data
+    package at *path*.  NLTK will search for these files in the
+    directories specified by ``nltk.data.path``.
+
+If no protocol is specified, then the default protocol ``nltk:`` will
+be used.
+
+This module provides to functions that can be used to access a
+resource file, given its URL: ``load()`` loads a given resource, and
+adds it to a resource cache; and ``retrieve()`` copies a given resource
+to a local file.
+"""
+
+import codecs
+import functools
+import os
+import pickle
+import re
+import sys
+import textwrap
+import urllib.request
+import zipfile
+from abc import ABCMeta, abstractmethod
+from gzip import WRITE as GZ_WRITE
+from gzip import GzipFile
+from io import BytesIO, TextIOWrapper
+from urllib.parse import unquote
+from urllib.request import url2pathname
+
+from nltk.pathsec import ZipFile
+from nltk.pathsec import open as _secure_open
+from nltk.pathsec import urlopen as _secure_urlopen
+
+# Reject unsafe no-protocol paths: traversal segments, trailing '..', absolute paths,
+# backslashes, Windows drive letters. Use a raw-string pattern and do not anchor only
+# at the start — we'll use search() for safety checks.
+_UNSAFE_NO_PROTOCOL_RE = re.compile(r"(?:\.\./|\.\.$|^/|\\|[A-Za-z]:[/\\])")
+
+
+def _assert_no_encoded_bypass(name, error_label=None):
+    """
+    Reject *name* if its URL-decoded form contains an unsafe pattern that
+    the raw form does not.
+
+    This is the single source of truth for the "did this resource string
+    smuggle traversal or absolute-path characters past the raw-form
+    check via percent-encoding?" question. Downstream code applies
+    :data:`_UNSAFE_NO_PROTOCOL_RE` to the raw resource string, but
+    :func:`url2pathname` decodes percent-escapes when turning the string
+    into a filesystem path, so a payload like ``%2fetc%2fpasswd`` would
+    otherwise pass the raw-form check and then resolve to ``/etc/passwd``
+    on disk. Centralising the encoded check here keeps the encoded /
+    literal policy in lock-step across every call site, which matters
+    because the rule is security-sensitive and we do not want it to
+    drift.
+
+    Only a single :func:`unquote` pass is performed, mirroring what
+    :func:`url2pathname` itself does — decoding repeatedly would change
+    the meaning of legitimate percent-encoded names such as ``%2520``
+    (a literal ``%20``).
+
+    :param name: The resource string to validate.
+    :param error_label: Optional alternative string to embed in the
+        ``ValueError`` message (defaults to ``name``). Useful when the
+        caller wants the error to reference the original outer URL.
+    """
+    decoded = unquote(name)
+    if decoded != name and _UNSAFE_NO_PROTOCOL_RE.search(decoded):
+        label = name if error_label is None else error_label
+        raise ValueError(f"Unsafe resource path: {label!r}")
+
+
+def _reject_unsafe_no_protocol(resource_url):
+    """
+    Reject unsafe resource strings that *omit an explicit protocol*.
+
+    Note: some no-protocol inputs are interpreted by split_resource_url() as
+    file-style paths (e.g., bare Windows drive paths like "C:/foo"). These must
+    still be rejected here when they contain unsafe patterns.
+
+    Both the raw and URL-decoded form are validated so that encoded path
+    separators / traversal segments (``%2f``, ``%2e%2e``, ...) cannot
+    bypass the filter and later be decoded by :func:`url2pathname` into
+    a dangerous filesystem path. The encoded-form check is delegated to
+    :func:`_assert_no_encoded_bypass` to keep the policy in one place.
+    """
+    if _UNSAFE_NO_PROTOCOL_RE.search(resource_url):
+        raise ValueError(f"Unsafe resource path: {resource_url!r}")
+    _assert_no_encoded_bypass(resource_url)
+
+
+try:
+    from zlib import Z_SYNC_FLUSH as FLUSH
+except ImportError:
+    from zlib import Z_FINISH as FLUSH
+
+from nltk import grammar, sem
+from nltk.internals import deprecated
+
+textwrap_indent = functools.partial(textwrap.indent, prefix="  ")
+
+
+def _is_windows():
+    return os.name == "nt"
+
+
+def _windows_data_paths():
+    return [
+        os.path.join(sys.prefix, "nltk_data"),
+        os.path.join(sys.prefix, "share", "nltk_data"),
+        os.path.join(sys.prefix, "lib", "nltk_data"),
+        os.path.join(os.environ.get("APPDATA", "C:\\"), "nltk_data"),
+        r"C:\nltk_data",
+        r"D:\nltk_data",
+        r"E:\nltk_data",
+    ]
+
+
+######################################################################
+# Search Path
+######################################################################
+
+path = []
+"""A list of directories where the NLTK data package might reside.
+   These directories will be checked in order when looking for a
+   resource in the data package.  Note that this allows users to
+   substitute in their own versions of resources, if they have them
+   (e.g., in their home directory under ~/nltk_data)."""
+
+# User-specified locations:
+_paths_from_env = os.environ.get("NLTK_DATA", "").split(os.pathsep)
+path += [d for d in _paths_from_env if d]
+if "APPENGINE_RUNTIME" not in os.environ and os.path.expanduser("~/") != "~/":
+    path.append(os.path.expanduser("~/nltk_data"))
+
+if _is_windows():
+    # Common locations on Windows:
+    path += _windows_data_paths()
+else:
+    # Common locations on UNIX & OS X:
+    path += [
+        os.path.join(sys.prefix, "nltk_data"),
+        os.path.join(sys.prefix, "share", "nltk_data"),
+        os.path.join(sys.prefix, "lib", "nltk_data"),
+        "/usr/share/nltk_data",
+        "/usr/local/share/nltk_data",
+        "/usr/lib/nltk_data",
+        "/usr/local/lib/nltk_data",
+    ]
+
+
+######################################################################
+# Util Functions
+######################################################################
+
+
+def gzip_open_unicode(
+    filename,
+    mode="rb",
+    compresslevel=9,
+    encoding="utf-8",
+    fileobj=None,
+    errors=None,
+    newline=None,
+):
+    if fileobj is None:
+        fileobj = GzipFile(filename, mode, compresslevel, fileobj)
+    return TextIOWrapper(fileobj, encoding, errors, newline)
+
+
+def split_resource_url(resource_url):
+    """
+    Splits a resource url into "<protocol>:<path>".
+
+    >>> windows = _is_windows()
+    >>> split_resource_url('nltk:home/nltk')
+    ('nltk', 'home/nltk')
+    >>> split_resource_url('nltk:/home/nltk')
+    ('nltk', '/home/nltk')
+    >>> split_resource_url('file:/home/nltk')
+    ('file', '/home/nltk')
+    >>> split_resource_url('file:///home/nltk')
+    ('file', '/home/nltk')
+    >>> split_resource_url('file:///C:/home/nltk')
+    ('file', '/C:/home/nltk')
+    """
+    protocol, path_ = resource_url.split(":", 1)
+
+    # Handle plain Windows drive paths like "C:/foo" or "D:/bar"
+    # Treat these as file-style inputs even without "file:" prefix.
+    if (
+        len(protocol) == 1
+        and protocol.isalpha()
+        and (path_.startswith("/") or path_.startswith("\\"))
+    ):
+        return "file", f"/{protocol}:{path_.lstrip('/')}"
+
+    if protocol == "nltk":
+        pass
+    elif protocol == "file":
+        if path_.startswith("/"):
+            path_ = "/" + path_.lstrip("/")
+    else:
+        path_ = re.sub(r"^/{0,2}", "", path_)
+
+    return protocol, path_
+
+
+def normalize_resource_url(resource_url):
+    r"""
+    Normalizes a resource url
+
+    >>> windows = _is_windows()
+    >>> os.path.normpath(split_resource_url(normalize_resource_url('file:grammar.fcfg'))[1]) == \
+    ... ('\\' if windows else '') + os.path.abspath(os.path.join(os.curdir, 'grammar.fcfg'))
+    True
+    >>> not windows or normalize_resource_url('file:C:/dir/file') == 'file:///C:/dir/file'
+    True
+    >>> not windows or normalize_resource_url('file:C:\\dir\\file') == 'file:///C:/dir/file'
+    True
+    >>> not windows or normalize_resource_url('file:C:\\dir/file') == 'file:///C:/dir/file'
+    True
+    >>> not windows or normalize_resource_url('file://C:/dir/file') == 'file:///C:/dir/file'
+    True
+    >>> not windows or normalize_resource_url('file:////C:/dir/file') == 'file:///C:/dir/file'
+    True
+    >>> windows or normalize_resource_url('file:/dir/file/toy.cfg') == 'file:///dir/file/toy.cfg'
+    True
+    >>> normalize_resource_url('nltk:home/nltk')
+    'nltk:home/nltk'
+    >>> windows or normalize_resource_url('nltk:/home/nltk') == 'file:///home/nltk'
+    True
+    >>> normalize_resource_url('https://example.com/dir/file')
+    'https://example.com/dir/file'
+    >>> normalize_resource_url('dir/file')
+    'nltk:dir/file'
+
+    # Security: reject attempts to smuggle local Windows paths via the "nltk:" protocol.
+    >>> normalize_resource_url('nltk:C:/dir/file')  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ...
+    ValueError: Unsafe resource path: ...
+    >>> normalize_resource_url(r'nltk:C:\dir\file')  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ...
+    ValueError: Unsafe resource path: ...
+    """
+    try:
+        protocol, name = split_resource_url(resource_url)
+    except ValueError:
+        # No protocol → default to 'nltk:'
+        _reject_unsafe_no_protocol(resource_url)
+        protocol = "nltk"
+        name = resource_url
+    # If split_resource_url() inferred "file" from an input that *omitted* an explicit
+    # protocol (e.g., "C:/dir/file" or "C:\\dir\\file"), then treat it as a no-protocol
+    # input for security validation to prevent unsafe local path access.
+    if protocol == "file" and not resource_url.lower().startswith("file:"):
+        _reject_unsafe_no_protocol(resource_url)
+
+    # ----------------------------------------------------------------------
+    # Protocol-specific handling
+    # ----------------------------------------------------------------------
+
+    # Case 1: nltk:<path>
+    if protocol == "nltk":
+        # Reject encoded-form bypasses (e.g. ``nltk:%2fetc%2fpasswd``)
+        # before the literal-form routing below interprets the path. The
+        # encoded check is centralised in _assert_no_encoded_bypass so the
+        # encoded / literal policy cannot drift across call sites.
+        _assert_no_encoded_bypass(name, error_label=resource_url)
+        # Reject Windows drive-letter paths even when explicitly using the
+        # nltk: protocol. This prevents smuggling filesystem paths through
+        # nltk: URLs.
+        if re.match(r"^[A-Za-z]:[/\\]", name):
+            raise ValueError(f"Unsafe resource path: {resource_url!r}")
+        # If "nltk:" is used with an absolute path, treat it as "file://"
+        if os.path.isabs(name):
+            protocol = "file://"
+            name = normalize_resource_name(name, False, None)
+        else:
+            protocol = "nltk:"
+            name = normalize_resource_name(name, True)
+
+    # Case 2: file:<path>
+    elif protocol == "file":
+        protocol = "file://"
+        name = normalize_resource_name(name, False, None)
+
+    # Case 3: External URLs (http, https, ftp, etc.)
+    else:
+        protocol += "://"
+
+    return protocol + name
+
+
+def normalize_resource_name(resource_name, allow_relative=True, relative_path=None):
+    """
+    :type resource_name: str or unicode
+    :param resource_name: The name of the resource to search for.
+        Resource names are posix-style relative path names, such as
+        ``corpora/brown``.  Directory names will automatically
+        be converted to a platform-appropriate path separator.
+        Directory trailing slashes are preserved
+
+    >>> windows = _is_windows()
+    >>> normalize_resource_name('.', True)
+    './'
+    >>> normalize_resource_name('./', True)
+    './'
+    >>> windows or normalize_resource_name('dir/file', False, '/') == '/dir/file'
+    True
+    >>> not windows or normalize_resource_name('C:/file', False, '/') == '/C:/file'
+    True
+    >>> windows or normalize_resource_name('/dir/file', False, '/') == '/dir/file'
+    True
+    >>> windows or normalize_resource_name('../dir/file', False, '/') == '/dir/file'
+    True
+    >>> not windows or normalize_resource_name('/dir/file', True, '/') == 'dir/file'
+    True
+    >>> windows or normalize_resource_name('/dir/file', True, '/') == '/dir/file'
+    True
+    """
+    is_dir = bool(re.search(r"[\\/.]$", resource_name)) or resource_name.endswith(
+        os.path.sep
+    )
+    if _is_windows():
+        resource_name = resource_name.lstrip("/")
+    else:
+        resource_name = re.sub(r"^/+", "/", resource_name)
+    if allow_relative:
+        resource_name = os.path.normpath(resource_name)
+    else:
+        if relative_path is None:
+            relative_path = os.curdir
+        resource_name = os.path.abspath(os.path.join(relative_path, resource_name))
+    resource_name = resource_name.replace("\\", "/").replace(os.path.sep, "/")
+    if _is_windows() and os.path.isabs(resource_name):
+        resource_name = "/" + resource_name
+    if is_dir and not resource_name.endswith("/"):
+        resource_name += "/"
+    return resource_name
+
+
+######################################################################
+# Path Pointers
+######################################################################
+
+
+class PathPointer(metaclass=ABCMeta):
+    """
+    An abstract base class for 'path pointers,' used by NLTK's data
+    package to identify specific paths.  Two subclasses exist:
+    ``FileSystemPathPointer`` identifies a file that can be accessed
+    directly via a given absolute path.  ``ZipFilePathPointer``
+    identifies a file contained within a zipfile, that can be accessed
+    by reading that zipfile.
+    """
+
+    @abstractmethod
+    def open(self, encoding=None):
+        """
+        Return a seekable read-only stream that can be used to read
+        the contents of the file identified by this path pointer.
+
+        :raise IOError: If the path specified by this pointer does
+            not contain a readable file.
+        """
+
+    @abstractmethod
+    def file_size(self):
+        """
+        Return the size of the file pointed to by this path pointer,
+        in bytes.
+
+        :raise IOError: If the path specified by this pointer does
+            not contain a readable file.
+        """
+
+    @abstractmethod
+    def join(self, fileid):
+        """
+        Return a new path pointer formed by starting at the path
+        identified by this pointer, and then following the relative
+        path given by ``fileid``.  The path components of ``fileid``
+        should be separated by forward slashes, regardless of
+        the underlying file system's path separator character.
+        """
+
+
+class FileSystemPathPointer(PathPointer, str):
+    """
+    A path pointer that identifies a file which can be accessed
+    directly via a given absolute path.
+    """
+
+    def __init__(self, _path):
+        """
+        Create a new path pointer for the given absolute path.
+
+        :raise IOError: If the given path does not exist.
+        """
+
+        _path = os.path.abspath(_path)
+        if not os.path.exists(_path):
+            raise OSError("No such file or directory: %r" % _path)
+        self._path = _path
+
+        # There's no need to call str.__init__(), since it's a no-op;
+        # str does all of its setup work in __new__.
+
+    @property
+    def path(self):
+        """The absolute path identified by this path pointer."""
+        return self._path
+
+    def open(self, encoding=None):
+        """
+        Secure open — prevents absolute direct access outside pointer root.
+        Path validation is enforced by pathsec.open() which checks the
+        resolved path against allowed NLTK data roots.
+        """
+        stream = _secure_open(self._path, "rb")
+        if encoding is not None:
+            stream = SeekableUnicodeStreamReader(stream, encoding)
+        return stream
+
+    def file_size(self):
+        return os.stat(self._path).st_size
+
+    def join(self, fileid):
+        """
+        Harden join() to prevent traversal & ensure corpus-root sandbox.
+        """
+        fileid = str(fileid).replace("\\", "/")
+
+        # Block ../ traversal
+        if ".." in fileid.split("/"):
+            raise ValueError(f"Traversal blocked: {fileid}")
+
+        joined = os.path.normpath(os.path.join(self._path, fileid))
+        root = os.path.normpath(self._path)
+
+        # Enforce root boundary — must stay inside corpus root
+        if not (joined == root or joined.startswith(root + os.sep)):
+            raise ValueError(f"Escape outside root blocked: {joined}")
+
+        return FileSystemPathPointer(joined)
+
+    def __repr__(self):
+        return "FileSystemPathPointer(%r)" % self._path
+
+    def __str__(self):
+        return self._path
+
+
+@deprecated("Use gzip.GzipFile instead as it also uses a buffer.")
+class BufferedGzipFile(GzipFile):
+    """A ``GzipFile`` subclass for compatibility with older nltk releases.
+
+    Use ``GzipFile`` directly as it also buffers in all supported
+    Python versions.
+    """
+
+    def __init__(
+        self, filename=None, mode=None, compresslevel=9, fileobj=None, **kwargs
+    ):
+        """Return a buffered gzip file object."""
+        GzipFile.__init__(self, filename, mode, compresslevel, fileobj)
+
+    def write(self, data):
+        # This is identical to GzipFile.write but does not return
+        # the bytes written to retain compatibility.
+        super().write(data)
+
+
+class GzipFileSystemPathPointer(FileSystemPathPointer):
+    """
+    A subclass of ``FileSystemPathPointer`` that identifies a gzip-compressed
+    file located at a given absolute path.  ``GzipFileSystemPathPointer`` is
+    appropriate for loading large gzip-compressed pickle objects efficiently.
+    """
+
+    def open(self, encoding=None):
+        # Route through the sentinel like FileSystemPathPointer.open() so the
+        # path is validated against the allowed NLTK data roots (with symlinks
+        # resolved) before reading; decompress the validated stream rather than
+        # re-opening the path directly (CWE-22 / CWE-73).
+        stream = GzipFile(self._path, fileobj=_secure_open(self._path, "rb"))
+        # ``encoding is not None`` (not truthiness) to match
+        # FileSystemPathPointer.open() / ZipFilePathPointer.open().
+        if encoding is not None:
+            stream = SeekableUnicodeStreamReader(stream, encoding)
+        return stream
+
+
+#: Maximum allowed ratio of a zip member's uncompressed size to its stored
+#: (compressed) size before it is treated as a decompression bomb (CWE-409).
+#: DEFLATE's maximum ratio is ~1032x, reached only by runs of identical bytes,
+#: i.e. payloads crafted purely to maximize expansion; legitimate text/markup
+#: corpora compress a few-fold to a few-hundred-fold at most, well under this.
+#: A member that expands beyond this ratio is rejected. Configurable.
+MAX_UNZIP_RATIO = 1000
+
+#: Optional hard cap (in bytes) on a single zip member's uncompressed size.
+#: ``None`` disables it (the default, so legitimately large corpora are not
+#: affected); set it for a strict absolute limit in hardened deployments.
+MAX_UNZIP_SIZE = None
+
+#: The ratio check is only applied once a member's declared uncompressed size
+#: exceeds this activation threshold, so small files (which cannot exhaust
+#: resources regardless of ratio) are never rejected.
+MAX_UNZIP_ACTIVATION = 32 * 1024 * 1024  # 32 MiB
+
+
+def _check_decompression_bomb(info):
+    """
+    Reject a zip member that looks like a decompression bomb (CWE-409).
+
+    ``info`` is a ``zipfile.ZipInfo``. A member is refused when its declared
+    uncompressed size exceeds the optional hard cap ``MAX_UNZIP_SIZE``, or when
+    that size is both large (>= ``MAX_UNZIP_ACTIVATION``) and expands by more
+    than ``MAX_UNZIP_RATIO`` over its stored compressed size. This guards the
+    read-into-memory paths (``ZipFilePathPointer.open``,
+    ``OpenOnDemandZipFile.read``) and the on-disk extraction path
+    (``nltk.downloader``) against tiny archives that exhaust RAM or disk.
+    """
+    compress_size = getattr(info, "compress_size", 0) or 0
+    file_size = getattr(info, "file_size", 0) or 0
+    name = getattr(info, "filename", "<member>")
+
+    if MAX_UNZIP_SIZE is not None and file_size > MAX_UNZIP_SIZE:
+        raise ValueError(
+            "Refusing to decompress zip member %r: uncompressed size %d bytes "
+            "exceeds nltk.data.MAX_UNZIP_SIZE=%d." % (name, file_size, MAX_UNZIP_SIZE)
+        )
+
+    if (
+        file_size >= MAX_UNZIP_ACTIVATION
+        and compress_size > 0
+        # integer comparison (no float rounding at the threshold)
+        and file_size > MAX_UNZIP_RATIO * compress_size
+    ):
+        raise ValueError(
+            "Refusing to decompress suspected zip bomb %r: it expands %.1fx "
+            "(%d -> %d bytes), above nltk.data.MAX_UNZIP_RATIO=%d. "
+            "Raise nltk.data.MAX_UNZIP_RATIO if this data is trusted."
+            % (
+                name,
+                file_size / compress_size,
+                compress_size,
+                file_size,
+                MAX_UNZIP_RATIO,
+            )
+        )
+
+
+class ZipFilePathPointer(PathPointer):
+    """
+    A path pointer that identifies a file contained within a zipfile,
+    which can be accessed by reading that zipfile.
+    """
+
+    def __init__(self, zipfile, entry=""):
+        """
+        Create a new path pointer pointing at the specified entry
+        in the given zipfile.
+
+        :raise IOError: If the given zipfile does not exist, or if it
+        does not contain the specified entry.
+        """
+        if isinstance(zipfile, str):
+            zipfile = OpenOnDemandZipFile(os.path.abspath(zipfile))
+
+        # Check that the entry exists:
+        if entry:
+            # Normalize the entry string, it should be relative:
+            entry = normalize_resource_name(entry, True, "/").lstrip("/")
+
+            try:
+                zipfile.getinfo(entry)
+            except Exception as e:
+                # Sometimes directories aren't explicitly listed in
+                # the zip file.  So if `entry` is a directory name,
+                # then check if the zipfile contains any files that
+                # are under the given directory.
+                if entry.endswith("/") and [
+                    n for n in zipfile.namelist() if n.startswith(entry)
+                ]:
+                    pass  # zipfile contains a file in that directory.
+                else:
+                    # Otherwise, complain.
+                    raise OSError(
+                        f"Zipfile {zipfile.filename!r} does not contain {entry!r}"
+                    ) from e
+        self._zipfile = zipfile
+        self._entry = entry
+
+    @property
+    def zipfile(self):
+        """
+        The ZipFile object used to access the zip file
+        containing the entry identified by this path pointer.
+        """
+        return self._zipfile
+
+    @property
+    def entry(self):
+        """
+        The name of the file within zipfile that this path
+        pointer points to.
+        """
+        return self._entry
+
+    def open(self, encoding=None):
+        _check_decompression_bomb(self._zipfile.getinfo(self._entry))
+        data = self._zipfile.read(self._entry)
+        stream = BytesIO(data)
+        if self._entry.endswith(".gz"):
+            stream = GzipFile(self._entry, fileobj=stream)
+        elif encoding is not None:
+            stream = SeekableUnicodeStreamReader(stream, encoding)
+        return stream
+
+    def file_size(self):
+        return self._zipfile.getinfo(self._entry).file_size
+
+    def join(self, fileid):
+        entry = f"{self._entry}/{fileid}"
+        return ZipFilePathPointer(self._zipfile, entry)
+
+    def __repr__(self):
+        return f"ZipFilePathPointer({self._zipfile.filename!r}, {self._entry!r})"
+
+    def __str__(self):
+        return os.path.normpath(os.path.join(self._zipfile.filename, self._entry))
+
+
+######################################################################
+# Access Functions
+######################################################################
+
+# Don't use a weak dictionary, because in the common case this
+# causes a lot more reloading that necessary.
+_resource_cache = {}
+"""A dictionary used to cache resources so that they won't
+   need to be loaded more than once."""
+
+
+def open_datafile(path, file_name="", encoding="utf-8"):
+    """
+    Open a data file using a PathPointer, supporting both filesystem and zip file paths.
+
+    The function can be used in two ways:
+
+    1. `path` is a PathPointer to a directory, and `file_name` is the name of a file
+       within that directory.
+    2. `path` is a PathPointer to a file, and `file_name` is left empty.
+
+    :param path: A PathPointer (e.g. FileSystemPathPointer or ZipFilePathPointer)
+        representing either the file to open (when file_name is empty), or the
+        directory containing the file.
+    :type path: PathPointer
+    :param file_name: The name of the file to open within the directory. Leave empty
+        if `path` already points to the file.
+    :type file_name: str
+    :param encoding: The character encoding to use when opening the file. If None,
+        a binary stream is returned.
+    :type encoding: str or None
+    :return: A file-like object (binary stream if encoding is None, otherwise a text
+        stream with the specified encoding).
+    :rtype: file-like
+    """
+    if file_name:
+        # Use .join() to reach the file regardless of zip/real FS.
+        path = path.join(file_name)
+    return path.open(encoding=encoding)
+
+
+def find(resource_name, paths=None):
+    """
+    Find the given resource by searching through the directories and
+    zip files in paths, where a None or empty string specifies an absolute path.
+    Returns a corresponding path name.  If the given resource is not
+    found, raise a ``LookupError``, whose message gives a pointer to
+    the installation instructions for the NLTK downloader.
+
+    Zip File Handling:
+
+      - If ``resource_name`` contains a component with a ``.zip``
+        extension, then it is assumed to be a zipfile; and the
+        remaining path components are used to look inside the zipfile.
+
+      - If any element of ``nltk.data.path`` has a ``.zip`` extension,
+        then it is assumed to be a zipfile.
+
+      - If a given resource name that does not contain any zipfile
+        component is not found initially, then ``find()`` will make a
+        second attempt to find that resource, by replacing each
+        component *p* in the path with *p.zip/p*.  For example, this
+        allows ``find()`` to map the resource name
+        ``corpora/chat80/cities.pl`` to a zip file path pointer to
+        ``corpora/chat80.zip/chat80/cities.pl``.
+
+      - When using ``find()`` to locate a directory contained in a
+        zipfile, the resource name must end with the forward slash
+        character.  Otherwise, ``find()`` will not locate the
+        directory.
+
+    :type resource_name: str or unicode
+    :param resource_name: The name of the resource to search for.
+        Resource names are posix-style relative path names, such as
+        ``corpora/brown``.  Directory names will be
+        automatically converted to a platform-appropriate path separator.
+    :rtype: str
+    """
+    resource_name = normalize_resource_name(resource_name, True)
+    # Defense-in-depth: reject traversal/absolute paths even if a caller
+    # bypassed normalize_resource_url(). Use search() so traversal
+    # components anywhere in the resource_name trigger rejection. The
+    # URL-decoded form is checked via _assert_no_encoded_bypass to keep
+    # the encoded / literal policy aligned with the other call sites.
+    if _UNSAFE_NO_PROTOCOL_RE.search(resource_name):
+        raise ValueError(f"Unsafe resource path: {resource_name!r}")
+    _assert_no_encoded_bypass(resource_name)
+
+    # Resolve default paths at runtime in-case the user overrides
+    # nltk.data.path
+    if paths is None:
+        paths = path
+
+    # Check if the resource name includes a zipfile name
+    m = re.match(r"(.*?\.zip)/?(.*)$", resource_name)
+    if m:
+        zipfile, zipentry = m.groups()
+    else:
+        zipfile = None
+
+    # Evidence that the *package* exists but the specific entry does not.
+    _package_present_but_entry_missing = []
+
+    def _note_near_miss(where):
+        if where not in _package_present_but_entry_missing:
+            _package_present_but_entry_missing.append(where)
+
+    # Check each item in our path
+    for path_ in paths:
+        # Is the path item a zipfile?
+        if path_ and (os.path.isfile(path_) and path_.endswith(".zip")):
+            try:
+                return ZipFilePathPointer(path_, resource_name)
+            except OSError:
+                # resource not in zipfile
+                _note_near_miss(path_)
+                continue
+
+        # Is the path item a directory or is resource_name an absolute path?
+        elif not path_ or os.path.isdir(path_):
+            if zipfile is None:
+                p = os.path.join(path_, url2pathname(resource_name))
+                if os.path.exists(p):
+                    if p.endswith(".gz"):
+                        return GzipFileSystemPathPointer(p)
+                    else:
+                        return FileSystemPathPointer(p)
+                else:
+                    # If the package exists (either as a directory or as a .zip)
+                    # but the specific requested file doesn't, record a "near miss"
+                    # so the eventual LookupError isn't misleading.
+                    parts = [p for p in resource_name.split("/") if p]
+                    # Only record a "near miss" when there is a sub-entry *within* a
+                    # package (i.e. more than two meaningful path components), so we
+                    # don't misclassify requests for the package root itself.
+                    if len(parts) > 2:
+                        pkg = "/".join(parts[:2])  # e.g. "corpora/stopwords"
+                        pkg_dir = os.path.join(path_, url2pathname(pkg))
+                        pkg_zip = os.path.join(path_, url2pathname(pkg + ".zip"))
+                        if os.path.isdir(pkg_dir):
+                            _note_near_miss(pkg_dir)
+                        elif os.path.isfile(pkg_zip):
+                            _note_near_miss(pkg_zip)
+            else:
+                p = os.path.join(path_, url2pathname(zipfile))
+                if os.path.exists(p):
+                    try:
+                        return ZipFilePathPointer(p, zipentry)
+                    except OSError:
+                        # resource not in zipfile
+                        _note_near_miss(p)
+                        continue
+
+    # Fallback: if the path doesn't include a zip file, then try
+    # again, assuming that one of the path components is inside a
+    # zipfile of the same name.
+    if zipfile is None:
+        pieces = resource_name.split("/")
+        for i in range(len(pieces)):
+            modified_name = "/".join(pieces[:i] + [pieces[i] + ".zip"] + pieces[i:])
+            try:
+                return find(modified_name, paths)
+            except LookupError:
+                pass
+
+    # Identify the package (i.e. the .zip file) to download.
+    parts = resource_name.split("/")
+    resource_zipname = parts[1] if len(parts) > 1 else parts[0]
+    if resource_zipname.endswith(".zip"):
+        resource_zipname = resource_zipname.rpartition(".")[0]
+
+    # HuggingFace fallback: if the corpus is in the HF registry and has
+    # already been downloaded to the HF datasets cache, serve it from there.
+    # Uses local_files_only=True so no network request is made here.
+    try:
+        from nltk.huggingface.dataset import REGISTRY, HFDatasetPathPointer, _is_cached
+
+        if resource_zipname in REGISTRY and _is_cached(resource_zipname):
+            return HFDatasetPathPointer(resource_zipname)
+    except ImportError:
+        pass
+
+    # Display a friendly error message if the resource wasn't found.
+    # If the package appears present but the specific entry is missing, keep
+    # the download hint as a secondary suggestion.
+    if _package_present_but_entry_missing:
+        msg = (
+            f"Resource entry '{resource_name}' not found in installed package "
+            f"'{resource_zipname}'.\n"
+            "The package appears to be installed, but the requested file is missing.\n"
+            "\n"
+            "If you believe the package is corrupted or out of date, you can try "
+            "re-downloading it with the NLTK Downloader:\n\n"
+            ">>> import nltk\n"
+            f">>> nltk.download('{resource_zipname}')\n"
+        )
+    else:
+        msg = (
+            f"Resource '{resource_zipname}' not found.\n"
+            "Please use the NLTK Downloader to obtain the resource:\n\n"
+            ">>> import nltk\n"
+            f">>> nltk.download('{resource_zipname}')\n"
+        )
+    msg = textwrap_indent(msg)
+
+    msg += "\n  For more information see: https://www.nltk.org/data.html\n"
+
+    msg += f"\n  Attempted to load '{resource_name}'\n"
+
+    if _package_present_but_entry_missing:
+        msg += "\n  Package was found in:" + "".join(
+            "\n    - %r" % d for d in _package_present_but_entry_missing
+        )
+
+    msg += "\n  Searched in:" + "".join("\n    - %r" % d for d in paths)
+    sep = "*" * 70
+    resource_not_found = f"\n{sep}\n{msg}\n{sep}\n"
+    raise LookupError(resource_not_found)
+
+
+def retrieve(resource_url, filename=None, verbose=True):
+    """
+    Copy the given resource to a local file.  If no filename is
+    specified, then use the URL's filename.  If there is already a
+    file named ``filename``, then raise a ``ValueError``.
+
+    :type resource_url: str
+    :param resource_url: A URL specifying where the resource should be
+        loaded from.  The default protocol is "nltk:", which searches
+        for the file in the the NLTK data package.
+    """
+    resource_url = normalize_resource_url(resource_url)
+    if filename is None:
+        if resource_url.startswith("file:"):
+            filename = os.path.split(resource_url)[-1]
+        else:
+            filename = re.sub(r"(^\w+:)?.*/", "", resource_url)
+    if os.path.exists(filename):
+        filename = os.path.abspath(filename)
+        raise ValueError("File %r already exists!" % filename)
+
+    if verbose:
+        print(f"Retrieving {resource_url!r}, saving to {filename!r}")
+
+    # Open the input & output streams.
+    infile = _open(resource_url)
+
+    # Copy infile -> outfile, using 64k blocks. Route the write through the
+    # pathsec sentinel so the destination honours the file-access sandbox
+    # (allowed data roots, symlink resolution) instead of the builtin open,
+    # which bypasses it and can write arbitrary local files -- an arbitrary
+    # file write that can escalate to code execution via a planted file
+    # (CWE-22).
+    with _secure_open(filename, "wb") as outfile:
+        while True:
+            s = infile.read(1024 * 64)  # 64k blocks.
+            outfile.write(s)
+            if not s:
+                break
+
+    infile.close()
+
+
+#: A dictionary describing the formats that are supported by NLTK's
+#: load() method.  Keys are format names, and values are format
+#: descriptions.
+FORMATS = {
+    "pickle": "A serialized python object, stored using the pickle module.",
+    "json": "A serialized python object, stored using the json module.",
+    "yaml": "A serialized python object, stored using the yaml module.",
+    "cfg": "A context free grammar.",
+    "pcfg": "A probabilistic CFG.",
+    "fcfg": "A feature CFG.",
+    "fol": "A list of first order logic expressions, parsed with "
+    "nltk.sem.logic.Expression.fromstring.",
+    "logic": "A list of first order logic expressions, parsed with "
+    "nltk.sem.logic.LogicParser.  Requires an additional logic_parser "
+    "parameter",
+    "val": "A semantic valuation, parsed by nltk.sem.Valuation.fromstring.",
+    "raw": "The raw (byte string) contents of a file.",
+    "text": "The raw (unicode string) contents of a file. ",
+}
+
+#: A dictionary mapping from file extensions to format names, used
+#: by load() when format="auto" to decide the format for a
+#: given resource url.
+AUTO_FORMATS = {
+    "pickle": "pickle",
+    "json": "json",
+    "yaml": "yaml",
+    "cfg": "cfg",
+    "pcfg": "pcfg",
+    "fcfg": "fcfg",
+    "fol": "fol",
+    "logic": "logic",
+    "val": "val",
+    "txt": "text",
+    "text": "text",
+}
+
+
+def restricted_pickle_load(string):
+    """
+    Prevents any class or function from loading.
+    """
+    from nltk.picklesec import RestrictedUnpickler
+
+    return RestrictedUnpickler(BytesIO(string)).load()
+
+
+def switch_punkt(lang="english"):
+    """
+    Return a pickle-free Punkt tokenizer instead of loading a pickle.
+
+    >>> import nltk
+    >>> tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+    >>> print(tokenizer.tokenize("Hello! How are you?"))
+    ['Hello!', 'How are you?']
+    """
+    from nltk.tokenize import PunktTokenizer as tok
+
+    return tok(lang)
+
+
+def switch_chunker(fmt="multiclass"):
+    """
+    Return a pickle-free Named Entity Chunker instead of loading a pickle.
+
+    >>> import nltk
+    >>> from nltk.corpus import treebank
+    >>> from pprint import pprint
+    >>> chunker = nltk.data.load('chunkers/maxent_ne_chunker/PY3/english_ace_multiclass.pickle')
+    >>> pprint(chunker.parse(treebank.tagged_sents()[2][8:14])) # doctest: +NORMALIZE_WHITESPACE
+    Tree('S', [('chairman', 'NN'), ('of', 'IN'), Tree('ORGANIZATION', [('Consolidated', 'NNP'), ('Gold', 'NNP'), ('Fields', 'NNP')]), ('PLC', 'NNP')])
+
+    """
+    from nltk.chunk import ne_chunker
+
+    return ne_chunker(fmt)
+
+
+def switch_t_tagger():
+    """
+    Return a pickle-free Treebank Pos Tagger instead of loading a pickle.
+
+    >>> import nltk
+    >>> from nltk.tokenize import word_tokenize
+    >>> tagger = nltk.data.load('taggers/maxent_treebank_pos_tagger/PY3/english.pickle')
+    >>> print(tagger.tag(word_tokenize("Hello, how are you?")))
+    [('Hello', 'NNP'), (',', ','), ('how', 'WRB'), ('are', 'VBP'), ('you', 'PRP'), ('?', '.')]
+
+    """
+    from nltk.classify.maxent import maxent_pos_tagger
+
+    return maxent_pos_tagger()
+
+
+def switch_p_tagger(lang):
+    """
+    Return a pickle-free Averaged Perceptron Tagger instead of loading a pickle.
+
+    >>> import nltk
+    >>> from nltk.tokenize import word_tokenize
+    >>> tagger = nltk.data.load('taggers/averaged_perceptron_tagger/averaged_perceptron_tagger.pickle')
+    >>> print(tagger.tag(word_tokenize("Hello, how are you?")))
+    [('Hello', 'NNP'), (',', ','), ('how', 'WRB'), ('are', 'VBP'), ('you', 'PRP'), ('?', '.')]
+
+    """
+    from nltk.tag import _get_tagger
+
+    if lang == "ru":
+        lang = "rus"
+    else:
+        lang = None
+    return _get_tagger(lang)
+
+
+def load(
+    resource_url,
+    format="auto",
+    cache=True,
+    verbose=False,
+    logic_parser=None,
+    fstruct_reader=None,
+    encoding=None,
+):
+    """
+    Load a given resource from the NLTK data package.  The following
+    resource formats are currently supported:
+
+      - ``pickle``
+      - ``json``
+      - ``yaml``
+      - ``cfg`` (context free grammars)
+      - ``pcfg`` (probabilistic CFGs)
+      - ``fcfg`` (feature-based CFGs)
+      - ``fol`` (formulas of First Order Logic)
+      - ``logic`` (Logical formulas to be parsed by the given logic_parser)
+      - ``val`` (valuation of First Order Logic model)
+      - ``text`` (the file contents as a unicode string)
+      - ``raw`` (the raw file contents as a byte string)
+
+    If no format is specified, ``load()`` will attempt to determine a
+    format based on the resource name's file extension.  If that
+    fails, ``load()`` will raise a ``ValueError`` exception.
+
+    For all text formats (everything except ``pickle``, ``json``, ``yaml`` and ``raw``),
+    it tries to decode the raw contents using UTF-8, and if that doesn't
+    work, it tries with ISO-8859-1 (Latin-1), unless the ``encoding``
+    is specified.
+
+    :type resource_url: str
+    :param resource_url: A URL specifying where the resource should be
+        loaded from.  The default protocol is "nltk:", which searches
+        for the file in the the NLTK data package.
+    :type cache: bool
+    :param cache: If true, add this resource to a cache.  If load()
+        finds a resource in its cache, then it will return it from the
+        cache rather than loading it.
+    :type verbose: bool
+    :param verbose: If true, print a message when loading a resource.
+        Messages are not displayed when a resource is retrieved from
+        the cache.
+    :type logic_parser: LogicParser
+    :param logic_parser: The parser that will be used to parse logical
+        expressions.
+    :type fstruct_reader: FeatStructReader
+    :param fstruct_reader: The parser that will be used to parse the
+        feature structure of an fcfg.
+    :type encoding: str
+    :param encoding: the encoding of the input; only used for text formats.
+    """
+    resource_url = normalize_resource_url(resource_url)
+
+    # Determine the format of the resource.
+    if format == "auto":
+        resource_url_parts = resource_url.split(".")
+        ext = resource_url_parts[-1]
+        if ext == "gz":
+            ext = resource_url_parts[-2]
+        format = AUTO_FORMATS.get(ext)
+        if format is None:
+            raise ValueError(
+                "Could not determine format for %s based "
+                'on its file\nextension; use the "format" '
+                "argument to specify the format explicitly." % resource_url
+            )
+
+    if format not in FORMATS:
+        raise ValueError(f"Unknown format type: {format}!")
+
+    # If we've cached the resource, then just return it.
+    if cache:
+        resource_val = _resource_cache.get((resource_url, format))
+        if resource_val is not None:
+            if verbose:
+                print(f"<<Using cached copy of {resource_url}>>")
+            return resource_val
+
+    protocol, path_ = split_resource_url(resource_url)
+
+    if path_[-7:] == ".pickle":
+        if verbose:
+            print(f"<<Loading pickle-free alternative to {resource_url}>>")
+        fil = os.path.split(path_[:-7])[-1]
+        if path_.startswith("tokenizers/punkt"):
+            return switch_punkt(fil)
+        elif path_.startswith("chunkers/maxent_ne_chunker"):
+            return switch_chunker(fil.split("_")[-1])
+        elif path_.startswith("taggers/maxent_treebank_pos_tagger"):
+            return switch_t_tagger()
+        elif path_.startswith("taggers/averaged_perceptron_tagger"):
+            return switch_p_tagger(fil.split("_")[-1])
+
+    # Let the user know what's going on.
+    if verbose:
+        print(f"<<Loading {resource_url}>>")
+
+    # Load the resource.
+    opened_resource = _open(resource_url)
+
+    if format == "raw":
+        resource_val = opened_resource.read()
+    elif format == "pickle":
+        resource_val = restricted_pickle_load(opened_resource.read())
+    elif format == "json":
+        import json
+
+        from nltk.jsontags import json_tags
+
+        resource_val = json.load(opened_resource)
+        tag = None
+        if len(resource_val) != 1:
+            tag = next(resource_val.keys())
+        if tag not in json_tags:
+            raise ValueError("Unknown json tag.")
+    elif format == "yaml":
+        import yaml
+
+        resource_val = yaml.safe_load(opened_resource)
+    else:
+        # The resource is a text format.
+        binary_data = opened_resource.read()
+        if encoding is not None:
+            string_data = binary_data.decode(encoding)
+        else:
+            try:
+                string_data = binary_data.decode("utf-8")
+            except UnicodeDecodeError:
+                string_data = binary_data.decode("latin-1")
+        if format == "text":
+            resource_val = string_data
+        elif format == "cfg":
+            resource_val = grammar.CFG.fromstring(string_data, encoding=encoding)
+        elif format == "pcfg":
+            resource_val = grammar.PCFG.fromstring(string_data, encoding=encoding)
+        elif format == "fcfg":
+            resource_val = grammar.FeatureGrammar.fromstring(
+                string_data,
+                logic_parser=logic_parser,
+                fstruct_reader=fstruct_reader,
+                encoding=encoding,
+            )
+        elif format == "fol":
+            resource_val = sem.read_logic(
+                string_data,
+                logic_parser=sem.logic.LogicParser(),
+                encoding=encoding,
+            )
+        elif format == "logic":
+            resource_val = sem.read_logic(
+                string_data, logic_parser=logic_parser, encoding=encoding
+            )
+        elif format == "val":
+            resource_val = sem.read_valuation(string_data, encoding=encoding)
+        else:
+            raise AssertionError(
+                "Internal NLTK error: Format %s isn't "
+                "handled by nltk.data.load()" % (format,)
+            )
+
+    opened_resource.close()
+
+    # If requested, add it to the cache.
+    if cache:
+        try:
+            _resource_cache[(resource_url, format)] = resource_val
+            # TODO: add this line
+            # print('<<Caching a copy of %s>>' % (resource_url,))
+        except TypeError:
+            # We can't create weak references to some object types, like
+            # strings and tuples.  For now, just don't cache them.
+            pass
+
+    return resource_val
+
+
+def show_cfg(resource_url, escape="##"):
+    """
+    Write out a grammar file, ignoring escaped and empty lines.
+
+    :type resource_url: str
+    :param resource_url: A URL specifying where the resource should be
+        loaded from.  The default protocol is "nltk:", which searches
+        for the file in the the NLTK data package.
+    :type escape: str
+    :param escape: Prepended string that signals lines to be ignored
+    """
+    resource_url = normalize_resource_url(resource_url)
+    resource_val = load(resource_url, format="text", cache=False)
+    lines = resource_val.splitlines()
+    for l in lines:
+        if l.startswith(escape):
+            continue
+        if re.match("^$", l):
+            continue
+        print(l)
+
+
+def clear_cache():
+    """
+    Remove all objects from the resource cache.
+    :see: load()
+    """
+    _resource_cache.clear()
+
+
+def _open(resource_url):
+    """
+    Helper function that returns an open file object for a resource,
+    given its resource URL.  If the given resource URL uses the "nltk:"
+    protocol, or uses no protocol, then use ``nltk.data.find`` to find
+    its path, and open it with the given mode; if the resource URL
+    uses the 'file' protocol, then open the file with the given mode;
+    otherwise, delegate to ``urllib2.urlopen``.
+
+    :type resource_url: str
+    :param resource_url: A URL specifying where the resource should be
+        loaded from.  The default protocol is "nltk:", which searches
+        for the file in the the NLTK data package.
+    """
+    # Restore "no protocol" handling for internal resilience
+    resource_url = str(resource_url)
+    if ":" not in resource_url:
+        resource_url = "nltk:" + resource_url
+
+    protocol, path_ = resource_url.split(":", 1)
+
+    if protocol == "nltk":
+        # If find() or .open() raises a ValueError (security) or LookupError,
+        # let it bubble up or handle it based on load() logic.
+        return find(path_).open()
+    elif protocol == "file":
+        local_path = url2pathname(path_)
+        try:
+            # 1. Attempt to use NLTK's standard search paths (Safe/Normalized)
+            return find(local_path).open()
+        except (LookupError, ValueError):
+            # 2. Fallback for absolute paths (e.g., file:///etc/passwd)
+            # This ensures even direct file access hits the pathsec sentinel.
+            return _secure_open(local_path, "rb")
+    else:
+        # Network protocols (http, https, ftp)
+        return _secure_urlopen(resource_url)
+
+
+######################################################################
+# Lazy Resource Loader
+######################################################################
+
+
+class LazyLoader:
+
+    def __init__(self, _path):
+        self._path = _path
+
+    def __load(self):
+        resource = load(self._path)
+        # This is where the magic happens!  Transform ourselves into
+        # the object by modifying our own __dict__ and __class__ to
+        # match that of `resource`.
+        self.__dict__ = resource.__dict__
+        self.__class__ = resource.__class__
+
+    def __getattr__(self, attr):
+        self.__load()
+        # This looks circular, but its not, since __load() changes our
+        # __class__ to something new:
+        return getattr(self, attr)
+
+    def __repr__(self):
+        self.__load()
+        # This looks circular, but its not, since __load() changes our
+        # __class__ to something new:
+        return repr(self)
+
+
+######################################################################
+# Open-On-Demand ZipFile
+######################################################################
+
+
+class OpenOnDemandZipFile(ZipFile):
+    """
+    A subclass of ``ZipFile`` that closes its file pointer
+    whenever it is not using it; and re-opens it when it needs to read
+    data from the zipfile.  This is useful for reducing the number of
+    open file handles when many zip files are being accessed at once.
+    ``OpenOnDemandZipFile`` must be constructed from a filename, not a
+    file-like object (to allow re-opening).  ``OpenOnDemandZipFile`` is
+    read-only (i.e. ``write()`` and ``writestr()`` are disabled.
+    """
+
+    def __init__(self, filename):
+        if not isinstance(filename, str):
+            raise TypeError("ReopenableZipFile filename must be a string")
+        ZipFile.__init__(self, filename)
+        assert self.filename == filename
+        self.close()
+        # After closing a ZipFile object, the _fileRefCnt needs to be cleared
+        # for Python2and3 compatible code.
+        self._fileRefCnt = 0
+
+    def read(self, name):
+        assert self.fp is None
+        _check_decompression_bomb(self.getinfo(name))
+        # This will be validated by pathsec.open
+        self.fp = _secure_open(self.filename, "rb")
+        value = zipfile.ZipFile.read(self, name)
+        self.fp.close()
+        self.fp = None
+        return value
+
+    def write(self, *args, **kwargs):
+        """:raise NotImplementedError: OpenOnDemandZipfile is read-only"""
+        raise NotImplementedError("OpenOnDemandZipfile is read-only")
+
+    def writestr(self, *args, **kwargs):
+        """:raise NotImplementedError: OpenOnDemandZipfile is read-only"""
+        raise NotImplementedError("OpenOnDemandZipfile is read-only")
+
+    def __repr__(self):
+        return repr("OpenOnDemandZipFile(%r)" % self.filename)
+
+
+######################################################################
+# Seekable Unicode Stream Reader
+######################################################################
+
+
+class SeekableUnicodeStreamReader:
+    """
+    A stream reader that automatically encodes the source byte stream
+    into unicode (like ``codecs.StreamReader``); but still supports the
+    ``seek()`` and ``tell()`` operations correctly.  This is in contrast
+    to ``codecs.StreamReader``, which provide *broken* ``seek()`` and
+    ``tell()`` methods.
+
+    This class was motivated by ``StreamBackedCorpusView``, which
+    makes extensive use of ``seek()`` and ``tell()``, and needs to be
+    able to handle unicode-encoded files.
+
+    Note: this class requires stateless decoders.  To my knowledge,
+    this shouldn't cause a problem with any of python's builtin
+    unicode encodings.
+    """
+
+    DEBUG = True  # : If true, then perform extra sanity checks.
+
+    def __init__(self, stream, encoding, errors="strict"):
+        # Rewind the stream to its beginning.
+        stream.seek(0)
+
+        self.stream = stream
+        """The underlying stream."""
+
+        self.encoding = encoding
+        """The name of the encoding that should be used to encode the
+           underlying stream."""
+
+        self.errors = errors
+        """The error mode that should be used when decoding data from
+           the underlying stream.  Can be 'strict', 'ignore', or
+           'replace'."""
+
+        self.decode = codecs.getdecoder(encoding)
+        """The function that is used to decode byte strings into
+           unicode strings."""
+
+        self.bytebuffer = b""
+        """A buffer to use bytes that have been read but have not yet
+           been decoded.  This is only used when the final bytes from
+           a read do not form a complete encoding for a character."""
+
+        self.linebuffer = None
+        """A buffer used by ``readline()`` to hold characters that have
+           been read, but have not yet been returned by ``read()`` or
+           ``readline()``.  This buffer consists of a list of unicode
+           strings, where each string corresponds to a single line.
+           The final element of the list may or may not be a complete
+           line.  Note that the existence of a linebuffer makes the
+           ``tell()`` operation more complex, because it must backtrack
+           to the beginning of the buffer to determine the correct
+           file position in the underlying byte stream."""
+
+        self._rewind_checkpoint = 0
+        """The file position at which the most recent read on the
+           underlying stream began.  This is used, together with
+           ``_rewind_numchars``, to backtrack to the beginning of
+           ``linebuffer`` (which is required by ``tell()``)."""
+
+        self._rewind_numchars = None
+        """The number of characters that have been returned since the
+           read that started at ``_rewind_checkpoint``.  This is used,
+           together with ``_rewind_checkpoint``, to backtrack to the
+           beginning of ``linebuffer`` (which is required by ``tell()``)."""
+
+        self._bom = self._check_bom()
+        """The length of the byte order marker at the beginning of
+           the stream (or None for no byte order marker)."""
+
+    # /////////////////////////////////////////////////////////////////
+    # Read methods
+    # /////////////////////////////////////////////////////////////////
+
+    def read(self, size=None):
+        """
+        Read up to ``size`` bytes, decode them using this reader's
+        encoding, and return the resulting unicode string.
+
+        :param size: The maximum number of bytes to read.  If not
+            specified, then read as many bytes as possible.
+        :type size: int
+        :rtype: unicode
+        """
+        chars = self._read(size)
+
+        # If linebuffer is not empty, then include it in the result
+        if self.linebuffer:
+            chars = "".join(self.linebuffer) + chars
+            self.linebuffer = None
+            self._rewind_numchars = None
+
+        return chars
+
+    def discard_line(self):
+        if self.linebuffer and len(self.linebuffer) > 1:
+            line = self.linebuffer.pop(0)
+            self._rewind_numchars += len(line)
+        else:
+            self.stream.readline()
+
+    def readline(self, size=None):
+        """
+        Read a line of text, decode it using this reader's encoding,
+        and return the resulting unicode string.
+
+        :param size: The maximum number of bytes to read.  If no
+            newline is encountered before ``size`` bytes have been read,
+            then the returned value may not be a complete line of text.
+        :type size: int
+        """
+        # If we have a non-empty linebuffer, then return the first
+        # line from it.  (Note that the last element of linebuffer may
+        # not be a complete line; so let _read() deal with it.)
+        if self.linebuffer and len(self.linebuffer) > 1:
+            line = self.linebuffer.pop(0)
+            self._rewind_numchars += len(line)
+            return line
+
+        readsize = size or 72
+        chars = ""
+
+        # If there's a remaining incomplete line in the buffer, add it.
+        if self.linebuffer:
+            chars += self.linebuffer.pop()
+            self.linebuffer = None
+
+        while True:
+            startpos = self.stream.tell() - len(self.bytebuffer)
+            new_chars = self._read(readsize)
+
+            # If we're at a '\r', then read one extra character, since
+            # it might be a '\n', to get the proper line ending.
+            if new_chars and new_chars.endswith("\r"):
+                new_chars += self._read(1)
+
+            chars += new_chars
+            lines = chars.splitlines(True)
+            if len(lines) > 1:
+                line = lines[0]
+                self.linebuffer = lines[1:]
+                self._rewind_numchars = len(new_chars) - (len(chars) - len(line))
+                self._rewind_checkpoint = startpos
+                break
+            elif len(lines) == 1:
+                line0withend = lines[0]
+                line0withoutend = lines[0].splitlines(False)[0]
+                if line0withend != line0withoutend:  # complete line
+                    line = line0withend
+                    break
+
+            if not new_chars or size is not None:
+                line = chars
+                break
+
+            # Read successively larger blocks of text.
+            if readsize < 8000:
+                readsize *= 2
+
+        return line
+
+    def readlines(self, sizehint=None, keepends=True):
+        """
+        Read this file's contents, decode them using this reader's
+        encoding, and return it as a list of unicode lines.
+
+        :rtype: list(unicode)
+        :param sizehint: Ignored.
+        :param keepends: If false, then strip newlines.
+        """
+        return self.read().splitlines(keepends)
+
+    def next(self):
+        """Return the next decoded line from the underlying stream."""
+        line = self.readline()
+        if line:
+            return line
+        else:
+            raise StopIteration
+
+    def __next__(self):
+        return self.next()
+
+    def __iter__(self):
+        """Return self"""
+        return self
+
+    def __del__(self):
+        # let garbage collector deal with still opened streams
+        if not self.closed:
+            self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.close()
+
+    def xreadlines(self):
+        """Return self"""
+        return self
+
+    # /////////////////////////////////////////////////////////////////
+    # Pass-through methods & properties
+    # /////////////////////////////////////////////////////////////////
+
+    @property
+    def closed(self):
+        """True if the underlying stream is closed."""
+        return self.stream.closed
+
+    @property
+    def name(self):
+        """The name of the underlying stream."""
+        return self.stream.name
+
+    @property
+    def mode(self):
+        """The mode of the underlying stream."""
+        return self.stream.mode
+
+    def close(self):
+        """
+        Close the underlying stream.
+        """
+        self.stream.close()
+
+    # /////////////////////////////////////////////////////////////////
+    # Seek and tell
+    # /////////////////////////////////////////////////////////////////
+
+    def seek(self, offset, whence=0):
+        """
+        Move the stream to a new file position.  If the reader is
+        maintaining any buffers, then they will be cleared.
+
+        :param offset: A byte count offset.
+        :param whence: If 0, then the offset is from the start of the file
+            (offset should be positive), if 1, then the offset is from the
+            current position (offset may be positive or negative); and if 2,
+            then the offset is from the end of the file (offset should
+            typically be negative).
+        """
+        if whence == 1:
+            raise ValueError(
+                "Relative seek is not supported for "
+                "SeekableUnicodeStreamReader -- consider "
+                "using char_seek_forward() instead."
+            )
+        self.stream.seek(offset, whence)
+        self.linebuffer = None
+        self.bytebuffer = b""
+        self._rewind_numchars = None
+        self._rewind_checkpoint = self.stream.tell()
+
+    def char_seek_forward(self, offset):
+        """
+        Move the read pointer forward by ``offset`` characters.
+        """
+        if offset < 0:
+            raise ValueError("Negative offsets are not supported")
+        # Clear all buffers.
+        self.seek(self.tell())
+        # Perform the seek operation.
+        self._char_seek_forward(offset)
+
+    def _char_seek_forward(self, offset, est_bytes=None):
+        """
+        Move the file position forward by ``offset`` characters,
+        ignoring all buffers.
+
+        :param est_bytes: A hint, giving an estimate of the number of
+            bytes that will be needed to move forward by ``offset`` chars.
+            Defaults to ``offset``.
+        """
+        if est_bytes is None:
+            est_bytes = offset
+        bytes = b""
+
+        while True:
+            # Read in a block of bytes.
+            newbytes = self.stream.read(est_bytes - len(bytes))
+            bytes += newbytes
+
+            # Decode the bytes to characters.
+            chars, bytes_decoded = self._incr_decode(bytes)
+
+            # If we got the right number of characters, then seek
+            # backwards over any truncated characters, and return.
+            if len(chars) == offset:
+                self.stream.seek(-len(bytes) + bytes_decoded, 1)
+                return
+
+            # If we went too far, then we can back-up until we get it
+            # right, using the bytes we've already read.
+            if len(chars) > offset:
+                while len(chars) > offset:
+                    # Assume at least one byte/char.
+                    est_bytes += offset - len(chars)
+                    chars, bytes_decoded = self._incr_decode(bytes[:est_bytes])
+                self.stream.seek(-len(bytes) + bytes_decoded, 1)
+                return
+
+            # Otherwise, we haven't read enough bytes yet; loop again.
+            est_bytes += offset - len(chars)
+
+    def tell(self):
+        """
+        Return the current file position on the underlying byte
+        stream.  If this reader is maintaining any buffers, then the
+        returned file position will be the position of the beginning
+        of those buffers.
+        """
+        # If nothing's buffered, then just return our current filepos:
+        if self.linebuffer is None:
+            return self.stream.tell() - len(self.bytebuffer)
+
+        # Otherwise, we'll need to backtrack the filepos until we
+        # reach the beginning of the buffer.
+
+        # Store our original file position, so we can return here.
+        orig_filepos = self.stream.tell()
+
+        # Calculate an estimate of where we think the newline is.
+        bytes_read = (orig_filepos - len(self.bytebuffer)) - self._rewind_checkpoint
+        buf_size = sum(len(line) for line in self.linebuffer)
+        est_bytes = int(
+            bytes_read * self._rewind_numchars / (self._rewind_numchars + buf_size)
+        )
+
+        self.stream.seek(self._rewind_checkpoint)
+        self._char_seek_forward(self._rewind_numchars, est_bytes)
+        filepos = self.stream.tell()
+
+        # Sanity check
+        if self.DEBUG:
+            self.stream.seek(filepos)
+            check1 = self._incr_decode(self.stream.read(50))[0]
+            check2 = "".join(self.linebuffer)
+            assert check1.startswith(check2) or check2.startswith(check1)
+
+        # Return to our original filepos (so we don't have to throw
+        # out our buffer.)
+        self.stream.seek(orig_filepos)
+
+        # Return the calculated filepos
+        return filepos
+
+    # /////////////////////////////////////////////////////////////////
+    # Helper methods
+    # /////////////////////////////////////////////////////////////////
+
+    def _read(self, size=None):
+        """
+        Read up to ``size`` bytes from the underlying stream, decode
+        them using this reader's encoding, and return the resulting
+        unicode string.  ``linebuffer`` is not included in the result.
+        """
+        if size == 0:
+            return ""
+
+        # Skip past the byte order marker, if present.
+        if self._bom and self.stream.tell() == 0:
+            self.stream.read(self._bom)
+
+        # Read the requested number of bytes.
+        if size is None:
+            new_bytes = self.stream.read()
+        else:
+            new_bytes = self.stream.read(size)
+        bytes = self.bytebuffer + new_bytes
+
+        # Decode the bytes into unicode characters
+        chars, bytes_decoded = self._incr_decode(bytes)
+
+        # If we got bytes but couldn't decode any, then read further.
+        if (size is not None) and (not chars) and (len(new_bytes) > 0):
+            while not chars:
+                new_bytes = self.stream.read(1)
+                if not new_bytes:
+                    break  # end of file.
+                bytes += new_bytes
+                chars, bytes_decoded = self._incr_decode(bytes)
+
+        # Record any bytes we didn't consume.
+        self.bytebuffer = bytes[bytes_decoded:]
+
+        # Return the result
+        return chars
+
+    def _incr_decode(self, bytes):
+        """
+        Decode the given byte string into a unicode string, using this
+        reader's encoding.  If an exception is encountered that
+        appears to be caused by a truncation error, then just decode
+        the byte string without the bytes that cause the trunctaion
+        error.
+
+        Return a tuple ``(chars, num_consumed)``, where ``chars`` is
+        the decoded unicode string, and ``num_consumed`` is the
+        number of bytes that were consumed.
+        """
+        while True:
+            try:
+                return self.decode(bytes, "strict")
+            except UnicodeDecodeError as exc:
+                # If the exception occurs at the end of the string,
+                # then assume that it's a truncation error.
+                if exc.end == len(bytes):
+                    return self.decode(bytes[: exc.start], self.errors)
+
+                # Otherwise, if we're being strict, then raise it.
+                elif self.errors == "strict":
+                    raise
+
+                # If we're not strict, then re-process it with our
+                # errors setting.  This *may* raise an exception.
+                else:
+                    return self.decode(bytes, self.errors)
+
+    _BOM_TABLE = {
+        "utf8": [(codecs.BOM_UTF8, None)],
+        "utf16": [(codecs.BOM_UTF16_LE, "utf16-le"), (codecs.BOM_UTF16_BE, "utf16-be")],
+        "utf16le": [(codecs.BOM_UTF16_LE, None)],
+        "utf16be": [(codecs.BOM_UTF16_BE, None)],
+        "utf32": [(codecs.BOM_UTF32_LE, "utf32-le"), (codecs.BOM_UTF32_BE, "utf32-be")],
+        "utf32le": [(codecs.BOM_UTF32_LE, None)],
+        "utf32be": [(codecs.BOM_UTF32_BE, None)],
+    }
+
+    def _check_bom(self):
+        # Normalize our encoding name
+        enc = re.sub("[ -]", "", self.encoding.lower())
+
+        # Look up our encoding in the BOM table.
+        bom_info = self._BOM_TABLE.get(enc)
+
+        if bom_info:
+            # Read a prefix, to check against the BOM(s)
+            bytes = self.stream.read(16)
+            self.stream.seek(0)
+
+            # Check for each possible BOM.
+            for bom, new_encoding in bom_info:
+                if bytes.startswith(bom):
+                    if new_encoding:
+                        self.encoding = new_encoding
+                    return len(bom)
+
+        return None
+
+
+__all__ = [
+    "path",
+    "PathPointer",
+    "FileSystemPathPointer",
+    "BufferedGzipFile",
+    "GzipFileSystemPathPointer",
+    "GzipFileSystemPathPointer",
+    "find",
+    "retrieve",
+    "FORMATS",
+    "AUTO_FORMATS",
+    "load",
+    "show_cfg",
+    "clear_cache",
+    "LazyLoader",
+    "OpenOnDemandZipFile",
+    "GzipFileSystemPathPointer",
+    "SeekableUnicodeStreamReader",
+]

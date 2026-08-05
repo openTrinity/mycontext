@@ -1,0 +1,1096 @@
+/**
+ * 启动装配。
+ *
+ * 顺序是刻意的：配置 → 日志（需要 level）→ 数据库（需要路径）→ 服务 → IPC → 窗口。
+ * 任一步失败都直接抛出，由 index.ts 统一处理为「启动失败」，
+ * 而不是让应用带着半初始化的状态打开窗口。
+ */
+import { statSync } from "node:fs"
+import { join } from "node:path"
+import { app, shell, type BrowserWindow } from "electron"
+import { resolveLanguage } from "@mycontext/i18n"
+import { createLogger, systemClock, type Logger } from "@mycontext/kernel"
+import {
+  AccountRepository,
+  ConversationRepository,
+  openStore,
+  SelfIdentityRepository,
+  SessionStore,
+  OnboardingRepository,
+  SettingsRepository,
+  VaultStore,
+  type SqliteDatabase,
+  type StoreHandle,
+} from "@mycontext/store"
+import {
+  ChannelHost,
+  createDingTalkPlugin,
+  createFeishuPlugin,
+  createRegistry,
+} from "@mycontext/channels"
+import { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
+import { LlmHolder } from "@mycontext/llm"
+import { IPC_EVENTS } from "@mycontext/ipc-contract"
+import type { KlGraphOverview } from "@mycontext/ipc-contract"
+import { bootstrapConfig } from "./config.js"
+import { resolveAppPaths, type AppPaths } from "./paths.js"
+import { applyPostAuthIdentity } from "./post-auth-identity.js"
+import { DwsSourceService } from "../services/dws-source.service.js"
+import { runShutdownStep } from "./shutdown.js"
+import { AuthService } from "../services/auth.service.js"
+import { ChannelService } from "../services/channel.service.js"
+import { DataPlaneService } from "../services/data-plane.service.js"
+import { FeedService } from "../services/feed.service.js"
+import { OnboardingService } from "../services/onboarding.service.js"
+import { DistillSourceService } from "../services/distill-source.service.js"
+import { DistillService } from "../services/distill.service.js"
+import { ForgeService } from "../services/forge.service.js"
+import { MediaService } from "../services/media.service.js"
+import { PersonaService } from "../services/persona.service.js"
+import { PersonaGate } from "../services/persona-gate.js"
+import { SearchService } from "../services/search.service.js"
+import { KlServerService, klDataDirFor } from "../services/kl-server.service.js"
+import { ensurePythonEnv } from "../services/python-env.js"
+import { GraphQueryService } from "../services/graph-query.service.js"
+import { AdvancedAiService } from "../services/advanced-ai.service.js"
+import { RuntimeConfigService } from "../services/runtime-config.service.js"
+import { SecretStore } from "../services/secret-store.js"
+import { PreferencesService } from "../services/preferences.service.js"
+import { ScryptPasswordHasher } from "../services/password-hasher.js"
+import { SigningKeyStore } from "../services/signing-key.service.js"
+import { StatusService } from "../services/status.service.js"
+import { registerIpc } from "../ipc/register.js"
+import { toLocalFileUrl } from "../windows/local-file-url.js"
+
+export interface AppContext {
+  paths: AppPaths
+  logger: Logger
+  /** 控制库：账号与应用级设置 */
+  store: StoreHandle
+  vaults: VaultStore
+  auth: AuthService
+  status: StatusService
+  channels: ChannelService
+  onboarding: OnboardingService
+  /** 蒸馏资料源：用户的选择 + 可选会话列表。生命周期跟随 vault */
+  distillSources: DistillSourceService
+  /** 蒸馏执行（切窗 + 跑任务 + 进度推送） */
+  distill: DistillService
+  forge: ForgeService
+  /** 数字人管控层接线 */
+  persona: PersonaService
+  /** 媒体与头像下载（按需，不在采集时全下） */
+  media: MediaService
+  preferences: PreferencesService
+  /** 数据面：采集 + Outbox + Feed。生命周期严格跟随 vault */
+  dataPlane: DataPlaneService
+  /** 搜索模块。生命周期同样跟随 vault */
+  search: SearchService
+  /** kl 检索服务子进程（懒启动，应用级句柄但数据按 vault 隔离） */
+  klServer: KlServerService
+  /** 图谱只读查询（ego 图 + 事实检索）。与 klServer 分开，见构造处注释 */
+  graphQuery: GraphQueryService
+  /** 隐藏的极客配置页（应用级，不随账号切换） */
+  advancedAi: AdvancedAiService
+  /** 模型网关运行时配置（用户可见，单一真源） */
+  runtimeConfig: RuntimeConfigService
+  settings: SettingsRepository
+  openDevTools: boolean
+  /** 窗口创建后回填，供服务向渲染层推事件 */
+  setWindow(window: BrowserWindow | null): void
+  /** 停采集与 Feed → 关 vault → 关控制库。**必须 await**（见实现处注释） */
+  dispose(): Promise<void>
+}
+
+/**
+ * 把 `MYCONTEXT_DWS_SOURCE` 解析成**可执行文件**路径。
+ *
+ * 这个变量与脚本侧同名同义，而那边允许两种写法（`scripts/lib/dws-resolver.mjs`
+ * 的 `resolveDwsFromEnv`）：可执行文件本身，或它所在的目录。
+ * 运行时 `resolve("dws")` 只能用文件，所以这里就地把目录形态解开 ——
+ * 否则 `.env` 里那个值在脚本侧能用、在应用里静默失效，
+ * 而"两处语义不一致"正是最难查的一类问题。
+ *
+ * 解析不出（值为空 / 目录里没有 dws）返回空串 = 当作没配。
+ */
+function resolveDwsSourceValue(raw: string): string {
+  const value = raw.trim()
+  if (value === "") return ""
+  try {
+    if (statSync(value).isDirectory()) {
+      const suffix = `${process.platform}-${process.arch}`
+      for (const name of [
+        process.platform === "win32" ? `dws-${suffix}.exe` : `dws-${suffix}`,
+        process.platform === "win32" ? "dws.exe" : "dws",
+      ]) {
+        const candidate = join(value, name)
+        if (statSync(candidate).isFile()) return candidate
+      }
+      return ""
+    }
+    return statSync(value).isFile() ? value : ""
+  } catch {
+    return ""
+  }
+}
+
+export function bootstrapApp(mainDir: string): AppContext {
+  const packaged = app.isPackaged
+  // 配置要先于 paths：dataDir 覆盖项来自配置。
+  const { config, dotenvLoaded, dotenvPath } = bootstrapConfig({ packaged })
+  const paths = resolveAppPaths({ dataDirOverride: config.values.dataDir, mainDir })
+
+  const logger = createLogger("Main", {
+    level: config.values.logLevel,
+    filePath: paths.logFile,
+  })
+  logger.info("bootstrap start", {
+    packaged,
+    userData: paths.userData,
+    dotenvLoaded,
+    // 路径进日志：.env 没生效时第一时间就能看出是没找到还是找错了。
+    dotenvPath,
+    logLevel: config.values.logLevel,
+  })
+
+  // 装配阶段只开控制库：此时还不知道是哪个账号登录，也就没有 vault 可开。
+  const store = openStore({ path: paths.controlDatabase, logger: logger.child("Store") })
+  const accounts = new AccountRepository(store.db)
+  const settings = new SettingsRepository(store.db)
+  const sessions = new SessionStore(settings)
+  const vaults = new VaultStore({ root: paths.vaultsRoot, logger: logger.child("Vault") })
+
+  const onboarding = new OnboardingService()
+  const preferences = new PreferencesService(settings)
+
+  /**
+   * 模型网关运行时配置：**单一真源**（设置面板 / onboarding / 高级面板同源）。
+   * 落 control 库（应用级）而不是 vault —— 「用哪个模型」是这台机器的偏好。
+   *
+   * ★ 装配阶段就 seed 一次 process.env：两条子进程路（opencode 的
+   * `resolveGatewayModelConfig(process.env)`、kl 的 `ANTHROPIC_AUTH_TOKEN`）
+   * 都在**登录后**才 spawn，所以这里 seed 一定早于它们，让用户存的覆盖值
+   * 从第一次起子进程就生效。
+   */
+  const secretStore = new SecretStore({ settings, logger: logger.child("Secret") })
+  const runtimeConfig = new RuntimeConfigService({
+    settings,
+    logger: logger.child("RuntimeConfig"),
+    secretStore,
+    defaults: config,
+  })
+  runtimeConfig.seedProcessEnv()
+
+  /**
+   * 高级 AI 配置：落 control 库（应用级）而不是 vault。
+   * 「用哪个模型」是这台机器上的偏好，不该随账号切换而变。
+   *
+   * ★ baseUrl/apiKey 委托给 runtimeConfig（单一真源）；这里只留极客专属的
+   * modelRoles/harness/逃生阀。
+   */
+  const advancedAi = new AdvancedAiService({
+    settings,
+    logger: logger.child("AdvancedAi"),
+    secretStore,
+    runtimeConfig,
+  })
+
+  /**
+   * 自备 dws 的路径与渠道号（内部同学用闭源版的入口）。
+   *
+   * 落 control 库（**应用级**）——「这台机器上用哪个 dws」是机器的属性，
+   * 不随账号切换而变（与 advanced-ai 同一个口径）。
+   */
+  const dwsSource = new DwsSourceService({
+    settings,
+    clock: systemClock,
+    logger: logger.child("DwsSource"),
+    // 随包那份的路径，仅用于 UI 上展示"没设时用的是哪个"（与 runtime-env
+    // 的 fileName 同规则：`dws-<platform>-<arch>`）
+    bundledPath: join(
+      paths.binDir,
+      process.platform === "win32"
+        ? `dws-${process.platform}-${process.arch}.exe`
+        : `dws-${process.platform}-${process.arch}`,
+    ),
+    // 渠道号的默认层：内置默认 < .env < 环境变量（见 kernel/config.ts）。
+    // 用户在 UI 上存的覆盖它 —— 与 RuntimeConfigService 同一套三层解析。
+    fallbackChannel: config.values.dwsChannel,
+    /**
+     * 自备 dws 路径的默认层（`MYCONTEXT_DWS_SOURCE`）。
+     *
+     * ★ 这个变量**允许指到目录**（脚本侧 dws-resolver 就是这么用的：
+     * "可执行文件本身或它所在的目录"）。运行时只能用文件路径，所以在这里
+     * 就地解析成文件 —— 让 `.env` 里的一个值同时喂 `pnpm prepare:bin`
+     * 与应用运行时，用户不必写两遍。
+     */
+    fallbackPath: resolveDwsSourceValue(config.values.dwsSource),
+  })
+
+  // 渠道要在 auth 之前装配：登录回调里要挂载数据面，而数据面依赖渠道插件。
+  const runtime = new RuntimeEnv({
+    binDir: paths.binDir,
+    /**
+     * ★ 用 getter：用户在 UI 上改完路径/渠道号应当**立即生效**，
+     * 而 `RuntimeEnv` 是启动时构造一次的。`resolve()` / `buildEnv()`
+     * 每次调用都现读这两个 option —— 传静态值的话改完得重启，
+     * 而"改了没反应"会被当成功能坏了。
+     */
+    get dwsChannel() {
+      return dwsSource.channel()
+    },
+    get dwsBinOverride() {
+      return dwsSource.path() ?? undefined
+    },
+    dwsConfigDir: paths.dwsHome,
+  })
+  const processes = new ProcessRunner(logger.child("Process"))
+  const dingtalk = createDingTalkPlugin({
+    runtime,
+    processes,
+    logger: logger.child("DingTalk"),
+    openExternal: (url) => shell.openExternal(url),
+  })
+  const registry = createRegistry([dingtalk, createFeishuPlugin()])
+
+  let window: BrowserWindow | null = null
+  /**
+   * 当前挂载的 vault 连接（登录时挂、登出时清）。
+   *
+   * ★ 用一个可变引用而不是把 db 传进各服务的构造：需要它的是
+   * `KlServerService` 的两个注入回调（ego 图要认出「我」、要把会话归到
+   * 渠道），而那个服务是在**登录之前**装配的 —— 那一刻还没有 vault。
+   *
+   * `vaultDb()` 返回 null 就是"还没登录"，调用方据此降级。
+   */
+  let mountedVault: SqliteDatabase | null = null
+  const vaultDb = (): SqliteDatabase | null => mountedVault
+
+  const feed = new FeedService({
+    clock: systemClock,
+    logger: logger.child("Pipeline"),
+    sharedRoot: paths.sharedRoot,
+    // ★ 网关配置全部从 runtimeConfig 现读（函数）：用户在设置里改了之后，
+    // 下次 attach（登录）写出的 handoff.json 就反映新值，不必重启。
+    embedding: () => ({
+      baseUrl: runtimeConfig.resolved().llmBaseUrl,
+      model: runtimeConfig.resolved().embedModel,
+      // 算法侧写死 2048（改了要重建两套向量库）——这是外部约束不是我们的选择
+      dim: 2048,
+    }),
+    // 本地索引自用 1024 维，**不作为共享产物**（维度不同，给了也用不了）
+    localEmbedding: { model: runtimeConfig.resolved().embedModel, dim: 1024 },
+    // LLM 网关与模型名（图谱侧的抽取阶段用同一个）。
+    // ★ 给的是**裸模型名** —— 他们的 llm_extractor 会自己拼 provider 前缀，
+    // 传全名会二次拼接成 model_not_found，而那个错是静默的。
+    // 见 packages/knowledge-feed/src/handoff.ts 的 llm.modelNote。
+    llm: () => ({
+      baseUrl: runtimeConfig.resolved().klBaseUrl,
+      model: runtimeConfig.resolved().klModel,
+    }),
+    /**
+     * ★ 自动建图（攒批）。
+     *
+     * 全部是**函数**而不是值：`klServer` 在下面才构造（它要 feed 的
+     * exportDir），而 building / 图存不存在 / 有没有配模型都是随时在变的。
+     * 装配时取快照的话，那一轮判断用的是几十分钟前的状态。
+     *
+     * `enabled` 的判据是**有没有配 LLM**，不是一个独立开关：
+     * 建图必须调 LLM 抽取与 embedding，没配 key 时触发它只会失败 ——
+     * 那时静默重试比不建更糟（日志刷屏，而用户以为在建）。
+     * 用户要关掉自动建图就把 key 摘掉，或者用手动按钮。
+     */
+    autoBuild: {
+      enabled: () => {
+        const r = runtimeConfig.resolved()
+        return r.klBaseUrl.trim() !== "" && r.klApiKey.trim() !== ""
+      },
+      ready: () => {
+        const status = klServer.status()
+        // building 中不再触发（rebuildGraph 自己也会挡，这里省一次无效调用）
+        return !status.building
+      },
+      /**
+       * ★★ 必须用 `graphExists()` 而**不是** `graphOverview().available`。
+       *
+       * 后者会去取 `buildSchedule`，而那条链路（`feed.graphBuildSchedule()`）
+       * 又回头调这里的 `graphExists` —— 一个无限互递归，且 `graphOverview()`
+       * 的错误分支自己也在环上，所以它连撞栈都不会退出，只会一秒 15000 条地
+       * 刷 warn 直到把主进程的事件循环彻底堵死。实测代价见
+       * `KlServerService.graphExists()` 的注释（1.7 GB / 1000 万条 / 应用起不来）。
+       *
+       * 那次的形态特别值得记住：tsc **报过**这个循环（TS7022/7023），
+       * 而修法是给 `buildSchedule` 标显式返回类型 —— 类型报错消失了，
+       * 运行时的环一个字没动。
+       */
+      graphExists: () => klServer.graphExists(),
+      trigger: async () => {
+        const result = await klServer.rebuildGraph(false)
+        /**
+         * ★ 被主动打断（退出应用时杀了 kl）→ 报 `"cancelled"`，让上层
+         * **不计入** `consecutiveFailures`（那会触发 30 分钟退避，而这一轮
+         * 根本没失败）。见 `KlGraphBuildResult.cancelled` 的注释。
+         *
+         * 也不打 warn：关机路径上那条 warn 是纯噪音，而它掩盖了真正的失败。
+         */
+        if (result.cancelled === true) return "cancelled"
+        if (!result.ok) {
+          logger.warn("auto graph build failed", { reason: result.reason })
+        }
+        return result.ok
+      },
+    },
+  })
+
+  const distillSources = new DistillSourceService({
+    clock: systemClock,
+    logger: logger.child("DistillSource"),
+    plugin: dingtalk,
+  })
+
+  /**
+   * 蒸馏与数字人共用同一个 LLM 客户端 —— 经 holder 间接持有。
+   *
+   * 共用是刻意的：并发闸在实例内，两个实例就等于并发上限翻倍 ——
+   * 而网关的限流是按 key 算的，翻倍只会让两边一起被限流。holder 任一时刻
+   * 只持有一个 client，稳态下这条不变式仍成立。
+   *
+   * 未配 key 时 `get()` 为 null：蒸馏只跑统计型任务（抽取型显式报错而不是
+   * 静默产 0 条），数字人降级成"只出占位草稿"并在 UI 明示。
+   *
+   * ★ holder 而非一次性 `new LlmClient()`：用户在设置里改了网关后，
+   * `runtimeConfig.onChange` 会 `reconfigure` 它 —— 数字人下一条 batch、
+   * 蒸馏下一轮就用新配置，**不必重启**（见 provider.ts 的文件头）。
+   */
+  const llmHolder = new LlmHolder(logger.child("Llm"))
+  const reconfigureLlm = (): void => {
+    const r = runtimeConfig.resolved()
+    llmHolder.reconfigure({ baseUrl: r.llmBaseUrl, apiKey: r.llmApiKey, model: r.modelMain })
+  }
+  reconfigureLlm()
+  if (llmHolder.get() === null) {
+    logger.warn("llm not configured; distill extraction and persona drafts will degrade", {})
+  }
+  /**
+   * kl 的网关只在 spawn 那一刻定（`KL_*` env），所以改配置后要**重起它**。
+   *
+   * ★ 用一个后填的引用而不是把 `onChange` 挪到 klServer 之后：那个回调里还有
+   * 别的事（reconfigureLlm + 通知渲染层），而 klServer 的装配依赖一长串在它
+   * 之后才准备好的东西。回调只在用户真的改配置时才跑，那时早已装配完。
+   *
+   * 不修这条的后果实测过：打包态首启没有 `.env`（网关为空）→ kl 带着空 env
+   * 起来 → 用户在设置里填完 key，蒸馏/数字人立刻可用，而 kl **一直**用着
+   * 空网关，建图卡在 Phase B（`OpenAIException - Connection error`），
+   * 抽出 0 个实体。详见 `KlServerService.onGatewayChanged` 的注释。
+   */
+  let klServerRef: KlServerService | null = null
+  runtimeConfig.onChange(() => {
+    reconfigureLlm()
+    void klServerRef?.onGatewayChanged()
+    // 网关变了 → 通知渲染层刷新设置面板（并显示哪些要重启子进程）。
+    if (window !== null && !window.isDestroyed()) {
+      window.webContents.send(IPC_EVENTS.runtimeConfigChanged)
+    }
+  })
+
+  /**
+   * forge 蒸馏引擎（随包分发的 Python 源码）。
+   *
+   * 解释器**不内置**（打包一个要几十 MB，与 opencode 那条「102MB 不入 git」
+   * 的取舍冲突），所以在这里解析一次并把结果传进去：缺失不是错误，
+   * 是降级 —— `availability()` 会给出人话原因，状态页显示它。
+   */
+  const forgePython = runtime.tryResolvePython()
+  if (forgePython === null) {
+    logger.warn("python not found; forge distillation unavailable", {})
+  } else {
+    logger.info("python resolved for forge", {
+      path: forgePython.path,
+      version: forgePython.version.join("."),
+      source: forgePython.source,
+    })
+  }
+  const forge = new ForgeService({
+    clock: systemClock,
+    logger: logger.child("Forge"),
+    processes,
+    forgeDir: paths.forgeDir,
+    python: forgePython,
+    /**
+     * ★ 时区显式给，不让它退回写死的 +08:00。
+     *
+     * vault 存的是 unix 毫秒，而「几点活跃」「回得快不快」都是本地时间的
+     * 问题。`ForgeService` 的兜底是东八区 —— 对这台机器碰巧是对的，
+     * 但那让"读运行环境时区"那条注释所警告的问题换了个形式存在：
+     * 同一份语料在别的时区跑出来的作息是错的，而**不会报错**。
+     *
+     * 用 `getTimezoneOffset` 取反：JS 给的是"本地转 UTC 要加多少分钟"
+     * （东八区是 -480），而 forge 要的是 UTC 偏移（+480）。
+     */
+    offsetMinutes: -new Date().getTimezoneOffset(),
+    /**
+     * ★ locale pack 由应用显式给，不让 forge 的 `auto` 去猜。
+     *
+     * `auto` 按本人消息的字符集直方图判，而中英混写正好落在它的判定
+     * 边界上：实测同一个人补了几天历史之后，Han 从 48.2% 变成 52.1%，
+     * 判定结果却从 `zh-CN` 翻成 `null` —— 而 `null` pack 会让所有词级层
+     * 缺失（ask 分类、改口/推脱的真实说法），覆盖度从 A 掉到 D。
+     * "多采了历史反而更差"这件事在任何界面上都看不出来。
+     *
+     * `system` 跟随系统语言：那时也解析成一个确定的 pack，而不是让
+     * forge 再去猜一次。走 `resolveLanguage`（渲染层选文案用的同一个函数）
+     * 而不是在这里自己判 —— 两处各写一份会在某天分叉，而分叉的表现是
+     * "界面是中文而画像按英文测的"。forge 只带 `zh-CN` 与 `en` 两个包。
+     */
+    localeId: resolveLanguage(preferences.language(), app.getLocale()) === "en" ? "en" : "zh-CN",
+  })
+
+  const distill = new DistillService({
+    clock: systemClock,
+    logger: logger.child("Distill"),
+    llmProvider: llmHolder,
+    getWindow: () => window,
+    /**
+     * 能不能跑要在**跑之前**就能显示。
+     *
+     * 缺 Python 时蒸馏根本不会启动，而那时唯一的痕迹是上面那行启动日志
+     * —— 用户在界面上只看到「等待中」，无从下手。
+     */
+    forgeAvailability: () => forge.availability(),
+    /**
+     * 蒸出新画像 → 让数字人在下一次回消息前重装 skill。
+     *
+     * ★ 箭头函数（惰性）而不是直接传 `persona.markProfileChanged`：
+     * `persona` 在下面才构造 —— 装配这一刻它还不存在。
+     *
+     * 不接这条线的后果不是报错，是"蒸完了但没生效"：正在聊的会话会继续
+     * 用蒸馏前的 workspace，直到 idle（10 分钟）淘汰它。实测踩过 ——
+     * 蒸馏 grade A 跑完，10 个 workspace 里的 skill 数全是 0，
+     * 而回复照旧走兜底文案。
+     */
+    onProfileChanged: () => persona.markProfileChanged(),
+    /**
+     * ★★ 蒸馏完 → 立刻踢一轮图谱同步（否则最多干等 10 分钟）。
+     *
+     * `GraphSync` 是 10 分钟一轮的定时器，而蒸馏完成不叫醒它。用户点完
+     * 「开始学习」时蒸馏几十秒就完了，图谱那边却毫无动静 —— 那就是
+     * "点了开始学习不会建图"的真相（没接上，不是坏了）。
+     * 同事机器实测：`forge run finished` 09:53:35 → `graph export synced`
+     * 09:59:43，中间 6 分钟空白。
+     *
+     * `void`：这一轮同步是分钟级的（要导出、可能还要建图），不能阻塞
+     * 蒸馏的收尾。`tickGraphSync` 自己有 `inFlightSync` 挡并发。
+     */
+    onCorpusReady: () => void feed.tickGraphSync(),
+  })
+
+  /**
+   * kl-server 端口：KlServerService 起在这里，两条 agent 路径（SearchService
+   * 与 PersonaService）注入给 opencode 子进程的 kl CLI 都连这里。三处必须
+   * 一致，所以抽成一个常量并**在两个消费者之前**声明。
+   *
+   * 曾经写在 SearchService 之上、PersonaService 之下 —— persona 那时够不到
+   * 它（TDZ / used before declaration），也就是把整个装配拆成了两半。
+   */
+  const klPort = 8200
+
+  /**
+   * 媒体与头像。
+   *
+   * ★ 拿的是 `dingtalk.cli` 而不是整个 plugin：它只需要"能跑白名单内的
+   * 命令"这一个能力，给整个 plugin 会让它顺手就能调采集与授权。
+   *
+   * ★★ 位置在 `PersonaService` **之前**（原来在它之后 ~100 行）——
+   * 数字分身起草前要按需下载图片（让 agent 真能看到图），而那需要它。
+   * 与上面 `klPort` 那条注释同一个教训：消费者在生产者之前声明的话
+   * 拿到的是 TDZ 错误，而这里更糟 —— 用 `() => media` 惰性引用能编译过，
+   * 却把"起草时 media 好了没有"变成一个时序问题。
+   */
+  const media = new MediaService({
+    clock: systemClock,
+    logger: logger.child("Media"),
+    mediaDir: join(paths.userData, "media"),
+    avatarDir: join(paths.userData, "avatars"),
+    // 用户上传的图片（形象 / 自己的头像）—— 与渠道下载的分开放，便于分别清理
+    uploadDir: join(paths.userData, "uploads"),
+    cli: dingtalk.mediaRunner ?? null,
+    // 头像能力（契约）。渠道没实现时为 null —— 取头像退化为首字母兜底
+    avatars: dingtalk.avatars ?? null,
+    channelId: dingtalk.meta.id,
+  })
+
+  const persona = new PersonaService({
+    clock: systemClock,
+    logger: logger.child("Persona"),
+    workspaceRoot: paths.agentWorkspaces,
+    /**
+     * ★ 随包的 skill 目录（`kl` 图谱查询）。
+     *
+     * 这一路以前**没接**到数字分身 —— `skillsDir` 只有搜索在用，
+     * 所以数字人从来没有过图谱查询能力，而那不报错：只是那个能力不存在。
+     *
+     * dev 与打包同一套解析（见 paths.ts 的 `resolveSkillsDir`），
+     * 所以这里传 `paths.skillsDir` 就同时覆盖两态。
+     */
+    skillsDir: paths.skillsDir,
+    /**
+     * ★ agent 路径：每个 conversation 一个 opencode ACP session。
+     *
+     * 这四样凑齐才启用（见 PersonaService 的构造）：起不来时
+     * `PersonaAcp.turn` 返回 null，`generateDraft` 自己落回 LlmClient 直连
+     * 并记一条 `via: "llm"` —— 静默降级是这个项目反复出现的那类失效。
+     *
+     * `agentHome` 不是可选的美化：不给它 opencode 会从 `$HOME/.claude/skills`
+     * 读到用户自己装的**全部** skill（搜索侧实测泄漏 8 个）。
+     */
+    runtime,
+    processes,
+    agentHome: paths.agentHome,
+    klRoot: paths.klRoot,
+    klPort,
+    /**
+     * ★ 共用 holder：用户在设置里改网关后，`runtimeConfig.onChange`
+     * 会 `reconfigure` 它，数字人下一条 batch 就用新配置 —— 不必重启。
+     */
+    llmProvider: llmHolder,
+    getWindow: () => window,
+    /**
+     * 授权用的 CLI。
+     *
+     * ★ 与 MediaService 同一个理由：只给 `MediaRunner`（能跑白名单内的
+     * 命令），不给整个 plugin —— 那会让这一层顺手就能调采集与登录。
+     * `chat chmod` 在 `HOST_APPROVAL_COMMANDS` 里，所以它跑起来一定会
+     * 在宿主应用弹一次确认框，绕不过去。
+     */
+    cli: dingtalk.mediaRunner ?? null,
+    /**
+     * 判定闸：跑蒸馏产物自带的 `persona.py` 拿「这条能不能自己回」。
+     *
+     * ★ 与 `forge` 共用**同一个** `forgePython`：两处各解析一次会得到
+     * "蒸馏能跑但判定不可得"这种半可用状态，而它的表现是自动发送
+     * 全部静默降级 —— 没有任何东西解释为什么。
+     *
+     * 解释器缺失时 `PersonaGate` 的三个方法一律返回 null，而调用点把
+     * null 当降级处理（fail closed，见 persona-gate.ts 的文件头）。
+     */
+    gate: new PersonaGate({
+      logger: logger.child("PersonaGate"),
+      processes,
+      python: forgePython,
+    }),
+    /**
+     * 发送成功后定向补拉那个会话，把刚发的那条秒级拉回来。
+     *
+     * ★ 惰性箭头（同 `onProfileChanged`）：`dataPlane` 在下面才构造，
+     * 装配这一刻它还不存在，但这个回调要到"用户真发了一条"时才被调，
+     * 那时它早已就位。发送 API 只回 taskId、消息不在库里，不补拉的话
+     * 要等下一轮 2 分钟的全局轮询才出现（见 `PersonaService.onSentMessage`）。
+     */
+    onSentMessage: (externalId) => void dataPlane.refreshConversation(externalId),
+    /**
+     * ★ 数字人的**记忆**：知识图谱的只读查询（见 persona-memory.ts 的文件头）。
+     *
+     * forge 给的是"怎么说"，图谱给的是"说什么" —— 缺了后者，产出是一种可复现的
+     * 失效：对方提到一个专有名词，草稿把那个词原样复述一遍，因为模型除了语气
+     * 参数什么都没拿到。而图谱里往往已经有那个名词的解释（它是从同一批聊天
+     * 记录里抽出来的），只是从来没接进起草。
+     *
+     * ★ 取函数而不是值：`graphQuery` 在这一行**之后**才构造（它依赖 vault 的
+     * 本人身份），而两者的构造顺序不该由这个接线决定。惰性取也顺带让
+     * "图还没建"变成一次返回空数组，而不是启动期抛错。
+     */
+    graph: {
+      entitiesByName: (names) => graphQuery.entities(names),
+      /**
+       * ★ 限会话。全库检索是事实面板的定义，不是记忆的定义 ——
+       * 见 `factsInConversation` 的注释（跨会话会让数字人复述本人在这个
+       * 会话里从没说过的话）。
+       */
+      searchFacts: (keyword, conversationExternalId) =>
+        graphQuery.factsInConversation(keyword, conversationExternalId, 8),
+    },
+    /** 查记忆时排除本人的名字 —— `people.md` 已经按人给了语气 */
+    getSelfNames: () => {
+      const db = vaultDb()
+      if (db === null) return []
+      try {
+        return new SelfIdentityRepository(db).get(dingtalk.meta.id)?.displayNames ?? []
+      } catch {
+        return []
+      }
+    },
+    /**
+     * 起草前把这几条消息挂的图下下来 —— 让 agent 真能看到图。
+     *
+     * ★ 为什么起草这条路上必须自己下：媒体原本只在"用户看到那一屏时"才下
+     * （见 `MediaService.downloadForMessages` 的注释），而起草是后台跑的。
+     * 实测库里 1915 张图只有 242 张在本地（13%）——不下就等于绝大多数轮次
+     * agent 仍然看不到图。
+     *
+     * 范围由 persona 侧限到最近几条带图的消息（与送图上限对齐），
+     * 所以这里不再加限制。失败不抛：那时 transcript 标「（图片，未下载）」。
+     */
+    downloadMedia: (messageIds) => media.downloadForMessages(messageIds),
+  })
+
+  /**
+   * 媒体与头像。
+   *
+   * ★ 拿的是 `dingtalk.cli` 而不是整个 plugin：它只需要"能跑白名单内的
+   * 命令"这一个能力，给整个 plugin 会让它顺手就能调采集与授权。
+   */
+
+  const search = new SearchService({
+    clock: systemClock,
+    logger: logger.child("Search"),
+    runtime,
+    processes,
+    workspaceRoot: paths.agentWorkspaces,
+    // ★ 隔离 HOME：不给的话 opencode 会读到用户 `~/.claude/skills` 下的全部
+    // skill（实测泄漏 8 个，含一个专门检测隔离失效的探针）。
+    agentHome: paths.agentHome,
+    // kl skill 随包分发；建会话时复制进 workspace（harness 按 cwd 发现 skill）
+    skillsDir: paths.skillsDir,
+    klRoot: paths.klRoot,
+    klPort,
+    /**
+     * agent 进程也用内置 Python 环境。
+     *
+     * ★ 必需：skill 里跑的裸 `kl` 要命中我们在 venv/bin 生成的 wrapper
+     * （上游 kl-graph/kl 硬编码了它自己那套不存在的 .venv 路径）。
+     * 与 KlServerService 共用同一份准备逻辑，幂等 —— 就绪时不做任何事。
+     */
+    getPythonEnv: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
+    getWindow: () => window,
+  })
+
+  const klServer = new KlServerService({
+    clock: systemClock,
+    logger: logger.child("KlServer"),
+    processes,
+    klRoot: paths.klRoot,
+    dataDir: klDataDirFor(paths.sharedRoot),
+    // 四件套导出目录（FeedService 每 10min 自动物化到这里）；建图读它。
+    exportDir: join(paths.sharedRoot, "exports", "dws"),
+    port: klPort,
+    getWindow: () => window,
+    /**
+     * 准备并**激活** mycontext 的共用 Python 环境（内置解释器 + venv + 依赖）。
+     *
+     * ★ 为什么必须自己带 Python：本机的指望不上 —— macOS 自带的是 3.9.6，
+     * 而 kl 要求 ≥3.10；依赖（约 280MB，含平台绑定的 .so）也不入 git。
+     * 不准备就 spawn 的后果是 kl-server `exit 3`，日志里只有退出码，
+     * 看不出是缺依赖（真实踩过：同事机器能和 opencode 聊，但 kl 调不通）。
+     *
+     * 返回的 env 是激活后的（VIRTUAL_ENV / PATH 前插 venv/bin / 清 PYTHONHOME），
+     * 会传给 kl 的每个子进程 —— 于是它们里面裸 `python`、`kl` 都在这个 venv 里。
+     * 幂等：就绪时不联网、不装东西，也不打日志。
+     */
+    preparePython: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
+    /**
+     * embedding/LLM 走网关（出网边界，UI 明示）。
+     *
+     * ★ 函数：每次 spawn 现读 `runtimeConfig.resolved()` 的 **KL 三项**
+     * （留空回退主配置）。用户在设置里改了网关后，下次 kl 重启就用新值。
+     */
+    gateway: () => {
+      const r = runtimeConfig.resolved()
+      // KL base/key 留空时 resolved 已回退主配置；再兜一层真实 env 里的
+      // ANTHROPIC_*（用户只配了那个而没配 MYCONTEXT_* 的情况）。
+      const base =
+        r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
+      const key =
+        r.klApiKey.trim() !== ""
+          ? r.klApiKey
+          : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
+      return {
+        // ★ LLM 走 Anthropic 模式：base 不含 /v1（litellm 自己拼 /v1/messages），
+        // 裸模型名（kl 的 extractor 自己拼 anthropic/ 前缀）。见 kl_graph/config.py。
+        llmBaseUrl: base,
+        // ★ kl 抽取模型：默认回退主模型（glm-5.2，实测 anthropic 模式可抽中文 facts）。
+        // 想给 kl 单独指一个模型就在设置里填 KL 模型，或用 KL_LLM_MODEL env 覆盖。
+        llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
+        // ★ embedding 走 OpenAI 兼容：base 要带 /v1（litellm 直接 POST {base}/embeddings）。
+        embedBaseUrl: base === "" ? "" : `${base.replace(/\/$/, "")}/v1`,
+        embedModel: r.embedModel,
+        apiKey: key,
+        // ★ 网关（DashScope 兼容）的 text-embedding-v4 默认返回 1024 维，而 kl 默认
+        // 建 4096 维集合 —— 维度对不上会在 Qdrant upsert 时崩。配 2048 + 带 dimensions
+        // 参数（matryoshka 截断），与 kl 侧实跑验证过的口径一致。
+        embeddingDim: 2048,
+        sendDimensions: true,
+      }
+    },
+    /**
+     * 自动建图的调度快照 → `graphOverview().buildSchedule`（界面上
+     * 「下次多久后构建」那一块）。
+     *
+     * ★ 惰性取（函数而非值）：水位随每一轮采集在变，装配这一刻的快照
+     * 到用户打开界面时早已过期 —— 与 `gateway` 同一个理由。
+     *
+     * ★★ 这里有一条**真实存在的运行期环**，改动前先读完这一段：
+     *
+     * ```
+     * klServer.graphOverview() → 本函数 → feed.graphBuildSchedule()
+     *   → autoBuild.graphExists() → klServer.??? ← 这里必须是 graphExists()
+     * ```
+     *
+     * 上面那个 `graphExists` 曾经指向 `graphOverview().available`，于是环闭合，
+     * 而且 `graphOverview()` 的 catch 分支自己也在环上 —— 结果是一次调用打出
+     * 1000 万条 warn / 1.7 GB 日志、主进程事件循环彻底停摆（"应用启动不起来"）。
+     * 现在环在 `KlServerService.graphExists()` 那里断开（它不碰 buildSchedule），
+     * 详细的判据与代价记在那个方法的注释里。
+     *
+     * ★ 所以：`feed.graphBuildSchedule()` 这条链路上的任何一环都**不许**再去
+     * 调 `graphOverview()`。要行数就调 `graphExists()`。
+     *
+     * ★★ 返回类型**必须显式写**：`feed.autoBuild` 里引用了 `klServer`，
+     * 而 `klServer` 的构造又引用 `feed` —— 不标注的话 tsc 判定
+     * 「circularly references itself」并把这三处全部推成 `any`
+     * （TS7022/7023）。那比编译失败更糟：`any` 会让整条链路失去类型检查。
+     *
+     * ★ 但要记住这个标注**只修类型、不修环**：上面那次事故里 tsc 报的就是
+     * 这个循环，而"加显式返回类型"把唯一的告警按掉了，运行时的环留在原地。
+     * 类型层面的循环警告是在提示这里的装配有环，不是一个纯粹的标注疏漏。
+     *
+     * 实现与真实触发判据同源（同一个 `forecastAutoBuild`），
+     * 那是"界面说的"与"实际做的"不漂移的唯一办法。
+     */
+    buildSchedule: (): KlGraphOverview["buildSchedule"] => feed.graphBuildSchedule(),
+  })
+  // 回填给上面那个 onChange —— 改网关后重起 kl（见那里的注释）。
+  klServerRef = klServer
+
+  /**
+   * 图谱的**只读查询**（ego 图 + 事实检索）。
+   *
+   * ★ 与 `klServer` 分开是刻意的：那个是 kl **子进程的 supervisor**
+   * （启停 / 健康轮询 / 建图），由维护 kl 那条线的人负责。
+   * 而这一层只开图库的只读连接跑 SELECT —— 与进程无关
+   * （图库是磁盘产物，建图**期间**也读得到，那时 kl 的 HTTP 端点在忙）。
+   *
+   * 混在一起的代价这一轮真实发生过：两边同时改那个文件，
+   * `stash pop` 撞出冲突，还漏出一个重复的 `ipcMain.handle` 注册。
+   */
+  const graphQuery = new GraphQueryService({
+    logger: logger.child("GraphQuery"),
+    dataDir: klDataDirFor(paths.sharedRoot),
+    now: () => systemClock.now(),
+    /**
+     * ego 图要在实体表里认出「我」—— 判据是本人身份里的显示名。
+     *
+     * ★ 取函数而不是值：vault 是**跟随登录挂载**的，装配这一刻它还没挂上。
+     * 未登录时返回空数组，`ego()` 会给一句"先确认本人身份"。
+     */
+    getSelfNames: () => {
+      const db = vaultDb()
+      if (db === null) return []
+      try {
+        const row = new SelfIdentityRepository(db).get(dingtalk.meta.id)
+        return row?.displayNames ?? []
+      } catch {
+        // 表还不存在（迁移没跑完）→ 空数组，页面照常降级
+        return []
+      }
+    },
+    /**
+     * `会话 externalId → 渠道 id`。ego 图靠它把关系归到 IM 渠道。
+     *
+     * kl 的图库里没有渠道字段，但它的 `conversation_id` 就是我们的
+     * `conversations.external_id`（实测能对上）—— 所以映射只能从 vault 来。
+     */
+    getChannelByConversation: () => {
+      const db = vaultDb()
+      if (db === null) return new Map<string, string>()
+      try {
+        return new ConversationRepository(db).channelByExternalId()
+      } catch {
+        return new Map<string, string>()
+      }
+    },
+  })
+
+  const dataPlane = new DataPlaneService({
+    clock: systemClock,
+    logger: logger.child("DataPlane"),
+    plugin: dingtalk,
+    feed,
+    getWindow: () => window,
+    /**
+     * 数字人的入站消费者挂在采集的 tick 上（见 IngestService）。
+     *
+     * 取的是**函数**而不是实例：`persona.attach` 与 `dataPlane.attach`
+     * 的先后由下面的 onSessionChange 决定，传实例会拿到 attach 之前的 null。
+     */
+    getPersonaSupervisor: () => persona.inboundSupervisor,
+    /**
+     * 投递成功 → 叫醒调度 + 推快照。
+     *
+     * 不接这一条的话消息只是"进了队列"：要等 `TICK_MS`（8 秒）才被处理，
+     * 而那几秒里界面上「待处理」一动不动 —— 与没收到无法区分。
+     */
+    onPersonaDelivered: () => persona.onDelivered(),
+  })
+
+  const auth = new AuthService({
+    accounts,
+    sessions,
+    signingKey: new SigningKeyStore({ settings, logger: logger.child("SigningKey") }),
+    hasher: new ScryptPasswordHasher(),
+    logger: logger.child("Auth"),
+    /**
+     * 登录态变化时挂/摘该账号的 vault 与数据面。
+     *
+     * 只有一处地方开关，因此不会出现「登录了但 vault 没开」
+     * 或「登出了 vault 还开着」——后者意味着账号级数据在登出后仍可读，
+     * 而对数据面来说还意味着「已登出的账号仍在被采集、且 Feed 端口仍在暴露它」。
+     */
+    onSessionChange: (next) => {
+      if (next === null) {
+        onboarding.bind(null, null)
+        distillSources.detach()
+        // 登出：先撤 token + kill opencode，再 detach（换库时旧 agent 不该续命）。
+        void search.shutdown().finally(() => search.detach())
+        media.detach()
+        /**
+         * 蒸馏与数字人也要摘。
+         *
+         * 两者都持定时器且会写库 —— 不摘的话登出后它们还在往一个
+         * 即将关闭的连接上写（实测的表现是 unhandledRejection）。
+         */
+        void distill.detach().catch(() => undefined)
+        void persona.detach().catch(() => undefined)
+        // kl 数据按 vault 隔离：换库前必须停掉旧库的 kl-server（无孤儿）。
+        void klServer.stop()
+        /**
+         * ★ 先停数据面再关库，而且必须**等它真的停了**。
+         *
+         * `dataPlane.detach()` → `ingest.stop()` 现在会 await 在途的那一轮采集
+         * （它可能正在 await 一个 0.6s 的 DWS 子进程）。不等的话 `closeAll()`
+         * 会先跑，那一轮回来后写到已关闭的连接上 —— 实测抛
+         * `The database connection is not open`，且是个 unhandledRejection。
+         *
+         * `.finally` 已经保证了顺序，`.catch` 补的是"detach 自己失败"的情况：
+         * 那时仍然要关库（不关等于登出后账号数据仍可读），但错误要记下来。
+         */
+        void dataPlane
+          .detach()
+          .catch((error: unknown) => {
+            logger.error("data plane detach failed", {
+              detail: error instanceof Error ? error.message : String(error),
+            })
+          })
+          .finally(() => {
+            // ★ 先清引用再关库：不清的话 ego 图仍会拿着一个已关闭的连接，
+            // 而它读的是**上一个账号**的身份与会话（跨账号泄漏）。
+            mountedVault = null
+            vaults.closeAll()
+          })
+        return
+      }
+      const handle = vaults.handle(next.vaultId)
+      // ego 图的两个注入回调要用它（见 mountedVault 的注释）
+      mountedVault = handle.db
+      onboarding.bind(
+        new SettingsRepository(handle.db, "vault_settings"),
+        new OnboardingRepository(handle.db),
+      )
+      distillSources.attach(handle.db)
+      /**
+       * 跑 forge（测量型引擎），产出 skill 包。这是画像的**唯一**来源。
+       *
+       * 路径按 vault 给：语料是这个账号的，产物也只该被这个账号看到。
+       *
+       * ★ `since` 由 `DistillService` 给，**不再写死 `null`**。
+       *
+       * 写死的后果（实测）：引导页那个「30 / 90 / 180 天」选择器选完后
+       * `days` 一路传到 `distill.start()` 就被丢掉，forge 永远按增量水位跑
+       * （首次跑退化成 `analysisStart` = 库里最早那条消息的日期）。
+       * 也就是**选什么都一样**，而 `distill_sources.scope_json` 里却
+       * 老实记着用户选的那个 `since` —— 两处不一致，且界面上看不出来。
+       *
+       * `null` 仍然有意义：那是"不限范围"（自动重蒸走这条，见
+       * `DistillService.attach` 里 autoTimer 的注释）。
+       *
+       * ★ 返回**完整**结果而不是 `{ok, reason}`：`messages` / `turns` /
+       * `asks` / `files` / `grade` 是回答"蒸得怎么样"的那五个数，而它们
+       * 曾经在这个边界上被丢掉 —— 于是 UI 只能显示「等待中」。
+       *
+       * `signal` 一路传到 `ProcessRunner.spawn`：不传的话「停止」按钮
+       * 对在跑的那一轮完全无效（超时上限加起来近半小时）。
+       */
+      distill.attach(
+        handle.db,
+        (signal, onStep, since) =>
+          forge.run({
+            db: handle.db,
+            vaultPath: vaults.path(next.vaultId),
+            forgeRoot: vaults.forgeRoot(next.vaultId),
+            skillRoot: vaults.skillRoot(next.vaultId),
+            since: since ?? null,
+            ...(signal === undefined ? {} : { signal }),
+            // 阶段回调透传：让界面能显示"正在测量"而不是干等一句"正在蒸馏"
+            ...(onStep === undefined ? {} : { onStep }),
+          }),
+        /**
+         * 「重新蒸馏」要真的从头来 —— forge 的水位在它自己的派生库里，
+         * 不在 vault 里，所以这一步只能由持有路径的这一层给。
+         */
+        () => forge.resetWatermark(vaults.forgeRoot(next.vaultId)),
+      )
+      persona.attach(handle.db, vaults.skillRoot(next.vaultId))
+      media.attach(handle.db)
+      // kl-server 随登录懒启动（warmup ~90s，不阻塞登录）。fire-and-forget：
+      // ensureReady 内部轮询健康、自己管状态机（starting→ready/failed）并经 IPC
+      // 推 UI，绝不能 await（会卡住登录）。失败只降级（搜索落回本地召回），不抛。
+      // 数据按 vault 隔离，所以起在登录分支而非 bootstrap——登出分支已 stop。
+      void klServer.ensureReady().catch(() => undefined)
+      /**
+       * 数字人调度器随登录启动。
+       *
+       * 启动它是安全的：回复模式默认 `draft`（只出草稿），且自动发送
+       * 还要过白名单与授权门。所以调度器起来了也不会替用户发出任何消息。
+       *
+       * ★ 注意这里**不再**说"默认 listening = 0 所以不处理任何消息" ——
+       * 那个开关已经删了，现在管控层收所有消息（它是订阅者）。
+       * 安全性来自"发不发"那一层，不是"收不收"。
+       */
+      persona.start()
+      search.attach(handle.db)
+      void dataPlane.attach(handle.db, vaults.path(next.vaultId)).catch((error: unknown) => {
+        // 数据面挂载失败不该阻止登录：用户仍能用设置页与授权，
+        // 状态页会显示 lastError。把它变成"登录失败"才是过度反应。
+        logger.error("data plane attach failed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      })
+    },
+  })
+  // 持久化的会话 token 在装配阶段校验：窗口打开前就定好登录态，
+  // 避免渲染层先闪一下登录页再跳进主壳。
+  const restored = auth.restoreSession()
+
+  const status = new StatusService({
+    paths,
+    config,
+    dotenvLoaded,
+    dotenvPath,
+    migrations: store.appliedMigrations,
+    accounts,
+  })
+
+  const channels = new ChannelService({
+    host: new ChannelHost(registry),
+    logger: logger.child("Channel"),
+    getWindow: () => window,
+    /**
+     * ★ 授权成功 → 解除采集 blocked、确认本人身份、刷新账号头像与显示名。
+     *
+     * 实现在 `post-auth-identity.ts`（那里有完整的 why）。三条真实踩过的坑
+     * 都在那个文件里锁着：
+     * ① 两段必须**各自** try/catch —— 身份解析抛错曾把取头像整段带走；
+     * ② 显示名要一起回填 —— `applyChannelProfile` 一直支持它却没人传；
+     * ③ 第零步解除采集的 blocked 终态 —— 否则用户重新授权后采集再也不跑。
+     *
+     * 提成独立文件的理由：留在这个闭包里没法写测试（要测就得把整个
+     * `bootstrapApp()` 跑起来：Electron、真 vault、迁移、python env…）。
+     */
+    onAuthorized: (_channelId, status) =>
+      applyPostAuthIdentity({ dataPlane, media, auth, logger, toFileUrl: toLocalFileUrl }, status),
+  })
+
+  registerIpc({
+    auth,
+    status,
+    channels,
+    onboarding,
+    distillSources,
+    distill,
+    persona,
+    media,
+    preferences,
+    dataPlane,
+    search,
+    klServer,
+    graphQuery,
+    advancedAi,
+    runtimeConfig,
+    dwsSource,
+    logger: logger.child("Ipc"),
+  })
+
+  logger.info("bootstrap done", {
+    controlVersion: store.appliedVersion,
+    accountCount: accounts.count(),
+    sessionRestored: restored !== null,
+    binDir: paths.binDir,
+  })
+
+  return {
+    paths,
+    logger,
+    store,
+    vaults,
+    auth,
+    status,
+    channels,
+    onboarding,
+    distillSources,
+    distill,
+    forge,
+    persona,
+    media,
+    preferences,
+    dataPlane,
+    search,
+    klServer,
+    graphQuery,
+    advancedAi,
+    runtimeConfig,
+    settings,
+    openDevTools: config.values.devTools,
+    setWindow: (next) => {
+      window = next
+    },
+    dispose: async () => {
+      /**
+       * 顺序：停采集与 Feed → 关 vault → 关控制库。
+       *
+       * ## ★ 每一步都过 `runShutdownStep`（分步超时 + 逐步日志）
+       *
+       * 首版是一串裸 `await`，外面套一个 `try/catch`。两个问题：
+       *
+       * ① **没有超时**。这些步骤全在等外部世界（ACP 的 session/dispose、
+       *    DWS 子进程、kl 子进程），任一步不返回就是**退不出去** ——
+       *    而 `before-quit` 已经 preventDefault 了，表现是窗口关了、
+       *    进程还在、Dock 图标赖着不走。
+       * ② **第一个抛错会跳过后面所有步骤**（同一个 try 块）。而
+       *    `store.close()` 排在最后，它是唯一有持久化后果的那一步。
+       *
+       * 现在每步独立：超时/失败都只记日志并继续，见 `shutdown.ts`。
+       *
+       * `await` 而不是 `void` 的理由不变：`dataPlane.detach()` 要等在途的
+       * 那一轮采集收尾（可能正 await 一个 0.6s 的子进程），不等就关库会抛
+       * 一堆 `The database connection is not open` —— 无害但会淹没真正的
+       * 退出问题，而且是 unhandledRejection（退出码可能变）。
+       */
+      const runner = { logger: logger.child("Shutdown"), clock: systemClock }
+      // 同步且无外部依赖的两个不值得单独计时
+      distillSources.detach()
+      media.detach()
+      // 先优雅收掉 opencode（撤 token + kill 进程，无孤儿），再 detach。
+      await runShutdownStep(runner, "search", () => search.shutdown())
+      search.detach()
+      await runShutdownStep(runner, "distill", () => distill.detach())
+      await runShutdownStep(runner, "persona", () => persona.detach())
+      // kl 子进程同样优雅停（SIGTERM→SIGKILL，无孤儿）。
+      await runShutdownStep(runner, "klServer", () => klServer.stop())
+      await runShutdownStep(runner, "dataPlane", () => dataPlane.detach())
+      await runShutdownStep(runner, "db", () => {
+        vaults.closeAll()
+        store.close()
+      })
+      logger.info("shutdown complete")
+    },
+  }
+}

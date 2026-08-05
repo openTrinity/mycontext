@@ -1,0 +1,45 @@
+{
+  "loading": "Loading…",
+  "noGraph": "No relationship graph yet",
+  "rebuild": "Rebuild graph",
+  "building": "Building…",
+  "legendSelf": "{{name}} (you)",
+  "legendChannel": "Outline = {{channel}}",
+  "mentions": "mentioned {{count}} times",
+  "hint": "Only the {{count}} entities directly linked to you. The full graph has 2000+ — drawn in full it is a hairball. Use Search to walk deeper.",
+  "type": {
+    "Person": "Person",
+    "System": "System",
+    "Project": "Project",
+    "Organization": "Org",
+    "Unknown": "Unknown"
+  },
+  "channel": {
+    "dingtalk": "DingTalk",
+    "feishu": "Feishu"
+  },
+  "range7": "Last 7 days",
+  "range30": "Last 30 days",
+  "range90": "Last 90 days",
+  "rangeAll": "All",
+  "searchPlaceholder": "Search fact text…",
+  "clear": "Clear",
+  "aboutEntity": "About {{name}}",
+  "clearEntity": "Clear this entity filter",
+  "filterByEntity": "Only facts about {{name}}",
+  "factsTotal": "{{count}} facts",
+  "prev": "Prev",
+  "next": "Next",
+  "factType": {
+    "DECISION": "Decision",
+    "DELEGATE": "Delegate",
+    "CAUSAL": "Causal",
+    "STATUS": "Status",
+    "GENERAL": "General"
+  },
+  "seeFacts": "See their facts",
+  "closeDetail": "Close",
+  "resetView": "Reset view",
+  "neighborsTitle": "Direct links ({{count}})",
+  "factsAbout": "{{count}} facts about \"{{name}}\""
+}

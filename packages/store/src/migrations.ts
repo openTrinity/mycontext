@@ -1,0 +1,231 @@
+/**
+ * 迁移清单。
+ *
+ * 每个迁移是一个模块内的 SQL 字符串而非独立 .sql 文件：主进程会被 electron-vite
+ * 打包成单文件，运行时按相对路径读 .sql 需要额外的 extraResources 拷贝步骤，
+ * 打包后极易漏文件。内联 SQL 让「开发态 / 打包态」路径完全一致。
+ *
+ * 两套清单：
+ * - CONTROL_MIGRATIONS：control.sqlite（账号、应用级设置、会话）
+ * - VAULT_MIGRATIONS：vaults/<vaultId>/core.sqlite（单个账号的业务数据）
+ *
+ * 分库而不是给每张业务表挂 accountId：跨账号泄漏从「每个查询都要记得带条件」
+ * 变成「打开的是哪个文件」——前者靠自觉，后者靠文件系统。删账号也变成删目录。
+ *
+ * 规则：
+ * - version 单调递增，**已发布的迁移不得再修改**（checksum 会校验）
+ * - 新增变更一律追加新 version
+ * - vault 的每个版本 SQL 拆到 `migrations/vault/v*.ts`，本文件只组装数组
+ */
+import { VAULT_0002_RAW_NORMALIZED } from "./migrations/vault/v2-raw-normalized.js"
+import { VAULT_0003_OUTBOX } from "./migrations/vault/v3-outbox.js"
+import { VAULT_0004_INDEX } from "./migrations/vault/v4-index.js"
+import { VAULT_0005_SEARCH } from "./migrations/vault/v5-search.js"
+import { VAULT_0006_DISTILL } from "./migrations/vault/v6-distill.js"
+import { VAULT_0007_PERSONA } from "./migrations/vault/v7-persona.js"
+import { VAULT_0008_MEDIA_MINUTES } from "./migrations/vault/v8-media-minutes.js"
+import { VAULT_0009_ONBOARDING } from "./migrations/vault/v9-onboarding.js"
+import { VAULT_0010_AVATARS } from "./migrations/vault/v10-avatars.js"
+import { VAULT_0011_AVATAR_MISS_RESET } from "./migrations/vault/v11-avatar-miss-reset.js"
+import { VAULT_0012_PERSONA_REVIEW } from "./migrations/vault/v12-persona-review.js"
+import { VAULT_0013_PERSONA_CONVERSATION_EXCLUSIONS } from "./migrations/vault/v13-persona-conversation-exclusions.js"
+import { VAULT_0014_PERSONA_SELF_CONVERSATION } from "./migrations/vault/v14-persona-self-conversation.js"
+import { VAULT_0015_PERSONA_PUBLIC_SERVICE_BOTS } from "./migrations/vault/v15-persona-public-service-bots.js"
+import { VAULT_0016_PERSONA_REPLY_EXPIRY } from "./migrations/vault/v16-persona-reply-expiry.js"
+import { VAULT_0017_SEND_TASK_ID } from "./migrations/vault/v17-send-task-id.js"
+import { VAULT_0018_DRAFT_CAP } from "./migrations/vault/v18-draft-cap.js"
+import { VAULT_0020_DOCUMENTS } from "./migrations/vault/v20-documents.js"
+import { VAULT_0021_MEDIA_URL_KIND } from "./migrations/vault/v21-media-url-kind.js"
+import { VAULT_0022_UNWRAP_RICH_CONTENT } from "./migrations/vault/v22-unwrap-rich-content.js"
+import { VAULT_0023_CONVERSATION_UNREADABLE } from "./migrations/vault/v23-conversation-unreadable.js"
+import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
+import {
+  VAULT_0002_LEGACY_CHECKSUMS,
+  VAULT_0009_LEGACY_CHECKSUMS,
+} from "./migration-legacy-checksums.js"
+
+export interface Migration {
+  version: number
+  name: string
+  sql: string
+  /**
+   * 这条迁移在历史上出现过的旧 `rawChecksum`，全部已确认「只改了注释」。
+   *
+   * 命中的库会被就地收敛到 `schemaChecksum`，而**没登记的值仍然报错**。
+   * 见 `migration-legacy-checksums.ts` 的文件头（含为什么挂在这里而不是
+   * 一张 version→checksums 的表：version 在两套清单里不唯一）。
+   */
+  legacyChecksums?: readonly string[]
+}
+
+const CONTROL_0001_INIT = `
+CREATE TABLE accounts (
+  id              TEXT PRIMARY KEY,
+  email_canonical TEXT NOT NULL UNIQUE,
+  email_display   TEXT NOT NULL,
+  password_hash   TEXT NOT NULL,
+  salt            TEXT NOT NULL,
+  hash_params     TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  last_login_at   TEXT
+);
+
+CREATE TABLE app_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`
+
+/**
+ * 每个账号一个 vault。
+ *
+ * 追加新版本而不是改 v1：已应用的迁移改动会被 checksum 拦住（这是有意的）。
+ * 回填用 id 本身作为 vault_id——已有账号必须拿到一个稳定值，
+ * 而 SQLite 的 ALTER TABLE ADD COLUMN 不支持在加 NOT NULL 列时用表达式默认值。
+ *
+ * 不加 UNIQUE 约束：SQLite 无法对已有列追加约束，需要重建表。
+ * 一对一由应用层保证（vault_id 由注册流程生成，不接受外部输入）。
+ */
+const CONTROL_0002_VAULTS = `
+ALTER TABLE accounts ADD COLUMN vault_id TEXT NOT NULL DEFAULT '';
+UPDATE accounts SET vault_id = id WHERE vault_id = '';
+CREATE UNIQUE INDEX idx_accounts_vault_id ON accounts(vault_id);
+`
+
+/**
+ * 用户身份：显示名 + 头像。
+ *
+ * ## 为什么在 control 库而不是 vault
+ *
+ * 这是**账号级**身份：登录界面与账号切换器都要显示它，而那时还没挂 vault。
+ * 放 vault 会让"显示自己的名字"依赖"先打开自己的库"，多一层没必要的耦合。
+ *
+ * ## ★ `avatar_source` 是「不自动替换」的判据，不是 `avatar_url` 空不空
+ *
+ * 渠道授权成功后回填头像的规则只有一条：
+ *   'manual' → 永不覆盖   'channel' → 可更新   NULL → 可填
+ *
+ * 用 source 而不是"url 是否为空"：用户**手动清空**头像是一个明确的选择
+ * （"我就要首字母"），只看 url 会让下一次授权把它又填回来 ——
+ * 而那个覆盖是静默的（没人会盯着自己的头像等它变）。
+ *
+ * 三列都可空：已有账号回填不了显示名（那要用户自己填或从渠道拿），
+ * 而 `NOT NULL DEFAULT ''` 会让"没设过"与"设成空串"不可区分。
+ */
+const CONTROL_0003_PROFILE = `
+ALTER TABLE accounts ADD COLUMN display_name  TEXT;
+ALTER TABLE accounts ADD COLUMN avatar_url    TEXT;
+ALTER TABLE accounts ADD COLUMN avatar_source TEXT;
+`
+
+/** 单个账号的库。本阶段只有账号级设置（onboarding 状态等）。 */
+const VAULT_0001_INIT = `
+CREATE TABLE vault_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`
+
+export const CONTROL_MIGRATIONS: readonly Migration[] = [
+  { version: 1, name: "init", sql: CONTROL_0001_INIT },
+  { version: 2, name: "account-vaults", sql: CONTROL_0002_VAULTS },
+  { version: 3, name: "account-profile", sql: CONTROL_0003_PROFILE },
+]
+
+/**
+ * Vault 清单。
+ *
+ * 每个版本的 SQL 拆到 `migrations/vault/v*.ts` 单独一个模块，本文件只组装数组：
+ * 35 张表塞进一个文件既是冲突热点（多个阶段的改动都落在这里），
+ * 也会让单次编辑超出可审阅的规模。checksum 校验不受影响 ——
+ * 它算的是 SQL 字符串的内容，与文件路径无关。
+ *
+ * **版本号连续、写到才分配。** 不预留空号：`appliedVersion` 的语义是
+ * 「最后一条已应用迁移的 version」，它已经流到 IPC 契约与状态面板；
+ * 留空洞会让「版本号 = schema 代数」这个用户可见的语义失真，
+ * 而分批发布的收益（跑起来再定稿）与编号是否连续无关。
+ */
+export const VAULT_MIGRATIONS: readonly Migration[] = [
+  { version: 1, name: "vault-init", sql: VAULT_0001_INIT },
+  {
+    version: 2,
+    name: "raw-normalized",
+    sql: VAULT_0002_RAW_NORMALIZED,
+    legacyChecksums: VAULT_0002_LEGACY_CHECKSUMS,
+  },
+  { version: 3, name: "outbox", sql: VAULT_0003_OUTBOX },
+  { version: 4, name: "index", sql: VAULT_0004_INDEX },
+  { version: 5, name: "search", sql: VAULT_0005_SEARCH },
+  { version: 6, name: "distill", sql: VAULT_0006_DISTILL },
+  { version: 7, name: "persona", sql: VAULT_0007_PERSONA },
+  { version: 8, name: "media-minutes", sql: VAULT_0008_MEDIA_MINUTES },
+  {
+    version: 9,
+    name: "onboarding",
+    sql: VAULT_0009_ONBOARDING,
+    legacyChecksums: VAULT_0009_LEGACY_CHECKSUMS,
+  },
+  { version: 10, name: "avatars", sql: VAULT_0010_AVATARS },
+  { version: 11, name: "avatar-miss-reset", sql: VAULT_0011_AVATAR_MISS_RESET },
+  { version: 12, name: "persona-review", sql: VAULT_0012_PERSONA_REVIEW },
+  {
+    version: 13,
+    name: "persona-conversation-exclusions",
+    sql: VAULT_0013_PERSONA_CONVERSATION_EXCLUSIONS,
+  },
+  {
+    version: 14,
+    name: "persona-self-conversation",
+    sql: VAULT_0014_PERSONA_SELF_CONVERSATION,
+  },
+  {
+    version: 15,
+    name: "persona-public-service-bots",
+    sql: VAULT_0015_PERSONA_PUBLIC_SERVICE_BOTS,
+  },
+  {
+    version: 16,
+    name: "persona-reply-expiry",
+    sql: VAULT_0016_PERSONA_REPLY_EXPIRY,
+  },
+  {
+    version: 17,
+    name: "send-task-id",
+    sql: VAULT_0017_SEND_TASK_ID,
+  },
+  {
+    version: 18,
+    name: "draft-cap",
+    sql: VAULT_0018_DRAFT_CAP,
+  },
+  {
+    version: 19,
+    name: "draft-keep-and-trace",
+    sql: VAULT_0019_DRAFT_KEEP_AND_TRACE,
+  },
+  {
+    version: 20,
+    name: "documents",
+    sql: VAULT_0020_DOCUMENTS,
+  },
+  {
+    version: 21,
+    name: "media-url-kind",
+    sql: VAULT_0021_MEDIA_URL_KIND,
+  },
+  {
+    version: 22,
+    name: "unwrap-rich-content",
+    sql: VAULT_0022_UNWRAP_RICH_CONTENT,
+  },
+  {
+    version: 23,
+    name: "conversation-unreadable",
+    sql: VAULT_0023_CONVERSATION_UNREADABLE,
+  },
+]
+
+/** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */
+export const MIGRATIONS = CONTROL_MIGRATIONS

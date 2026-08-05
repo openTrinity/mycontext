@@ -1,0 +1,42 @@
+{
+  "greeting": {
+    "morning": "早上好",
+    "afternoon": "下午好",
+    "evening": "晚上好",
+    "lateNight": "夜深了"
+  },
+  "welcome": {
+    "separator": "，",
+    "description": "问点什么，我从你的聊天记录里找答案。"
+  },
+  "composer": {
+    "placeholder": "搜索消息、文档，或直接提问…",
+    "attach": "添加文件",
+    "send": "发送",
+    "stop": "停止"
+  },
+  "sessions": {
+    "title": "搜索历史",
+    "empty": "还没有搜索记录",
+    "groups": {
+      "pinned": "已置顶",
+      "today": "今天",
+      "yesterday": "昨天",
+      "week": "7 天内",
+      "earlier": "更早"
+    },
+    "actions": {
+      "rename": "重命名",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "delete": "删除",
+      "more": "更多操作"
+    },
+    "untitled": "未命名会话"
+  },
+  "degraded": {
+    "noAgent": "当前直接展示本地检索结果，未由 Agent 编排生成答案",
+    "noGraph": "图谱服务未运行，结果基于本地索引",
+    "noVector": "向量索引不可用，仅使用全文检索"
+  }
+}

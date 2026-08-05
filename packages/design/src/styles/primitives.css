@@ -1,0 +1,170 @@
+/**
+ * Primitive tokens — 最底层色板，不带任何语义。
+ *
+ * 分三组：
+ *   --brand-brand-*     品牌色阶（可由主题色切换覆盖，见下）
+ *   --theme-neutral-*   中性色（亮色主题下基于 #141414 的透明阶梯）
+ *   --theme-white/black 纯白/纯黑透明阶梯
+ *
+ * 语义层（semantic.css）只引用这里的变量，组件只引用语义层。
+ * 换品牌色 = 只改本文件的 --brand-brand-*，组件与语义层零改动 ——
+ * 下面的 `[data-accent]` 就是靠这条性质实现的：整套主题色切换只是
+ * **重新定义 12 个变量**，没有任何组件需要知道当前是什么颜色。
+ */
+
+:root {
+  /* 品牌色：MyContext 墨蓝（默认） */
+  --brand-brand-0: rgba(64, 118, 240, 0);
+  --brand-brand-5: rgba(64, 118, 240, 0.1);
+  --brand-brand-10: rgba(64, 118, 240, 0.18);
+  --brand-brand-20: rgba(64, 118, 240, 0.42);
+  --brand-brand-30: rgba(64, 118, 240, 0.62);
+  --brand-brand-40: #5b8bf5;
+  --brand-brand-50: #4076f0;
+  --brand-brand-60: #3563d6;
+  --brand-brand-70: #2b51b4;
+  --brand-brand-80: #234293;
+  --brand-brand-90: #1a3070;
+  --brand-brand-100: #0d1a3f;
+
+  /* 纯白透明阶梯 */
+  --theme-white-white-0: rgba(255, 255, 255, 0);
+  --theme-white-white-5: rgba(255, 255, 255, 0.06);
+  --theme-white-white-10: rgba(255, 255, 255, 0.09);
+  --theme-white-white-20: rgba(255, 255, 255, 0.12);
+  --theme-white-white-30: rgba(255, 255, 255, 0.16);
+  --theme-white-white-40: rgba(255, 255, 255, 0.2);
+  --theme-white-white-50: rgba(255, 255, 255, 0.36);
+  --theme-white-white-60: rgba(255, 255, 255, 0.48);
+  --theme-white-white-70: rgba(255, 255, 255, 0.65);
+  --theme-white-white-80: rgba(255, 255, 255, 0.8);
+  --theme-white-white-90: rgba(255, 255, 255, 0.92);
+  --theme-white-white-100: #ffffff;
+
+  /* 纯黑透明阶梯 */
+  --theme-black-black-0: rgba(0, 0, 0, 0);
+  --theme-black-black-5: rgba(0, 0, 0, 0.04);
+  --theme-black-black-10: rgba(0, 0, 0, 0.07);
+  --theme-black-black-20: rgba(0, 0, 0, 0.1);
+  --theme-black-black-30: rgba(0, 0, 0, 0.15);
+  --theme-black-black-40: rgba(0, 0, 0, 0.2);
+  --theme-black-black-50: rgba(0, 0, 0, 0.35);
+  --theme-black-black-60: rgba(0, 0, 0, 0.5);
+  --theme-black-black-70: rgba(0, 0, 0, 0.65);
+  --theme-black-black-80: rgba(0, 0, 0, 0.7);
+  --theme-black-black-90: rgba(0, 0, 0, 0.85);
+  --theme-black-black-100: #000000;
+
+  /* 状态色（亮/暗共用色相，语义层按主题选深浅） */
+  --palette-blue-50: #0d86ff;
+  --palette-blue-60: #0b72d9;
+  --palette-blue-10: rgba(13, 134, 255, 0.1);
+  --palette-green-50: #1f9d57;
+  --palette-green-60: #17803f;
+  --palette-green-10: rgba(31, 157, 87, 0.12);
+  --palette-amber-50: #a87e05;
+  --palette-amber-60: #8d6a04;
+  --palette-amber-10: rgba(247, 189, 12, 0.14);
+  --palette-red-50: #d9150b;
+  --palette-red-60: #b5110a;
+  --palette-red-10: rgba(217, 21, 11, 0.1);
+}
+
+/* 亮色主题的中性色基于近黑 #141414 */
+:root,
+:root[data-theme="light"] {
+  --theme-neutral-neutral-0: rgba(20, 20, 20, 0);
+  --theme-neutral-neutral-5: rgba(20, 20, 20, 0.04);
+  --theme-neutral-neutral-10: rgba(20, 20, 20, 0.07);
+  --theme-neutral-neutral-20: rgba(20, 20, 20, 0.1);
+  --theme-neutral-neutral-30: rgba(20, 20, 20, 0.15);
+  --theme-neutral-neutral-40: rgba(20, 20, 20, 0.2);
+  --theme-neutral-neutral-50: rgba(20, 20, 20, 0.35);
+  --theme-neutral-neutral-60: rgba(20, 20, 20, 0.5);
+  --theme-neutral-neutral-70: rgba(20, 20, 20, 0.65);
+  --theme-neutral-neutral-80: rgba(20, 20, 20, 0.7);
+  --theme-neutral-neutral-90: rgba(20, 20, 20, 0.85);
+  --theme-neutral-neutral-100: #141414;
+}
+
+/* 暗色主题的中性色翻转为基于纯白 */
+:root[data-theme="dark"] {
+  --theme-neutral-neutral-0: rgba(255, 255, 255, 0);
+  --theme-neutral-neutral-5: rgba(255, 255, 255, 0.06);
+  --theme-neutral-neutral-10: rgba(255, 255, 255, 0.09);
+  --theme-neutral-neutral-20: rgba(255, 255, 255, 0.12);
+  --theme-neutral-neutral-30: rgba(255, 255, 255, 0.17);
+  --theme-neutral-neutral-40: rgba(255, 255, 255, 0.22);
+  --theme-neutral-neutral-50: rgba(255, 255, 255, 0.36);
+  --theme-neutral-neutral-60: rgba(255, 255, 255, 0.48);
+  --theme-neutral-neutral-70: rgba(255, 255, 255, 0.65);
+  --theme-neutral-neutral-80: rgba(255, 255, 255, 0.75);
+  --theme-neutral-neutral-90: rgba(255, 255, 255, 0.9);
+  --theme-neutral-neutral-100: #f7f7f7;
+}
+
+/**
+ * 主题色（accent）。
+ *
+ * ## 为什么只重定义 --brand-brand-*
+ *
+ * 语义层里所有"强调色"最终都指到这 12 个变量
+ * （`--text-accent-normal` / `--color-primary` / `--border-focus` /
+ *  `--bg-card-accent` / `--bg-brand-panel` …），所以换主题色**不需要**
+ * 组件或语义层改一行 —— 这正是 primitives 分层的收益。
+ *
+ * ## 每套 12 阶怎么来的
+ *
+ * · `-0 ~ -30`：同色的**透明**阶梯（用于选中底色/卡片底色，
+ *   必须是透明才能在亮/暗两种背景上都不脏）；
+ * · `-40 ~ -100`：实色由浅到深。
+ *
+ * ★ 三套都实测了 `-60`（亮色主题的正文强调色）在白底 `#fcfcfc` 上的对比度，
+ * 全部达到 WCAG AA 正文标准（≥4.5:1）：
+ *
+ * | 主题色 | -60 | 对比度 |
+ * | --- | --- | --- |
+ * | 墨蓝（默认） | #3563d6 | 5.24:1 |
+ * | 琥珀 | #9c6708 | 4.70:1 |
+ * | 紫 | #6847d6 | 5.91:1 |
+ * | 蓝 | #0b6fd4 | 4.83:1 |
+ *
+ * 黄色是这里最难的一个：亮黄 `#ffd400` 实测只有 **1.40:1**，完全不可读。
+ * 所以黄色这套的中段压成**琥珀/棕金**，亮黄只留在 `-40`
+ * （暗色主题用，在 `#1f1f1f` 上实测 8.84:1）。
+ * 「主题色是黄色」不该以"看不见文字"为代价 —— 那不是风格选择，是缺陷。
+ */
+
+/* 黄色（琥珀）：中段压深以保证白底可读，见上文 */
+:root[data-accent="amber"] {
+  --brand-brand-0: rgba(217, 145, 6, 0);
+  --brand-brand-5: rgba(217, 145, 6, 0.1);
+  --brand-brand-10: rgba(217, 145, 6, 0.18);
+  --brand-brand-20: rgba(217, 145, 6, 0.42);
+  --brand-brand-30: rgba(217, 145, 6, 0.62);
+  --brand-brand-40: #f0b429;
+  --brand-brand-50: #c98a0b;
+  --brand-brand-60: #9c6708;
+  --brand-brand-70: #825507;
+  --brand-brand-80: #6b4606;
+  --brand-brand-90: #4e3305;
+  --brand-brand-100: #2e1f06;
+}
+
+/* 紫色 */
+:root[data-accent="violet"] {
+  --brand-brand-0: rgba(124, 92, 240, 0);
+  --brand-brand-5: rgba(124, 92, 240, 0.1);
+  --brand-brand-10: rgba(124, 92, 240, 0.18);
+  --brand-brand-20: rgba(124, 92, 240, 0.42);
+  --brand-brand-30: rgba(124, 92, 240, 0.62);
+  --brand-brand-40: #9575f5;
+  --brand-brand-50: #7c5cf0;
+  --brand-brand-60: #6847d6;
+  --brand-brand-70: #5539b4;
+  --brand-brand-80: #452f93;
+  --brand-brand-90: #322170;
+  --brand-brand-100: #1c1240;
+}
+
+

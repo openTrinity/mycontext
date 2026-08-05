@@ -1,0 +1,56 @@
+name: verify
+
+# 为什么需要 CI：门禁全靠开发者手跑 `pnpm verify` 时，
+# 「我本机是绿的」与「仓库是绿的」会逐渐分叉 —— 尤其是包数 7→14、
+# 测试文件 13→~50 的规模下，没有机制能保证新包带测试、新包注册进 3 份清单。
+#
+# 刻意只跑 hermetic 的那部分：test:externals 需要 opencode / dws / kl，
+# 在 CI 上必然不可用，把它放进来只会得到一条长期红的流水线（然后所有人忽略它）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    # macOS runner：本仓库内置的是 darwin-arm64 二进制，
+    # 且 better-sqlite3 的原生编译路径与开发机一致才有意义。
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read Node version
+        id: node
+        run: echo "version=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # 二进制内置的验收之一：新克隆零配置就能准备好。
+      - run: pnpm prepare:bin
+
+      - run: pnpm verify
+
+      # 覆盖率只对确定性包设下限（见 vitest.config.ts 的注释）。
+      - run: pnpm coverage
+
+      # ★ 必须真的构建一次，否则 check:desktop-bundle 只会走"产物不存在→跳过"分支。
+      #
+      # 这一步对应一个真实故障：主进程新增的 4 个工作区包没进 electron-vite 的
+      # 内联清单，产物里留下裸 import，运行时解析到无 dist 的 src/index.ts
+      # → `pnpm dev` 启动即崩，而当时 `pnpm verify` 全绿（没有测试加载产物）。
+      #
+      # 放在 coverage 之后：build 会把 better-sqlite3 重建成 Electron ABI，
+      # 而 vitest 需要 Node ABI —— 顺序颠倒会让 coverage 一步崩在原生模块上。
+      - run: pnpm build
+
+      - run: pnpm check:desktop-bundle

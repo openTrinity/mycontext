@@ -1,0 +1,84 @@
+{
+  "dingtalk": {
+    "label": "DingTalk",
+    "description": "Reads your conversations, documents and meeting notes as you, and drafts replies.",
+    "steps": {
+      "openBrowser": "Click “Authorize” — the app opens your browser at the DingTalk sign-in page",
+      "scanQr": "Scan the code in the DingTalk mobile app and confirm access (contacts, conversations, messages)",
+      "backToApp": "Once the browser confirms success, come back — the status refreshes on its own"
+    }
+  },
+  "feishu": {
+    "label": "Lark",
+    "description": "Connects to Lark conversations as a custom app (planned).",
+    "steps": {
+      "createApp": "Create a custom app on the Lark developer console and get its App ID and App Secret",
+      "subscribe": "Enter the credentials here and subscribe to message events"
+    }
+  },
+  "state": {
+    "authorized": "Connected",
+    "expired": "Expired",
+    "unauthorized": "Not connected",
+    "unavailable": "Coming soon"
+  },
+  "actions": {
+    "start": "Authorize",
+    "reauthorize": "Re-authorize",
+    "useCode": "Use a code",
+    "useCodeHint": "If the browser cannot open, finish on another device with a code"
+  },
+  "scope": {
+    "readTitle": "Reads your work data",
+    "readDescription": "Reads conversations, contacts, documents and meeting notes as you, for distillation and search.",
+    "noSpeakTitle": "Never speaks for you",
+    "noSpeakDescription": "Generated replies go to drafts — nothing is sent until you confirm it.",
+    "credentialsTitle": "Credentials never reach us",
+    "credentialsDescription": "The official DingTalk CLI handles authorization; credentials live in your system keychain and are never uploaded."
+  },
+  "dwsSource": {
+    "title": "Use your own dws",
+    "badgeBundled": "Bundled",
+    "badgeCustom": "Custom",
+    "badgeMissing": "Path unavailable",
+    "description": "The app ships with a DingTalk CLI (dws). If you have another build installed, point to its absolute path here; leave empty to use the bundled one.",
+    "placeholder": "/path/to/dws",
+    "save": "Save",
+    "saving": "Verifying…",
+    "clear": "Switch back to the bundled one",
+    "missing": "That file can no longer be found; the bundled one is in use. Enter a new path or clear this field.",
+    "effective": "In use: {{version}}",
+    "channelDescription": "If your organization restricts CLI access to specific channels, enter the channel code from your distributor. Usually not needed.",
+    "channelPlaceholder": "Channel code (optional)",
+    "channelInactive": "Saved, but the bundled dws is in use, so it is not active right now.",
+    "channelFromEnv": "The current channel code comes from an environment variable or .env.",
+    "badgeFromEnv": "From .env",
+    "fromEnv": "Currently set by an environment variable: {{path}} (entering a path above overrides it)"
+  },
+  "account": {
+    "user": "Account",
+    "userValue": "{{name}} ({{id}})",
+    "accessExpiresAt": "Token refreshes until",
+    "refreshExpiresAt": "Re-authorization due",
+    "adoptableHint": "This DingTalk session already exists on this computer ({{corp}} · {{name}}) — sessions are shared across logins on the same machine. The current account isn't using it yet.",
+    "adoptAction": "Use this identity"
+  },
+  "onboarding": {
+    "connectTitle": "Connect {{channel}}",
+    "connectedTitle": "{{channel}} connected",
+    "machineSessionHint": "This computer already has a DingTalk session (sessions are shared across logins on the same machine). Authorize once for the current account so we know who you are — otherwise learning would use the wrong identity.",
+    "accountTitle": "Connected account",
+    "scopeTitle": "What you're authorizing"
+  },
+  "settings": {
+    "expiredHint": "Authorization expired — you'll need to scan again",
+    "expiryWarning": "This authorization expires in {{days}} days. Re-authorizing now is a good idea.",
+    "identityMismatch": "Identity mismatch: the channel is currently acting as \"{{channelCorp}}\", but this account is bound to \"{{boundCorp}}\". Conversation lists and collection follow the former, so you may see content outside your intended scope — re-authorize to \"{{boundCorp}}\", or create a separate account for \"{{channelCorp}}\".",
+    "sharedCredentialNote": "The official DingTalk CLI stores credentials in your system keychain, shared with the CLI in your terminal. To clear them completely, run <1>{{command}}</1> in a terminal."
+  },
+  "progress": {
+    "browserOpened": "Browser opened — scan the code to confirm",
+    "enterCode": "Enter the code in your browser to finish",
+    "manualUrl": "Browser didn't open? Visit this URL: {{url}}"
+  }
+}

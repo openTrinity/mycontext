@@ -1,0 +1,17 @@
+portalocker-3.2.0.dist-info/INSTALLER,sha256=5hhM4Q4mYTT9z6QB6PGpUAW81PGNFrYrdXMj4oM_6ak,2
+portalocker-3.2.0.dist-info/METADATA,sha256=GmzJQ0z9Sjc2MJSciAerbDD0eDrSAkFR7qdV8HZuzAM,8730
+portalocker-3.2.0.dist-info/RECORD,,
+portalocker-3.2.0.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+portalocker-3.2.0.dist-info/WHEEL,sha256=_zCd3N1l69ArxyTb8rzEoP9TpbYXkqRFSNOD5OuxnTs,91
+portalocker-3.2.0.dist-info/licenses/LICENSE,sha256=pQVw-jsxAqQte6uwVpI4sLPArtzgBjyOTWUGDf0_cpM,1460
+portalocker-3.2.0.dist-info/top_level.txt,sha256=qfIEwW2X8cgtD0cFJIIWaR-cnKNo4ESR7Raiwxf-UNA,12
+portalocker/__about__.py,sha256=VpTONUAoehWbnw_BAq7DEjtfHi6A8Co8xZJ0FITH0HU,230
+portalocker/__init__.py,sha256=RVTSfvu0rKlx5k6rW5sBLQVA7J4Tr0GKbsvzH7EJ30o,2072
+portalocker/__main__.py,sha256=i0BfWd8wkXotF8IKXq_D8yVs3ronys7pSm1ze9QXzJw,4665
+portalocker/constants.py,sha256=4YaYFZZxBXa1wXMzm_xafTwsHfGQqGaNo1vHvlCueGM,1265
+portalocker/exceptions.py,sha256=wQMp4k_FT0uVkeh1BlJrx1kJJ0GYaea_PT40Hoyk0r4,738
+portalocker/portalocker.py,sha256=35jItNPEEn-OCoZmAIy_x4xpkosLBgrtduWhC-H6NZ0,17646
+portalocker/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+portalocker/redis.py,sha256=8isYHHXrQYHAhYsF14NVRg51oCTeSJkUS41izoP1iYE,9377
+portalocker/types.py,sha256=5vLQgGX7WD8rMzpfcE3FsC2cDv2yLMLS_ztx9JY9cas,2025
+portalocker/utils.py,sha256=yGHXkRD6pbAQAAY1mtt18c5OKHUPFvoLhsaWCzyDHkc,18268

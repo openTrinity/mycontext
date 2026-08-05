@@ -1,0 +1,112 @@
+{
+  "id": "zh-CN",
+  "version": "1",
+  "displayName": "Chinese (simplified), mainland work chat",
+  "_comment": "A LOCALE PACK: every language-specific pattern the forge uses lives in a file like this one, never in forge/*.py. The engine measures; the pack tells it what the words mean. Changing anything here changes the pack version and therefore every derived number — treat as versioned data, not tuning knobs.",
+  "_authoring": "To support another language, copy this file, keep every key, and write the patterns from that language's OWN idioms. Do not translate these regexes word-for-word: a pack that matches only literal translations produces confident numbers from patterns that miss most real messages, which is worse than shipping no pack at all (see NULL_PACK in forge/locale.py).",
+  "scripts": [
+    "Han"
+  ],
+  "_scriptsComment": "Which writing systems this pack expects, from forge/locale.py SCRIPT_RANGES. Used by detect() to match a pack to a corpus, and reported in fidelity.md as the coverage this build actually had.",
+  "wordBoundaries": false,
+  "_wordBoundariesComment": "false = no spaces between words, so vocabulary mining and FTS query building slide n-grams over character runs. true = split on whitespace and count words/bigrams instead. This single flag is what lets one vocabulary() implementation serve both kinds of language.",
+  "style": {
+    "_comment": "Expression markers, counted per 1k characters of the owner's own text. These become the 'markers per 1k' line in style.md.",
+    "question": "[?？]|吗|呢|吧$|么$",
+    "certaintyHigh": "(一定|肯定|必须|显然|毫无疑问|绝对|就是|确实)",
+    "certaintyLow": "(也许|可能|大概|应该|感觉|或许|似乎|不太确定|我觉得|好像)",
+    "transition": "(但是|不过|然而|其实|另外|而且|所以|因此|反正)",
+    "conclusionFirst": "(结论|简单说|一句话|总之|直接说|先说结论)",
+    "analogy": "(就像|好比|相当于|类似|打个比方|如同)",
+    "laughter": "(哈哈+|hh+|lol|笑死|233+|[😂🤣])",
+    "casual": "(好哒|okk?|收到啦|行呀|可以呀|嗯呐|诶|欸|~|～|嘛|哈|呀|啦|哦|噢)",
+    "warmth": "(谢谢|感谢|辛苦了?|麻烦你?|保重|注意休息|早点休息|加油|棒|厉害|nice)",
+    "rough": "(卧槽|靠|md|tmd|草|艹|傻|智障|离谱|无语|服了)",
+    "hedge": "(我理解|我先|要不|可能得|不确定|回头|待会|稍等|等我)",
+    "directive": "(你去|你先|帮我|麻烦你|记得|务必|尽快|今天之内|明确一下|对齐一下)",
+    "enumerate": "([1-9１-９][、.)）]\\s*\\S+.*){2,}"
+  },
+  "scene": {
+    "_comment": "Coarse situation tagging. Order is fixed by the engine (escalation, external, formalReport, product), most consequential first.",
+    "product": "(需求|方案|设计|评审|prd|指标|数据|用户|功能|迭代|优先级|联调|接口|协议)",
+    "formalReport": "(汇报|周报|日报|总结|复盘|结论|进展|风险|计划|排期)",
+    "escalation": "(阻塞|blocker|卡住|上线失败|故障|p0|p1|紧急|回滚|事故|客诉)",
+    "external": "(客户|甲方|合作方|对外|供应商|贵方|你们公司)"
+  },
+  "askKinds": {
+    "_comment": "What the counterparty wants. Order matters: the first match wins, so specific kinds precede generic ones. Keys are FIXED — the engine and compose.py's ASK_KIND_LABEL map onto them — but every pattern is language-specific.",
+    "decision_request": "(你觉得|你看|要不要|能不能|行不行|可以吗|你定|你决定|同意吗|批一下|审一下|怎么选|哪个好)",
+    "approval_or_commit": "(答应|承诺|保证|确认一下时间|定个时间|排一下|什么时候能好|截止|deadline|签|报价|预算|多少钱|费用)",
+    "help_request": "(帮我|麻烦你?|帮忙|看下|看一下|支持一下|处理一下|review|合一下|发一下|给我|拉个会)",
+    "status_chase": "(进展|什么时候|多久|好了吗|做完了吗|完成了吗|还没|到哪了|催|ready)",
+    "technical_question": "(怎么|如何|为什么|为啥|是不是|报错|失败|不生效|什么原因|哪里|哪个|bug|error|挂了|不对)",
+    "disagreement": "(不对|不行|有问题|不合理|不同意|不应该|为什么要|反对|存疑)",
+    "ack_or_fyi": "(收到|好的|知道了|明白|同步一下|通知|fyi|辛苦|谢谢)"
+  },
+  "riskTags": {
+    "_comment": "Content classes the persona must never settle on its own. Matched on the incoming text AND on any candidate reply; either hit forces manual handling. Keys are FIXED (compose.RISK_LABEL maps onto them).",
+    "commitment": "(承诺|保证|一定|答应|我们会|肯定能|必须完成)",
+    "approval": "(审批|批准|通过|同意|签字|授权|批一下|准了)",
+    "money": "(预算|报价|价格|多少钱|费用|付款|发票|成本预算|合同金额|credits?)",
+    "scheduling": "(排期|deadline|截止|定时间|约个|会议时间|下周几|几点开|请假|调休)",
+    "personnel": "(绩效|晋升|转正|离职|裁|hr|人事|招聘|面试结果|薪|奖金|考核)",
+    "external_position": "(对外|客户那边|官方口径|法务|合同|协议条款|公关|媒体)",
+    "org_decision": "(组织|架构调整|谁负责|owner是谁|汇报线|team调整|定岗)",
+    "destructive": "(删库|删除|清空|下线|回滚|禁用|revoke|权限|重置)"
+  },
+  "openerShapes": {
+    "_comment": "How a reply starts. Measured, not prescriptive — in most corpora the majority of replies match none of these, and that itself is the finding worth publishing ('there is no template opener').",
+    "hedged_judgment": "^(感觉|我觉得|我理解|应该|可能|大概|好像|似乎|不太确定)",
+    "direct_answer": "^(是的|是|对|不是|没有|没|可以|不行|好的|好|收到|嗯|行)",
+    "counter_question": "^(那|你|是不是|有没有|要不要|怎么|为什么|什么|哪)",
+    "action_statement": "^(我先|我来|我去|我改|我看|我跑|我提|我合|我加|等我|稍等|我这边)",
+    "deferral": "^(回头|待会|等下|明天|之后|先不|再说|晚点)",
+    "causal_explain": "^(因为|由于|主要是|其实是|是因为)",
+    "handoff": "^(可能得问|要问|得找|问一下|让.{1,6}看|.{1,6}(应该|可能)知道|@)",
+    "self_state": "^(我(现在|刚|已经|还|之前|昨天|今天))"
+  },
+  "replyShapes": {
+    "_comment": "How a reply DISPOSES of an ask — the decision layer's core vocabulary. The engine labels each reply with the most consequential match in a fixed order (decline, settle, handoff, defer, clarify, else plain answer), because a reply that both defers and settles is a settle and settling is what needs a gate. `clarify` is deliberately LAST: a reply that narrows the question down while also agreeing to something is an agreement first.",
+    "handoff": "(得问|要问|问一下|问问|找一下|得找|你问|让.{1,8}(看|说|定|确认)|@\\S+|我不(太)?清楚|不太确定|我确认一下|我问下|我去问)",
+    "defer": "(回头|待会|等下|等我|稍等|晚点|明天|之后|先不|再说|下周|忙完|有空)",
+    "settle": "(可以|行|好的?|同意|批了?|通过|没问题|就这样|定了|安排|我来|我改|确认|准了|走吧|上吧)",
+    "decline": "(不行|不可以|不太行|不合适|做不了|没法|不方便|先不|暂时不|不建议|我的顾虑|我担心|问题是)",
+    "clarify": "(哪个|哪些|哪一|哪种|是说|是指|你说的是|指的是|说的哪|具体哪|是不是指)",
+    "_clarifyComment": "Asking the counterpart to NARROW DOWN before answering — not a refusal and not a handoff, but a request to identify which thing is meant. Mined so the persona can ask in the owner's own words when the corpus mentions a subject but does not settle the question. Kept tight on purpose: a chatty particle question (\"\\u5403\\u5565\\u5462\") is idle talk, not a clarification, and matching it would flood the layer with lines that clarify nothing.",
+    "deferSubject": "(我|咱|再|先|等|一下|下午|晚点|回头|待会|忙完|有空|看)",
+    "_deferSubjectComment": "A deferral is only a reusable escape hatch if the owner is postponing something THEY will do. A bare time word can just as easily be reporting a fact about someone else, which is not an escape hatch — so a quotable deferral must also refer to the speaker or to the pending work."
+  },
+  "responseGate": {
+    "_comment": "genuineAsk: an incoming line only counts as a real ask if it matches. chitchatReply: a reply only counts as substantive if it does NOT match. Without this gate the large majority of turns in a work-chat corpus are banter and every statistic is noise.",
+    "genuineAsk": "([?？]|吗[?？]?$|呢[?？]?$|(怎么|如何|为什么|为啥|是不是|能不能|可以吗|行不行|有没有|多久|多少|几点|什么时候|你觉得|要不要|哪个|谁来|谁负责)|(帮我|麻烦你?|看下|看一下|review\\s*一?下|确认一下)|(好了吗|做完了吗|进展如何|到哪了))",
+    "chitchatReply": "^(哈哈+|嘿嘿|嘻嘻|[。…\\.]+|[👍👌🙏😂🤣]+|好的?|收到|嗯+|ok|OK|辛苦啦?|早|晚安.*|午安|啊这|好吧)[\\s！!。…]*$"
+  },
+  "bots": {
+    "_comment": "Service accounts and notification robots. They emit question-shaped text the owner never answers, which would drag every reply-rate down and can even land a robot on the auto-send candidate list. Matched on the SENDER NAME, never on the message text.",
+    "_whySenderOnly": "Filtering by message wording was tried and removed. Measured on a real corpus, the overwhelming majority of pushes it caught were group messages already excluded by the '@-mention only' rule, and the rest came from service accounts — so the sender check alone covers them. Meanwhile text rules kept misfiring on real colleagues writing urgent-sounding messages, and a false positive silently drops someone's actual message from the queue. Identity is knowable; intent from wording is not.",
+    "_scopeNote": "GENERIC ONLY. Anything specific to one company's internal tools (an intranet bot's brand name, a particular CI system) belongs in the operator's own data root — see forge/locale.py localExtraFile. Baking one tenant's vocabulary into a distributed pack is how it stops working for the next person.",
+    "namePattern": "(助手|机器人|通知|提醒|服务号|公告|订阅号|(系统|平台|中心|服务)$|运维|监控|告警|工单|考勤|打卡|流水线|robot|^bot$|bot$|assistant|alert|pipeline|jenkins|noreply|no-reply|daemon|webhook)"
+  },
+  "sensitiveTitlePattern": "(hr|人力|人事|财务|法务|审计|合规|总监|总经理|vp|ceo|cto|coo|老板|董事)",
+  "_sensitiveComment": "A role whose title matches this is forced to the most conservative tone band regardless of how friendly the measured traffic looks. Volume cannot buy informality with the person who signs off on your compensation.",
+  "stopwords": "的 了 是 我 你 他 她 它 们 这 那 个 不 在 有 和 就 都 很 也 要 会 说 吗 呢 吧 啊 哦 嗯 把 被 给 对 从 与 及 或 但 而 如果 因为 所以 一个 可以 还 没有 什么 怎么 上 下 前 后 里 外 只 能 过 着 来 去 到 这个 那个 这些 那些 这里 那里 这边 那边 我们 你们 他们 她们 咱们 大家 自己 别人 我的 你的 他的 我也 你也 那我 那你 这样 那样 怎样 一样是的 不是 就是 还是 也是 都是 有点 有个 有没 不可 能不 会不 要不 得了 好了 行了 对了 知道 觉得 感觉 应该 可能 需要 应该是 然后 但是 不过 虽然 而且 另外 其实 反正 已经 现在 刚刚 马上 立刻 还有 只是 就好 一直 一般 特别 非常 比较 稍微 差不 多少今天 明天 昨天 前天 后天 上午 下午 晚上 早上 时候 一下 一点 一些 两个 几个 一次 之后 之前 最近 目前 现在的话 一下子 为什么 哪个 哪些 多少 一起 一定 这么 那么 就行 好的 收到 明白 了解 okok",
+  "_stopwordsComment": "Space-separated, and it MUST cover the same gram lengths that vocabulary mining produces. This is easy to get wrong in a script without word separators: `vocabulary()` slides 2/3/4-character windows, so a list of only single characters filters nothing it ever emits and the published phrase list fills up with grammatical glue (这个 / 就是 / 然后) instead of anything characteristic.",
+  "guidance": {
+    "_comment": "The only prose in this file. compose.py renders these into the published skill instead of hardcoding language-specific advice in Python. Every entry must be about THIS language's register.",
+    "neverWrite": [
+      "赋能 · 抓手 · 打通 · 闭环 · 对标 · 沉淀 · 颗粒度 · 拉通 · 强背书",
+      "「首先/其次/最后」as a three-part scaffold in a chat message",
+      "exclamation-heavy enthusiasm (非常好！太棒了！) and emoji strings",
+      "explaining that you are an assistant, or apologizing for a delay in a chat"
+    ],
+    "_neverWriteComment": "Corporate register that reads instantly as not-a-person. The first entry is the language's own management jargon; the rest are register habits that survive translation.",
+    "manufacturedOpeners": "好的 / 我觉得 / 那",
+    "_manufacturedOpenersComment": "The filler openers an LLM reaches for in this language. Named in style.md so the agent is told explicitly not to prepend them.",
+    "hedgeMarkers": "感觉 / 好像 / 应该",
+    "assertMarkers": "肯定 / 必须",
+    "decisionMarkers": "你觉得 / 能不能 / 要不要 / 你定",
+    "_decisionMarkersComment": "Surface forms of 'you decide this' — quoted in the persona's never-auto-send rule so the agent can recognize the shape in the wild.",
+    "shortReferentExamples": "还可以 / 是的 / 好的",
+    "_shortReferentComment": "Short replies that carry no meaning without the line they answer. Quoted in the persona's step-0 rule so the agent recognizes the shape and reads the live conversation before drafting."
+  }
+}

@@ -1,0 +1,22 @@
+# Dedicated Codex configuration for LoCoMo agentic evaluation.
+#
+# The evaluator copies this file into a temporary, isolated CODEX_HOME. It does
+# not load ~/.codex/config.toml, personal MCP servers, hooks, plugins, or feature
+# flags. Authentication is supplied separately and is never stored here.
+
+model = "gpt-5.6-sol"
+model_provider = "inkflow"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+preferred_auth_method = "apikey"
+
+# These are defense-in-depth defaults. Each evaluation thread also explicitly
+# requests deny-all approvals and workspace-write sandboxing in the SDK call.
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[model_providers.inkflow]
+name = "InkFlow"
+base_url = "https://llmapi.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true

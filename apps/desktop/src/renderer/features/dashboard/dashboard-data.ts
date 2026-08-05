@@ -1,0 +1,441 @@
+/**
+ * 仪表盘的取数与格式化 —— **纯函数**，与 React 无关。
+ *
+ * ## 为什么把它们拆出来
+ *
+ * 仪表盘上每个数字都是"从若干个快照里算出来的一句话"。这些算法有真正的
+ * 判据（多少算落后？空系统与健康系统怎么区分？），而判据要能被门禁锁住。
+ * 混在组件里的话只能靠 CDP 探针去读渲染结果，那种断言又慢又脆。
+ */
+import type {
+  DistillProgressView,
+  FeedInfo,
+  IngestSnapshot,
+  KlGraphOverview,
+  KlServerStatus,
+  PersonaSnapshotView,
+} from "@mycontext/ipc-contract"
+import type { MetricTone } from "./primitives.js"
+
+/**
+ * 千分位。
+ *
+ * 手写而不是 `toLocaleString()`：后者的分隔符跟随系统区域设置，
+ * 于是同一个数字在不同机器上长得不一样，截图对不上、门禁也没法断言。
+ */
+export function formatCount(n: number): string {
+  if (!Number.isFinite(n)) return "—"
+  const sign = n < 0 ? "-" : ""
+  const digits = Math.abs(Math.trunc(n)).toString()
+  const parts: string[] = []
+  for (let i = digits.length; i > 0; i -= 3) parts.unshift(digits.slice(Math.max(0, i - 3), i))
+  return sign + parts.join(",")
+}
+
+/**
+ * 字节 → 人话。
+ *
+ * 用 1024 进制并标 KiB/MiB：磁盘占用给用户看的时候，"1.0 MB" 与 "1.0 MiB"
+ * 差 5%，而我们这里的数来自 SQLite 的页数 —— 它本来就是 1024 进制的。
+ * 标成 MB 等于把一个精确值说成一个近似值。
+ */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—"
+  if (bytes < 1024) return `${Math.trunc(bytes)} B`
+  const units = ["KiB", "MiB", "GiB", "TiB"]
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value).toString()} ${units[unit]}`
+}
+
+/** 毫秒 → "15 秒" / "2 分钟"。给探针间隔这种"多久一次"用。 */
+export function formatInterval(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "—"
+  if (ms < 60_000) return `${Math.round(ms / 1000)} 秒`
+  return `${Math.round(ms / 60_000)} 分钟`
+}
+
+/**
+ * Outbox 落后量的语气。
+ *
+ * ## ★ 判据（这是这个文件里唯一"有观点"的地方）
+ *
+ * · 0 → good：追平了；
+ * · < 500 → neutral：正常的在途量。一轮采集能进上百条，
+ *   落后几十几百只说明消费者还没跑到，不是问题；
+ * · < 5000 → warn：某个消费者慢了，但还在追；
+ * · 否则 → bad：多半是某个消费者卡住了（lease 没释放 / 反复失败）。
+ *
+ * 阈值给得宽是刻意的：一个天天亮黄灯的仪表盘等于没有仪表盘 ——
+ * 人会学会忽略它，然后真的出问题时也一起忽略了。
+ */
+export function lagTone(lag: number): MetricTone {
+  if (lag <= 0) return "good"
+  if (lag < 500) return "neutral"
+  if (lag < 5_000) return "warn"
+  return "bad"
+}
+
+export const LAG_WARN_THRESHOLD = 500
+export const LAG_BAD_THRESHOLD = 5_000
+
+/**
+ * 采集这一组。
+ *
+ * `running` 为 false 时**不是**把数字藏起来，而是照常给出并在语气上降级：
+ * 用户想知道的是"我有多少数据"，那与"现在有没有在采"是两个问题。
+ */
+export interface IngestCards {
+  messages: string
+  conversations: string
+  media: string
+  minutes: string
+  storage: string
+  lag: string
+  lagTone: MetricTone
+  probeHint: string
+  /** 采集没在跑 / 被拦住时的一句话。null = 正常。 */
+  problem: string | null
+}
+
+export function readIngest(snapshot: IngestSnapshot | null): IngestCards | null {
+  if (snapshot === null) return null
+  const problem =
+    snapshot.blockedReason === "session_expired"
+      ? "钉钉登录已过期，去设置里重新授权"
+      : snapshot.blockedReason === "permission_required"
+        ? "钉钉侧需要一次授权确认"
+        : snapshot.lastError !== null
+          ? snapshot.lastError
+          : !snapshot.running
+            ? "采集未运行"
+            : null
+  return {
+    messages: formatCount(snapshot.messages),
+    conversations: formatCount(snapshot.conversations),
+    media: formatCount(snapshot.mediaAssets),
+    minutes: formatCount(snapshot.minutes),
+    storage: formatBytes(snapshot.storage.mainBytes + snapshot.storage.walBytes),
+    lag: formatCount(snapshot.ftsLag),
+    lagTone: lagTone(snapshot.ftsLag),
+    probeHint: snapshot.probeThrottled
+      ? `${formatInterval(snapshot.probeIntervalMs)}（已退避）`
+      : formatInterval(snapshot.probeIntervalMs),
+    problem,
+  }
+}
+
+/**
+ * 蒸馏这一组。
+ *
+ * ★ `total === 0` 要与"跑完了 0 条"分开：前者是"还没开始"（应当引导用户去
+ * 选范围），后者是"跑了但什么都没产出"（那是真问题，历史上出现过 ——
+ * 身份未确认导致 9768 条语料全被守卫拒掉，而进度页显示"完成"）。
+ * 两者都显示 0% 的话，那个真问题会被当成"我还没开始"而永远查不出来。
+ */
+export interface DistillCards {
+  facets: string
+  done: string
+  ratio: number
+  failed: string
+  tokens: string
+  state: "idle" | "running" | "done" | "empty" | "failing"
+  stateText: string
+}
+
+export function readDistill(progress: DistillProgressView | null): DistillCards | null {
+  if (progress === null) return null
+  const finished = progress.done + progress.skipped
+  const ratio = progress.total === 0 ? 0 : finished / progress.total
+  const state: DistillCards["state"] =
+    progress.total === 0
+      ? "idle"
+      : progress.running > 0 || progress.pending > 0
+        ? "running"
+        : progress.failed > 0 && progress.done === 0
+          ? "failing"
+          : progress.facetCount === 0
+            ? "empty"
+            : "done"
+  const stateText =
+    state === "idle"
+      ? "还没选蒸馏范围"
+      : state === "running"
+        ? `进行中：${progress.done + progress.skipped}/${progress.total}`
+        : state === "failing"
+          ? `全部失败（${progress.failed} 个任务）`
+          : state === "empty"
+            ? "任务跑完但没有结论 —— 多半是本人身份未确认"
+            : "已完成"
+  return {
+    facets: formatCount(progress.facetCount),
+    done: `${formatCount(finished)} / ${formatCount(progress.total)}`,
+    ratio,
+    failed: formatCount(progress.failed),
+    tokens: formatCount(progress.costTokens),
+    state,
+    stateText,
+  }
+}
+
+/** 分身这一组。 */
+export interface PersonaCards {
+  autoReply: string
+  pendingInbox: string
+  pendingDrafts: string
+  residents: string
+  killSwitch: boolean
+  /** 有降级时的一句话（没配 LLM / agent 不可用 / 急停开着）。 */
+  degraded: string | null
+}
+
+export function readPersona(snapshot: PersonaSnapshotView | null): PersonaCards | null {
+  if (snapshot === null) return null
+  const degraded = snapshot.killSwitch
+    ? "急停开着 —— 所有发送都被拦住"
+    : !snapshot.agentAvailable
+      ? "分身运行时不可用，草稿是占位文本"
+      : !snapshot.running
+        ? "调度未运行"
+        : null
+  return {
+    autoReply: formatCount(snapshot.autoReplyCount),
+    pendingInbox: formatCount(snapshot.pendingInbox),
+    pendingDrafts: formatCount(snapshot.pendingDrafts),
+    residents: `${snapshot.residents.length} / ${snapshot.maxResident}`,
+    killSwitch: snapshot.killSwitch,
+    degraded,
+  }
+}
+
+/**
+ * 图谱这一组。
+ *
+ * kl 的状态是 stopped/starting/ready/failed 四态 + building。
+ * 这里把它压成一句人话 —— 用户不需要知道我们的状态机，
+ * 只需要知道"能不能用"和"要不要等"。
+ */
+export function describeKl(status: KlServerStatus | null): {
+  text: string
+  tone: MetricTone
+  progressRatio: number | null
+} {
+  if (status === null) return { text: "未集成", tone: "muted", progressRatio: null }
+  if (status.building) {
+    const p = status.buildProgress
+    const phase =
+      p === null
+        ? ""
+        : p.phase === "phase_a"
+          ? "切块与向量化"
+          : p.phase === "phase_b"
+            ? "抽取与建图"
+            : p.phase === "improve"
+              ? "社区与排序"
+              : p.phase
+    return {
+      text: phase === "" ? "建图中" : `建图中 · ${phase}`,
+      tone: "neutral",
+      progressRatio: p?.percent ?? null,
+    }
+  }
+  if (status.state === "ready") return { text: "就绪", tone: "good", progressRatio: null }
+  if (status.state === "starting") return { text: "启动中", tone: "neutral", progressRatio: null }
+  if (status.state === "failed")
+    return { text: status.reason ?? "启动失败", tone: "bad", progressRatio: null }
+  return { text: "未启动", tone: "muted", progressRatio: null }
+}
+
+/**
+ * 毫秒 → 倒计时文案（"约 3 小时" / "约 25 分钟" / "不到 1 分钟"）。
+ *
+ * ★ 一律带"约"：这个数是**下界**（触发要等下一轮图谱同步，默认 10 分钟一轮），
+ * 所以给一个精确到秒的倒计时是在承诺做不到的事。写"约"之后
+ * 「显示 0 分钟但还没开始」就不再是一个 bug 报告。
+ */
+export function formatEta(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—"
+  if (ms < 60_000) return "不到 1 分钟"
+  if (ms < 3_600_000) return `约 ${String(Math.round(ms / 60_000))} 分钟`
+  if (ms < 86_400_000) return `约 ${String(Math.round(ms / 3_600_000))} 小时`
+  return `约 ${String(Math.round(ms / 86_400_000))} 天`
+}
+
+/**
+ * 自动建图的调度状态 → 一句人能读的话。
+ *
+ * ## ★ 每个 reason 都要说不同的话（这是这个函数存在的理由）
+ *
+ * `AutoBuildSkipReason` 的注释里写过：一个把人引向错误方向的原因码
+ * 比没有原因码更糟。`build-in-progress` 曾经叫 `not-ready`，
+ * 于是日志里连刷几条看起来像"kl 起不来"（要去查 Python/端口），
+ * 而真实情况是它正忙着出结果。这里把那几种情况分开成不同的话。
+ *
+ * ## 为什么倒计时只在"由时间决定"时才显示
+ *
+ * `etaMs === null` 表示等下去也不会开始（关掉了 / 正在建 / 没有新数据）。
+ * 那时显示倒计时是在骗人 —— 契约里 null 与 0 分开正是为了这件事。
+ */
+export function describeBuildSchedule(
+  schedule: KlGraphOverview["buildSchedule"],
+): { text: string; tone: MetricTone } | null {
+  if (schedule === null) return null
+  const { reason, etaMs, pendingMessages, messagesToThreshold, lagThreshold } = schedule
+
+  if (!schedule.enabled) {
+    return { text: "自动构建已关闭 · 需手动触发", tone: "muted" }
+  }
+  if (reason === "build-in-progress") {
+    // ★ 措辞刻意不是"未就绪"：那会把人引去查环境，而实际是上一轮在跑。
+    return { text: "上一轮构建仍在进行", tone: "neutral" }
+  }
+  if (schedule.willBuild) {
+    return { text: `已达触发条件 · 下一轮同步开始构建`, tone: "neutral" }
+  }
+  if (reason === "backoff") {
+    return {
+      text: `构建失败后退避中 · ${etaMs === null ? "待重试" : `${formatEta(etaMs)}后重试`}`,
+      tone: "warn",
+    }
+  }
+  if (reason === "no-new-data") {
+    // 没有增量时时间条件也不会触发（max-age 要求同时有新数据）—— 不给倒计时。
+    return { text: "无增量数据 · 暂不构建", tone: "muted" }
+  }
+  // below-threshold：两个条件谁先到都会触发，所以两个都报。
+  const byCount = `增量 ${formatCount(pendingMessages)} / ${formatCount(lagThreshold)} 条`
+  const byTime = etaMs === null ? "" : ` · 或 ${formatEta(etaMs)}后按时间触发`
+  return {
+    text: `${byCount}（还差 ${formatCount(messagesToThreshold)} 条）${byTime}`,
+    tone: "muted",
+  }
+}
+
+/**
+ * Outbox 消费者里**最落后**的那个。
+ *
+ * ★ 取最大值而不是平均：平均会把"一个消费者彻底卡死"稀释成一个温和的数字
+ * （5 个消费者里 1 个落后 10000、其余 0 → 平均 2000，看起来只是有点忙）。
+ * 而卡死的那一个正是我们要看见的。
+ */
+export function worstConsumer(
+  info: FeedInfo | null,
+): { consumerId: string; lag: number; needsFullRebuild: boolean } | null {
+  if (info === null || info.consumers.length === 0) return null
+  let worst = info.consumers[0]
+  if (worst === undefined) return null
+  for (const c of info.consumers) if (c.lag > worst.lag) worst = c
+  return { consumerId: worst.consumerId, lag: worst.lag, needsFullRebuild: worst.needsFullRebuild }
+}
+
+/**
+ * 「知识加工」的一句话状态。
+ *
+ * ## ★ 为什么把两个板块压成一行
+ *
+ * 仪表盘原来有「知识管道」（Outbox 消费者的 acked_seq / lag / 死信）与
+ * 「画像蒸馏」（distill_tasks 的 facet × 窗口状态机）两整块。那些数字
+ * **要求用户理解我们的架构**才能读懂 —— 而他要的答案只有一个：
+ * 「现在能不能用、有没有出事」。
+ *
+ * 但**不能直接丢掉**：这两块各自承载了一个真实的失效信号
+ * （消费者卡死 → 检索结果不是最新的；蒸馏跑完但 0 条结论 → 画像是空的，
+ * 而那通常是本人身份没确认）。这两个信号有用，摆出来的方式没用。
+ *
+ * 所以压成一行：正常时返回 null（不占地方），出事时返回一句**人话**
+ * —— 说清后果与下一步，而不是 `acked_seq=10230`。
+ *
+ * 技术细节仍在「设置 → 状态」页（那里本来就是给排查用的）。
+ */
+export function readProcessing(input: {
+  feed: FeedInfo | null
+  distill: DistillProgressView | null
+}): { text: string; tone: "warn" | "bad" } | null {
+  const worst = worstConsumer(input.feed)
+  /**
+   * 落后阈值取 500。
+   *
+   * 依据：一轮采集最多带回几百条消息（实测单窗 2529 条要 51 页），
+   * 而消费者是每轮 tick 追的 —— 几十条的落后是**正常的在途量**，
+   * 报出来就是狼来了。500 以上才说明追不上。
+   */
+  if (worst !== null && worst.needsFullRebuild) {
+    return { text: `${worst.consumerId} 需要重建索引 —— 搜索结果可能不完整`, tone: "warn" }
+  }
+  if (worst !== null && worst.lag > 500) {
+    return {
+      text: `知识加工落后 ${formatCount(worst.lag)} 条 —— 最近的消息可能还搜不到`,
+      tone: "warn",
+    }
+  }
+
+  const dis = readDistill(input.distill)
+  /**
+   * 蒸馏只报两种：**全失败**与**跑完但没结论**。
+   *
+   * 「进行中」不报 —— 那是正常工作，而它可能持续几十分钟
+   * （一个横幅挂几十分钟会被当成背景，之后真出事时也不会被看见）。
+   */
+  if (dis !== null && dis.state === "failing") {
+    return { text: `画像蒸馏全部失败（${dis.failed} 个任务）—— 去设置里看模型配置`, tone: "bad" }
+  }
+  if (dis !== null && dis.state === "empty") {
+    return { text: "画像蒸馏跑完但没有结论 —— 多半是本人身份未确认", tone: "bad" }
+  }
+  return null
+}
+
+/**
+ * 身份条要显示什么 —— 纯判定，与 React 无关。
+ *
+ * ## ★ 为什么抽出来
+ *
+ * 这一条上有四个"看起来显然、实际会写错"的判定，而它们都是**静默**的：
+ *
+ * · 渠道要不要给切换器（给一个只有一项的下拉是假的可配置性）；
+ * · 哪些渠道算"已连接"（`expired` 不算 —— 那个状态下采集已经停了，
+ *   把它列成可选项等于让用户以为切过去还有数据）；
+ * · 分身有没有名字（没名字时草稿署名会回落到兜底文案「数字分身」，
+ *   而那个回落在这一页上看不出来）；
+ * · 身份判定的三态（未读到 / 已确认 / 待确认）—— 待确认时蒸馏会拒掉
+ *   **全部**语料且不报错，所以那一档必须是警告色而不是灰字。
+ *
+ * 放在组件里只能靠 CDP 探针读渲染结果去验，那种断言又慢又脆。
+ */
+export interface IdentityBarView {
+  /** 已连接（真的授权成功）的渠道 id。顺序即渲染顺序 */
+  connectedChannelIds: string[]
+  /**
+   * 要不要渲染渠道切换器。
+   *
+   * ★ 判据是**已连接 ≥ 2**，不是"渠道插件 ≥ 2"：飞书的插件在，但
+   * `available: false`，给它一个选项点了只能跳设置 —— 而设置里已经有
+   * 渠道页，在仪表盘再放一个入口是重复。
+   */
+  showChannelPicker: boolean
+  /** 分身配过名字了吗。false 时右半边给「去起个名字」而不是空字符串 */
+  personaNamed: boolean
+  /** 身份判定的三态 */
+  selfState: "unknown" | "confirmed" | "unconfirmed"
+}
+
+export function readIdentityBar(input: {
+  channels: readonly { id: string; status: { state: string } }[]
+  personaName: string
+  selfConfirmed: boolean | null
+}): IdentityBarView {
+  const connectedChannelIds = input.channels
+    .filter((item) => item.status.state === "authorized")
+    .map((item) => item.id)
+  return {
+    connectedChannelIds,
+    showChannelPicker: connectedChannelIds.length >= 2,
+    personaNamed: input.personaName.trim() !== "",
+    selfState:
+      input.selfConfirmed === null ? "unknown" : input.selfConfirmed ? "confirmed" : "unconfirmed",
+  }
+}

@@ -1,0 +1,223 @@
+# electron-builder：macOS 打包配置
+#
+# 单独一个 yml 而不是塞进 package.json：下面每条 extraResources 都需要解释
+# "为什么在"（尤其那 550MB），而 JSON 放不下注释。
+#
+# ## ★★ Resources/ 刻意**镜像仓库布局**
+#
+# 主进程有一处路径**反推**：`python-env.ts` 的 `repoRootFrom(klRoot)` 从
+# klRoot 上跳**一级**得到仓库根，再据此找解释器、`scripts/lib/python-env.mjs`、
+# `requirements.txt`。所以 kl 必须落在 `Resources/` 的**一层**子目录里，
+# 与它在仓库里的位置（`<repo>/kl-graph`）一致：
+#   Resources/kl-graph  →  上跳一级 = Resources/
+#     ⇒ 解释器 = Resources/vendor/python/darwin-arm64/python   ✓
+#     ⇒ mjs    = Resources/scripts/lib/python-env.mjs          ✓
+#     ⇒ reqs   = Resources/kl-graph/requirements.txt           ✓
+# 一条布局约定换掉一堆运行时路径特判 —— `repoRootFrom` 一行都不用改。
+#
+# ★ 层级数不能与仓库不一致。以前 kl 在 `external/kl-graph`（两层），这里的 `to`
+# 也是两层；导入真实 commit 历史后变一层，两边同时改。放错层数的表现是
+# **开发态完全正常、打包后 kl 起不来**（反推到 Contents/，那三样都不在）。
+#
+# ## 体积
+#
+# ~550MB 资源（python 379M + bin 170M + 其余 ~3M）+ Electron 自身。
+# 瘦身（砍 site-packages 里的测试数据 / *.dist-info）是独立一步，先跑通。
+
+appId: com.mycontext.app
+productName: MyContext
+copyright: Copyright © 2026 MyContext
+
+# ★ 注入 asar 内 package.json 的字段（**不改**磁盘上那份）。
+#
+# 两个都必需：
+# · `main` —— 打进 asar 的是**根** package.json，而它没有 main 字段
+#   （工作区根不是一个可运行的包）。不注入的话 electron-builder 直接报
+#   `Application entry file "index.js" … is corrupted: not found`（实测）。
+#   路径是 asar 内的相对路径，与上面 `files` 的 `apps/desktop/out/**` 对应。
+# · `productName` —— Electron 的 `app.getName()` 读它，决定 userData 目录名
+#   （`~/Library/Application Support/MyContext/`）。不注入就会退回 npm 的
+#   `name`（`mycontext`，小写），与 `resolveAppName(packaged)` 返回的
+#   `MyContext` 不一致 —— 那会让打包态与我们自己算出来的路径分叉。
+extraMetadata:
+  main: apps/desktop/out/main/index.js
+  productName: MyContext
+
+# ★★ 路径基准是**仓库根**（electron-builder 的 projectDir = cwd），
+# **不是**本文件所在目录 —— 即便用 `--config apps/desktop/electron-builder.yml`
+# 指过来也一样。实测教训：按 `apps/desktop/` 相对写的话每条 extraResources 都是
+# `file source doesn't exist  from=/Users/<me>/kl-graph`（它把相对路径
+# 拼到了 $HOME 上），而 app.asar 里也没有 index.js（files 的 out/** 没命中）。
+# 所以下面所有 from/files/output 一律**从仓库根**写。
+directories:
+  output: apps/desktop/release
+  buildResources: apps/desktop/build
+
+# 应用图标。
+#
+# 不给的话 electron-builder 打出来是 **Electron 官方那个原子图标**
+# （打包日志里会说 `default Electron icon is used  reason=application icon
+# is not set` —— 是 info 级，很容易被 200 行构建输出盖过去）。
+# 那个图标在 Dock 里与用户装的任何 Electron 应用长得一样。
+#
+# ★ 指到 `.icns` 而不是 `.png`：electron-builder 能从 png 现场转，但那条路
+# 只生成它自己挑的几档。这里那份 icns 是 `iconutil` 出的，含 16/32/128/256/512
+# 各 @1x+@2x 共 8 档（最大 1024）—— Dock、启动台、Finder 列表、⌘Tab 各用不同档，
+# 缺档时系统会拿最近的那档缩放，边缘会糊。
+#
+# `icon.png`（1024×1024 源图）与 `icon.icns` 都入 git：
+# 前者是**可再生成的源**，后者是构建输入。只留 png 的话每台机器都要装
+# iconutil（那是 macOS 自带，但 CI 上不一定是 mac）；只留 icns 的话以后
+# 想改图或出 Windows 的 .ico 就没有源了。
+#
+# 重新生成（改了源图之后）：
+#   cd apps/desktop/build && mkdir icon.iconset
+#   for s in 16 32 128 256 512; do
+#     sips -z $s $s icon.png --out icon.iconset/icon_${s}x${s}.png
+#     sips -z $((s*2)) $((s*2)) icon.png --out icon.iconset/icon_${s}x${s}@2x.png
+#   done
+#   iconutil -c icns icon.iconset -o icon.icns && rm -rf icon.iconset
+#
+# ★ 这张图是**满幅出血**的（章鱼的触手在下边缘 499px、右边缘 160px 处就是
+# 画布边界），所以刻意**不留内边距**：macOS 的图标规范建议留白，但那是给
+# 四周都完整的图形用的。这张图内缩之后那两条被裁的边会露成一条直线，
+# 比"贴边"更难看。要真正合规得改源图（把章鱼画完整再缩），那是设计的事。
+#
+# 配置项本身在下面的 `mac:` 块里（`icon:`）—— 不在这里单开一个 `mac:`，
+# 那会是**重复的 YAML key**：解析器只留最后一个，于是另一个块里的
+# identity/target/extraResources 全部静默失效。
+
+# `files` 是**白名单**：只装编译产物 + 元数据。
+#
+# renderer/main/preload 的产物已经把所有一方源码 inline 进去了（见
+# electron.vite.config.ts 里 `externalizeDepsPlugin({ exclude })` 那段：
+# 工作区包一律内联，不外置），所以不需要 src/、packages/、scripts/。
+# 唯一例外是主进程运行时会 `import()` 的那个 .mjs —— 它走 extraResources。
+files:
+  # ★ 从仓库根写。`package.json` 取的也是**根**那份 —— electron-builder 用它
+  # 读 name/version，而 main 入口由下面的 extraMetadata 覆盖（根 package.json
+  # 没有 main 字段，不覆盖的话 asar 里找不到入口）。
+  - apps/desktop/out/**
+  - package.json
+
+# ★ better-sqlite3 是 native 模块，必须解出 asar。
+#
+# Electron 能从 asar 里 dlopen `.node`，但那条路踩过多次 ENOENT（尤其它还要
+# 找同目录的辅助文件）。解出来是廉价的保险 —— 只多几 MB 的磁盘占用，
+# 主进程仍然从 asar 里 require（Node 的 asar shim 会透明重定向到 unpacked）。
+#
+# pnpm 的软链布局要两半都写：`node_modules/<pkg>` 是符号链接，真文件在
+# `.pnpm/<pkg>@<ver>/` 下。只解前者等于没解。
+asarUnpack:
+  - node_modules/better-sqlite3/**
+  - node_modules/.pnpm/better-sqlite3@*/**
+
+mac:
+  category: public.app-category.productivity
+  # 应用图标（源图与重新生成的命令见文件上半部分那段注释）。
+  # ★ 路径**从仓库根**写，与本文件其余所有路径同一条规则。
+  icon: apps/desktop/build/icon.icns
+  target:
+    # `dir` = 裸 .app，双击就能验；dmg 是给同事的分发形态。
+    # 日常迭代用 `pnpm dist:mac`（只出 dir，快得多）。
+    - target: dir
+      arch: [arm64]
+  # ★ 不签名、不公证：还没有 Apple Developer 证书。
+  #
+  # 后果要说清：同事拿到 .app 会被 Gatekeeper 拦，需要右键打开或
+  # `xattr -dr com.apple.quarantine <app>`。而 hardenedRuntime 必须**关**——
+  # 开了它但不签名的话，那些 entitlement 反而会让进程起不来。
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+
+  extraResources:
+    # ── ① 预置二进制（170M）─────────────────────────────────────
+    #
+    # dws-darwin-arm64（22M）+ opencode-darwin-arm64（138M）。
+    # dws 是**必需**的（缺了直接 RUNTIME_BINARY_MISSING）；opencode 缺失只是
+    # 降级到本地召回，但既然 prepare:bin 已经钉了版本就一起进包 ——
+    # 那也是版本闸（MIN_OPENCODE_VERSION）能生效的前提。
+    #
+    # ★★ 两条排除是**安全要求**，不是优化：
+    # extraResources 从**工作树**拷，**不受 .gitignore 约束**。
+    # `.dws/` 里是 DWS 运行时写的真实凭据（实测含 token.json / identity.json /
+    # profiles.json）—— .gitignore 挡住了它进 git，但打包不看 gitignore。
+    # 不排除就等于把构建者的钉钉 token 分发给每一个拿到包的人。
+    - from: apps/desktop/resources/bin
+      to: bin
+      filter:
+        - "**/*"
+        - "!.dws/**"
+        - "!workspace/**"
+        - "!.gitkeep"
+
+    # ── ② 随包分发的 skill（20K）──────────────────────────────────
+    # `kl` 等。agent 按 cwd/skills.paths 发现它们，不放进去就等于没有。
+    - from: apps/desktop/resources/skills
+      to: skills
+      filter: ["**/*"]
+
+    # ── ③ 蒸馏引擎（728K）───────────────────────────────────────
+    - from: apps/desktop/resources/forge
+      to: forge
+      filter:
+        - "**/*"
+        - "!**/__pycache__/**"
+        - "!**/*.pyc"
+
+    # ── ④ kl 代码（1.9M）───────────────────────────────────────
+    #
+    # ★ `to` 的层数必须与仓库里一致（都是一层）—— 见文件头的镜像布局。
+    # 多套或少套一层目录都会让 repoRootFrom 反推错，Python 全线失效。
+    - from: kl-graph
+      to: kl-graph
+      filter:
+        - "**/*"
+        - "!**/__pycache__/**"
+        - "!**/*.pyc"
+        # 上游目录里可能有它自己的 .venv（我们不用它，且它绑上游作者的机器）
+        - "!.venv/**"
+        - "!**/*.log"
+        # ★ `data/` 是**本机跑出来的**图谱与抽取缓存（实测 152M：qdrant 100M
+        # + knowledge.db 15M + extraction_cache 37M）。它是 gitignore 的，
+        # 所以以前那份 rsync 副本里不存在，`from` 也就自然拿不到它。
+        # 现在 kl-graph 是真 checkout，构建机上这个目录**就在那儿** ——
+        # 不排除的话会把构建者的**真实聊天内容**打进用户的 .app。
+        - "!data/**"
+
+    # ── ⑤ Python：**压平后的自包含解释器**（379M）────────────────
+    #
+    # ★★ `from` 是**构建产物**（scripts/build-python-bundle.mjs 的输出），
+    # 不是 `vendor/python/`。直接拷 vendor 会把 400M 的 venv 一起带上，而那个
+    # venv 的 pyvenv.cfg 里 `home =` 绑死构建机的绝对路径 —— 换机器就
+    # `Could not find platform independent libraries` 起不来（实测）。
+    # 压平之后是裸解释器 + 装在它自己 site-packages 里的依赖，自定位、
+    # 零环境变量、拷到哪都能跑（那个脚本每次产出时都会验一遍）。
+    #
+    # `to` 仍落在 `vendor/python/darwin-arm64` —— 镜像布局要求路径与仓库一致。
+    - from: apps/desktop/resources/python/darwin-arm64
+      to: vendor/python/darwin-arm64
+      filter: ["**/*"]
+
+    # ── ⑥ 主进程运行时 import 的 .mjs（52K）─────────────────────
+    #
+    # `python-env.ts` 在运行时动态 import `scripts/lib/python-env.mjs`
+    # （刻意绕开 Vite 的静态分析，见那边注释）—— 所以这个文件必须真的在盘上，
+    # 不能只存在于 bundle 里。
+    - from: scripts/lib
+      to: scripts/lib
+      filter: ["**/*.mjs"]
+    - from: scripts/kl-extra-requirements.txt
+      to: scripts/kl-extra-requirements.txt
+
+  extendInfo:
+    CFBundleDisplayName: MyContext
+    CFBundleLocalizations: [zh_CN, en]
+    NSHumanReadableCopyright: Copyright © 2026 MyContext
+
+dmg:
+  sign: false
+  contents:
+    - { x: 130, y: 220, type: file }
+    - { x: 410, y: 220, type: link, path: /Applications }

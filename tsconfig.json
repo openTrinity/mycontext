@@ -1,0 +1,50 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/kernel"
+    },
+    {
+      "path": "packages/ipc-contract"
+    },
+    {
+      "path": "packages/store"
+    },
+    {
+      "path": "packages/runtime-env"
+    },
+    {
+      "path": "packages/channels"
+    },
+    {
+      "path": "packages/design"
+    },
+    {
+      "path": "packages/i18n"
+    },
+    {
+      "path": "packages/retrieval"
+    },
+    {
+      "path": "packages/ingest"
+    },
+    {
+      "path": "packages/knowledge-feed"
+    },
+    {
+      "path": "packages/agent-runtime"
+    },
+    {
+      "path": "packages/distill"
+    },
+    {
+      "path": "packages/llm"
+    },
+    {
+      "path": "packages/persona"
+    },
+    {
+      "path": "apps/desktop"
+    }
+  ]
+}

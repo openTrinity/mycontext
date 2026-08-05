@@ -1,0 +1,16 @@
+node_modules
+dist
+out
+coverage
+*.css
+package-lock.json
+pnpm-lock.yaml
+
+# 他人代码与二进制：格式化权不在我们手上。
+# 实测 `prettier --check .` 在算法团队那份代码下的 json/yaml/md 上会退出码 1，
+# 而显式 glob 到 `.py` 还会报「No parser could be inferred」——整目录排除，不逐文件修。
+kl-graph/
+vendor/
+
+# 从 kl-graph/ 同步过来的产物：内容仍归他人所有，格式化会让 check:kl-skill-sync 永远红
+apps/desktop/resources/skills/

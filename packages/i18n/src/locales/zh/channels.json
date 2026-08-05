@@ -1,0 +1,84 @@
+{
+  "dingtalk": {
+    "label": "钉钉",
+    "description": "以本人身份读取会话、文档与听记，并生成回复草稿。",
+    "steps": {
+      "openBrowser": "点击「开始授权」，应用会打开浏览器并跳转到钉钉登录页",
+      "scanQr": "用手机钉钉扫码并确认授权（读取通讯录、会话与消息）",
+      "backToApp": "浏览器提示成功后回到应用，授权状态会自动刷新"
+    }
+  },
+  "feishu": {
+    "label": "飞书",
+    "description": "以自建应用身份接入飞书会话（规划中）。",
+    "steps": {
+      "createApp": "在飞书开放平台创建自建应用并获取 App ID 与 App Secret",
+      "subscribe": "在应用内填写凭据并订阅消息事件"
+    }
+  },
+  "state": {
+    "authorized": "已连接",
+    "expired": "已过期",
+    "unauthorized": "未连接",
+    "unavailable": "暂未开放"
+  },
+  "actions": {
+    "start": "开始授权",
+    "reauthorize": "重新授权",
+    "useCode": "用授权码",
+    "useCodeHint": "无法打开浏览器时，用授权码在其他设备完成"
+  },
+  "scope": {
+    "readTitle": "读取工作数据",
+    "readDescription": "以你本人的身份读取会话、通讯录、文档与听记，用于蒸馏与检索。",
+    "noSpeakTitle": "不代表你发言",
+    "noSpeakDescription": "生成的回复默认进草稿箱，需要你确认后才会发送。",
+    "credentialsTitle": "凭据不经过我们",
+    "credentialsDescription": "授权由钉钉官方 CLI 完成，凭据存在系统钥匙串，不上传任何服务器。"
+  },
+  "dwsSource": {
+    "title": "使用自有 dws",
+    "badgeBundled": "随应用提供",
+    "badgeCustom": "自有",
+    "badgeMissing": "路径已失效",
+    "description": "应用自带一份钉钉 CLI（dws）。若你本机装了其他版本，可以在这里指定它的绝对路径；留空则用自带的那份。",
+    "placeholder": "/path/to/dws",
+    "save": "保存",
+    "saving": "验证中…",
+    "clear": "改回使用自带的那份",
+    "missing": "指定的文件已找不到，当前实际用的是自带的那份。重新填一个路径，或清空这项。",
+    "effective": "当前生效：{{version}}",
+    "channelDescription": "若你所在组织限定了 CLI 的渠道范围，在这里填分发方给的渠道号；一般不用填。",
+    "channelPlaceholder": "渠道号（可留空）",
+    "channelInactive": "渠道号已保存，但当前用的是自带的 dws，所以它暂不生效。",
+    "channelFromEnv": "当前渠道号来自环境变量或 .env。",
+    "badgeFromEnv": "来自 .env",
+    "fromEnv": "当前由环境变量指定：{{path}}（在上面填一个路径可覆盖它）"
+  },
+  "account": {
+    "user": "账号",
+    "userValue": "{{name}}（{{id}}）",
+    "accessExpiresAt": "凭证刷新至",
+    "refreshExpiresAt": "需重新授权",
+    "adoptableHint": "这是本机上已有的钉钉登录态（{{corp}} · {{name}}）—— 同一台电脑上的登录会共用。当前账号还没有使用它。",
+    "adoptAction": "用这个身份"
+  },
+  "onboarding": {
+    "connectTitle": "连接{{channel}}",
+    "connectedTitle": "已连接{{channel}}",
+    "machineSessionHint": "这台电脑上已有钉钉登录态（同一台电脑的登录会共用）。为当前账号授权一次，才能确定「你」是谁 —— 否则学习会用错身份。",
+    "accountTitle": "已连接的账号",
+    "scopeTitle": "授权范围"
+  },
+  "settings": {
+    "expiredHint": "授权已过期，需要重新扫码",
+    "expiryWarning": "授权将在 {{days}} 天后过期，建议现在重新授权。",
+    "identityMismatch": "身份不一致：渠道当前生效的是「{{channelCorp}}」，而这个账号绑定的是「{{boundCorp}}」。会话列表与采集都会按前者来，可能读到不属于你预期范围的内容 —— 请重新授权到「{{boundCorp}}」，或新建一个账号使用「{{channelCorp}}」。",
+    "sharedCredentialNote": "授权凭据由钉钉官方 CLI 保存在系统钥匙串，与你在终端里的登录态共用。如需彻底清除，请在终端执行 <1>{{command}}</1>。"
+  },
+  "progress": {
+    "browserOpened": "已打开浏览器，请扫码确认",
+    "enterCode": "在浏览器中输入授权码完成授权",
+    "manualUrl": "浏览器未自动打开？手动访问：{{url}}"
+  }
+}

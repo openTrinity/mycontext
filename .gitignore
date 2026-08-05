@@ -1,0 +1,129 @@
+# 依赖与产物
+node_modules/
+dist/
+out/
+release/
+coverage/
+*.tsbuildinfo
+.tsbuild/
+
+# 文档：源文档必须入 git（交付物），只忽略产物。
+# 曾经这里写的是整目录 `docs/`，结果 `git ls-files docs` = 0 ——
+# 交付文档写完就丢，团队协作直接失效。`pnpm verify` 现有 check:docs-tracked 门禁盯着这条。
+docs/build/
+docs/**/*.generated.md
+
+# 环境变量：只提交 .env.example
+.env
+.env.*
+!.env.example
+
+# 本地数据与日志
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal
+
+# 系统与编辑器
+.DS_Store
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# 构建产物（配置文件旁的 tsc 输出）
+apps/*/electron.vite.config.js
+apps/*/electron.vite.config.d.ts
+*.tsbuildinfo
+
+# pnpm
+.pnpm-store/
+package-lock.json
+
+# 预置二进制：resources/bin 是**构建产物**目录（由 prepare:bin 从 vendor 填充），
+# 同时也是 DWS 运行时可能写入的地方 —— 因此保持 ignore。
+apps/*/resources/bin/*
+!apps/*/resources/bin/.gitkeep
+
+# 同理：resources/forge 是 prepare:bin 从 vendor/forge 拷出来的产物。
+apps/*/resources/forge/
+
+# 同理：resources/python 是 build-python-bundle.mjs 从 vendor/python 压平出来的
+# 产物（解释器 + 压进它自己 site-packages 的依赖，379MB）。源在 vendor/python，
+# 那份入 git；这份是每次打包重算的，不入。
+apps/*/resources/python/
+
+# 打包产物（.app / dmg，~600MB 一份）。
+apps/desktop/release/
+
+# vendor 是「源」，入 git。但 DWS 运行时会在同级写 .dws/（含真实 token），必须挡住。
+# 这几条是双保险，另有 scripts/check-vendor-clean.mjs 做门禁。
+**/.dws/
+vendor/**/logs/
+vendor/**/token.json
+vendor/**/identity.json
+vendor/**/profiles.json
+vendor/**/app-dev.json
+vendor/**/*.zip
+
+# dws 二进制的解包缓存：从 npm 包 `dingtalk-workspace-cli` 的 assets/ 解出来的
+# 中间物（见 scripts/lib/dws-resolver.mjs）。**不入 git** —— 它是产物，
+# 而且 61MB；版本由 lockfile 管，重装依赖即可重建。
+.dws-cache/
+
+# 开源版 dws 的试跑沙箱（`pnpm dev:dws-oss`）：独立应用数据 + 独立凭据。
+# ★ 里面有**真实 token**（文件 DEK 形式的加密凭据），绝不能入 git。
+.dws-oss-sandbox/
+
+# forge 是 Python 源码：字节码缓存是执行副产物，不入 git
+# （另有 check:vendor-integrity 的「未登记文件」检查兜底）。
+vendor/**/__pycache__/
+vendor/**/*.pyc
+
+# 算法团队的代码（真实 commit 历史，见那次导入的 message）：
+# 源码入 git，本机跑出来的数据与虚拟环境不入。
+#
+# ★ `data/` 是**本机的真实聊天内容**抽出来的图谱（实测 152M：qdrant + knowledge.db
+# + 按 msg.id 存的抽取缓存）。它同时也在 electron-builder 的 filter 里排除掉 ——
+# 那份 rsync 副本时代不需要那条 filter（副本里根本没有 data/），
+# 现在 kl-graph 是真 checkout，构建机上它就在那儿。
+kl-graph/data/
+kl-graph/.venv/
+kl-graph/**/__pycache__/
+kl-graph/**/*.pyc
+
+# 内置 Python：**解释器与 venv（含全部依赖）都入 git**。
+#
+# 为什么连 venv 一起入：打包后的用户不可能去跑 `pnpm setup:python`，
+# 也不该要求他们出网装 288MB 依赖。整套入 git 之后 clone/安装即可用。
+#
+# venv 里只有两处绑机器路径，都已解决：
+# · `bin/python*` 软链 —— 入库时就是**相对**的（../../python/bin/python3）；
+# · `pyvenv.cfg` 的 `home =` —— 必须绝对，启动时按本机路径重写一次
+#   （见 scripts/lib/python-env.mjs 的 relocateVenv；实测不改就起不来）。
+vendor/python/*/*.tar.gz
+# venv 里的这些是执行副产物，不入 git（首次 import 自动重建）
+vendor/python/*/venv/**/__pycache__/
+vendor/python/*/venv/**/*.pyc
+
+# ★ 一次性诊断探针的产物 —— 它装的是**真实聊天流**的原始字节。
+#
+# `scripts/probe-acp-stream.mjs` 把每一条 session/update 原样 dump 到仓库根，
+# 那份 JSON 里有真人名与真会话内容。它与正常的 fixture 长得完全一样
+# （见 scripts/check-no-local-data.mjs 的文件头：泄漏的形态与正常代码没差别），
+# 所以这一行是它进 git 之前的最后一道拦阻。
+acp-stream-dump.json
+
+# ★ 本机/内部用的 agent 工具，不属于产品，也不该随开源仓分发。
+#
+# · `.claude/` —— 本机 agent 配置与内部 skill（`gpt-image/` 写着私有网关地址与
+#   key 的取法；`hitg-cli/` 驱动内部后端；`find-skills` 是指向仓库外的死软链）；
+# · `.agents/` —— 上面那条软链的目标，同样是本机 skill 目录；
+# · `.hitg_attachments/` —— 会话临时附件（截图等），不是代码。
+#
+# 产品真正要随包分发的 skill 在 `apps/desktop/resources/skills/`
+# （由 `pnpm sync:kl-skill` 生成，且过脱敏），与这里无关。
+.claude/
+.agents/
+.hitg_attachments/

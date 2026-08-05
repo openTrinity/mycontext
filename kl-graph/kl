@@ -1,0 +1,5 @@
+#!/bin/bash
+# kl — Knowledge graph CLI entry point
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+exec "${SCRIPT_DIR}/.venv/bin/python" kl_cli.py "$@"

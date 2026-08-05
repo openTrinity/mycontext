@@ -1,0 +1,119 @@
+{
+  "app": {
+    "name": "MyContext",
+    "starting": "Starting MyContext…",
+    "loading": "Loading…",
+    "retry": "Retry",
+    "mountMissing": "Mount point #root not found"
+  },
+  "actions": {
+    "cancel": "Cancel",
+    "signOut": "Sign out",
+    "newSearch": "New search",
+    "close": "Close"
+  },
+  "sidebar": {
+    "nav": "Main navigation",
+    "expand": "Expand sidebar",
+    "expandHint": "Expand sidebar (hover for a temporary preview)",
+    "pin": "Pin sidebar",
+    "pinHint": "Pin the sidebar so it stays open",
+    "collapse": "Collapse sidebar",
+    "resize": "Resize sidebar"
+  },
+  "modules": {
+    "comingSoon": "Coming soon",
+    "comingSoonTitle": "{{module}} · Coming soon",
+    "dashboard": {
+      "label": "Dashboard",
+      "description": "Real metrics for all four pipelines: collection, knowledge pipeline, profile distillation, digital twin."
+    },
+    "persona": {
+      "label": "Digital twin",
+      "description": "Your IM double: distills a personal profile and drafts replies for you. Opens once the DingTalk data pipeline is in place."
+    },
+    "search": {
+      "label": "Search",
+      "description": "Search across channels, with answers that link back to their sources. Opens once the index is built."
+    },
+    "status": {
+      "label": "Diagnostics",
+      "description": "Self-check for directories, database migrations and where each config value came from."
+    },
+    "settings": {
+      "label": "Settings",
+      "description": "Channel authorization and app information."
+    }
+  },
+  "theme": {
+    "label": "Theme: {{value}}",
+    "system": "Match system",
+    "light": "Light",
+    "dark": "Dark",
+    "menuLabel": "Theme"
+  },
+  "language": {
+    "label": "Language",
+    "system": "System"
+  },
+  "imagePicker": {
+    "tooLarge": "Image too large (4MB max)",
+    "rejected": "Unsupported format — use PNG / JPEG / GIF / WEBP",
+    "uploading": "Uploading…",
+    "pick": "Upload an image",
+    "replace": "Replace"
+  },
+  "quit": {
+    "confirmTitle": "Quit MyContext?",
+    "confirmDetail": "In-flight ingestion, persona drafts, and streaming search will stop. Saved work is unaffected.",
+    "confirmAction": "Quit",
+    "dontAskAgain": "Don't ask again",
+    "overlayTitle": "Quitting MyContext",
+    "overlaySubtitle": "Finishing ingest, saving drafts, closing databases…"
+  },
+  "stream": {
+    "thinking": "Thinking",
+    "waiting": {
+      "thinking": "Thinking…",
+      "reading": "Gathering leads…",
+      "reasoning": "Working it through…",
+      "composing": "Composing the answer…",
+      "extended": "Harder questions take longer — still working on it"
+    },
+    "thoughtToggle": "Show reasoning",
+    "toolRunning": "Running",
+    "toolSuccess": "Done",
+    "toolError": "Cancelled",
+    "planTitle": "Plan",
+    "citations": "Sources",
+    "retry": "Retry",
+    "toolGraph": "Knowledge graph",
+    "toolRecall": "Local search",
+    "toolAction": {
+      "graph": "Query knowledge graph",
+      "execute": "Run command",
+      "read": "Read file",
+      "edit": "Edit file",
+      "search": "Search content",
+      "fetch": "Fetch web content",
+      "think": "Analyze",
+      "skill": "Use skill",
+      "generic": "Use tool"
+    },
+    "group": {
+      "action": "{{count}} actions",
+      "processing": "Working…",
+      "failed": "Some cancelled",
+      "cancelled": "Cancelled",
+      "skipped": "Skipped",
+      "separator": ", ",
+      "more": "…"
+    },
+    "toolPending": "Waiting",
+    "toolSkipped": "Skipped",
+    "detail": {
+      "command": "Command",
+      "result": "Result"
+    }
+  }
+}

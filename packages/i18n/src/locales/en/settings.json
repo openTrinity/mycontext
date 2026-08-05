@@ -1,0 +1,342 @@
+{
+  "nav": "Settings sections",
+  "sections": {
+    "general": "General",
+    "channels": "Channels",
+    "about": "About",
+    "persona": "Digital twin",
+    "onboarding": "Setup steps",
+    "model": "Models"
+  },
+  "general": {
+    "title": "General",
+    "description": "Identity, language, and appearance.",
+    "language": "Language",
+    "languageDescription": "System follows the OS setting.",
+    "theme": "Theme",
+    "accent": "Accent",
+    "accentDescription": "Applies to highlights, selection, and links.",
+    "accents": {
+      "amber": "Amber",
+      "blue": "Blue",
+      "violet": "Violet"
+    },
+    "quitConfirm": "Confirm before quitting",
+    "quitConfirmDescription": "Show a prompt on ⌘Q so an accidental quit doesn't interrupt in-flight work.",
+    "quitConfirmToggle": "Ask before quitting"
+  },
+  "channels": {
+    "title": "Channels",
+    "description": "MyContext can only read conversations and draft replies once a channel is connected. Authorization happens as you.",
+    "loading": "Reading channel status…"
+  },
+  "about": {
+    "title": "About",
+    "appVersion": "App version",
+    "electronVersion": "Electron",
+    "platform": "Platform"
+  },
+  "status": {
+    "sections": {
+      "runtime": "Runtime",
+      "paths": "Data directories",
+      "database": "Database (migrated to v{{version}})",
+      "config": "Configuration",
+      "dataPlane": "Data plane",
+      "kl": "Knowledge graph (kl)"
+    },
+    "runtime": {
+      "appVersion": "App version",
+      "electronVersion": "Electron",
+      "nodeVersion": "Node",
+      "platform": "Platform",
+      "packaged": "Packaged",
+      "packagedYes": "Yes",
+      "packagedNo": "No (development)",
+      "dotenvLoaded": ".env loaded",
+      "no": "No"
+    },
+    "paths": {
+      "userData": "User data",
+      "database": "Control database",
+      "vaults": "Account data",
+      "logs": "Logs"
+    },
+    "database": {
+      "accountCount": "Accounts",
+      "migrations": "Applied migrations",
+      "accountSummary": "{{accounts}} accounts"
+    },
+    "config": {
+      "key": "Setting",
+      "envName": "Environment variable",
+      "value": "Value",
+      "source": "Source",
+      "configured": "Configured (value hidden)",
+      "notConfigured": "Not configured",
+      "empty": "(empty)",
+      "note": "Precedence: built-in default < .env file < environment variable. Secrets only show whether they are configured.",
+      "sources": {
+        "default": "Built-in default",
+        "dotenv": ".env file",
+        "env": "Environment variable"
+      },
+      "summary": "{{total}} entries, {{overridden}} overridden"
+    },
+    "dataPlane": {
+      "syncNow": "Sync now",
+      "messages": "Messages",
+      "conversations": "Conversations",
+      "outboxHead": "Changelog head",
+      "ftsIndexed": "Indexed",
+      "probeInterval": "Probe interval",
+      "vectors": "Vectors",
+      "dbSize": "Database size",
+      "rawRecords": "Raw records",
+      "selfIdentity": "Your identity",
+      "selfConfirmed": "Confirmed",
+      "selfUnconfirmed": "Needs confirmation",
+      "unjudgedHint": "{{count}} messages aren't attributed yet — confirming your identity backfills them (distillation stays off until then)",
+      "staleConsumers": "These consumers haven't caught up for a while; their data may be incomplete: {{list}}",
+      "eventStream": "Live events",
+      "eventStreamState": {
+        "stopped": "Off",
+        "starting": "Connecting…",
+        "ready": "Connected · no delivery",
+        "delivering": "Delivering",
+        "backoff": "Reconnecting"
+      },
+      "eventStreamHint": "Push over a long connection makes @-mentions visible within seconds; if it drops or delivers nothing, completeness is unaffected — polling still guarantees messages",
+      "eventStreamIdleHint": "Connected but no events received yet; falling back to polling (this account may not have personal event subscriptions enabled)",
+      "blocked": {
+        "session_expired": "Channel sign-in expired — authorize again to resume collecting",
+        "permission_required": "Missing permission — approve it in the source app to continue",
+        "retry": "Done, resume"
+      },
+      "ftsCovered": "{{indexed}} of them searchable",
+      "eventCoverage": "Event coverage: {{active}} active subscription(s) ({{global}} covering @-mentions across all groups, {{perConversation}} kind(s) needing per-conversation subscriptions). Conversations without a subscription are covered by polling — no messages are lost."
+    },
+    "kl": {
+      "serverTitle": "Graph service",
+      "dataTitle": "Graph data",
+      "state": "Status",
+      "stateStopped": "Stopped",
+      "stateStarting": "Starting…",
+      "stateReady": "Ready",
+      "stateFailed": "Failed",
+      "stateBuilding": "Paused for build",
+      "port": "Port",
+      "egress": "Network egress",
+      "egressYes": "embedding/LLM call the remote gateway",
+      "egressNo": "None",
+      "start": "Start",
+      "stop": "Stop",
+      "retry": "Retry",
+      "build": "Build graph",
+      "building": "Building…",
+      "buildHint": "Extract entities from collected messages. Needs the gateway, takes minutes. Search stays available. Full the first time, incremental after.",
+      "buildDone": "Built: {{entities}} entities / {{facts}} facts / {{edges}} edges",
+      "buildFailed": "Build failed: {{reason}}",
+      "rebuild": "Rebuild",
+      "rebuildHint": "Deletes the current graph and extraction cache, then re-extracts everything. Slower and more expensive than an incremental build. Use only when the graph is broken or a full reset is needed.",
+      "buildProgress": "Building graph {{percent}}%"
+    }
+  },
+  "advancedAi": {
+    "title": "Advanced AI",
+    "warning": "These settings are for users familiar with models and agent harnesses. Getting them wrong can break agent features, but it will **not** affect send gating or auto-reply policy — those are decided by an independent policy layer.",
+    "provider": {
+      "title": "Model provider",
+      "baseUrl": "Base URL",
+      "apiKey": "API key",
+      "apiKeyEmpty": "Not configured",
+      "apiKeySet": "Configured (…{{tail}})",
+      "apiKeyPlaceholder": "Leave blank to keep current"
+    },
+    "roles": {
+      "title": "Model roles",
+      "description": "Each role can point at a different model. Blank falls back to the default.",
+      "placeholder": "e.g. qwen3.7-plus"
+    },
+    "harness": {
+      "title": "Harness",
+      "description": "Each module can pick its own agent runtime. The built-in harness spawns no subprocess and is also the fallback when the external runtime is missing.",
+      "search": "Search",
+      "persona": "Digital twin"
+    },
+    "escape": {
+      "title": "Escape hatch",
+      "description": "Paste raw harness config JSON to override everything above. Invalid JSON won't be applied and the reason is shown below.",
+      "invalid": "Invalid JSON, not applied: {{detail}}"
+    },
+    "save": "Save",
+    "saved": "Saved"
+  },
+  "title": "Settings",
+  "groups": {
+    "app": "Application",
+    "other": "Other",
+    "persona": "Digital twin"
+  },
+  "identity": {
+    "displayName": "Display name",
+    "displayNameHint": "Used in the sidebar and in drafts; leave empty to use the part before @ in your email.",
+    "avatarUrl": "Avatar",
+    "avatarUrlHint": "Paste an image URL; leave empty to show your initial. DingTalk exposes no user-avatar API, so this is never filled in automatically.",
+    "save": "Save",
+    "clearAvatar": "Clear avatar",
+    "clearAvatarHint": "Falls back to your initial, and channel authorization will not replace it again",
+    "avatarHint": "Upload a local image, or fetch it from a connected platform. Leave empty to show your initial.",
+    "avatarFromChannel": "Fetch from connected platform",
+    "avatarFetching": "Fetching…",
+    "avatarMiss": {
+      "not_set": "You have no avatar set on that platform",
+      "not_reachable": "Your avatar isn't reachable on that platform (not an error)",
+      "not_attempted": "Missing the information needed to look it up — it will retry later",
+      "failed": "Download failed — worth retrying",
+      "no_common_group": "No shared group found, so the avatar is unavailable (not an error)",
+      "no_avatar_set": "No avatar set on DingTalk",
+      "download_failed": "Download failed — worth retrying",
+      "identity_unresolved": "Identity not confirmed yet — confirm it on the status page first",
+      "no_open_id": "The identity has no ID usable for an avatar lookup"
+    },
+    "avatarMissOther": "Avatar unavailable",
+    "avatarSourceLocal": "Using a local image",
+    "avatarSourceRemote": "Using a remote image",
+    "avatarAdvanced": "Enter an image URL manually"
+  },
+  "onboarding": {
+    "title": "Setup flow",
+    "resetDistill": "Reset distillation progress",
+    "resetDistillHint": "Re-distills enabled sources from the beginning. Existing conclusions are kept (merging is idempotent) and nothing is duplicated.",
+    "description": "Where you are in setup, and how to run it again.",
+    "needsLogin": "Sign in to see setup progress."
+  },
+  "selfIdentity": {
+    "confirmedOk": "Your identity is confirmed; every message has an attribution.",
+    "warning": "★ Your own identity isn't confirmed yet — distillation rejects **every** message (silently), so no profile can be built. Resolve, then confirm.",
+    "partialWarning": "{{count}} messages still have no attribution — the distillation guard rejects those. Confirm again to backfill them.",
+    "resolve": "Resolve identity",
+    "confirm": "Confirm and backfill",
+    "confirmHint": "Backfills is_self and @-mentions across all historical messages",
+    "userId": "Employee ID",
+    "names": "Display names",
+    "corp": "Organization",
+    "matched": "Matched",
+    "matchedValue": "{{count}} of your messages",
+    "backfilled": "Backfilled {{messages}} messages and {{mentions}} @-mentions."
+  },
+  "persona": {
+    "description": "Control-layer runtime limits and the auto-send whitelist.",
+    "loading": "Loading…",
+    "limitsTitle": "Runtime limits",
+    "limitsDescription": "Applied immediately — no restart needed.",
+    "limits": {
+      "maxResident": "Max resident agents",
+      "maxConcurrentTurns": "Conversations handled at once",
+      "maxBatchSize": "Max messages per batch",
+      "idleEvictMinutes": "Evict after idle (minutes)",
+      "maxDraftsPerConversation": "Max drafts per conversation"
+    },
+    "limitHints": {
+      "maxResident": "One context per conversation; the least recently used is evicted past the cap",
+      "maxConcurrentTurns": "Extras queue up — too much concurrency trips model rate limits together",
+      "maxBatchSize": "When a conversation floods, only the newest this many enter the context",
+      "idleEvictMinutes": "Release a conversation's agent after this much silence",
+      "maxDraftsPerConversation": "How many pending drafts to keep per conversation; the oldest are trimmed past the cap (no more time-based expiry)"
+    },
+    "workHours": {
+      "label": "Working hours",
+      "hint": "Auto-send only inside this window; outside it every reply stays a draft",
+      "from": "From",
+      "to": "to",
+      "day": {
+        "0": "Sun",
+        "1": "Mon",
+        "2": "Tue",
+        "3": "Wed",
+        "4": "Thu",
+        "5": "Fri",
+        "6": "Sat"
+      },
+      "summary": "{{days}} {{from}}:00–{{to}}:00"
+    },
+    "rateLimit": {
+      "title": "Auto-send rate limit",
+      "off": "off",
+      "perConversation": "Per conversation (per minute)",
+      "perConversationHint": "Max auto-sends in one conversation per minute; extras become drafts. \"off\" disables this gate",
+      "global": "Global (per hour)",
+      "globalHint": "Max auto-sends across all conversations per hour; extras become drafts. \"off\" disables this gate"
+    },
+    "figure": {
+      "title": "Look",
+      "description": "Pick hair, eyes and accessories one at a time — or just upload an image.",
+      "save": "Save look",
+      "saved": "Saved",
+      "needsName": "Name your persona in onboarding first",
+      "sideEffect": "Saving marks the onboarding “Persona” step as done.",
+      "useGenerated": "Use a generated figure"
+    },
+    "autoSendTitle": "Auto-send",
+    "autoSendHint": "When, and in which conversations, replies may go out as you",
+    "limitsSummary": "{{resident}} resident · {{concurrent}} concurrent"
+  },
+  "model": {
+    "description": "Configure the model gateway used to draft replies and organize knowledge. Changes here apply globally.",
+    "provider": {
+      "baseUrl": "Endpoint",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "Leave blank to keep unchanged",
+      "modelMain": "Main model",
+      "embedModel": "Embedding model"
+    },
+    "kl": {
+      "title": "Use a different model for the knowledge base",
+      "hint": "Leave blank to reuse the main settings above. Fill these in only to point the knowledge base at its own gateway or model.",
+      "inherited": "Follows main settings"
+    },
+    "save": "Save",
+    "saveAndNext": "Save and continue",
+    "saved": "Saved",
+    "keyOn": "Configured",
+    "keyOff": "Not configured",
+    "keyTail": "Configured …{{tail}}",
+    "other": "Other…",
+    "probe": {
+      "test": "Test connection",
+      "testing": "Testing…",
+      "ok": "Connected · {{count}} models available",
+      "fromGateway": "From gateway · {{count}}",
+      "reason": {
+        "unauthorized": "Key rejected — try another one",
+        "unreachable": "Can't reach this endpoint — check it",
+        "badResponse": "Not a model service — check the endpoint",
+        "noKey": "Enter an API key first"
+      },
+      "modelNotListed": "This model isn't in the gateway's list — pick one above, or extraction/graph tasks will fail with model_not_found"
+    }
+  },
+  "ingestIntervals": {
+    "title": "Collection intervals",
+    "description": "Polling interval per collection channel. Saving re-attaches collection in place and applies immediately.",
+    "loading": "Loading…",
+    "fields": {
+      "probeBaseMs": "Incremental probe base interval",
+      "probeMaxMs": "Adaptive backoff ceiling",
+      "activeScanMs": "Full-directory rotation scan interval",
+      "pullMs": "Full pagination sweep interval",
+      "minutesMs": "Meeting notes poll interval",
+      "documentsMs": "Document poll interval"
+    },
+    "hints": {
+      "probeBaseMs": "Fetches conversation-level change markers only (unread counts and last-message timestamps); roughly 0.7s per round. This is the base interval, not the effective one: adaptive backoff halves the rate when a round exceeds half the interval, so observed values may exceed what you set.",
+      "probeMaxMs": "Upper bound for adaptive backoff. Past this point the probe stops slowing down and raises a status-page warning instead — unbounded backoff degrades into probing once every few hours.",
+      "activeScanMs": "Walks the full conversation directory in descending activity order, compares against local watermarks, and issues targeted top-ups only for those behind. The incremental probe returns only conversations with unread markers (~13% coverage measured); this tier covers its blind spot. Fixed cost per round is one cached directory call plus one aggregate query — independent of conversation count.",
+      "pullMs": "Paginates a time window across all conversations to cover the probe's blind spot (read conversations don't appear in the unread list). A round can reach hundreds of pages and holds the collection lock exclusively, so short intervals crowd out sending and targeted top-ups.",
+      "minutesMs": "This endpoint has no time filter, so every round is a full enumeration at fixed cost — shorter intervals only add waste. Meetings are sparse events and don't warrant high frequency.",
+      "documentsMs": "A round covers workspace enumeration, recursive node traversal, and body backfill — substantially heavier than the message channel. Documents change slowly and carry no second-level visibility requirement."
+    },
+    "note": "Second-level visibility for new messages comes from the event stream and probe-triggered targeted top-ups, not from raising the full-pagination rate."
+  }
+}

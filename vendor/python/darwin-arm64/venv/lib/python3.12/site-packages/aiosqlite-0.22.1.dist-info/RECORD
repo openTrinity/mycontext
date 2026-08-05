@@ -1,0 +1,17 @@
+aiosqlite-0.22.1.dist-info/INSTALLER,sha256=5hhM4Q4mYTT9z6QB6PGpUAW81PGNFrYrdXMj4oM_6ak,2
+aiosqlite-0.22.1.dist-info/METADATA,sha256=zzyMxzl2h_dGAlV6Pk9c4YBlkaYsgv6UybOW_YDRs5o,4311
+aiosqlite-0.22.1.dist-info/RECORD,,
+aiosqlite-0.22.1.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+aiosqlite-0.22.1.dist-info/WHEEL,sha256=G2gURzTEtmeR8nrdXUJfNiB3VYVxigPQ-bEQujpNiNs,82
+aiosqlite-0.22.1.dist-info/licenses/LICENSE,sha256=qwwXHcPvi_MlqEu3fYVUIfJhEzXd9uCIFrKSLE7cD3Y,1071
+aiosqlite/__init__.py,sha256=kjZKcYP2eZ3IbBEHQ0D_Owsk_-FlRGEjQWlbybOs8jk,888
+aiosqlite/__version__.py,sha256=sEM7xBU6e8WQYHe3ESoQmkEbXGKrqXjrQ5ujl5zpyV0,157
+aiosqlite/context.py,sha256=9jJcPG_SGSshzNUwXy87C1__mrKGFbToX0UuOQ1uItQ,1448
+aiosqlite/core.py,sha256=eXar7Bxr1pQz3VShCD0t6zGpp_bwwvFtVzVdzS2opII,15095
+aiosqlite/cursor.py,sha256=X3k2gYJeo3yB84scDEAPFZpsC_rzjT8dT4p6W3MeezM,3476
+aiosqlite/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+aiosqlite/tests/__init__.py,sha256=sp0-HYboM6gOYrUxWy8xna-hdJyMUtKBvAKrpRBcDCE,90
+aiosqlite/tests/__main__.py,sha256=eZRuAxr1bwF9xAAqVjCi4vd1WFsFO35uyhtuVO0GjmY,162
+aiosqlite/tests/helpers.py,sha256=MWC839FiX63TBmFiIjabXNx-4G5eWYnE5MiInKIAdJw,722
+aiosqlite/tests/perf.py,sha256=-ipnXSHidO6VBKEdLAOcGa3cKHU5ul1w8-ifDNtGbfA,7249
+aiosqlite/tests/smoke.py,sha256=k5mp4AOHheOO6wKL_bgdH1fenY6-ve6aew19ifmcIWA,19851

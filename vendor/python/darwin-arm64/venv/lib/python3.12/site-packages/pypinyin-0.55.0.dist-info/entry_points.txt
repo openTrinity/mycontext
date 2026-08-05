@@ -1,0 +1,5 @@
+[console_scripts]
+pypinyin = pypinyin.__main__:main
+
+[pyinstaller40]
+hook-dirs = pypinyin.__pyinstaller:get_hook_dirs

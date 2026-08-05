@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": ".tsbuild",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../kernel" },
+    { "path": "../store" },
+    { "path": "../runtime-env" },
+    { "path": "../retrieval" }
+  ]
+}

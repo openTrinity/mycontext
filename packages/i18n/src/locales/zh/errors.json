@@ -1,0 +1,67 @@
+{
+  "auth": {
+    "invalidEmail": "邮箱格式不正确",
+    "weakPassword": "口令至少需要 {{min}} 位",
+    "emailTaken": "该邮箱已注册",
+    "invalidCredentials": "邮箱或口令不正确"
+  },
+  "channel": {
+    "unknown": "未知渠道：{{id}}",
+    "unsupported": "该渠道尚未开放",
+    "authInProgress": "该渠道正在授权中",
+    "authFailed": "授权失败：{{detail}}",
+    "authNotDetected": "授权流程结束但未检测到有效登录态，请重试"
+  },
+  "process": {
+    "spawnFailed": "无法启动所需的程序",
+    "failed": "程序执行失败：{{detail}}",
+    "timeout": "操作超时（{{ms}} 毫秒）已终止",
+    "cancelled": "操作已取消",
+    "outputLimit": "程序输出过多，已终止"
+  },
+  "runtime": {
+    "binaryMissing": "缺少预置程序 {{file}}。期望位置：{{path}}，请运行 {{command}} 准备。",
+    "binaryNotExecutable": "无法为 {{file}} 设置可执行权限（{{path}}）"
+  },
+  "db": {
+    "unavailable": "无法打开数据库：{{detail}}",
+    "migrationFailed": "数据库升级失败：{{detail}}",
+    "migrationChanged": "迁移 v{{version}}（{{name}}）与已应用的版本不一致，已发布的迁移不可修改"
+  },
+  "config": {
+    "invalid": "配置校验失败：{{detail}}"
+  },
+  "ipc": {
+    "badRequest": "请求参数不合法"
+  },
+  "byCode": {
+    "CONFIG_INVALID": "配置有误，请检查环境变量或 .env",
+    "DB_MIGRATION_FAILED": "数据库升级失败",
+    "DB_UNAVAILABLE": "数据库不可用",
+    "AUTH_EMAIL_TAKEN": "该邮箱已注册",
+    "AUTH_INVALID_CREDENTIALS": "邮箱或口令不正确",
+    "AUTH_WEAK_PASSWORD": "口令强度不足",
+    "AUTH_INVALID_EMAIL": "邮箱格式不正确",
+    "AUTH_NOT_SIGNED_IN": "请先登录",
+    "IPC_BAD_REQUEST": "请求参数不合法",
+    "RUNTIME_BINARY_MISSING": "缺少必需的预置程序",
+    "PROCESS_FAILED": "外部程序执行失败",
+    "PROCESS_TIMEOUT": "外部程序超时",
+    "PROCESS_CANCELLED": "操作已取消",
+    "CHANNEL_UNKNOWN": "未知渠道",
+    "CHANNEL_AUTH_IN_PROGRESS": "该渠道正在授权中",
+    "CHANNEL_AUTH_FAILED": "渠道授权失败",
+    "CHANNEL_UNSUPPORTED": "该渠道尚未开放",
+    "SELF_IDENTITY_AMBIGUOUS": "无法唯一确定你的身份，请手动确认后再继续",
+    "SELF_IDENTITY_CONFLICT": "这个账号已绑定另一个身份（组织或工号不同）。换身份请新建一个账号，或用原身份重新授权。",
+    "PARSE_FAILED": "外部数据格式无法解析",
+    "SESSION_EXPIRED": "登录已过期，请重新授权",
+    "PERMISSION_REQUIRED": "需要先在来源应用中确认授权",
+    "GRANT_REVOKED": "授权已被撤销，请重新授权",
+    "RESOURCE_FORBIDDEN": "该会话被设为保密，无法读取其消息",
+    "FORBIDDEN": "该操作不被允许",
+    "FTS_QUERY_INVALID": "搜索条件无法处理，请换个说法试试",
+    "DISTILL_NO_EVIDENCE": "该结论没有原文依据，已拒绝写入画像",
+    "INTERNAL": "出现了未预期的问题"
+  }
+}

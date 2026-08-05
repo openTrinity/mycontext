@@ -1,0 +1,33 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@mycontext/kernel": ["../packages/kernel/src/index.ts"],
+      "@mycontext/ipc-contract": ["../packages/ipc-contract/src/index.ts"],
+      "@mycontext/store": ["../packages/store/src/index.ts"],
+      "@mycontext/design": ["../packages/design/src/index.ts"],
+      "@mycontext/i18n": ["../packages/i18n/src/index.ts"],
+      "@main/*": ["../apps/desktop/src/main/*"],
+      "@renderer/*": ["../apps/desktop/src/renderer/*"],
+      "@mycontext/channels": ["../packages/channels/src/index.ts"],
+      "@mycontext/runtime-env": ["../packages/runtime-env/src/index.ts"],
+      "@mycontext/retrieval": ["../packages/retrieval/src/index.ts"],
+      "@mycontext/ingest": ["../packages/ingest/src/index.ts"],
+      "@mycontext/knowledge-feed": ["../packages/knowledge-feed/src/index.ts"],
+      "@mycontext/agent-runtime": ["../packages/agent-runtime/src/index.ts"],
+      "@mycontext/distill": ["../packages/distill/src/index.ts"],
+      "@mycontext/llm": ["../packages/llm/src/index.ts"],
+      "@mycontext/persona": ["../packages/persona/src/index.ts"],
+      "@tanstack/react-query": ["../apps/desktop/node_modules/@tanstack/react-query"],
+      "@dicebear/core": ["../packages/design/node_modules/@dicebear/core"],
+      "@dicebear/notionists": ["../packages/design/node_modules/@dicebear/notionists"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx"]
+}

@@ -1,0 +1,849 @@
+/**
+ * ChannelAuthPanel — 渠道授权卡片。
+ *
+ * Onboarding 与设置页共用：两处的信息与操作完全一致，分别实现必然漂移。
+ * 差异只由 variant 控制——Onboarding 用居中的「连接关系」大图（首次引导需要
+ * 讲清楚「谁连到谁」），设置页用紧凑的行式布局（已经知道背景，只关心状态与操作）。
+ *
+ * 视觉语言对齐参考设计系统的连接器卡片：
+ * 双图标 + 中间状态连线、填充块承载账号信息（带状态圆点）、
+ * 未连接时用图标 + 标题 + 说明的信息块讲清授权范围。
+ */
+import { Avatar, Button, DingTalkIcon, Panel, Tooltip, cn } from "@mycontext/design"
+import { REFRESH_EXPIRY_WARNING_DAYS } from "@mycontext/ipc-contract"
+import type { AuthProgress, AuthStatus, ChannelSummary } from "@mycontext/ipc-contract"
+import { useState } from "react"
+import type { ComponentType } from "react"
+import { Trans } from "react-i18next"
+import {
+  useAdoptSession,
+  useAdoptableSession,
+  useAuthProgress,
+  useBootstrapState,
+  useCancelChannelAuth,
+  useSelfIdentity,
+  useStartChannelAuth,
+} from "../../lib/queries.js"
+import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
+import { useErrorText } from "../../lib/use-error-text.js"
+import { StepSection } from "../onboarding/step-section.js"
+import { DwsSourceDisclosure } from "./dws-source-disclosure.js"
+import {
+  AppIcon,
+  CheckCircleIcon,
+  DINGTALK_BRAND,
+  ExchangeIcon,
+  KeyIcon,
+  ShieldIcon,
+  SpinnerIcon,
+  ToolsIcon,
+} from "./channel-icons.js"
+
+/**
+ * 渠道 id → 官方标识组件。
+ *
+ * 放在这里而不是渠道插件里：插件跑在主进程，不能引 React 组件。
+ * 没有官方标识的渠道不在表里，由 ChannelBadge 走字母兜底。
+ */
+const BRAND_ICONS: Record<string, ComponentType<{ className?: string }> | undefined> = {
+  dingtalk: DingTalkIcon,
+}
+
+function formatTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/** 状态文案的 i18n key。三个状态都要有，缺一个界面上就是原样的 key。 */
+const STATE_LABEL_KEY: Record<AuthStatus["state"], string> = {
+  authorized: "channels:state.authorized",
+  expired: "channels:state.expired",
+  unauthorized: "channels:state.unauthorized",
+}
+
+const STATE_STYLE: Record<AuthStatus["state"], string> = {
+  authorized: "bg-[var(--status-fill-success-container)] text-[var(--status-success)]",
+  expired: "bg-[var(--status-fill-warning-container)] text-[var(--status-warning)]",
+  unauthorized: "bg-[var(--bg-card-z0)] text-[var(--text-base-tertiary)]",
+}
+
+export interface ChannelAuthPanelProps {
+  channel: ChannelSummary
+  /** onboarding：居中大图引导；settings：紧凑行式 */
+  variant?: "onboarding" | "settings"
+}
+
+export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthPanelProps) {
+  const { t } = useDynamicTranslation("channels")
+  const errorText = useErrorText()
+  const start = useStartChannelAuth()
+  const cancel = useCancelChannelAuth()
+  const [progress, setProgress] = useState<AuthProgress | null>(null)
+  /**
+   * 授权 URL 与授权码单独留存，不从「最后一个进度事件」推导。
+   *
+   * dws 会先打印 URL/授权码、随后持续打印「等待授权中」，
+   * 若只看最新事件，这些用户真正需要的信息会被 waiting 冲掉——
+   * 而它们恰恰是浏览器没自动打开时的唯一兜底。
+   */
+  const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined)
+  const [deviceCode, setDeviceCode] = useState<
+    Extract<AuthProgress, { phase: "device-code" }> | undefined
+  >(undefined)
+
+  useAuthProgress(channel.id, (next) => {
+    setProgress(next)
+    if (next.phase === "browser-opened") setBrowserUrl(next.url)
+    if (next.phase === "device-code") setDeviceCode(next)
+  })
+
+  const running = start.isPending
+  const status = channel.status
+  const authorized = status.state === "authorized"
+
+  /**
+   * 渠道侧的昵称（钉钉叫花名）。
+   *
+   * 只在已授权时查 —— 未授权时那一行必然不存在，白发一次 IPC。
+   * 拿不到就不显示（`readSelf` 在还没解析身份时返回 null，那是正常状态）。
+   *
+   * ★ 用 `useSelfIdentity`（query）而不是 `useResolveSelf`（mutation）：
+   * 后者每次都真调渠道并可能抛歧义错误 —— 见 queries.ts 里的注释。
+   */
+  const selfIdentity = useSelfIdentity(authorized)
+
+  /**
+   * ★★ 这个**账号**自己连好了吗 —— 与「渠道 authorized」是两件事。
+   *
+   * ## 为什么需要比 `authorized` 更严的判据
+   *
+   * dws 的登录态按**系统用户**共享（token 密钥在 Keychain，`DWS_CONFIG_DIR`
+   * 隔离不了它 —— 见 `plugins/dingtalk/auth.ts` 文件头）。所以 `authorized`
+   * 回答的是「**这台电脑**登录过钉钉吗」，而不是「**这个账号**连了吗」。
+   *
+   * 后果（实测两个真实形态）：新注册的账号一进引导页就看到「已连接钉钉·某某」，
+   * 合理反应是"那我不用管了，下一步" —— 于是他从不授权，而这个账号的
+   * 身份行、头像、显示名、采集范围全都跟着**上一个账号**或某个**过期
+   * profile** 走。`@222` 那个账号就是：身份表 0 行、accounts 两列全 NULL，
+   * 而 messages 已 49 条 —— `is_self` 全 NULL，蒸馏拒掉全部语料而进度页显示"完成"。
+   *
+   * 引导页的完成门本来就用的是按账号的信号（`selfConfirmed` 读 vault 里的
+   * `confirmed_at`），所以它没被这个假象骗到。**骗到的是界面**：卡片显示
+   * 「已连接」，用户没有任何理由去点授权。这里把那个表达修正过来。
+   *
+   * ## ★ 判据是 `confirmed` 而不只是"有身份行"
+   *
+   * 同名多 ID 的歧义情形下身份行存在、但 `confirmed_at` 仍是 null
+   * （主进程不替用户猜）。那时 `is_self` 全表为空、蒸馏一条语料都拿不到，
+   * 所以同样**不算**"这个账号连好了" —— 与完成门的判据保持一致。
+   *
+   * `undefined`（还在查）按"未连接"处理会让已连接的账号闪一下"去授权"，
+   * 所以显式要求 `=== true`：查完之前两个分支都不进（见下面 `pending`）。
+   */
+  const accountConnected = authorized && selfIdentity.data?.confirmed === true
+  /**
+   * 身份还在查 —— 此时**不要**下结论。
+   *
+   * 不判这个的话：已连接的账号在首帧会显示「授权钉钉」，200ms 后变回
+   * 「已连接」。那种一闪而过的状态比慢 200ms 更让人困惑，
+   * 而且会让人以为自己的授权掉了。
+   */
+  const identityPending = authorized && selfIdentity.data === undefined
+
+  /**
+   * 与实名不同才显示，否则会得到"王强（王强）"。
+   *
+   * `displayNames` 是数组（一人可能多个名字），取第一个 ——
+   * 它是渠道返回的主显示名。
+   */
+  const channelNick = (() => {
+    if (!authorized) return null
+    const nick = selfIdentity.data?.displayNames[0]
+    if (nick === undefined || nick === "" || nick === status.userName) return null
+    return nick
+  })()
+
+  /**
+   * ★★ 身份错位：**渠道当前用的组织** ≠ **这个账号绑定的组织**。
+   *
+   * ## 为什么必须显式告警（这是个隐私问题，不只是显示不准）
+   *
+   * dws 的会话列表、消息采集全都按它**当前生效的 profile** 来答，而那个
+   * profile 由 `primaryProfile` 决定。实测过一次真实错位：用户在应用里授权到
+   * 组织 A，token 也写进去了（`token.json` 的 updated_at 就是那一刻），
+   * 但 `primaryProfile` 仍指着组织 B（且 B 已过期）—— 于是：
+   *
+   * · 引导页「学习范围」列出的单聊是**组织 B** 的联系人（实测 43 个），
+   *   而 vault 身份行绑的是组织 A（库里只有 19 个单聊）；
+   * · 用户授权的是 A，应用却在按 B 列会话 —— 这是**越权读取面**，
+   *   与 CLAUDE.md 第 5 节「严格遵守用户选的范围」是同一类问题。
+   *
+   * ## 为什么只能告警，不能自动修
+   *
+   * 修它需要让 dws 把 primary 切到 A，而实测**每一种** `--profile` 形式
+   * （`corpId:userId` / `corpId` / `corpName` / `corpName:userName`）都报
+   * `organization … not found`，`profile switch --dry-run` 也一样 ——
+   * 因为 `dws profile list` 只认 1 个槽位，而 `profiles.json` 里记了 3 个。
+   * 那是 dws 侧两份记录不一致，应用这侧无法寻址到另外两个。
+   *
+   * 所以这里的目标是把一个**静默**的错位变成**可见**的：告诉用户是哪两个
+   * 组织、并指出重新授权是唯一出路。
+   *
+   * ★ 比对用 `corpId` 而不是 `corpName`（后者是显示名，写法可能变）。
+   * 两侧任一为空就不判 —— 缺值时报警只会制造假阳性。
+   */
+  const identityMismatch = (() => {
+    if (!authorized) return null
+    const boundCorpId = selfIdentity.data?.corpId
+    if (boundCorpId === undefined || boundCorpId === null || boundCorpId === "") return null
+    if (boundCorpId === status.corpId) return null
+    return {
+      channelCorp: status.corpName,
+      boundCorp: selfIdentity.data?.corpName ?? boundCorpId,
+    }
+  })()
+
+  /**
+   * 本机有一份**可采纳**的登录态（渠道说已授权，但这个账号还没身份行）。
+   *
+   * ## ★ 这个状态意味着什么
+   *
+   * dws 的登录态按**系统用户**共享（token 密钥在 Keychain，`DWS_CONFIG_DIR`
+   * 隔离不了它 —— 见 plugins/dingtalk/auth.ts 文件头）。所以新注册一个应用
+   * 账号进来就是"已连接"，而这个账号自己的身份/头像/显示名都还没落库。
+   *
+   * ★ **不自动采纳** —— 给一个写明组织与账号的按钮，由用户决定。
+   * 自动采纳会替他选定身份，而他之后真去授权换组织时反被身份守卫拦住
+   * （`SELF_IDENTITY_CONFLICT`）—— 那个冲突是自动补跑自己制造的。
+   * 完整理由见主进程 `adoptExistingSession` 的注释。
+   *
+   * 只在已授权时查：未授权时答案必然是 null，而这个查询会跑一次
+   * `auth status`（子进程）。
+   */
+  const adoptable = useAdoptableSession(authorized)
+  const adopt = useAdoptSession()
+
+  /**
+   * 本人头像 —— 授权后画在连接图右侧（见 `ConnectionGraph`）。
+   *
+   * 取账号里那份而不是重新去渠道拿：`startup.ts` 的 `onAuthorized` 已经
+   * 在身份确认后自动取过一次并写进账号了（遵守 manual 优先），所以这里
+   * **只是读**。拿不到时传 null，`Avatar` 自己退回首字母。
+   */
+  const bootstrap = useBootstrapState()
+  const selfAvatar = bootstrap.data?.session?.avatarUrl ?? null
+
+  // 进度事件里的失败带 i18n key 与原始细节；抛出来的错误走 useErrorText。
+  const failure =
+    progress?.phase === "failed"
+      ? t(progress.messageKey, { detail: progress.detail ?? "" })
+      : start.error !== null
+        ? errorText(start.error)
+        : undefined
+
+  const begin = (mode: "loopback" | "device") => {
+    setProgress(null)
+    setBrowserUrl(undefined)
+    setDeviceCode(undefined)
+    start.reset()
+    start.mutate({ channelId: channel.id, mode })
+  }
+
+  // 未开放的渠道：只展示能力预告，不给任何操作入口
+  if (!channel.available) {
+    return (
+      <Panel className="flex items-center gap-3 opacity-70">
+        <ChannelBadge channelId={channel.id} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="typography-body-base-500 text-[var(--text-base-primary)]">
+              {t(channel.labelKey)}
+            </span>
+            <StateTag available={false} state={status.state} />
+          </div>
+          <p className="typography-caption-400 mt-0.5 text-[var(--text-base-tertiary)]">
+            {t(channel.descriptionKey)}
+          </p>
+        </div>
+      </Panel>
+    )
+  }
+
+  const actions = (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button size="md" loading={running} onClick={() => begin("loopback")}>
+        {/*
+          ★ 「重新授权」只在**这个账号**真的连好时才说得通。
+          机器级登录态下（authorized 但账号没连）说"重新"是误导 ——
+          用户会以为已经连过一次了，而实际上这个账号从没授权。
+        */}
+        {t(accountConnected ? "actions.reauthorize" : "actions.start")}
+      </Button>
+      <Tooltip content={t("actions.useCodeHint")} placement="top">
+        <Button size="md" variant="secondary" disabled={running} onClick={() => begin("device")}>
+          {t("actions.useCode")}
+        </Button>
+      </Tooltip>
+    </div>
+  )
+
+  const body = (
+    <>
+      {authorized ? (
+        <AccountBlock
+          status={status}
+          adoptable={adoptable.data ?? null}
+          adopting={adopt.isPending}
+          onAdopt={() => adopt.mutate()}
+        />
+      ) : (
+        <div className="flex flex-col gap-0.5">
+          <InfoRow
+            icon={<ToolsIcon className="size-4" />}
+            title={t("scope.readTitle")}
+            description={t("scope.readDescription")}
+          />
+          <InfoRow
+            icon={<ShieldIcon className="size-4" />}
+            title={t("scope.noSpeakTitle")}
+            description={t("scope.noSpeakDescription")}
+          />
+          <InfoRow
+            icon={<KeyIcon className="size-4" />}
+            title={t("scope.credentialsTitle")}
+            description={t("scope.credentialsDescription")}
+          />
+        </div>
+      )}
+
+      {/*
+        ★ 「使用自有 dws」：授权与否**都**显示（仅钉钉，dws 是它的 CLI）。
+
+        这里曾经嵌在上面那个三元的 else 分支里，理由写的是"授权走不通是唯一
+        需要换 dws 的时刻"。那个前提在共享登录态下不成立：dws 的 token 按
+        **系统用户**存（见 plugins/dingtalk/auth.ts 文件头），所以新注册一个
+        应用账号进来**就是**已授权 —— 于是"已连上但想换成闭源版"的人
+        看不到任何入口，而那恰恰是内部同学的常规路径，不是异常。
+
+        隐蔽性由组件自己保证（默认折叠 + 平淡标题 + 靠右），不需要再靠
+        "在某个状态下整块不渲染"来实现。
+      */}
+      {channel.id === "dingtalk" ? (
+        // 右下角：组件自己 items-end 靠右，这里只给一点上间距
+        <div className="mt-1">
+          <DwsSourceDisclosure />
+        </div>
+      ) : null}
+
+      {running ? (
+        <ProgressBlock
+          deviceCode={deviceCode}
+          browserUrl={browserUrl}
+          onCancel={() => cancel.mutate({ channelId: channel.id })}
+        />
+      ) : null}
+
+      {failure !== undefined && !running ? (
+        <p
+          role="alert"
+          className="typography-body-small-400 radius-md bg-[var(--status-fill-error-container)] px-3 py-2 text-[var(--status-error)]"
+        >
+          {failure}
+        </p>
+      ) : null}
+
+      {authorized && status.daysUntilRefreshExpiry <= REFRESH_EXPIRY_WARNING_DAYS ? (
+        <p className="typography-body-small-400 radius-md bg-[var(--status-fill-warning-container)] px-3 py-2 text-[var(--status-warning)]">
+          {t("settings.expiryWarning", { days: status.daysUntilRefreshExpiry })}
+        </p>
+      ) : null}
+
+      {/*
+        ★★ 身份错位告警 —— 用 error 而不是 warning。
+
+        它比"凭证快过期"严重：那个是**将来**会失效，而这个是**现在**正在
+        按另一个组织的身份读数据（会话列表、采集范围都跟着错）。
+        用户授权了 A 却在看 B 的会话，这是越权读取面，必须显眼。
+
+        放在过期提醒之后：两条可能同时出现（错位到的那个 profile 恰好也快过期，
+        实测就是这样），而"身份不对"比"快过期"更该先被处理。
+      */}
+      {identityMismatch === null ? null : (
+        <p
+          role="alert"
+          className="typography-body-small-400 radius-md bg-[var(--status-fill-error-container)] px-3 py-2 text-[var(--status-error)]"
+        >
+          {t("settings.identityMismatch", {
+            channelCorp: identityMismatch.channelCorp,
+            boundCorp: identityMismatch.boundCorp,
+          })}
+        </p>
+      )}
+    </>
+  )
+
+  if (variant === "onboarding") {
+    return (
+      <div className="flex flex-col gap-[var(--gap-section-md)]">
+        {/*
+          连接关系 + 结论，居中成一块"英雄区"。
+          它讲的是"谁连到了谁"，所以图与那句话必须在一起、居中。
+        */}
+        <div className="flex flex-col items-center gap-[var(--gap-component-md)] py-2">
+          <ConnectionGraph
+            channelId={channel.id}
+            /**
+             * ★ 连接图按**账号连了吗**画，而不是渠道 authorized。
+             *
+             * 机器级登录态下画成"已连上"是这个误导的视觉部分 —— 一个绿勾
+             * 比任何文案都更让人相信"不用管了"。查身份期间（identityPending）
+             * 也当已连接画，避免闪一下断开。
+             */
+            authorized={accountConnected || identityPending}
+            running={running}
+            peerName={accountConnected ? status.userName : null}
+            peerAvatar={selfAvatar}
+          />
+          <div className="flex flex-col items-center gap-1 text-center">
+            <h2 className="typography-title-base-600 text-[var(--text-base-primary)]">
+              {t(
+                accountConnected || identityPending
+                  ? "onboarding.connectedTitle"
+                  : "onboarding.connectTitle",
+                { channel: t(channel.labelKey) },
+              )}
+            </h2>
+            {/*
+              ★ 授权后这里显示**身份**（谁），未授权时显示渠道能做什么。
+              授权成功后再念一遍"后续采集都基于这个授权"是废话 ——
+              用户刚点完那个按钮，他要确认的是连上的是不是自己。
+              花名与实名相同时不重复显示，否则会得到"高鹏（高鹏）"。
+
+              ★★ 「渠道 authorized 但这个账号没连」时**不显示身份** ——
+              那个身份属于本机上另一个账号（或一个过期 profile），
+              把它当成"你的"显示出来正是这个误导的核心。改为说清
+              "本机已有登录态，但要为当前账号确认一次"。
+            */}
+            <p className="typography-body-base-400 max-w-[420px] text-[var(--text-base-secondary)]">
+              {accountConnected
+                ? channelNick === null
+                  ? `${status.corpName} · ${status.userName}`
+                  : `${status.corpName} · ${status.userName}（${channelNick}）`
+                : authorized && !identityPending
+                  ? t("onboarding.machineSessionHint")
+                  : t(channel.descriptionKey)}
+            </p>
+          </div>
+          <div className="flex justify-center">{actions}</div>
+        </div>
+
+        {/*
+          ★ 详情收进一个**带标题**的分区。
+          原来这三行凭证信息是个没有标题的灰框，读起来像报错。
+          未授权时这里是授权范围说明（读什么、不发言、凭证存哪），
+          那同样是"细则"而不是"结论"，所以共用这一个分区。
+        */}
+        <StepSection
+          title={t(accountConnected ? "onboarding.accountTitle" : "onboarding.scopeTitle")}
+        >
+          {body}
+        </StepSection>
+      </div>
+    )
+  }
+
+  return (
+    <Panel className="flex flex-col gap-[var(--gap-section-sm)]">
+      <div className="flex items-center gap-3">
+        {/*
+          ★ 已授权时这个位置放**本人头像**（渠道图标降为右下角角标），
+          未授权时就是渠道图标本身。
+
+          ## 为什么这里该是头像
+
+          这一行回答的是「这个渠道连的是谁」。未授权时没有"谁"，
+          渠道图标是唯一能说的事；而授权之后**身份才是主信息** ——
+          旁边那行字已经在写 `corpName · userName（花名）`，
+          左边却还是一个渠道 logo，于是整行没有任何地方能让人
+          一眼确认"连上的是我自己"。
+
+          引导页那一步（`ConnectionGraph`）早就是这么画的 ——
+          设置页与它保持同一个形态，而不是各自一套。
+
+          ## 角标而不是替换
+
+          「某平台的某个人」两个信息都要在,而头像 + 右下角平台角标
+          正是 IM 里表达这件事的标准形态。渠道图标消失的话
+          多渠道并列时就分不清哪一行是哪个平台了。
+        */}
+        {/* ★ 头像/身份按**账号连了吗**显示 —— 见 accountConnected 的注释 */}
+        {accountConnected ? (
+          <span className="relative shrink-0">
+            <Avatar size="lg" name={status.userName ?? "?"} src={selfAvatar} />
+            {/*
+              ★ 这圈 ring 的圆角必须与 `ChannelBadge` **同半径**。
+
+              角标内部是 `radius-md`(8px)，而这里原来写的是 `--radius-sm`(6px)
+              —— ring 沿 6px 的轮廓走、里面的图标是 8px，于是四角各露出一小块
+              错位的缝隙。在暗色下那缝隙是深的，看起来就是"头像有黑边、没对齐"。
+
+              ring 的颜色取 `--bg-card-z1`：那正是 `Panel` 的 `raised` 底色
+              （实色 #262626 / #ffffff），所以这圈描边读起来是"角标把底色顶开了"
+              而不是一条灰线。用半透明 token 会透出下面的头像，那才真是脏边。
+            */}
+            <span className="absolute -bottom-0.5 -right-0.5 radius-md ring-2 ring-[var(--bg-card-z1)]">
+              <ChannelBadge channelId={channel.id} size="sm" />
+            </span>
+          </span>
+        ) : (
+          <ChannelBadge channelId={channel.id} />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="typography-body-base-500 text-[var(--text-base-primary)]">
+              {t(channel.labelKey)}
+            </span>
+            <StateTag available state={status.state} />
+          </div>
+          <p className="typography-caption-400 mt-0.5 truncate text-[var(--text-base-tertiary)]">
+            {accountConnected
+              ? // 有渠道昵称（花名）时带上：那才是同事们叫他的名字
+                channelNick === null
+                ? `${status.corpName} · ${status.userName}`
+                : `${status.corpName} · ${status.userName}（${channelNick}）`
+              : authorized && !identityPending
+                ? // 机器级登录态：不冒充成"你的"身份，说清要为当前账号确认一次
+                  t("onboarding.machineSessionHint")
+                : status.state === "expired"
+                  ? t("settings.expiredHint")
+                  : t(channel.descriptionKey)}
+          </p>
+        </div>
+        {actions}
+      </div>
+
+      <div className="h-px bg-[var(--border-divider-light)]" />
+      {body}
+      <SharedCredentialNote />
+    </Panel>
+  )
+}
+
+/**
+ * 双图标 + 中间状态连线：讲清「应用 ↔ 渠道」的连接关系。
+ *
+ * ## ★ 授权后右侧换成**这个人的头像**
+ *
+ * 授权前右侧是渠道图标（此时还没有身份，画头像无从画起）。
+ * 授权成功后就有身份了，而这时用户最需要确认的是「连上的是**谁**」——
+ * 一个渠道图标回答不了那个问题（他刚才扫的就是这个渠道的码）。
+ *
+ * 头像不用额外去取：`startup.ts` 的 `onAuthorized` 在身份确认后会自动
+ * 取一次本人头像并写进账号（遵守"manual 永不被覆盖"），所以
+ * `session.avatarUrl` 这时通常已经有值。取不到时 `Avatar` 自己退回
+ * 首字母色块 —— 那也是钉钉在没设头像时的做法，不是缺陷。
+ *
+ * 渠道图标降为**右下角角标**，而不是消失：「某平台的某个人」这两个信息
+ * 都要在，而角标正是 IM 里表达这件事的标准形态。
+ */
+function ConnectionGraph({
+  channelId,
+  authorized,
+  running,
+  peerName,
+  peerAvatar,
+}: {
+  channelId: string
+  authorized: boolean
+  running: boolean
+  /** 授权后的显示名（头像兜底要用它的首字母） */
+  peerName: string | null
+  peerAvatar: string | null
+}) {
+  return (
+    <div className="flex items-center">
+      <div className="flex size-12 shrink-0 items-center justify-center radius-xl border border-[var(--border-light)] bg-[var(--bg-card-z1)] text-[var(--text-accent-normal)]">
+        <AppIcon className="size-7" />
+      </div>
+      <div className="mx-1 flex flex-1 items-center">
+        <span className="h-px w-8 bg-[var(--border-light)]" />
+        {authorized ? (
+          <CheckCircleIcon className="mx-1.5 size-5 shrink-0 text-[var(--status-success)]" />
+        ) : running ? (
+          <SpinnerIcon className="mx-1.5 size-4 shrink-0 animate-spin text-[var(--text-base-tertiary)]" />
+        ) : (
+          <ExchangeIcon className="mx-1.5 size-4 shrink-0 text-[var(--text-base-tertiary)]" />
+        )}
+        <span className="h-px w-8 bg-[var(--border-light)]" />
+      </div>
+      {authorized ? (
+        /*
+          头像 + 渠道角标。`relative` 容器让角标能定位到右下角；
+          角标带一圈与页面同色的描边，让它从头像上"浮"起来而不是糊在一起。
+        */
+        <span className="relative shrink-0">
+          {/*
+            ★ **不要**在这里给 Avatar 加 ring。
+
+            原来有一圈 `ring-1 ring-[var(--border-divider-light)]`，那是一条
+            真实的灰线 —— 而 `Avatar` 现在明确不带边框了（见它的注释：
+            兜底色块本身是实色，再套描边等于加一道杂线）。从外面补回来
+            等于把那个决定又推翻一次，视觉上就是"头像有一圈不协调的边"。
+
+            照片的轮廓交给 squircle 的边界本身。
+          */}
+          <Avatar size="xl" name={peerName ?? "?"} src={peerAvatar} />
+          {/* ring 的圆角与角标同为 radius-md —— 不一致会在四角露出错位的缝隙 */}
+          <span className="absolute -bottom-0.5 -right-0.5 radius-md ring-2 ring-[var(--bg-card-z1)]">
+            <ChannelBadge channelId={channelId} size="sm" />
+          </span>
+        </span>
+      ) : (
+        <ChannelBadge channelId={channelId} size="lg" />
+      )}
+    </div>
+  )
+}
+
+/**
+ * 渠道标识徽标。
+ *
+ * 官方标识本身就是「满幅底色 + 白色图形」的方形图标，因此**直接铺满**整个方框，
+ * 不再套一层边框与白底——那会变成「框里的框」，而且官方蓝底被我们的白底一圈包住
+ * 反而更不像它自己。只有字母兜底才需要容器来撑出形状。
+ */
+function ChannelBadge({
+  channelId,
+  size = "md",
+}: {
+  channelId: string
+  /** `sm` 是给"叠在头像右下角当角标"用的（见 ConnectionGraph） */
+  size?: "sm" | "md" | "lg"
+}) {
+  const { t } = useDynamicTranslation("channels")
+  const box =
+    size === "lg" ? "size-12 radius-xl" : size === "sm" ? "size-5 radius-md" : "size-10 radius-lg"
+  const official = BRAND_ICONS[channelId]
+
+  if (official !== undefined) {
+    const Icon = official
+    // overflow-hidden 让方形标识跟着容器圆角被裁切。
+    return (
+      <div className={cn("shrink-0 overflow-hidden", box)}>
+        <Icon className="size-full" />
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className={cn(
+        "flex shrink-0 items-center justify-center border border-[var(--border-light)] bg-[var(--bg-card-z1)]",
+        box,
+      )}
+    >
+      {/*
+        没有官方标识时用渠道名首字兜底。取自译文而不是写死「飞」：
+        英文界面下会得到 "L"(ark)，不会突然冒出一个汉字。
+      */}
+      <span className="typography-body-base-500 text-[var(--text-base-tertiary)]">
+        {[...t(`${channelId}.label`)][0] ?? "?"}
+      </span>
+    </div>
+  )
+}
+
+function StateTag({ available, state }: { available: boolean; state: AuthStatus["state"] }) {
+  const { t } = useDynamicTranslation("channels")
+  return (
+    <span
+      className={cn(
+        "typography-caption-400 radius-sm px-1.5 py-0.5",
+        available ? STATE_STYLE[state] : "bg-[var(--bg-card-z0)] text-[var(--text-base-tertiary)]",
+      )}
+    >
+      {available ? t(STATE_LABEL_KEY[state]) : t("state.unavailable")}
+    </span>
+  )
+}
+
+/**
+ * 已连接账号的详情块（填充块 + 状态圆点）。
+ *
+ * `adoptable` 非 null = 渠道说已授权，但**这个应用账号**还没有身份行 ——
+ * 那份登录态是本机上别处（另一个账号、或用户自己的终端）建立的。
+ * 见下面那段的注释：为什么给按钮而不是自动采纳。
+ */
+function AccountBlock({
+  status,
+  adoptable = null,
+  adopting = false,
+  onAdopt,
+}: {
+  status: Extract<AuthStatus, { state: "authorized" }>
+  adoptable?: { corpName: string; userName: string } | null
+  adopting?: boolean
+  onAdopt?: () => void
+}) {
+  const { t } = useDynamicTranslation("channels")
+  return (
+    <div className="flex flex-col gap-1.5 radius-md bg-[var(--bg-card-z0)] px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="size-2 shrink-0 rounded-full bg-[var(--status-success)]" />
+        <span className="typography-body-small-400 truncate text-[var(--text-base-primary)]">
+          {status.corpName}
+        </span>
+      </div>
+      <dl className="flex flex-col gap-0.5 pl-4">
+        <Field
+          label={t("account.user")}
+          value={t("account.userValue", { name: status.userName, id: status.userId })}
+        />
+        <Field label={t("account.accessExpiresAt")} value={formatTime(status.accessExpiresAt)} />
+        <Field label={t("account.refreshExpiresAt")} value={formatTime(status.refreshExpiresAt)} />
+      </dl>
+      {/*
+        ★ 这份登录态**不是这个账号建立的** —— 说清，并给一个显式选择。
+
+        dws 的 token 按系统用户存（见 plugins/dingtalk/auth.ts 文件头），
+        所以新注册一个应用账号进来就直接是"已连接"，而上面那些字段
+        （组织、账号、有效期）看起来完全像是这个账号自己的属性。
+
+        ★★ 为什么是按钮而不是自动采纳：自动会**替用户选定身份**，而他之后
+        真去授权换另一个组织时反被身份守卫拦住（SELF_IDENTITY_CONFLICT）——
+        那个冲突是自动补跑自己制造的。而且用户可能压根还没决定要不要用这个
+        渠道（比如想先填自有 dws 路径再授权）。所以：写明是哪个组织、哪个人，
+        让他自己点。
+
+        措辞不提 Keychain / token 这些内部概念：用户需要知道的是
+        "这是本机已有的登录态，要不要用它"。
+      */}
+      {adoptable === null ? null : (
+        <div className="mt-1 flex flex-col gap-1.5 pl-4">
+          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("account.adoptableHint", {
+              corp: adoptable.corpName,
+              name: adoptable.userName,
+            })}
+          </p>
+          <div>
+            <Button size="sm" variant="secondary" loading={adopting} onClick={onAdopt}>
+              {t("account.adoptAction")}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="typography-caption-400 flex items-center gap-1.5">
+      <dt className="text-[var(--text-base-tertiary)]">{label}</dt>
+      <dd className="min-w-0 truncate text-[var(--text-base-secondary)]">{value}</dd>
+    </div>
+  )
+}
+
+function InfoRow({
+  icon,
+  title,
+  description,
+}: {
+  icon: React.ReactNode
+  title: string
+  description: string
+}) {
+  return (
+    <div className="flex gap-3 py-2">
+      <span className="flex size-8 shrink-0 items-center justify-center radius-md bg-[var(--bg-card-z0)] text-[var(--text-base-secondary)]">
+        {icon}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="typography-body-small-400 font-medium text-[var(--text-base-primary)]">
+          {title}
+        </p>
+        <p className="typography-caption-400 mt-0.5 leading-relaxed text-[var(--text-base-tertiary)]">
+          {description}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function ProgressBlock({
+  deviceCode,
+  browserUrl,
+  onCancel,
+}: {
+  deviceCode: Extract<AuthProgress, { phase: "device-code" }> | undefined
+  browserUrl: string | undefined
+  onCancel: () => void
+}) {
+  const { t } = useDynamicTranslation("channels")
+  const { t: tc } = useDynamicTranslation()
+  return (
+    <div className="flex flex-col gap-2 radius-md border border-[var(--border-light)] bg-[var(--bg-card-z0)] p-3">
+      <div className="flex items-center gap-2">
+        <SpinnerIcon className="size-4 animate-spin text-[var(--text-accent-normal)]" />
+        <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+          {t(deviceCode !== undefined ? "progress.enterCode" : "progress.browserOpened")}
+        </span>
+      </div>
+
+      {deviceCode !== undefined ? (
+        <>
+          <code
+            className="typography-title-base-600 select-all text-center font-mono-token tracking-[0.2em] text-[var(--text-base-primary)]"
+            style={{ color: DINGTALK_BRAND }}
+          >
+            {deviceCode.userCode}
+          </code>
+          <p className="typography-caption-400 break-all text-[var(--status-link)]">
+            {deviceCode.verifyUrl}
+          </p>
+        </>
+      ) : null}
+
+      {browserUrl !== undefined ? (
+        <p className="typography-caption-400 break-all text-[var(--text-base-tertiary)]">
+          {t("progress.manualUrl", { url: browserUrl })}
+        </p>
+      ) : null}
+
+      <div>
+        <Button size="sm" variant="secondary" onClick={onCancel}>
+          {tc("actions.cancel")}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 登录态共享说明。
+ *
+ * 实测确认：token 的加密密钥在系统钥匙串里按系统用户存一份，
+ * 应用与用户终端里的 dws 是同一份登录态，无法隔离。
+ * 因此不提供「退出授权」按钮——那会连带清掉用户终端的登录态。
+ */
+function SharedCredentialNote() {
+  /**
+   * 用 Trans 而不是 t()：文案里要嵌一个 <code> 标签。
+   * 命令名作为插值参数传进去，而不是把句子拆成前后两半再拼——
+   * 拼接假设了「命令在句中的位置」，而中英文的语序恰好不同。
+   */
+  return (
+    <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+      <Trans
+        ns="channels"
+        i18nKey="settings.sharedCredentialNote"
+        values={{ command: "dws auth logout" }}
+        components={{ 1: <code className="font-mono-token" /> }}
+      />
+    </p>
+  )
+}

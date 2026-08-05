@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+/* 设计系统 token：走包导出，避免相对路径随目录层级漂移 */
+@import "@mycontext/design/index.css";
+
+/* Tailwind v4：显式声明要扫描的源文件 */
+@source "../**/*.{ts,tsx}";
+@source "../../../../../packages/design/src/**/*.{ts,tsx}";
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  /* mac 下窗口透明 + vibrancy，背景色交给各区域自己控制 */
+  background-color: transparent;
+  color: var(--text-base-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 非 mac 平台没有 vibrancy，需要实底背景 */
+:root:not([data-os="darwin"]) body {
+  background-color: var(--bg-base-normal);
+}
+
+*:focus-visible {
+  outline: none;
+}
+
+/* 可拖拽标题栏区域：mac 无边框窗口靠它移动窗口 */
+[data-window-drag] {
+  -webkit-app-region: drag;
+}
+/*
+  拖拽区内的可交互元素必须排除，否则点不动。
+  额外包含 data-no-drag：hover 触发用的包裹元素（span）也必须退出拖拽区——
+  拖拽区内的鼠标事件由系统窗口管理器接管，mouseenter/mouseleave 会乱序抖动，
+  表现为侧栏浮层反复闪烁且点击无效。
+*/
+[data-window-drag] button,
+[data-window-drag] input,
+[data-window-drag] a,
+[data-window-drag] [role="separator"],
+[data-window-drag] [data-no-drag] {
+  -webkit-app-region: no-drag;
+}
+
+/* 尊重系统「减少动态效果」：关闭过渡与动画，但保留最终状态 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 滚动条：跟随主题，避免亮色滚动条出现在暗色面板上 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--theme-neutral-neutral-20);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--theme-neutral-neutral-30);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

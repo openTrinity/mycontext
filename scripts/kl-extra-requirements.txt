@@ -1,0 +1,83 @@
+# kl-server 运行所需、但上游 requirements.txt 里没有的包。
+#
+# ## 为什么会有这个文件
+#
+# `kl-graph/` 是**算法团队的代码**（我们不改它 —— 改了会在 `pnpm sync:kl-graph`
+# 合并上游时变成冲突，且他们看不到）。而它的
+# `requirements.txt` 漏了 `kl_server.py` 自己 import 的两个包：
+#
+#   kl_server.py:25  from fastapi import FastAPI, HTTPException
+#   （以及 ASGI 服务器 uvicorn，靠它把 FastAPI 跑起来）
+#
+# 只装上游的 requirements 会得到一个**装完了但起不来**的 venv：
+# `ModuleNotFoundError: No module named 'fastapi'`。真实踩过 —— 表现是
+# agent 能说话（模型走网关）但**查不了图谱**，而 kl-server 那侧的报错
+# 不在搜索的日志里，很难联系起来。
+#
+# 上游修好之后这个文件应该变空（保留文件本身，省掉一次脚本改动）。
+# 别在这里堆"我觉得可能要用"的包 —— 只放**实测缺失**的。
+#
+# ## ★ 这个文件是依赖指纹的一半，改它会在所有人机器上触发重装
+#
+# `depsFingerprint` = 上游 `requirements.txt` + 本文件的内容 hash
+# （见 `lib/python-env.mjs`）。指纹变了就走安装路径。所以「改一行注释」
+# 与「加一个包」的代价是一样的 —— 而入 git 的 venv 里那份 `pyvenv.cfg`
+# 在别人机器上是坏的，安装路径头一件事就是 relocate（那一行不能省，
+# 理由见那边注释）。
+#
+# 导入上游 7/31 那批 commit 时指纹真的变过一次：上游把
+# `litellm>=1.0` 改成 `litellm>=1.0,<1.90`，于是
+# `8a419cd58618dbe3` → `ec63482e1c708ac6`，实测**只**降级 litellm 一个包
+# （1.94.1 → 1.89.6，74 个依赖里其余不动）。
+#
+# 我们**跟随**这个上限而不是绕过它：上游那次改动的正文是
+# `litellm.disable_aiohttp_transport = True`（中文网关返回非 ASCII 响应头时
+# aiohttp 传输层会抛 ASCII 编码错），上限是他们为此加的保险。
+# 1.94.1 实测也能跑（那个属性还在），但「能跑」不是「他们验过」——
+# 而这套依赖出问题的形态是**建图跑到一半失败**，不是启动就报错。
+# 版本闸这种东西跟随上游的成本最低。
+
+fastapi>=0.110
+uvicorn>=0.29
+
+# ---------------------------------------------------------------
+# periodic（社区检测 / 实体消歧）—— 建图的必经路径
+# ---------------------------------------------------------------
+#
+# ## ★ 为什么这四个必须在这里，不能只写进文档
+#
+# 上游把它们放在 `pyproject.toml` 的 optional-dependencies（`periodic` 组），
+# 而 `requirements.txt` 里没有 —— 所以照 requirements 装出来的 venv 缺件。
+#
+# 但 periodic **不是可选的**：`kl ingest` 默认 `run_improve=True`
+# （见 kl_cli.py 的 `--no-improve` 是**关**它的开关），而 runner 的
+# step 3-6 全在必经路径上：
+#
+#   [3/6] entity disambiguation → pypinyin
+#   [4/6] entity communities    → leidenalg + python-igraph
+#   [5/6] fact topic clusters   → sklearn (HDBSCAN)
+#   [6/6] fact communities      → leidenalg
+#
+# 缺任何一个 → `建图失败：No module named 'xxx'`。而且**一次只暴露一个**
+# （import 分散在不同函数里），所以只补 leidenalg 的话下一轮报 sklearn。
+#
+# ## ★ 为什么这个失败比看起来严重
+#
+# 它发生在**图已经完整建好之后**（entities/facts/edges 都已落库），
+# 于是 `state: error` 让人以为整轮白跑了。实际丢的是社区检测 ——
+# 而社区检测会给 entities 表 `ADD COLUMN community_L{0..3}`，
+# kl-server 的 `/entity` 端点 SELECT 这几列，没跑过就 `no such column`
+# → 查询 500。也就是说：**不补这四个包，实体类查询根本用不了。**
+#
+# 真实踩过两次：第一次在我这台（手动 pip 补上，没进清单）；
+# 第二次在同事那台，clone 下来就缺 —— 因为 venv 入 git，
+# 他拿到的正是我那个"手动补过、但清单里没记"的环境的**清单版**。
+# 手动装一次而不进清单，等于只修了自己这一台。
+#
+# 体积：约 165MB 增量（scipy 97 + sklearn 46 + igraph 6 + leidenalg 5
+# + pypinyin 4 + narwhals 4）。venv 入 git，所以这是仓库体积的实际增长。
+# 这笔钱必须付：不付的代价是"图谱功能在别人机器上默认不可用"。
+leidenalg>=0.10
+python-igraph>=0.11
+scikit-learn>=1.4
+pypinyin>=0.51

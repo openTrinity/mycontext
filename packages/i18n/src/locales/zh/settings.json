@@ -1,0 +1,342 @@
+{
+  "nav": "设置分类",
+  "sections": {
+    "general": "通用",
+    "channels": "渠道",
+    "about": "关于",
+    "persona": "数字分身",
+    "onboarding": "引导流程",
+    "model": "模型"
+  },
+  "general": {
+    "title": "通用",
+    "description": "身份、界面语言与外观。",
+    "language": "界面语言",
+    "languageDescription": "跟随系统时按操作系统语言自动选择。",
+    "theme": "主题",
+    "accent": "主题色",
+    "accentDescription": "影响强调色、选中态与链接。",
+    "accents": {
+      "amber": "黄色",
+      "blue": "蓝色",
+      "violet": "紫色"
+    },
+    "quitConfirm": "退出前确认",
+    "quitConfirmDescription": "按 ⌘Q 时弹出提示，避免误退出中断在途工作。",
+    "quitConfirmToggle": "开启退出确认"
+  },
+  "channels": {
+    "title": "渠道",
+    "description": "连接 IM 渠道后，MyContext 才能读取会话并生成回复。授权以你本人的身份进行。",
+    "loading": "读取渠道状态…"
+  },
+  "about": {
+    "title": "关于",
+    "appVersion": "应用版本",
+    "electronVersion": "Electron",
+    "platform": "平台"
+  },
+  "status": {
+    "sections": {
+      "runtime": "运行环境",
+      "paths": "数据目录",
+      "database": "数据库（已应用迁移 v{{version}}）",
+      "config": "配置注入",
+      "dataPlane": "数据面",
+      "kl": "知识图谱（kl）"
+    },
+    "runtime": {
+      "appVersion": "应用版本",
+      "electronVersion": "Electron",
+      "nodeVersion": "Node",
+      "platform": "平台",
+      "packaged": "打包态",
+      "packagedYes": "是",
+      "packagedNo": "否（开发）",
+      "dotenvLoaded": ".env 已读取",
+      "no": "否"
+    },
+    "paths": {
+      "userData": "用户数据",
+      "database": "控制库",
+      "vaults": "账号数据目录",
+      "logs": "日志"
+    },
+    "database": {
+      "accountCount": "账号数量",
+      "migrations": "迁移记录",
+      "accountSummary": "{{accounts}} 个账号"
+    },
+    "config": {
+      "key": "配置项",
+      "envName": "环境变量",
+      "value": "值",
+      "source": "来源",
+      "configured": "已配置（值不显示）",
+      "notConfigured": "未配置",
+      "empty": "（空）",
+      "note": "优先级：内置默认 < .env 文件 < 环境变量。密钥类配置只显示是否已配置。",
+      "sources": {
+        "default": "内置默认",
+        "dotenv": ".env 文件",
+        "env": "环境变量"
+      },
+      "summary": "{{total}} 项，{{overridden}} 项被覆盖"
+    },
+    "dataPlane": {
+      "syncNow": "立即同步",
+      "messages": "已采集消息",
+      "conversations": "会话数",
+      "outboxHead": "变更流水位",
+      "ftsIndexed": "已建索引",
+      "probeInterval": "探针周期",
+      "vectors": "向量条数",
+      "dbSize": "库体积",
+      "rawRecords": "原生留存",
+      "selfIdentity": "本人身份",
+      "selfConfirmed": "已确认",
+      "selfUnconfirmed": "待确认",
+      "unjudgedHint": "有 {{count}} 条消息尚未判定归属，确认本人身份后会自动回填（未确认时不进行蒸馏）",
+      "staleConsumers": "以下消费者长时间未消费，其数据可能已不完整：{{list}}",
+      "eventStream": "实时事件",
+      "eventStreamState": {
+        "stopped": "未启用",
+        "starting": "连接中…",
+        "ready": "已连接·未投递",
+        "delivering": "投递中",
+        "backoff": "断线重连中"
+      },
+      "eventStreamHint": "长连接推送用于「@我的消息」秒级可见；它挂了或收不到也不影响完整性——消息仍由轮询保证",
+      "eventStreamIdleHint": "已连接但还没收到任何事件，正在靠轮询兜底（这个账号可能未开通个人事件订阅）",
+      "blocked": {
+        "session_expired": "渠道登录已过期，请重新授权后继续采集",
+        "permission_required": "缺少授权，请在来源应用中确认后继续",
+        "retry": "已处理，恢复采集"
+      },
+      "ftsCovered": "其中 {{indexed}} 条已能被搜到",
+      "eventCoverage": "事件覆盖面：当前 {{active}} 个订阅（{{global}} 个覆盖全部群的「@我」，{{perConversation}} 类需逐会话订阅）。没被订阅的会话由轮询保证，不会漏消息。"
+    },
+    "kl": {
+      "serverTitle": "图谱服务",
+      "dataTitle": "图谱数据",
+      "state": "状态",
+      "stateStopped": "未启动",
+      "stateStarting": "启动中…",
+      "stateReady": "就绪",
+      "stateFailed": "失败",
+      "stateBuilding": "建图占用中",
+      "port": "端口",
+      "egress": "出网",
+      "egressYes": "embedding/LLM 需连远端网关",
+      "egressNo": "无",
+      "start": "启动",
+      "stop": "停止",
+      "retry": "重试",
+      "build": "建图",
+      "building": "建图中…",
+      "buildHint": "从已采集消息抽实体建图，需连网关、耗时数分钟。期间检索照常可用。首次全量，之后增量（只抽新消息）。",
+      "buildDone": "建图完成：{{entities}} 实体 / {{facts}} 事实 / {{edges}} 边",
+      "buildFailed": "建图失败：{{reason}}",
+      "rebuild": "重建",
+      "rebuildHint": "删除现有图谱与抽取缓存后全量重抽，耗时与开销都高于增量建图。仅在图谱异常或需要彻底重来时使用。",
+      "buildProgress": "建图中 {{percent}}%"
+    }
+  },
+  "advancedAi": {
+    "title": "高级 AI 配置",
+    "warning": "这里的配置面向熟悉模型与 harness 的用户。改错了可能让 Agent 能力不可用，但**不会**影响发送门禁与自动回复策略（那两者由独立的策略层判定）。",
+    "provider": {
+      "title": "模型服务",
+      "baseUrl": "接口地址",
+      "apiKey": "API Key",
+      "apiKeyEmpty": "尚未配置",
+      "apiKeySet": "已配置（…{{tail}}）",
+      "apiKeyPlaceholder": "留空表示不修改"
+    },
+    "roles": {
+      "title": "模型角色映射",
+      "description": "每个角色可独立指定模型。留空则用默认值。",
+      "placeholder": "如 qwen3.7-plus"
+    },
+    "harness": {
+      "title": "Harness 选择",
+      "description": "每个模块可独立选择 Agent 运行方式。内置 harness 不起子进程，也是外部运行时缺失时的降级目标。",
+      "search": "搜索模块",
+      "persona": "数字分身模块"
+    },
+    "escape": {
+      "title": "逃生阀",
+      "description": "直接粘一份 harness 配置 JSON，覆盖上面所有推导。格式错误则不生效并在下方显示原因。",
+      "invalid": "JSON 格式错误，未生效：{{detail}}"
+    },
+    "save": "保存",
+    "saved": "已保存"
+  },
+  "title": "设置",
+  "groups": {
+    "app": "应用",
+    "other": "其他",
+    "persona": "数字分身"
+  },
+  "identity": {
+    "displayName": "显示名",
+    "displayNameHint": "侧栏与草稿里用这个名字；留空则用邮箱 @ 前的部分。",
+    "avatarUrl": "头像",
+    "avatarUrlHint": "填一个图片 URL；留空则显示名字首字。钉钉没有提供用户头像接口，所以不会自动填上。",
+    "save": "保存",
+    "clearAvatar": "清空头像",
+    "clearAvatarHint": "清空后显示名字首字，且之后渠道授权不会再自动替换",
+    "avatarHint": "上传一张本地图片，或从已连接的平台取。留空则显示名字首字。",
+    "avatarFromChannel": "从已连接的平台获取",
+    "avatarFetching": "获取中…",
+    "avatarMiss": {
+      "not_set": "你在那个平台上没有设置头像",
+      "not_reachable": "那个平台上取不到你的头像（这不是错误）",
+      "not_attempted": "还缺少查询所需的信息，稍后会自动再试",
+      "failed": "下载失败，可以再试一次",
+      "no_common_group": "没有找到共同群，取不到头像（这不是错误）",
+      "no_avatar_set": "钉钉上没有设置头像",
+      "download_failed": "下载失败，可以再试一次",
+      "identity_unresolved": "还没确认身份 —— 先在状态页确认一次",
+      "no_open_id": "身份信息里缺少可用于查询头像的 ID"
+    },
+    "avatarMissOther": "取不到头像",
+    "avatarSourceLocal": "用的是一张本地图片",
+    "avatarSourceRemote": "用的是一个网络图片",
+    "avatarAdvanced": "手动填图片地址"
+  },
+  "onboarding": {
+    "title": "引导流程",
+    "resetDistill": "重置蒸馏水位",
+    "resetDistillHint": "已启用的资料源从头再蒸一遍。已有结论不会被删（合并是幂等的），也不会产生重复。",
+    "description": "配到哪一步了，以及重走引导。",
+    "needsLogin": "登录后才能看到引导进度。"
+  },
+  "selfIdentity": {
+    "confirmedOk": "本人身份已确认，全部消息都有归属判定。",
+    "warning": "★ 本人身份还没确认 —— 蒸馏会拒掉**全部**语料（且不报错），画像出不来。先解析再确认。",
+    "partialWarning": "还有 {{count}} 条消息没有归属判定 —— 那些会被蒸馏守卫拒掉。再确认一次即可回填。",
+    "resolve": "解析身份",
+    "confirm": "确认并回填",
+    "confirmHint": "确认后回填全部历史消息的 is_self 与「@我」",
+    "userId": "工号",
+    "names": "显示名",
+    "corp": "组织",
+    "matched": "已识别",
+    "matchedValue": "{{count}} 条本人消息",
+    "backfilled": "已回填 {{messages}} 条消息、{{mentions}} 条「@我」。"
+  },
+  "persona": {
+    "description": "管控层的运行参数与自动发送白名单。",
+    "loading": "读取中…",
+    "limitsTitle": "运行参数",
+    "limitsDescription": "改完立刻生效，不需要重启。",
+    "limits": {
+      "maxResident": "常驻 agent 上限",
+      "maxConcurrentTurns": "同时处理几个会话",
+      "maxBatchSize": "一批最多带几条消息",
+      "idleEvictMinutes": "空闲多久回收（分钟）",
+      "maxDraftsPerConversation": "每会话草稿上限"
+    },
+    "limitHints": {
+      "maxResident": "每个会话一份上下文；超过上限时淘汰最久未用的",
+      "maxConcurrentTurns": "超出的排队 —— 并发太高会一起触发模型限流",
+      "maxBatchSize": "一个会话连发很多条时只带最新的这么多进上下文",
+      "idleEvictMinutes": "这么久没动静就把那个会话的 agent 释放掉",
+      "maxDraftsPerConversation": "同一会话最多留几条待审草稿；超出的按最旧的先裁（不再按时间自动过期）"
+    },
+    "workHours": {
+      "label": "工作时间",
+      "hint": "只在这个时间段内自动发送；其余时间一律只出草稿",
+      "from": "从",
+      "to": "到",
+      "day": {
+        "0": "周日",
+        "1": "周一",
+        "2": "周二",
+        "3": "周三",
+        "4": "周四",
+        "5": "周五",
+        "6": "周六"
+      },
+      "summary": "{{days}} {{from}}:00–{{to}}:00"
+    },
+    "rateLimit": {
+      "title": "自动发送频率上限",
+      "off": "不限",
+      "perConversation": "单会话（每分钟）",
+      "perConversationHint": "同一个会话 1 分钟内最多自动发几条；超过的降级成草稿。「不限」= 关掉这一关",
+      "global": "全局（每小时）",
+      "globalHint": "所有会话合计 1 小时内最多自动发几条；超过的降级成草稿。「不限」= 关掉这一关"
+    },
+    "figure": {
+      "title": "形象",
+      "description": "逐件挑选头发、眼睛、配饰 —— 也可以直接上传一张图片。",
+      "save": "保存形象",
+      "saved": "已保存",
+      "needsName": "先在引导里给数字分身起个名字",
+      "sideEffect": "保存会把引导里的「数字分身」这一步标记为已完成。",
+      "useGenerated": "改用生成的形象"
+    },
+    "autoSendTitle": "自动发送",
+    "autoSendHint": "什么时候、哪些会话允许以你的身份直接发出去",
+    "limitsSummary": "常驻 {{resident}} · 并发 {{concurrent}}"
+  },
+  "model": {
+    "description": "配置生成回复与整理知识用的模型网关。这里改的会全局生效。",
+    "provider": {
+      "baseUrl": "接口地址",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "留空表示不修改",
+      "modelMain": "主模型",
+      "embedModel": "向量模型"
+    },
+    "kl": {
+      "title": "知识库单独用别的模型",
+      "hint": "留空则和上面主配置一样。只有想给知识库单独指一个网关或模型时才填。",
+      "inherited": "跟随主配置"
+    },
+    "save": "保存",
+    "saveAndNext": "保存并继续",
+    "saved": "已保存",
+    "keyOn": "已配置",
+    "keyOff": "未配置",
+    "keyTail": "已配置 …{{tail}}",
+    "other": "其它…",
+    "probe": {
+      "test": "测试连接",
+      "testing": "正在测试…",
+      "ok": "连接正常 · {{count}} 个模型可用",
+      "fromGateway": "来自网关 · {{count}} 个",
+      "reason": {
+        "unauthorized": "密钥不对，换一把再试",
+        "unreachable": "连不上这个地址，检查一下",
+        "badResponse": "这个地址不是模型服务，检查一下",
+        "noKey": "先填 API Key"
+      },
+      "modelNotListed": "网关不认识这个模型名 —— 从上面挑一个，否则蒸馏/建图会报 model_not_found"
+    }
+  },
+  "ingestIntervals": {
+    "title": "采集周期",
+    "description": "各采集通道的轮询周期。保存后原地重挂采集，立即生效。",
+    "loading": "读取中…",
+    "fields": {
+      "probeBaseMs": "增量探测基准周期",
+      "probeMaxMs": "自适应退避上界",
+      "activeScanMs": "全量会话轮转扫描周期",
+      "pullMs": "全量分页兜底周期",
+      "minutesMs": "会议听记轮询周期",
+      "documentsMs": "文档轮询周期"
+    },
+    "hints": {
+      "probeBaseMs": "仅拉取会话级变更标记（未读计数与最后消息时间），单轮开销约 0.7s。这是基准周期而非实际周期：单轮耗时超过周期一半时自适应退避会自动降频，故观测值可能大于设定值。",
+      "probeMaxMs": "自适应退避的周期上界。到达该值后不再继续降频，转为在状态页告警 —— 无上界的退避会退化成「几小时探一次」。",
+      "activeScanMs": "按最近活跃时间降序遍历全部会话，与本地水位比对后仅对落后者发起定向补采。增量探测仅返回带未读标记的会话（实测覆盖率约 13%），此级补足其盲区。单轮固定开销为一次会话目录调用（带缓存）加一次聚合查询，与会话总数无关。",
+      "pullMs": "按时间窗对全部会话分页抽干，用于覆盖探测盲区（已读会话不出现在未读列表里）。单轮上限数百页且独占采集锁，周期过短会挤压发送与定向补采。",
+      "minutesMs": "该接口不支持时间过滤，每轮均为全量列举，单轮成本固定 —— 周期越短，无效开销越大。会议为稀疏事件，无需高频。",
+      "documentsMs": "单轮含知识库枚举、节点递归与正文补齐，开销显著高于消息通道。文档变更频率低且无秒级可见需求，低频即可。"
+    },
+    "note": "新消息的秒级可见性来自事件长连接与探测命中触发的定向补采，而非提高全量分页频率。"
+  }
+}

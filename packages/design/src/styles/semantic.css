@@ -1,0 +1,161 @@
+/**
+ * Semantic tokens — 组件唯一允许引用的一层。
+ *
+ * 命名沿用 bg / text / border / control / status 分组：
+ * 组件里写 var(--text-base-secondary) 而不是具体颜色，
+ * 因此主题切换只需在本文件补一组覆盖，不动任何组件。
+ */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /*
+   * 背景。
+   *
+   * ★ 亮色下侧栏要**明显**比内容区灰。
+   *
+   * 首版是 `#f6f6f6` 对 `#fcfcfc` —— 只差 6 个色阶，实测在多数显示器上
+   * 看起来"侧栏和内容一样白"，于是布局的左右分区完全靠那根 1px 分隔线撑，
+   * 而分隔线本身是 8% 黑（很淡）。结果是整屏没有层次。
+   *
+   * 现在拉到 `#f0f0ef`（约 12 个色阶差）并**略偏暖**：
+   * 纯灰在偏冷的屏幕上会显出蓝调，而内容区是纯白 —— 一冷一白同屏会脏。
+   * 暗色那侧不动：`#191919` 对 `#1f1f1f` 在暗背景上已经够分（暗部对比更敏感）。
+   */
+  --bg-base-normal: #fcfcfc;
+  --bg-base-material: rgba(252, 252, 252, 0.85);
+  --bg-sidebar-normal: #f0f0ef;
+  --bg-sidebar-material: rgba(240, 240, 239, 0.85);
+  --bg-card-z0: rgba(20, 20, 20, 0.04);
+  --bg-card-z1: #ffffff;
+  --bg-card-accent: var(--brand-brand-5);
+  --bg-pop: #ffffff;
+  --bg-page-mask: rgba(0, 0, 0, 0.2);
+  --bg-brand-panel: var(--brand-brand-100);
+
+  /* 文字 */
+  --text-base-primary: #141414;
+  --text-base-secondary: rgba(20, 20, 20, 0.65);
+  --text-base-tertiary: rgba(20, 20, 20, 0.35);
+  --text-base-disable: rgba(20, 20, 20, 0.25);
+  --text-inverted-primary: #ffffff;
+  --text-inverted-secondary: rgba(255, 255, 255, 0.8);
+  --text-accent-normal: var(--brand-brand-60);
+  --text-accent-hover: var(--brand-brand-70);
+  --text-status-error: var(--palette-red-50);
+
+  /* 描边 */
+  --border-medium: rgba(20, 20, 20, 0.15);
+  --border-light: rgba(20, 20, 20, 0.1);
+  --border-divider-light: rgba(20, 20, 20, 0.08);
+  --border-focus: var(--brand-brand-50);
+
+  /* 控件 */
+  --control-core-button-default: var(--brand-brand-50);
+  --control-core-button-hover: var(--brand-brand-60);
+  --control-core-button-active: var(--brand-brand-70);
+  --control-core-button-disabled: rgba(20, 20, 20, 0.07);
+  --control-ghost-button-default: rgba(20, 20, 20, 0.07);
+  --control-ghost-button-hover: rgba(20, 20, 20, 0.1);
+  --control-ghost-button-disabled: rgba(20, 20, 20, 0.04);
+  --control-input-bg: #ffffff;
+  --control-input-bg-disabled: rgba(20, 20, 20, 0.04);
+  /** 输入框获得焦点时的描边色。用 ring 而不是 border，避免盒模型变化导致内容跳 1px。 */
+  --control-input-border-focus: var(--brand-brand-40);
+
+  /*
+    容器上的叠加层：透明按钮的 hover / pressed / selected 反馈。
+    与 control-ghost-* 的区别是它更轻，用在「本来没有底色」的元素上
+    （顶栏图标按钮、导航条目），避免一 hover 就出现明显色块。
+  */
+  --overlay-on-container-hover: rgba(20, 20, 20, 0.04);
+  --overlay-on-container-pressed: rgba(20, 20, 20, 0.07);
+  --overlay-on-container-selected: rgba(20, 20, 20, 0.1);
+
+  /* 提示气泡：深底浅字，两种主题下都与背景形成足够对比 */
+  --bg-tooltip: rgba(38, 38, 38, 0.94);
+  --text-tooltip: rgba(255, 255, 255, 0.92);
+  --overlay-on-tooltip: rgba(255, 255, 255, 0.16);
+
+  /* 状态 */
+  --status-link: var(--palette-blue-50);
+  --status-success: var(--palette-green-50);
+  --status-warning: var(--palette-amber-50);
+  --status-error: var(--palette-red-50);
+  --status-fill-info-container: var(--palette-blue-10);
+  --status-fill-success-container: var(--palette-green-10);
+  --status-fill-warning-container: var(--palette-amber-10);
+  --status-fill-error-container: var(--palette-red-10);
+
+  /* 兼容层：便于按语义快速取色，值全部指向上面的语义 token */
+  --color-primary: var(--brand-brand-50);
+  --color-primary-hover: var(--brand-brand-60);
+  --color-text: var(--text-base-primary);
+  --color-text-secondary: var(--text-base-secondary);
+  --color-border: var(--border-medium);
+  --color-bg-container: var(--bg-card-z1);
+  --color-bg-layout: var(--bg-base-normal);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-base-normal: #1f1f1f;
+  --bg-base-material: rgba(31, 31, 31, 0.85);
+  --bg-sidebar-normal: #191919;
+  --bg-sidebar-material: rgba(25, 25, 25, 0.85);
+  --bg-card-z0: rgba(255, 255, 255, 0.06);
+  --bg-card-z1: #262626;
+  --bg-card-accent: var(--brand-brand-5);
+  --bg-pop: #2b2b2b;
+  --bg-page-mask: rgba(0, 0, 0, 0.5);
+  --bg-brand-panel: #0a1330;
+
+  --text-base-primary: #f7f7f7;
+  --text-base-secondary: rgba(255, 255, 255, 0.65);
+  --text-base-tertiary: rgba(255, 255, 255, 0.4);
+  --text-base-disable: rgba(255, 255, 255, 0.28);
+  --text-inverted-primary: #141414;
+  --text-inverted-secondary: rgba(20, 20, 20, 0.8);
+  --text-accent-normal: var(--brand-brand-40);
+  --text-accent-hover: #7aa3f8;
+  --text-status-error: #ff6a5e;
+
+  --border-medium: rgba(255, 255, 255, 0.17);
+  --border-light: rgba(255, 255, 255, 0.12);
+  --border-divider-light: rgba(255, 255, 255, 0.09);
+  --border-focus: var(--brand-brand-40);
+
+  --control-core-button-default: var(--brand-brand-50);
+  --control-core-button-hover: var(--brand-brand-40);
+  --control-core-button-active: var(--brand-brand-60);
+  --control-core-button-disabled: rgba(255, 255, 255, 0.09);
+  --control-ghost-button-default: rgba(255, 255, 255, 0.09);
+  --control-ghost-button-hover: rgba(255, 255, 255, 0.14);
+  --control-ghost-button-disabled: rgba(255, 255, 255, 0.06);
+  --control-input-bg: rgba(255, 255, 255, 0.06);
+  --control-input-bg-disabled: rgba(255, 255, 255, 0.03);
+  --control-input-border-focus: var(--brand-brand-40);
+
+  --overlay-on-container-hover: rgba(255, 255, 255, 0.06);
+  --overlay-on-container-pressed: rgba(255, 255, 255, 0.09);
+  --overlay-on-container-selected: rgba(255, 255, 255, 0.12);
+
+  --bg-tooltip: rgba(245, 245, 245, 0.96);
+  --text-tooltip: rgba(20, 20, 20, 0.92);
+  --overlay-on-tooltip: rgba(20, 20, 20, 0.12);
+
+  --status-link: #4da3ff;
+  --status-success: #41d871;
+  --status-warning: #f7bd0c;
+  --status-error: #ff6a5e;
+
+  --color-primary: var(--brand-brand-50);
+  --color-primary-hover: var(--brand-brand-40);
+  --color-text: var(--text-base-primary);
+  --color-text-secondary: var(--text-base-secondary);
+  --color-border: var(--border-medium);
+  --color-bg-container: var(--bg-card-z1);
+  --color-bg-layout: var(--bg-base-normal);
+}

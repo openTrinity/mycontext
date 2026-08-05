@@ -1,0 +1,150 @@
+{
+  "rulesVersion": "signals-v5",
+  "_comment": "LANGUAGE-INDEPENDENT rules only. Every lexical pattern lives in a locale pack under forge/locales/ — nothing in this file may contain a word in any human language. The model never free-judges at build time; it only reads what these rules measured.",
+  "_versioning": "Changing anything here changes rulesVersion and therefore every derived number. The effective version published in a skill is `rulesVersion+<localePack>@<packVersion>`, so a pack change invalidates derived numbers exactly like a change here does.",
+  "style": {
+    "lengthBuckets": {
+      "short": [
+        0,
+        15
+      ],
+      "medium": [
+        15,
+        40
+      ],
+      "long": [
+        40,
+        99999
+      ]
+    },
+    "_comment": "Codepoint counts. Deliberately not characters-per-word or sentences: chat messages in many languages have neither reliably, and the bucket only needs to separate a one-line reaction from a written-out explanation."
+  },
+  "responseGate": {
+    "_comment": "Timing and size thresholds for what counts as a reply. The lexical half of the gate (genuineAsk, chitchatReply) lives in the locale pack.",
+    "minReplyCodepoints": 4,
+    "contextTurnsBack": 4,
+    "replyWindowSeconds": 10800,
+    "_replyWindowNote": "Beyond this gap a message is no longer a reply to the line before it, just the next thing said in that thread.",
+    "silenceWindowSeconds": 86400,
+    "_silenceNote": "Silence only counts as a decision once this much later conversation activity proves the owner had the chance to answer. Without it, the unanswered tail of any corpus would read as deliberate silence."
+  },
+  "toneBands": {
+    "_comment": "Derived from measured interaction volume + mutual initiation, then owner-editable. The ladder is read from these keys in order, so a deployment may add or rename bands here without a code change; `S` is reserved as the forced-conservative band for sensitive roles and unresolved recipients.",
+    "_ladder": [
+      "A",
+      "B",
+      "C",
+      "D"
+    ],
+    "A": {
+      "minTotal": 200,
+      "minSelfShare": 0.25,
+      "label": "closest collaborator"
+    },
+    "B": {
+      "minTotal": 50,
+      "minSelfShare": 0.15,
+      "label": "trusted frequent"
+    },
+    "C": {
+      "minTotal": 12,
+      "minSelfShare": 0.05,
+      "label": "domain peer"
+    },
+    "D": {
+      "minTotal": 1,
+      "minSelfShare": 0.0,
+      "label": "sparse contact"
+    },
+    "groupOnlyCap": "C",
+    "_groupOnlyNote": "Someone known only from group chats cannot be measured for reciprocity, so volume alone must not promote them past this band. Being in a busy group with someone is not the same as being close to them."
+  },
+  "verification": {
+    "_comment": "A measured pattern is only promoted to a stable trait if it recurs enough, across enough days and scenes. Prevents 'anything a polite colleague does' from being published as personality.",
+    "_scopeNote": "Applies to the decision layer (per ask kind, per risk class) AND to per-slice style (per scene, per tone band) via analyze.evidence_strength. Both bars must clear: minSupport alone accepts one busy afternoon of an incident, and minDistinctDays alone accepts one message a day for four days. Neither is a habit.",
+    "minSupport": 8,
+    "minDistinctDays": 4,
+    "minScenes": 2,
+    "minShareForClaim": 0.15
+  },
+  "thresholds": {
+    "_comment": "Every behavioral cutoff the decision layer applies, in one place. These are policy, not measurement: each turns a measured share into a published rule. They are conservative by construction — being wrong about a commitment costs more than a missed reply — and they are versioned, so tightening one is reproducible rather than a local edit.",
+    "propensity": {
+      "_comment": "Turning a per-ask-kind reply rate into a default action. Rates are judged against the OWNER's own baseline, never absolute cutoffs: someone who answers 89% of everything and 55% of disagreements is telling you something real, which a fixed 'below 35% is quiet' rule would miss entirely.",
+      "notablyLowPoints": 15,
+      "notablyLowRatio": 0.67,
+      "_notablyLowNote": "Either test may fire, whichever is looser: at least this many points below baseline, or below this fraction of it.",
+      "handoffSharePct": 20,
+      "settleSharePct": 25,
+      "alwaysDraftKinds": [
+        "decision_request",
+        "approval_or_commit"
+      ],
+      "_alwaysDraftNote": "Some ask kinds ARE the gate: being asked to decide, approve or commit is never the persona's call, however reliably the owner answers it in person. A high reply rate there says 'they engage', not 'an agent may answer for them'."
+    },
+    "risk": {
+      "_comment": "Per risk class: did the owner settle these themselves, or route them away? Default is restrictive, and unknown always means never_settle — absence of evidence is not permission.",
+      "sometimesSettlesPct": 40
+    },
+    "autonomy": {
+      "_comment": "Who APPEARS consistently low-stakes. Clearing every bar makes someone a candidate the forge surfaces with its numbers; it never authorizes anything. Turning one on stays an explicit owner action.",
+      "minAnswerRatePct": 70,
+      "maxMedianLatencySeconds": 1800,
+      "maxSettleSharePct": 50,
+      "maxCandidates": 30
+    },
+    "escapeHatches": {
+      "_comment": "What makes one of the owner's real lines reusable as a shape. A long line carries situation-specific facts; a marker buried mid-sentence is not the sentence's move; multi-line text is a forwarded log.",
+      "quoteMaxLength": 40,
+      "markerMustStartWithin": 3,
+      "maxPerKind": 12,
+      "declineRepetitionCap": 3,
+      "declineInformativeLength": 6,
+      "_declineNote": "For declines, rank by repetition AND informativeness: the most frequent decline is usually a bare 'no', which teaches nothing, while a repeated line that gives the reason shows the actual pattern. Capping the weight of repetition is what lets the informative one win."
+    },
+    "replyWindow": {
+      "_comment": "The inbox's staleness cutoff, derived from the owner's own answered-ask latencies rather than a fixed default. Reply latency in chat is extremely front-loaded, and the distribution differs enough between people that any hardcoded value keeps items queued long after that particular person had, in practice, already decided not to answer.",
+      "basisPercentile": 0.99,
+      "percentileMultiplier": 2,
+      "longestMultiplier": 1.1,
+      "roundToMinutes": 15,
+      "minMinutes": 30,
+      "maxMinutes": 720,
+      "_clampNote": "Floored so a very fast replier does not get an aggressively short queue, capped so a slow one does not get an unbounded one.",
+      "noDataMinutes": 240
+    },
+    "freshness": {
+      "_comment": "How stale a near-realtime store may be and still be trusted for the pre-send freshness check. Only applies to sources declaring `recentReads` (an embedding application's own database) — a source with a real live tail asks the platform directly and needs no allowance, and a source with neither degrades visibly instead.",
+      "maxLagSeconds": 150,
+      "_lagNote": "The bound is the HOST's collection cycle, not a guess: the reference application pulls on a fixed 2-minute fallback regardless of whether its cheap probe fired, so a lag at or under that means the last cycle completed and what we are reading is what it found. 150s adds a margin because the cycle itself takes time — pinning this to exactly 120 would flag a healthy system on every slow window. Raising it past the host's actual cycle is what makes this dangerous: the check would pass while newer messages sit uncollected, and the agent would answer a question the other person has already withdrawn.",
+      "unknownLagIsStale": true,
+      "_unknownNote": "A store that cannot say how far behind it is counts as stale. Treating unknown as zero is the failure this whole flag exists to prevent — it is indistinguishable from 'perfectly current' at exactly the moment it matters, right before a message goes out that cannot be recalled."
+    },
+    "burst": {      "_comment": "When several consecutive incoming messages from one person count as ONE thing to answer. Chat splits a single thought across bubbles, so judging only the last bubble reads 'sign off on the contract amount / reply today / thanks' as 'thanks' — the risk words sit in a bubble the gate never looked at, and the reply becomes auto-sendable. The failure is one-directional (toward sending), which is why folding is only ever allowed to make a verdict stricter, never looser. How often it actually bites depends on the corpus; `forge report` states what this build measured rather than assuming a rate.",
+      "gapSeconds": 300,
+      "_gapNote": "Consecutive same-sender messages closer together than this are one unit. Wide enough for someone typing several lines, short enough that a new topic hours later is not glued onto the old one.",
+      "maxMessages": 12,
+      "_maxNote": "Bounds how much text one classification may cover, so a very chatty stretch cannot accumulate every risk class in the pack and make every reply draft-only for reasons nobody can trace.",
+      "bubbleGapSeconds": 180,
+      "_bubbleNote": "The same idea applied to the OWNER's own side: consecutive messages closer together than this are one reply sent as several bubbles. Shorter than gapSeconds because writing a follow-up bubble takes less time than a counterparty noticing and answering. Feeds the measured messages-per-reply figure, which is what stops a skill from asserting 'always reply once' or 'always split' — both are guesses, and the real rate differs per person and per tone band."
+    },
+    "people": {
+      "_comment": "Publication thresholds for the people table.",
+      "minMessagesToPublish": 5,
+      "maxPeoplePublished": 60
+    },
+    "scenes": {
+      "_comment": "When a per-scene measurement may be rendered at all. Whether it is narrated as a HABIT is a separate, stricter question answered by `verification` (minSupport + minDistinctDays), not here — see _evidenceNote.",
+      "minMessagesToRender": 3,
+      "_evidenceNote": "A scene above minMessagesToRender but below the `verification` bars is still rendered, and marked thin. Hiding it would be its own error: a reader who cannot see that a situation exists concludes it never happens, which is the 'unmeasured is not a measured zero' failure in the other direction. But rendering it unmarked is worse — a rare situation is exactly where an unattended agent has the least evidence and the most to lose, and per-scene numbers carry no sample size on their face.",
+      "laughterPer1kToMention": 0.5,
+      "examplesPerScene": 4
+    },
+    "styleNarration": {
+      "_comment": "Cutoffs for how length guidance is phrased. Below `veryShortCodepoints` the advice is 'one thought per message'; above `fullSentenceCodepoints' it is 'fuller sentences'. `meanSkewRatio` is when the mean is far enough above the median to be worth warning about, because a handful of pasted write-ups can pull a mean far above anything the person actually types.",
+      "veryShortCodepoints": 12,
+      "fullSentenceCodepoints": 25,
+      "meanSkewRatio": 1.8
+    }
+  }
+}

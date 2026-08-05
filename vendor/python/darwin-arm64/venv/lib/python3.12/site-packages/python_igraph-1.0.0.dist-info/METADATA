@@ -1,0 +1,73 @@
+Metadata-Version: 2.4
+Name: python-igraph
+Version: 1.0.0
+Summary: High performance graph data structures and algorithms (legacy package)
+Home-page: https://igraph.org/python
+Author: Tamas Nepusz
+Author-email: ntamas@gmail.com
+License: GNU General Public License (GPL)
+Project-URL: Bug Tracker, https://github.com/igraph/python-igraph/issues
+Project-URL: Changelog, https://github.com/igraph/python-igraph/blob/master/CHANGELOG.md
+Project-URL: CI, https://github.com/igraph/python-igraph/actions
+Project-URL: Documentation, https://igraph.org/python/doc
+Project-URL: Source Code, https://github.com/igraph/python-igraph
+Keywords: graph,network,mathematics,math,graph theory,discrete mathematics
+Platform: ALL
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: C
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Scientific/Engineering :: Information Analysis
+Classifier: Topic :: Scientific/Engineering :: Mathematics
+Classifier: Topic :: Scientific/Engineering :: Physics
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Requires-Python: >=3.6
+License-File: LICENSE
+Requires-Dist: igraph==1.0.0
+Provides-Extra: cairo
+Requires-Dist: cairocffi>=1.2.0; extra == "cairo"
+Provides-Extra: matplotlib
+Requires-Dist: matplotlib>=3.3.0; platform_python_implementation != "PyPy" and extra == "matplotlib"
+Provides-Extra: plotly
+Requires-Dist: plotly>=5.3.0; extra == "plotly"
+Provides-Extra: plotting
+Requires-Dist: cairocffi>=1.2.0; extra == "plotting"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: license-file
+Dynamic: platform
+Dynamic: project-url
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+Python interface to the igraph high performance graph
+library, primarily aimed at complex network research and analysis.
+
+**This package is deprecated; use the igraph package instead. This package will
+be kept in sync with igraph until Sep 1, 2022 and it will not receive any
+updates after Sep 1, 2022.**
+
+Graph plotting functionality is provided by the Cairo library, so make
+sure you install the Python bindings of Cairo if you want to generate
+publication-quality graph plots. You can try either `pycairo
+<http://cairographics.org/pycairo>`_ or `cairocffi <http://cairocffi.readthedocs.io>`_,
+``cairocffi`` is recommended because there were bug reports affecting igraph
+graph plots in Jupyter notebooks when using ``pycairo`` (but not with
+``cairocffi``).

@@ -1,0 +1,193 @@
+/**
+ * 字体与排版 token。
+ *
+ * 不打包字体二进制：用系统字体栈，保留 --font-* 变量作为将来接入自有字体的接入点。
+ * 中文优先落到系统的苹方 / 微软雅黑，避免中英混排时字重跳变。
+ */
+
+:root {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-body: var(--font-sans);
+}
+
+.font-body {
+  font-family: var(--font-body);
+}
+
+.font-mono-token {
+  font-family: var(--font-mono);
+}
+
+/* 排版组合类：与设计稿的 size/weight 组合一一对应，避免各处散写 text-[13px] */
+
+/*
+ * ── 数字（figure）两档 ─────────────────────────────────────
+ *
+ * 仪表盘的 KPI 与 hero 数字。它们**不是**标题，所以不进 title 那一族：
+ * 标题是"这一块讲什么"，而这两档是"这一块的那个值"——
+ * 前者要能被扫读跳过，后者是被扫读**找**的东西。
+ *
+ * ## ★ 三条共同性质（原来散写成裸 px 时全靠各处自己记）
+ *
+ * · `font-weight: 600` —— 数字比同字号的文字看起来轻，600 才配得上；
+ * · `line-height: 1` —— 大号数字下方不留行距，否则它与 hint 之间
+ *   会多出一段说不清的空白；
+ * · `letter-spacing: -0.01em` —— 大字号下默认字距偏松，数字会散开。
+ *
+ * ## 刻意**不加** tabular-nums
+ *
+ * 等宽数字是给**要对齐的列**用的（表格里上下对比）。独立的大号数字用
+ * 等宽会让 `1` 两侧出现空洞，读起来像缺了一位。dataviz 的
+ * `marks-and-anatomy.md` 也是这个结论。
+ */
+.typography-figure-large-600 {
+  font-size: 48px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.typography-figure-base-600 {
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.typography-title-jumbo-600 {
+  /**
+   * ★ 48px / line-height 1 —— 与 64px 头像视觉同高的大标题
+   *
+   * 加这一档的直接原因：仪表盘顶部那一行 greeting「下午好，小王」要与
+   * **旁边的 64px 头像**同高。三次调整的历程记在这里：
+   *
+   * 1. 首版用 `title-large-600`（26px / LH 32）—— 用户："文字那么小包括头像"，
+   *    line-height 32 还导致文字底与 line-box 底差 5px，`items-end` 时不齐；
+   * 2. 二版 32px / LH 1 —— 修了 line-box 问题，但用户："文本可以再大点，
+   *    和头像同高"；
+   * 3. 三版（现在）48px / LH 1 —— 中文字帽高约等于字号，48px 铺满 64px 头像
+   *    垂直空间的 3/4，两者放一起视觉上"同高"（真 64px 会让文字挤成一坨）。
+   *    LH 1 保证 `items-end` 时文字底 = 盒子底 = 头像底。
+   *
+   * ★ 谁该用这一档：**只用于**"与 xl(64px) Avatar 并排、`items-end`"的场景。
+   * 别的地方用 title-large-600 就够。
+   */
+  font-size: 48px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.typography-title-large-600 {
+  font-size: 26px;
+  line-height: 32px;
+  font-weight: 600;
+}
+
+.typography-title-base-600 {
+  font-size: 18px;
+  line-height: 26px;
+  font-weight: 600;
+}
+
+.typography-title-small-500 {
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+.typography-body-base-400 {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 400;
+}
+
+.typography-body-base-500 {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+/*
+ * 700 一档：给需要「有质感」的少量文字用（品牌字标、弹窗标题）。
+ *
+ * ★ 为什么不是把 -500 那档直接加粗：-500 被正文与列表项大量复用，
+ * 整体加粗会让侧栏每一行都在抢注意力 —— 而字重的作用是**建立层级**，
+ * 层级要靠对比，不是靠全部变重。所以单开一档，只用在字标这类"锚点"上。
+ */
+.typography-body-base-700 {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 700;
+}
+
+.typography-body-large-700 {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 700;
+}
+
+/*
+ * 15px / 400 —— **长篇阅读**那一档（搜索的问答正文）。
+ *
+ * ## ★ 为什么必须单开一档，而不是复用现有的
+ *
+ * 搜索模块的问答正文原来写的是裸 `text-[15px] leading-6/7`，绕开了整张表
+ * —— 而这张表的文件头第一句就是"避免各处散写 text-[13px]"。
+ * 它绕开是有原因的：表里 15px 只有 `title-small-500`（weight 500，
+ * 用在分区标题上），而一段几百字的答案用 500 会整块发灰发糊；
+ * 而降到 `body-base-400`（14px）在长文里偏小 —— 那一屏是这个应用里
+ * **唯一**需要连续读几段的地方。
+ *
+ * 所以缺的是一档真实存在的需求，而不是有人图省事。补上它之后
+ * "不许写裸 px"才是一条能被遵守的规则（见 check-typography-classes.mjs）。
+ *
+ * `line-height: 24px`（1.6）比同字号标题的 22px 松：那正是长篇与
+ * 单行标题的区别，也是原来那两处分别写 `leading-6`/`leading-7` 想要的东西。
+ */
+.typography-body-reading-400 {
+  font-size: 15px;
+  line-height: 24px;
+  font-weight: 400;
+}
+
+.typography-body-small-400 {
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 400;
+}
+
+.typography-caption-400 {
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 400;
+}
+
+/*
+ * 品牌字标专用。
+ *
+ * ## 为什么单开一档而不复用 body-*-700
+ *
+ * 参考实现的字标是一张**设计好的 SVG**（用 mask-image 上色），
+ * 我们没有对应的 "MyContext" 资源，所以用字体还原它的**特征**：
+ * · 极重字重（800/900 —— 系统字体栈里苹方与 SF 都有对应的 Heavy 档）；
+ * · 明显收紧的字距（设计字标的字母间距总比正文紧）；
+ * · 略压缩的行高（字标是一个"块"，不参与正文的行节奏）。
+ *
+ * 这三条与正文的诉求正好相反，所以不该挂在 body 那套 scale 上 ——
+ * 挂上去会让"改字标"与"改正文"变成同一个动作。
+ *
+ * 字重给 800 而不是 900：系统字体栈里 900 在部分中文字体上会**回退**到 700
+ * （没有对应字面），而 800 在苹方/雅黑上都有真实字面。
+ * 900 的表现是"我明明写了更粗但没变化"，那种不一致比略细更难排查。
+ */
+.typography-wordmark {
+  font-size: 20px;
+  line-height: 24px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}

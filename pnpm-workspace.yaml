@@ -1,0 +1,26 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# native 模块需要在安装时执行构建脚本；pnpm 10 起默认屏蔽，必须显式放行。
+# 只列真正需要的，其余依赖的脚本仍然被拦住。
+#
+# 注意 electron 自 42 起已删掉 postinstall，这里放行它是空操作（保留只为版本回退时兜底）：
+# 二进制由 scripts/rebuild-electron.mjs 调 install-electron 下载。
+#
+# ★★ `dingtalk-workspace-cli` 刻意**不在**这张表里 —— 这是一条安全要求，不是遗漏。
+#
+# 它的 `postinstall`（`install.js`）会往**用户家目录**写东西：把 skill 装进
+# `~/.agents/skills`、`~/.claude/skills`、`~/.cursor/skills` … 共 16 个 agent 目录
+# （每个都先 `rmSync` 再覆盖），还写 `~/.dws/skills/{mono,multi}`。
+# 也就是说一次 `pnpm install` 会**删改开发者已有的 Claude/Cursor 配置** ——
+# 对一个要开源的项目尤其不可接受：别人 clone 下来装依赖，我们动了他的编辑器。
+#
+# 不放行的代价是它不会自解二进制。那正合我们的需要：`scripts/lib/dws-resolver.mjs`
+# 直接从包内 `assets/dws-<platform>.tar.gz` 取（并按包内 `checksums.txt` 校验），
+# 与 opencode 同一套做法（见 opencode-resolver.mjs 的头注释：pnpm 不跑
+# optionalDependency 的 install 脚本，所以"绕过启动器，直接找平台包里的真二进制"）。
+onlyBuiltDependencies:
+  - better-sqlite3
+  - electron
+  - esbuild

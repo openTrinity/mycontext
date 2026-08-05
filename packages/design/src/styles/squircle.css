@@ -1,0 +1,31 @@
+/**
+ * 连续曲率圆角（squircle）。
+ *
+ * 优先用 CSS corner-shape（Chromium 139+），旧内核自动退化为标准圆角；
+ * 需要精确 squircle 路径的场景由 useSquircle() 生成 clip-path。
+ */
+
+.radius-sm {
+  border-radius: var(--radius-sm);
+}
+.radius-md {
+  border-radius: var(--radius-md);
+}
+.radius-lg {
+  border-radius: var(--radius-lg);
+}
+.radius-xl {
+  border-radius: var(--radius-xl);
+}
+.radius-2xl {
+  border-radius: var(--radius-2xl);
+}
+.radius-3xl {
+  border-radius: var(--radius-3xl);
+}
+
+@supports (corner-shape: squircle) {
+  .corner-squircle {
+    corner-shape: squircle;
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "loading": "读取中…",
+  "noGraph": "还没有可展示的关系图",
+  "rebuild": "重新建图",
+  "building": "建图中…",
+  "legendSelf": "{{name}}（你）",
+  "legendChannel": "描边＝{{channel}}",
+  "mentions": "被提及 {{count}} 次",
+  "hint": "只画与你直接关联的 {{count}} 个实体 —— 全图有两千多个，画出来是一团毛线。想顺着关系深挖去「搜索」问。",
+  "type": {
+    "Person": "人",
+    "System": "系统",
+    "Project": "项目",
+    "Organization": "组织",
+    "Unknown": "未知"
+  },
+  "channel": {
+    "dingtalk": "钉钉",
+    "feishu": "飞书"
+  },
+  "range7": "近 7 天",
+  "range30": "近 30 天",
+  "range90": "近 90 天",
+  "rangeAll": "全部",
+  "searchPlaceholder": "搜事实正文…",
+  "clear": "清除",
+  "aboutEntity": "关于 {{name}}",
+  "clearEntity": "取消这个实体的筛选",
+  "filterByEntity": "只看与 {{name}} 相关的",
+  "factsTotal": "共 {{count}} 条",
+  "prev": "上一页",
+  "next": "下一页",
+  "factType": {
+    "DECISION": "决策",
+    "DELEGATE": "指派",
+    "CAUSAL": "因果",
+    "STATUS": "状态",
+    "GENERAL": "一般"
+  },
+  "seeFacts": "看他的事实",
+  "closeDetail": "关闭",
+  "resetView": "回到初始视图",
+  "neighborsTitle": "直接关联（{{count}}）",
+  "factsAbout": "关于「{{name}}」的 {{count}} 条事实"
+}

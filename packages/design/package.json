@@ -1,0 +1,29 @@
+{
+  "name": "@mycontext/design",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./index.css": "./src/styles/index.css",
+    "./styles/*": "./src/styles/*"
+  },
+  "scripts": {
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@dicebear/bottts": "9.4.2",
+    "@dicebear/core": "9.4.2",
+    "@dicebear/fun-emoji": "9.4.2",
+    "@dicebear/lorelei": "9.4.2",
+    "@dicebear/micah": "9.4.2",
+    "@dicebear/notionists": "9.4.2",
+    "@dicebear/thumbs": "9.4.2",
+    "clsx": "2.1.1",
+    "framer-motion": "12.43.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  }
+}

@@ -1,0 +1,573 @@
+/**
+ * 蒸馏范围这一步：时间范围 + 会话（分组全选）+ 资料源勾选。
+ *
+ * ## ★ 「蒸馏范围」而不是「蒸馏资料源」
+ *
+ * 这一步同时决定**时间**、**哪些会话**、**哪几类数据** —— 三件事里
+ * 只有第三件是"资料源"。叫"范围"才涵盖全部，也才让用户知道
+ * 时间那一档不是可以跳过的装饰。
+ *
+ * ## ★ 会话列表一次全量加载，并按单聊/群聊分组
+ *
+ * 首版是"点开才拉"（那是一次约 4.8s 的三路子进程调用）。但实测下来
+ * 用户**总是**要点开的 —— 指定会话是这一步的主要动作，而"点一下再等
+ * 5 秒"比"进来就等 5 秒"更难受（前者要等两次注意力切换）。
+ *
+ * 分组是因为单聊与群聊的选择逻辑完全不同：单聊通常全选（那都是
+ * 一对一的真实对话，语料质量最高），群聊要挑（大群里大半是与本人
+ * 无关的噪声）。所以两组各有一个全选。
+ *
+ * ## ★ 单聊不显示人数
+ *
+ * 「2 人」是一句废话（单聊必然是两个人），而它占的位置本该给
+ * 更有用的信息。群聊的人数有意义 —— 12 人群与 500 人群的语料密度
+ * 完全不同。
+ *
+ * ## ★ 拿不全要说出来
+ *
+ * 渠道的会话列表分页是坏的（`--cursor` 无效 / `--limit` 硬顶 100 /
+ * `hasMore` 恒 false），所以列表**可能不完整**。`truncated` 为真时必须提示 ——
+ * 否则用户找不到某个群会以为是我们漏读了，而真相是渠道接口就拿不到。
+ */
+import { useMemo, useState } from "react"
+import { Button, Checkbox, Input, cn } from "@mycontext/design"
+import type { ChannelConversationView, DistillSourceId } from "@mycontext/ipc-contract"
+import { useChannelConversations } from "../../lib/queries.js"
+import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
+import { useErrorText } from "../../lib/use-error-text.js"
+import { StepSection, SubGroup } from "./step-section.js"
+
+/**
+ * 时间范围的预设。`null` 表示不限 —— 与"0 天"完全不同，别用 0 表示。
+ *
+ * ★ 加了 365：一年是"这个人今年是什么样"的自然单位，而原来最长的
+ * 预设是 180 天（半年）—— 于是想蒸一整年的人只能选"不限"，
+ * 而"不限"在一个用了三年的账号上是完全不同的成本。
+ */
+const RANGES: readonly { days: number | null; labelKey: string }[] = [
+  { days: 30, labelKey: "sourcesStep.range30" },
+  { days: 90, labelKey: "sourcesStep.range90" },
+  { days: 180, labelKey: "sourcesStep.range180" },
+  { days: 365, labelKey: "sourcesStep.range365" },
+  { days: null, labelKey: "sourcesStep.rangeAll" },
+]
+
+export interface SourcesDraft {
+  /** 往前多少天；null = 不限。与 `customRange` 互斥 */
+  rangeDays: number | null
+  /**
+   * 自定义日期区间（`YYYY-MM-DD`）。
+   *
+   * 有值时**优先于** `rangeDays` —— 用户显式选的区间不该被一个预设覆盖。
+   * 两个都可能为空串（只填了一头），那时按"没填"处理。
+   */
+  customRange?: { from: string; to: string } | null
+  chatKinds: ("direct" | "group")[]
+  conversationIds: string[]
+  /** 勾选了哪些资料源 */
+  enabledSources: DistillSourceId[]
+}
+
+export interface SourcesStepProps {
+  value: SourcesDraft
+  onChange: (next: SourcesDraft) => void
+  /** 全部资料源（含采集器状态），由主进程给 */
+  sources: readonly { kind: DistillSourceId; status: "ready" | "planned" }[]
+}
+
+export function SourcesStep({ value, onChange, sources }: SourcesStepProps) {
+  const { t } = useDynamicTranslation("onboarding")
+  const errorText = useErrorText()
+  /**
+   * ★ 一进来就拉，不再"点开才拉"。
+   *
+   * 那是一次约 4.8s 的三路子进程调用，但指定会话是这一步的**主要动作**
+   * —— 让用户先点一下再等 5 秒，等于把一次等待拆成两次注意力切换。
+   */
+  const conversations = useChannelConversations(true)
+  /** 自定义区间的展开态。默认按 payload 里有没有值决定。 */
+  const [customOpen, setCustomOpen] = useState(
+    value.customRange !== null && value.customRange !== undefined,
+  )
+
+  const custom = value.customRange ?? null
+
+  const toggleConversation = (externalId: string) => {
+    const next = value.conversationIds.includes(externalId)
+      ? value.conversationIds.filter((item) => item !== externalId)
+      : [...value.conversationIds, externalId]
+    onChange({ ...value, conversationIds: next })
+  }
+
+  const toggleSource = (kind: DistillSourceId) => {
+    const next = value.enabledSources.includes(kind)
+      ? value.enabledSources.filter((item) => item !== kind)
+      : [...value.enabledSources, kind]
+    onChange({ ...value, enabledSources: next })
+  }
+
+  /**
+   * 按类型分成两组。
+   *
+   * ★ 不再按 `chatKinds` 过滤掉一整类：那个复选框原本既是"我要哪种"
+   * 又是"列表里显示哪种"，于是取消勾选"单聊"会让已经选中的单聊
+   * **从列表里消失但仍留在 conversationIds 里** —— 用户看不到它们，
+   * 却在蒸馏时被算进去。现在两组都显示，选中与否只看 `conversationIds`。
+   */
+  const groups = useMemo(() => {
+    const items = conversations.data?.items ?? []
+    return {
+      direct: items.filter((item) => item.kind === "direct"),
+      group: items.filter((item) => item.kind === "group"),
+    }
+  }, [conversations.data])
+
+  /** 一组的全选/全不选。已经全选了就变成全不选（同一个按钮两个方向）。 */
+  const toggleAll = (items: readonly ChannelConversationView[]) => {
+    const ids = items.map((item) => item.externalId)
+    const allSelected = ids.length > 0 && ids.every((id) => value.conversationIds.includes(id))
+    const next = allSelected
+      ? value.conversationIds.filter((id) => !ids.includes(id))
+      : [...new Set([...value.conversationIds, ...ids])]
+    onChange({ ...value, conversationIds: next })
+  }
+
+  return (
+    <div className="flex flex-col gap-[var(--gap-section-md)]">
+      {/* 时间范围 */}
+      <StepSection
+        title={t("sourcesStep.sectionRange")}
+        hint={t("sourcesStep.sectionRangeHint")}
+        action={
+          <Button size="sm" variant="ghost" onClick={() => setCustomOpen((open) => !open)}>
+            {customOpen ? t("sourcesStep.usePreset") : t("sourcesStep.useCustom")}
+          </Button>
+        }
+      >
+        {customOpen ? (
+          <div className="flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              {/*
+                原生 `<input type="date">` 而不是引一个日期库。
+                它自带本地化、键盘输入与系统日历面板 —— 一个自己写的
+                日期选择器要几百行才能追上，而这里只需要"选两个日期"。
+              */}
+              <input
+                type="date"
+                value={custom?.from ?? ""}
+                max={custom?.to === undefined || custom.to === "" ? undefined : custom.to}
+                onChange={(event) =>
+                  onChange({
+                    ...value,
+                    customRange: { from: event.target.value, to: custom?.to ?? "" },
+                  })
+                }
+                className="typography-body-small-400 rounded-[var(--radius-sm)] border border-[var(--border-divider-light)] bg-[var(--bg-base-normal)] px-2 py-1 text-[var(--text-base-primary)]"
+              />
+              <span className="typography-body-small-400 text-[var(--text-base-tertiary)]">
+                {t("sourcesStep.rangeTo")}
+              </span>
+              <input
+                type="date"
+                value={custom?.to ?? ""}
+                min={custom?.from === undefined || custom.from === "" ? undefined : custom.from}
+                onChange={(event) =>
+                  onChange({
+                    ...value,
+                    customRange: { from: custom?.from ?? "", to: event.target.value },
+                  })
+                }
+                className="typography-body-small-400 rounded-[var(--radius-sm)] border border-[var(--border-divider-light)] bg-[var(--bg-base-normal)] px-2 py-1 text-[var(--text-base-primary)]"
+              />
+            </div>
+            <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              {t("sourcesStep.customHint")}
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {RANGES.map((range) => (
+              <button
+                key={String(range.days)}
+                type="button"
+                onClick={() =>
+                  // 选预设时清掉自定义区间 —— 两者互斥，留着会让"哪个生效"说不清
+                  onChange({ ...value, rangeDays: range.days, customRange: null })
+                }
+                aria-pressed={custom === null && value.rangeDays === range.days}
+                className={cn(
+                  "typography-body-small-400 rounded-full border px-3 py-1 transition-colors duration-150",
+                  custom === null && value.rangeDays === range.days
+                    ? "border-[var(--text-accent-normal)] bg-[var(--bg-card-z0)] text-[var(--text-base-primary)]"
+                    : "border-[var(--border-divider-light)] text-[var(--text-base-secondary)] hover:bg-[var(--bg-card-z0)]",
+                )}
+              >
+                {t(range.labelKey)}
+              </button>
+            ))}
+          </div>
+        )}
+      </StepSection>
+
+      {/* 会话：两组各自全选 */}
+      <StepSection
+        title={t("sourcesStep.sectionConversations")}
+        hint={t("sourcesStep.conversationHint")}
+        action={
+          value.conversationIds.length > 0 ? (
+            <span className="flex items-center gap-2">
+              <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+                {t("sourcesStep.selectedCount", { count: value.conversationIds.length })}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => onChange({ ...value, conversationIds: [] })}
+              >
+                {t("sourcesStep.clearSelection")}
+              </Button>
+            </span>
+          ) : null
+        }
+      >
+        {conversations.isLoading ? (
+          <ConversationSkeleton label={t("sourcesStep.conversationLoading")} />
+        ) : conversations.error !== null ? (
+          <p className="typography-body-small-400 text-[var(--status-error)]">
+            {errorText(conversations.error)}
+          </p>
+        ) : (
+          <div className="flex flex-col gap-[var(--gap-component-md)]">
+            {/* 截断提示放在列表**上方**：滚到底才看到就已经太晚了 */}
+            {conversations.data?.truncated === true ? (
+              <p className="typography-caption-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--text-base-tertiary)]">
+                {t("sourcesStep.truncatedWarning")}
+              </p>
+            ) : null}
+
+            <ConversationGroup
+              titleKey="sourcesStep.kindDirect"
+              items={groups.direct}
+              selected={value.conversationIds}
+              onToggle={toggleConversation}
+              onToggleAll={(visible) => toggleAll(visible)}
+              // ★ 单聊不显示人数：「2 人」是废话
+              showMemberCount={false}
+            />
+            <ConversationGroup
+              titleKey="sourcesStep.kindGroup"
+              items={groups.group}
+              selected={value.conversationIds}
+              onToggle={toggleConversation}
+              onToggleAll={(visible) => toggleAll(visible)}
+              showMemberCount
+            />
+          </div>
+        )}
+      </StepSection>
+
+      {/* 资料源勾选 */}
+      <StepSection
+        title={t("sourcesStep.sectionSources")}
+        hint={t("sourcesStep.sectionSourcesHint")}
+      >
+        {/*
+          ★ 「现在可用」与「排期中」**分成两组**。
+
+          9 个源里只有 2 个真能采（chat / minutes），另外 7 个的采集器还没写
+          （判据在主进程的 `READY_SOURCES`）。改动前它们平铺在一个两列网格里，
+          只靠一个浅色后缀区分 —— 于是用户很自然地全勾上，然后第 4 步
+          显示"已启用 9 个资料源"，而实际工作的只有 2 个。
+          那个数字会误导人，所以分组是必要的，不只是好看。
+
+          排期中的**不可勾**（见下面那个 Checkbox 的注释）：勾了却没有采集器
+          就是"静默无效"。等真接上采集器（`READY_SOURCES` 里出现）再放开。
+        */}
+        <SubGroup label={t("sourcesStep.sourcesReady")}>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+            {sources
+              .filter((source) => source.status === "ready")
+              .map((source) => (
+                <Checkbox
+                  key={source.kind}
+                  checked={value.enabledSources.includes(source.kind)}
+                  onChange={() => toggleSource(source.kind)}
+                  label={
+                    <span className="typography-body-small-400 text-[var(--text-base-primary)]">
+                      {t(`sourceKinds.${source.kind}`)}
+                    </span>
+                  }
+                />
+              ))}
+          </div>
+        </SubGroup>
+
+        {sources.every((source) => source.status === "ready") ? null : (
+          <SubGroup label={t("sourcesStep.sourcesPlanned")}>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+              {sources
+                .filter((source) => source.status !== "ready")
+                .map((source) => (
+                  <Checkbox
+                    key={source.kind}
+                    /**
+                     * ★ 排期中的源**不可勾、恒不选**。
+                     *
+                     * 之前它们可勾、可写进 `distill_sources`、然后什么都不发生
+                     * —— 那是"静默无效"：用户以为选了文档，实际没有采集器。
+                     * 禁用之后"还没做"是**看得见**的，而不是勾了却没反应。
+                     * 等真接了采集器（有 READY 判据）再放开。
+                     */
+                    checked={false}
+                    disabled
+                    onChange={() => undefined}
+                    label={
+                      <span className="typography-body-small-400 text-[var(--text-base-tertiary)]">
+                        {t(`sourceKinds.${source.kind}`)}
+                      </span>
+                    }
+                  />
+                ))}
+            </div>
+            {/*
+              ★ 只留这一条说明，删掉了原来那个 `title`（native tooltip）。
+              两者说的是同一件事，而 tooltip 只有 hover 才看得到 ——
+              一条必须靠悬停才能读到的关键信息等于没写。
+            */}
+            <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              {t("sourcesStep.plannedExplain")}
+            </p>
+          </SubGroup>
+        )}
+      </StepSection>
+    </div>
+  )
+}
+
+/**
+ * 会话列表的加载态。
+ *
+ * ## ★ 为什么是骨架而不是一行字
+ *
+ * 原来是一行 `读取会话列表…（要调三次渠道接口，约 5 秒）`。两个问题：
+ *
+ * · **它泄漏实现**。"三次渠道接口"是我们的事，用户不需要知道我们怎么
+ *   拿数据；而"约 5 秒"是一个会被打破的承诺（网络慢就变 15 秒，
+ *   那时这行字在说谎）。
+ * · **它不占位**。5 秒后列表出现，整页内容**跳一下** —— 用户刚要点的
+ *   东西位置变了。骨架把最终布局先占住，内容到位时不发生跳动。
+ *
+ * 行数固定 6 行：与真实列表的可视行数接近（那个框约 10 行），
+ * 不必精确 —— 骨架的作用是"这里将会有一列东西"，不是预览。
+ */
+function ConversationSkeleton({ label }: { label: string }) {
+  return (
+    <div className="flex flex-col gap-2" aria-busy="true" aria-live="polite">
+      <span className="typography-caption-400 text-[var(--text-base-tertiary)]">{label}</span>
+      <div className="flex flex-col gap-1 rounded-[var(--radius-md)] border border-[var(--border-divider-light)] p-2">
+        {Array.from({ length: 6 }, (_, index) => (
+          <div key={index} className="flex items-center gap-2 px-1 py-1">
+            <span className="size-4 shrink-0 animate-pulse rounded-[var(--radius-xs)] bg-[var(--bg-card-z0)]" />
+            <span
+              className="h-3 animate-pulse rounded-full bg-[var(--bg-card-z0)]"
+              /**
+               * 宽度逐行递减 —— 等宽的一叠条看起来像表格而不是列表。
+               * 用行内 style 而不是几个 Tailwind 类：这几个宽度是**数据**
+               * （骨架的形状），不是可复用的设计决定。
+               */
+              style={{ width: `${String(72 - index * 6)}%` }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 一组会话（单聊 / 群聊），带该组的全选。
+ *
+ * 分组的理由见文件头：两类的选择逻辑不同，单聊通常全选、群聊要挑。
+ */
+function ConversationGroup({
+  titleKey,
+  items,
+  selected,
+  onToggle,
+  onToggleAll,
+  showMemberCount,
+}: {
+  titleKey: string
+  items: readonly ChannelConversationView[]
+  selected: readonly string[]
+  onToggle: (externalId: string) => void
+  /**
+   * 全选/取消全选。
+   *
+   * ★ 参数是**当前可见的**那批（搜索过滤后），不是全部 ——
+   * 用户搜了"项目"再点全选，意思是"把这些都加进来"，
+   * 而不是"把 88 个都加进来"。
+   */
+  onToggleAll: (visible: readonly ChannelConversationView[]) => void
+  showMemberCount: boolean
+}) {
+  const { t } = useDynamicTranslation("onboarding")
+  /**
+   * 组内搜索。
+   *
+   * ★ 88 个会话靠滚动去找是不现实的。实测这个账号：单聊 52 / 群聊 36。
+   * 用户心里通常已经有目标了（"把和小李的单聊加进去"），
+   * 搜索比滚动快一个数量级。
+   */
+  const [keyword, setKeyword] = useState("")
+  /** 展开全部。收起时只显示前 `COLLAPSED_ROWS` 条 —— 见下方列表的注释。 */
+  const [expanded, setExpanded] = useState(false)
+
+  /**
+   * 过滤只影响**显示**，不影响选择状态。
+   *
+   * ★ 「全选」作用在过滤后的那批上 —— 那正是搜索的意义
+   * （"把所有带『项目』的群都加进来"）。作用在全部上的话，
+   * 用户搜完再点全选会莫名其妙地把 88 个都勾上。
+   */
+  const visible =
+    keyword.trim() === ""
+      ? items
+      : items.filter((item) =>
+          (item.title ?? item.externalId).toLowerCase().includes(keyword.trim().toLowerCase()),
+        )
+
+  const chosen = items.filter((item) => selected.includes(item.externalId)).length
+  /**
+   * ★★ 按钮的**标签与行为必须同源** —— 都按「当前可见」算。
+   *
+   * 这里原来是个真 bug：标签算的是 `items`（全量）而 `onToggleAll` 收的是
+   * `visible`（过滤后）。于是有搜索词时两者矛盾：69/69 全选中 + 搜一个关键词
+   * → 标签显示「全不选」（因为全量都选中了），点下去只取消匹配的那几个，
+   * 而标签**仍然**显示「全不选」。反过来 5/69 选中、关键词正好匹配那 5 个
+   * → 标签显示「全选」，点下去却是取消。
+   *
+   * 判据换成 `visible` 之后两者同源，无论有没有搜索词都一致。
+   */
+  const visibleChosen = visible.filter((item) => selected.includes(item.externalId)).length
+  const allVisibleSelected = visible.length > 0 && visibleChosen === visible.length
+
+  /**
+   * 收起时显示几条。
+   *
+   * ★ 这个数替换掉了原来的 `max-h-[320px] overflow-y-auto`。
+   *
+   * 那个定高滚动区嵌在页面滚动区里，两层都能滚 —— 而更要紧的是它把
+   * 「资料源」那一整段挤出了视口（实测截图里完全看不到）。
+   * 原注释担心的是"列表撑开会把下一步顶出视口"，那个顾虑对，
+   * 但解法不是内层滚动条，而是**默认只显示一小截**：收起态 8 行，
+   * 想看全部就展开，展开后跟着页面一起滚（只有一层滚动）。
+   */
+  const COLLAPSED_ROWS = 8
+  const shown = expanded ? visible : visible.slice(0, COLLAPSED_ROWS)
+  const hiddenCount = visible.length - shown.length
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2">
+        <span className="typography-caption-400 font-medium text-[var(--text-base-secondary)]">
+          {t(titleKey)}
+        </span>
+        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("sourcesStep.groupCount", { chosen, total: items.length })}
+        </span>
+        {items.length === 0 ? null : (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onToggleAll(visible)}
+            className="ml-auto"
+          >
+            {allVisibleSelected ? t("sourcesStep.deselectAll") : t("sourcesStep.selectAll")}
+          </Button>
+        )}
+      </div>
+
+      {/* 会话超过一屏才给搜索框：少量会话时它只是噪音 */}
+      {items.length > COLLAPSED_ROWS ? (
+        <Input
+          size="sm"
+          value={keyword}
+          placeholder={t("sourcesStep.searchPlaceholder")}
+          onChange={(event) => setKeyword(event.target.value)}
+        />
+      ) : null}
+
+      {items.length === 0 ? (
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("sourcesStep.conversationEmpty")}
+        </p>
+      ) : (
+        <>
+          {/*
+            ★ 不再是定高滚动区（见上方 `COLLAPSED_ROWS` 的注释）。
+            也不再有 border —— 收起态只有 8 行，不需要一个框来界定"这是个列表"，
+            而那个框在卡片里会变成"框里的框"。
+          */}
+          <ul className="flex flex-col gap-1">
+            {visible.length === 0 ? (
+              <li className="typography-caption-400 px-1 py-2 text-[var(--text-base-tertiary)]">
+                {t("sourcesStep.searchEmpty", { keyword })}
+              </li>
+            ) : null}
+            {shown.map((item) => (
+              <li key={item.externalId}>
+                <Checkbox
+                  checked={selected.includes(item.externalId)}
+                  onChange={() => onToggle(item.externalId)}
+                  label={
+                    <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                      <span className="typography-body-small-400 truncate text-[var(--text-base-primary)]">
+                        {item.title ?? item.externalId}
+                      </span>
+                      {showMemberCount && item.memberCount !== null ? (
+                        <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
+                          {t("sourcesStep.memberCount", { count: item.memberCount })}
+                        </span>
+                      ) : null}
+                      {item.lastMessageAt === null ? (
+                        // 「还没采过」是事实而不是缺陷：群列表那一路没有时间字段
+                        <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
+                          {t("sourcesStep.noMessages")}
+                        </span>
+                      ) : null}
+                    </span>
+                  }
+                  className="w-full"
+                />
+              </li>
+            ))}
+          </ul>
+          {/*
+            ★ 「展开全部」带**数字** —— 没有数字的话用户不知道折叠掉了多少，
+            也就无从判断要不要展开（"下面还有 3 个"与"还有 61 个"是两种决定）。
+          */}
+          {hiddenCount > 0 ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setExpanded(true)}
+              className="self-start"
+            >
+              {t("sourcesStep.expandAll", { count: hiddenCount })}
+            </Button>
+          ) : expanded && visible.length > COLLAPSED_ROWS ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setExpanded(false)}
+              className="self-start"
+            >
+              {t("sourcesStep.collapseList")}
+            </Button>
+          ) : null}
+        </>
+      )}
+    </div>
+  )
+}
