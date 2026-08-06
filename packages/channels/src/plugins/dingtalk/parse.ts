@@ -25,9 +25,22 @@ interface DwsAuthStatusPayload {
   user_id?: unknown
   user_name?: unknown
   error?: unknown
+  /** 机器可读的失败原因（`token_refresh_failed` 等），见 `EXPIRED_REASONS` */
+  reason?: unknown
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
+
+/**
+ * `reason` 值里表示「登录过但现在失效了」的那几个。
+ *
+ * ★ 与 `classifyDwsError` 的 `SESSION_EXPIRED_REASONS` **同源**（都来自上游
+ * 的 reason 枚举），但两处的用途不同：那边判"这个错误要不要重试"，
+ * 这边判"界面该说『重新授权』还是『去授权』"。刻意各留一份而不是共享一个
+ * 常量：那边多几个网关类的值（`http_401` / `gateway_auth_expired`）——
+ * 那些是**请求**失败，不构成"这台机器登录过"的证据。
+ */
+const EXPIRED_REASONS = new Set(["token_refresh_failed", "auth_refresh_failed"])
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined
@@ -94,6 +107,33 @@ export function parseAuthStatus(stdout: string, now: Date = new Date()): AuthSta
         ...(corpName === undefined ? {} : { corpName }),
         ...(userName === undefined ? {} : { userName }),
       }
+    }
+    /**
+     * ★ `reason` 也算"登录过"的痕迹 —— 而且它是**结构化**的判据。
+     *
+     * ## 为什么补这一支（实测踩到的）
+     *
+     * 每个身份一份 profiles 目录之后，"某个身份的凭据过期了而别的还好"
+     * 变成了常见状态。实测那时的输出是：
+     * ```
+     * { success:true, authenticated:false,
+     *   reason:"token_refresh_failed",
+     *   message:"Token 刷新失败: 旧版登录态已无法由当前认证服务刷新…" }
+     * ```
+     * —— **没有** `corp_name` / `user_name`（上游只在 message 里提了一句
+     * profile 标识）。于是上面那个判据落空，整体退化成 `unauthorized`，
+     * 界面说「授权钉钉」而不是「重新授权」。
+     *
+     * 安全性上没问题（fail-closed 那一侧），但它把"这个身份需要续期"
+     * 说成了"你还没连过钉钉" —— 而用户明明看得到那个身份就在列表里。
+     *
+     * 判据用 `reason` 而不是去 `message` 里捞组织名：文案会变，
+     * 而这几个 reason 值来自上游的枚举（与 `classifyDwsError` 里
+     * `SESSION_EXPIRED_REASONS` 同源）。名字缺就缺 —— `AuthStatus.expired`
+     * 的两个字段本来就是可选的，界面对它们有兜底。
+     */
+    if (EXPIRED_REASONS.has(asString(payload.reason) ?? "")) {
+      return { state: "expired" }
     }
     return { state: "unauthorized" }
   }

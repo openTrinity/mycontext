@@ -93,6 +93,55 @@ describe("parseAuthStatus：未授权与异常", () => {
 })
 
 describe("parseAuthStatus：过期", () => {
+  /**
+   * ★★ 实测抓的：**per-vault 目录里某个身份的凭据过期**时的真实输出。
+   *
+   * 每个身份一份 profiles 目录之后，"这个身份过期了而别的还好"变成了
+   * 常见状态。而它的 payload **没有** `corp_name` / `user_name`
+   * （上游只在 message 里提了一句 profile 标识）：
+   * ```
+   * { success:true, authenticated:false,
+   *   reason:"token_refresh_failed",
+   *   message:"Token 刷新失败: 旧版登录态已无法由当前认证服务刷新…" }
+   * ```
+   *
+   * 补 `reason` 判据之前它退化成 `unauthorized` —— 安全性没问题
+   * （fail-closed 那一侧），但界面会说「授权钉钉」而不是「重新授权」，
+   * 也就是把"这个身份需要续期"说成了"你还没连过钉钉"，
+   * 而用户明明看得到那个身份就在列表里。
+   *
+   * ★ 值已脱敏（CLAUDE.md §1.2），形状与字段照实测。
+   */
+  it("★★ reason=token_refresh_failed 且**没有**组织名/真名 → 仍判 expired", () => {
+    const raw = JSON.stringify({
+      success: true,
+      authenticated: false,
+      reason: "token_refresh_failed",
+      message:
+        'Token 刷新失败: 旧版登录态已无法由当前认证服务刷新；本地 profile 已保留…\nprofile: "dingFAKECORP0001:100001": MCP token exchange failed',
+      hint: "请重新运行 dws auth login 完成授权。",
+    })
+    // 名字缺就缺（`expired` 的两个字段本来可选，界面对它们有兜底）
+    expect(parseAuthStatus(raw, NOW)).toEqual({ state: "expired" })
+  })
+
+  /**
+   * ★ 反证：**别的** reason 不该被顺手当成"登录过"。
+   *
+   * 比如 `http_401` 是**请求**失败（网关拒了），它不构成"这台机器登录过
+   * 这个身份"的证据 —— 判成 expired 会让界面说「重新授权」，
+   * 而用户可能根本没连过。这条锁住 `EXPIRED_REASONS` 是个**白名单**
+   * 而不是"有 reason 就算登录过"。
+   */
+  it("★ 其它 reason（http_401 等）仍判 unauthorized，不放宽成 expired", () => {
+    const raw = JSON.stringify({
+      success: true,
+      authenticated: false,
+      reason: "http_401",
+    })
+    expect(parseAuthStatus(raw, NOW)).toEqual({ state: "unauthorized" })
+  })
+
   it("refresh_token_valid 为 false → expired 并保留身份用于提示", () => {
     const raw = JSON.stringify({
       authenticated: true,
