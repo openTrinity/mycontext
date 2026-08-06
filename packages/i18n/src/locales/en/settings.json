@@ -138,7 +138,7 @@
       "buildDone": "Built: {{entities}} entities / {{facts}} facts / {{edges}} edges",
       "buildFailed": "Build failed: {{reason}}",
       "rebuild": "Rebuild",
-      "rebuildHint": "Deletes the current graph and extraction cache, then re-extracts everything. Slower and more expensive than an incremental build. Use only when the graph is broken or a full reset is needed.",
+      "rebuildHint": "Deletes the current graph and extraction cache, then re-extracts everything. Slower and more expensive than incremental. Needed after you narrow the capture scope: incremental builds only add, so entities and relations from unchecked conversations stay in the graph.",
       "buildProgress": "Building graph {{percent}}%"
     }
   },

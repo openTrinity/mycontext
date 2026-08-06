@@ -70,6 +70,105 @@ export interface PostAuthDeps {
 }
 
 /**
+ * 授权成功 → 把这次授权的身份**路由到它自己的 vault**。
+ *
+ * ## ★★ 这是"重新授权换组织报错"那条红字的正解
+ *
+ * 原来的链路是：换组织重新授权 → `SelfIdentityRepository.upsert` 发现
+ * `(corpId, userId)` 与库里那行不一致 → 抛 `SELF_IDENTITY_CONFLICT` →
+ * 界面只能说"换身份请新建一个账号"。那道守卫**本身是对的**（它挡的是
+ * "两个人的语料混进同一份画像"，不可逆），但它给出的出路把渠道的身份问题
+ * 推给了登录体系 —— 而两者本来无关：同一个人、同一次登录，只是换了组织。
+ *
+ * 现在在守卫**之前**先分流：这次授权的身份有自己的 vault 吗？
+ * · 有 → 切过去（那个库里就是它的数据，守卫自然不会触发）；
+ * · 没有、且这个账号一个身份都没绑过 → 绑到基础 vault（那个库可能已有
+ *   采集数据，新建会把它孤立掉）；
+ * · 没有、但已有别的身份 → 新建一个 vault，从头开始。
+ *
+ * 三条分支都在 `ActiveIdentityService.bindAuthorized` 里（那里有单测）。
+ *
+ * ## ★ 为什么必须在 `applyPostAuthIdentity` 之前跑
+ *
+ * 后者会 `resolveSelf()` → `upsert` 身份行，也就是**会撞守卫**。
+ * 顺序反了的话就回到了原来那条报错路径 —— 只是我们多写了一堆代码。
+ *
+ * ## ★ 身份键用 `corpId + userId`，不用 openId
+ *
+ * `userId` 只在**企业内**唯一（同一个人在两家企业下是两个不同的 userId），
+ * 所以跨企业唯一要靠 `corpId + userId` 的组合 —— 这也正是渠道 CLI 自己的
+ * 多账号体系用的主键（`--profile <corpId>:<userId>`）。
+ * openId 是"观察者视角的对端标识"，不是身份主键，且形态各渠道不同。
+ *
+ * @returns 切换发生了吗（false = 就是当前身份，什么都没动）
+ */
+export async function routeAuthorizedIdentity(deps: {
+  identity: {
+    currentIdentity(): { corpId: string; userId: string; vaultId: string } | null
+    bindAuthorized(input: {
+      key: { accountId: string; channelId: string; corpId: string; userId: string }
+      corpName?: string | null | undefined
+      userName?: string | null | undefined
+      baseVaultId: string
+      newVaultId: () => string
+    }): { vaultId: string; created: boolean }
+    switchTo(key: {
+      accountId: string
+      channelId: string
+      corpId: string
+      userId: string
+    }): Promise<unknown>
+  }
+  logger: Pick<Logger, "info" | "warn">
+  /** 当前登录账号与它的基础 vault（`accounts.vault_id`） */
+  session: { accountId: string; baseVaultId: string } | null
+  newVaultId: () => string
+  channelId: string
+  status: Extract<AuthStatus, { state: "authorized" }>
+}): Promise<boolean> {
+  const { session } = deps
+  if (session === null) {
+    // 未登录时也能走授权（那是"还没有身份"时唯一能做的事），但没有 vault 可绑。
+    deps.logger.info("authorized while signed out; identity binding deferred", {})
+    return false
+  }
+
+  const key = {
+    accountId: session.accountId,
+    channelId: deps.channelId,
+    corpId: deps.status.corpId,
+    userId: deps.status.userId,
+  }
+  const current = deps.identity.currentIdentity()
+  const bound = deps.identity.bindAuthorized({
+    key,
+    corpName: deps.status.corpName,
+    userName: deps.status.userName,
+    baseVaultId: session.baseVaultId,
+    newVaultId: deps.newVaultId,
+  })
+
+  /**
+   * ★ 已经是当前身份 → 什么都不做。
+   *
+   * "重新授权刷新凭据"是最常见的路径（凭证快过期时用户会点它），
+   * 那时切一次 vault 等于白付一次几十秒的卸载+挂载，而且会打断在跑的采集。
+   */
+  if (current !== null && current.corpId === key.corpId && current.userId === key.userId) {
+    return false
+  }
+
+  deps.logger.info("routing to identity vault after auth", {
+    channelId: key.channelId,
+    corpName: deps.status.corpName,
+    // 新建 vault 是值得留痕的事实（磁盘上多了一份数据）
+    createdVault: bound.created,
+  })
+  await deps.identity.switchTo(key)
+  return true
+}
+
+/**
  * 授权成功 → 解析并**确认**本人身份，然后刷新账号的头像与显示名。
  *
  * 身份两步都做（resolve + confirm）而不是只 resolve：`is_self` 是在

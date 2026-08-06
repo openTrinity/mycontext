@@ -5,6 +5,7 @@
  * 任一步失败都直接抛出，由 index.ts 统一处理为「启动失败」，
  * 而不是让应用带着半初始化的状态打开窗口。
  */
+import { randomUUID } from "node:crypto"
 import { statSync } from "node:fs"
 import { join } from "node:path"
 import { app, shell, type BrowserWindow } from "electron"
@@ -37,7 +38,7 @@ import { IPC_EVENTS } from "@mycontext/ipc-contract"
 import type { KlGraphOverview } from "@mycontext/ipc-contract"
 import { bootstrapConfig } from "./config.js"
 import { resolveAppPaths, type AppPaths } from "./paths.js"
-import { applyPostAuthIdentity } from "./post-auth-identity.js"
+import { applyPostAuthIdentity, routeAuthorizedIdentity } from "./post-auth-identity.js"
 import { DwsSourceService } from "../services/dws-source.service.js"
 import { runShutdownStep } from "./shutdown.js"
 import { AuthService } from "../services/auth.service.js"
@@ -1164,8 +1165,33 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 提成独立文件的理由：留在这个闭包里没法写测试（要测就得把整个
      * `bootstrapApp()` 跑起来：Electron、真 vault、迁移、python env…）。
      */
-    onAuthorized: (_channelId, status) =>
-      applyPostAuthIdentity({ dataPlane, media, auth, logger, toFileUrl: toLocalFileUrl }, status),
+    onAuthorized: async (channelId, status) => {
+      /**
+       * ★★ 第一步：把这次授权的身份路由到**它自己的** vault。
+       *
+       * 必须在 `applyPostAuthIdentity` **之前** —— 后者会 upsert 身份行，
+       * 也就是会撞 `SELF_IDENTITY_CONFLICT` 那道守卫。先分流之后，
+       * 换组织重新授权走的是"切到那个身份的库"，守卫自然不触发。
+       * 完整的三条分支与 why 见 `routeAuthorizedIdentity`。
+       */
+      const session = auth.currentSession()
+      const vaultId = auth.currentVaultId()
+      await routeAuthorizedIdentity({
+        identity: activeIdentity,
+        logger,
+        session:
+          session === null || vaultId === null
+            ? null
+            : { accountId: session.accountId, baseVaultId: vaultId },
+        newVaultId: () => randomUUID(),
+        channelId,
+        status,
+      })
+      await applyPostAuthIdentity(
+        { dataPlane, media, auth, logger, toFileUrl: toLocalFileUrl },
+        status,
+      )
+    },
   })
 
   registerIpc({

@@ -485,7 +485,23 @@ export function DashboardModule() {
             disabled={kl === null || building || buildGraph.isPending}
             onClick={() => buildGraph.mutate(false)}
           >
-            {building ? "建图中…" : graph?.available === true ? "重新建图" : "开始建图"}
+            {/*
+              ★★ 文案必须说清这是**增量**，不能叫「重新建图」。
+
+              叫「重新」而做增量是一次真实的语义 bug：图谱侧的写入全部
+              只增不减（实测 `upsert_entity` 是 `mention_count + 1`，
+              facts/edges 是 `INSERT OR IGNORE`，而整个 storage 层
+              **没有任何** DELETE / prune / 孤儿清理）。所以缩小采集范围
+              之后，旧会话的实体与边**永远留在图里** —— 实测本机图库覆盖
+              73 个会话而当前导出只有 72 个，交集仅 40 个：
+              33 个已不在范围内的会话仍占着 26501 / 37566 条消息（70.5%）。
+
+              用户点着一个写「重新」的按钮，得到的是"又加了一轮"，
+              而仪表盘上那些数字里七成来自他已经取消勾选的会话。
+              真正会清空重来的入口是状态页那个「重建」（`fresh=true`，
+              它会删掉 knowledge.db + qdrant + 抽取缓存）。
+            */}
+            {building ? "建图中…" : graph?.available === true ? "继续建图（增量）" : "开始建图"}
           </Button>
         }
       >

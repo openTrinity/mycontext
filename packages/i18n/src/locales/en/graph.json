@@ -1,7 +1,7 @@
 {
   "loading": "Loading…",
   "noGraph": "No relationship graph yet",
-  "rebuild": "Rebuild graph",
+  "rebuild": "Continue building (incremental)",
   "building": "Building…",
   "legendSelf": "{{name}} (you)",
   "legendChannel": "Outline = {{channel}}",

@@ -1,7 +1,7 @@
 {
   "loading": "读取中…",
   "noGraph": "还没有可展示的关系图",
-  "rebuild": "重新建图",
+  "rebuild": "继续建图（增量）",
   "building": "建图中…",
   "legendSelf": "{{name}}（你）",
   "legendChannel": "描边＝{{channel}}",
