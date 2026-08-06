@@ -37,7 +37,7 @@
  * 蒸馏是分钟级的过程。轮询要么太频要么太疏，
  * 而"看起来卡住"会让用户以为坏了然后关掉。
  */
-import type { ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import { Button, cn } from "@mycontext/design"
 import type { DistillProgressView, IngestSnapshot } from "@mycontext/ipc-contract"
 import {
@@ -78,6 +78,8 @@ export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
   const progress = useDistillProgress()
   const start = useStartDistill()
   const reset = useResetDistill()
+  /** undefined = 本页还没发起；其余值是点击开始时的上一轮时间。 */
+  const [runBaseline, setRunBaseline] = useState<number | null | undefined>(undefined)
   /**
    * 采集快照 —— 这一步要的是它的 `backfill` 那段。
    *
@@ -92,6 +94,11 @@ export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
   const forge = data?.forge
   const running = forge?.running === true
   const hasRun = forge !== undefined && forge.lastRunAt !== null
+  const completedHere =
+    runBaseline !== undefined &&
+    forge?.lastRunAt !== null &&
+    forge?.lastRunAt !== undefined &&
+    forge.lastRunAt !== runBaseline
 
   return (
     <div className="flex flex-col gap-[var(--gap-section-md)]">
@@ -139,8 +146,12 @@ export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
                   ? t("distillStep.stateRunning")
                   : hasRun
                     ? forge.lastOk === true
-                      ? t("distillStep.stateDone")
-                      : t("distillStep.stateFailed")
+                      ? t(completedHere ? "distillStep.stateDone" : "distillStep.statePreviousDone")
+                      : t(
+                          completedHere
+                            ? "distillStep.stateFailed"
+                            : "distillStep.statePreviousFailed",
+                        )
                     : t("distillStep.stateIdle")}
               </span>
             }
@@ -170,7 +181,11 @@ export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
 
           {/* 结果只在真的跑过之后才出现 —— 没跑过时一排 0 是噪音 */}
           {!hasRun ? null : (
-            <StepSection title={t("distillStep.resultTitle")}>
+            <StepSection
+              title={t(
+                completedHere ? "distillStep.resultTitle" : "distillStep.previousResultTitle",
+              )}
+            >
               <ResultGrid
                 messages={forge.messages}
                 turns={forge.turns}
@@ -254,7 +269,10 @@ export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
            * 原因已经在上面写着了，所以这里只需要拦住动作。
            */
           disabled={start.isPending || running || forge?.available === false}
-          onClick={() => start.mutate({ days: rangeDays })}
+          onClick={() => {
+            setRunBaseline(forge?.lastRunAt ?? null)
+            start.mutate({ days: rangeDays })
+          }}
         >
           {t("distillStep.start")}
         </Button>
@@ -757,7 +775,16 @@ function CoverageNote({
    * 换算前先判零，免得 `Math.round` 把不到半天的残余抹成 0 而提前报"已完成"。
    */
   if (backfill.remainingMs <= 0) {
-    return <Note tone="muted">{label("coverageDone", { selected: rangeDays })}</Note>
+    return (
+      <Note tone="muted">
+        {typeof backfill.messages === "number"
+          ? label("coverageDone", {
+              selected: rangeDays,
+              count: formatCount(backfill.messages),
+            })
+          : label("coverageDoneLegacy", { selected: rangeDays })}
+      </Note>
+    )
   }
 
   /**

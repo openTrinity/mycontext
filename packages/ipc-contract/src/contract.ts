@@ -1364,6 +1364,7 @@ export const channelIdInputSchema = z.object({ channelId: z.string().min(1) })
 export const authProgressSchema = z.discriminatedUnion("phase", [
   z.object({ phase: z.literal("starting") }),
   z.object({ phase: z.literal("browser-opened"), url: z.string() }),
+  z.object({ phase: z.literal("scope-authorization"), url: z.string() }),
   z.object({
     phase: z.literal("device-code"),
     userCode: z.string(),

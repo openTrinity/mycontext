@@ -151,6 +151,33 @@ export function extractAuthUrl(line: string): string | undefined {
 }
 
 /**
+ * PAT 推荐权限的确认页。
+ *
+ * DWS 的 table 输出形如：
+ * `授权链接: https://open-dev.dingtalk.com/...#/personalAuthorization?...`
+ * 旧版也可能把 hash route URL 编码成 `%2FpersonalAuthorization`。
+ */
+export function extractPatAuthorizationUrl(line: string): string | undefined {
+  const cleanLine = line
+    .split(String.fromCharCode(27))
+    .map((part, index) => (index === 0 ? part : part.replace(/^\[[0-9;]*m/, "")))
+    .join("")
+  const urls = cleanLine.match(/https:\/\/[^\s│|]+/g)
+  if (urls === null) return undefined
+  for (const raw of urls) {
+    const url = raw.replace(/["'}\]),.]+$/, "")
+    const normalized = url.toLowerCase()
+    if (
+      normalized.includes("personalauthorization") ||
+      normalized.includes("%2fpersonalauthorization")
+    ) {
+      return url
+    }
+  }
+  return undefined
+}
+
+/**
  * device 流程里的授权码与验证页。
  * 实测输出形如：`│    授权码: GFZP-MCVP` 与
  * `https://login.dingtalk.com/oauth2/device/verify.htm?user_code=GFZP-MCVP`

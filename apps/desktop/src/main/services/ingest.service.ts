@@ -1891,6 +1891,7 @@ export class IngestService {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         this.scheduler.failBackfillWindow(detail)
+        this.events.emit("backfill.changed")
         this.options.logger.warn("ingest backfill failed", { detail })
       }
 
@@ -2460,6 +2461,13 @@ export class IngestService {
     )
     if (rootWindow === null) return totals
     this.scheduler.beginBackfillWindow(rootWindow)
+    /**
+     * 回填状态本身也是进度。
+     *
+     * 一个窗口可能全部是重复数据，`persist()` 此时不会发 `batch.persisted`，
+     * 但 activeWindow 已经变化。只靠入库事件会让 UI 一直停在上一个窗口。
+     */
+    this.events.emit("backfill.changed")
 
     /**
      * 队列按 start **升序**，与增量那边同理：下界只能往左推连续前缀。
@@ -2621,6 +2629,8 @@ export class IngestService {
         this.backfillStalledRounds = 0
       }
     }
+    // floor / stalled / activeWindow 都可能变化，即使这一轮新增消息为 0。
+    this.events.emit("backfill.changed")
     return totals
   }
 

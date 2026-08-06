@@ -78,6 +78,8 @@ export type AuthProgress =
   | { phase: "starting" }
   /** loopback：拿到授权 URL（已自动打开浏览器，同时给用户手动兜底） */
   | { phase: "browser-opened"; url: string }
+  /** OAuth 登录完成后，进入 DWS 的 PAT 推荐权限确认页。 */
+  | { phase: "scope-authorization"; url: string }
   /** device：拿到授权码与验证页 */
   | { phase: "device-code"; userCode: string; verifyUrl: string; expiresInSeconds: number }
   | { phase: "waiting" }

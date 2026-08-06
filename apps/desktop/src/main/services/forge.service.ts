@@ -64,7 +64,7 @@ export interface ForgeRunResult {
   failedStep: ForgeStep | null
   /** 人话原因，直接可显示 */
   reason: string | null
-  /** 灌进 forge 语料库的消息数 */
+  /** forge 当前语料库里的本人消息总数 */
   messages: number
   /** 配对出的 (上下文 → 我的回复) 数 */
   turns: number
@@ -275,17 +275,23 @@ export class ForgeService {
       note?: string
       sourceStats?: { unjudgedRows?: number }
     }
-    const messages = pulled.inserted ?? 0
+    const inserted = pulled.inserted ?? 0
 
     input.onStep?.("build")
     const build = await this.runStep("build", configPath, input.signal)
     if (!build.ok) {
-      return { ...empty, messages, failedStep: "build", reason: build.reason }
+      return { ...empty, messages: inserted, failedStep: "build", reason: build.reason }
     }
     const built = build.payload as {
-      corpus?: { turns?: number; asks?: number }
+      corpus?: { selfMessages?: number; turns?: number; asks?: number }
       warnings?: { code?: string; detail?: string }[]
     }
+    /**
+     * `pull.inserted` 只是本轮新增数：幂等重跑时会从 N 变成 0，
+     * 但语料库和配对都还在。结果页展示当前语料规模，必须读 build 的累计值。
+     * 兼容旧 Forge：缺 `selfMessages` 时退回本轮新增数。
+     */
+    const messages = built.corpus?.selfMessages ?? inserted
     const turns = built.corpus?.turns ?? 0
     const asks = built.corpus?.asks ?? 0
 

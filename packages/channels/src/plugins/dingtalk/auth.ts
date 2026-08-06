@@ -5,6 +5,11 @@
  *   loopback（默认）— dws 起本机 127.0.0.1 监听，浏览器授权后自动回写 token
  *   device        — 打印授权码 + 验证页，适合无浏览器环境
  *
+ * OAuth 登录后还必须完成 PAT 推荐权限确认。DWS 只在交互式 TTY 中为裸
+ * `auth login` 自动进入范围选择；本应用的子进程没有 TTY，因此必须显式传
+ * `--recommend -f table`。table 模式会输出 PAT URL并等待用户确认，JSON
+ * 模式则把 PAT pending 当结构化错误立即返回。
+ *
  * ⚠️ 登录态共享：token 的加密密钥存在 macOS Keychain（服务名 dws-cli），
  * 按系统用户存一份。DWS_CONFIG_DIR 只能隔离 profiles 与日志，**隔离不了 token**
  * （两种隔离手段都实测过）。因此本应用与用户终端里的 dws 共享同一登录态，
@@ -19,11 +24,15 @@ import {
   extractDeviceCode,
   extractDeviceExpiry,
   extractDeviceVerifyUrl,
+  extractPatAuthorizationUrl,
   parseAuthStatus,
 } from "./parse.js"
 
-/** 授权流程总超时：扫码 + 手机确认，5 分钟足够且不会无限挂着子进程。 */
-const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
+/**
+ * OAuth 最长约 5 分钟，随后 PAT 自身允许等待 10 分钟。
+ * 总超时必须覆盖两个串行阶段，否则用户正在范围页确认时会被宿主提前杀掉。
+ */
+const LOGIN_TIMEOUT_MS = 16 * 60 * 1000
 /** status 查询超时：本地命令 + 可能的 token 刷新网络请求。 */
 const STATUS_TIMEOUT_MS = 20_000
 
@@ -42,6 +51,7 @@ export class DingTalkAuth implements ChannelAuth {
     return [
       "channels:dingtalk.steps.openBrowser",
       "channels:dingtalk.steps.scanQr",
+      "channels:dingtalk.steps.confirmScope",
       "channels:dingtalk.steps.backToApp",
     ]
   }
@@ -78,12 +88,16 @@ export class DingTalkAuth implements ChannelAuth {
     // loopback 由我们自己开浏览器：dws 自带的打开行为在打包应用里不一定可靠，
     // 而且我们要把 URL 同时显示给用户作为手动兜底。
     args.push("--no-browser")
+    // 非 TTY 下裸 auth login 只拿 OAuth token，不会进入 PAT 范围授权。
+    // table 输出让 DWS 打印范围页 URL并留在轮询中，由本应用负责打开浏览器。
+    args.push("--recommend", "-f", "table")
     // ★ 同 status()：这条路径也要过门禁。
     // `auth login` 在 cli.ts 里归入 INTERACTIVE_COMMANDS —— 允许执行但**不加 `-y`**
     // （它等的是真人扫码，不是确认提示，加 `-y` 只会让人误以为能无人值守）。
     assertAllowedCommand(args)
 
-    let browserOpened = false
+    let loginBrowserOpened = false
+    let scopeBrowserOpened = false
     let deviceCode: string | undefined
     let verifyUrl: string | undefined
     let deviceExpiry: number | undefined
@@ -108,8 +122,8 @@ export class DingTalkAuth implements ChannelAuth {
         onLine: (line) => {
           if (ctx.mode === "loopback") {
             const url = extractAuthUrl(line)
-            if (url !== undefined && !browserOpened) {
-              browserOpened = true
+            if (url !== undefined && !loginBrowserOpened) {
+              loginBrowserOpened = true
               ctx.onProgress({ phase: "browser-opened", url })
               void this.options.openExternal(url).catch((error: unknown) => {
                 // 打不开浏览器不算失败：UI 上仍有可复制的 URL。
@@ -126,6 +140,17 @@ export class DingTalkAuth implements ChannelAuth {
             const expiry = extractDeviceExpiry(line)
             if (expiry !== undefined) deviceExpiry = expiry
             emitDeviceIfReady()
+          }
+
+          const scopeUrl = extractPatAuthorizationUrl(line)
+          if (scopeUrl !== undefined && !scopeBrowserOpened) {
+            scopeBrowserOpened = true
+            ctx.onProgress({ phase: "scope-authorization", url: scopeUrl })
+            void this.options.openExternal(scopeUrl).catch((error: unknown) => {
+              this.options.logger.warn("open PAT authorization page failed", {
+                error: error instanceof Error ? error.message : String(error),
+              })
+            })
           }
 
           if (/等待|轮询|waiting/i.test(line)) ctx.onProgress({ phase: "waiting" })

@@ -4,7 +4,8 @@
     "description": "以本人身份读取会话、文档与听记，并生成回复草稿。",
     "steps": {
       "openBrowser": "点击「开始授权」，应用会打开浏览器并跳转到钉钉登录页",
-      "scanQr": "用手机钉钉扫码并确认授权（读取通讯录、会话与消息）",
+      "scanQr": "用手机钉钉扫码，完成账号与组织登录",
+      "confirmScope": "登录后会打开 DWS 授权范围页，请检查并确认推荐的读取权限",
       "backToApp": "浏览器提示成功后回到应用，授权状态会自动刷新"
     }
   },
@@ -77,8 +78,9 @@
     "sharedCredentialNote": "授权凭据由钉钉官方 CLI 保存在系统钥匙串，与你在终端里的登录态共用。如需彻底清除，请在终端执行 <1>{{command}}</1>。"
   },
   "progress": {
-    "browserOpened": "已打开浏览器，请扫码确认",
+    "browserOpened": "已打开钉钉登录页，请扫码确认",
     "enterCode": "在浏览器中输入授权码完成授权",
+    "scopeAuthorization": "登录成功，请在新打开的页面确认 DWS 授权范围",
     "manualUrl": "浏览器未自动打开？手动访问：{{url}}"
   }
 }

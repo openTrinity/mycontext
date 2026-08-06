@@ -4,7 +4,8 @@
     "description": "Reads your conversations, documents and meeting notes as you, and drafts replies.",
     "steps": {
       "openBrowser": "Click “Authorize” — the app opens your browser at the DingTalk sign-in page",
-      "scanQr": "Scan the code in the DingTalk mobile app and confirm access (contacts, conversations, messages)",
+      "scanQr": "Scan with the DingTalk mobile app to sign in to your account and organization",
+      "confirmScope": "After sign-in, review and confirm the recommended read permissions on the DWS authorization page",
       "backToApp": "Once the browser confirms success, come back — the status refreshes on its own"
     }
   },
@@ -77,8 +78,9 @@
     "sharedCredentialNote": "The official DingTalk CLI stores credentials in your system keychain, shared with the CLI in your terminal. To clear them completely, run <1>{{command}}</1> in a terminal."
   },
   "progress": {
-    "browserOpened": "Browser opened — scan the code to confirm",
+    "browserOpened": "DingTalk sign-in opened — scan the code to continue",
     "enterCode": "Enter the code in your browser to finish",
+    "scopeAuthorization": "Signed in — confirm the DWS authorization scope in the newly opened page",
     "manualUrl": "Browser didn't open? Visit this URL: {{url}}"
   }
 }

@@ -285,6 +285,26 @@ describe("三步编排", () => {
     vault.handle.close()
   })
 
+  it("重复学习展示当前本人语料总数，不把本轮新增 0 误报成语料归零", async () => {
+    const { runner } = fakeRunner({
+      ...HAPPY,
+      pull: { inserted: 0, complete: true },
+      build: { corpus: { selfMessages: 51, turns: 5, asks: 0 }, warnings: [] },
+    })
+    const vault = makeVault()
+    const roots = makeRoots()
+    const result = await makeService(runner).run({
+      db: vault.handle.db,
+      vaultPath: vault.path,
+      ...roots,
+      since: null,
+    })
+
+    expect(result.messages).toBe(51)
+    expect(result.turns).toBe(5)
+    vault.handle.close()
+  })
+
   it("since 给定时转成本地墙钟串传给 pull（forge 比的是字符串）", async () => {
     const { runner, specs } = fakeRunner(HAPPY)
     const vault = makeVault()

@@ -249,6 +249,8 @@ export class DataPlaneService {
      * （进程内，不过 IPC、不查库）。
      */
     ingest.events.on("batch.persisted", () => this.pushSnapshotThrottled())
+    // 窗口推进不一定产生新行；activeWindow / floor / stalled 仍要实时推给 UI。
+    ingest.events.on("backfill.changed", () => this.pushSnapshotThrottled())
 
     ingest.start()
     this.ingest = ingest

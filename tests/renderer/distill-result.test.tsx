@@ -27,7 +27,7 @@
  * · 等级带量表与解释。
  */
 import { afterEach, describe, expect, it } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { I18nextProvider } from "react-i18next"
 import { createI18n } from "@mycontext/i18n"
@@ -101,6 +101,7 @@ function wrap(
   options: {
     rangeDays?: number | null
     backfill?: IngestSnapshot["backfill"]
+    captureIngestProgress?: (listener: (snapshot: IngestSnapshot) => void) => void
   } = {},
 ) {
   const api = {
@@ -123,7 +124,10 @@ function wrap(
             },
           ),
         }),
-      onProgress: () => () => undefined,
+      onProgress: (listener: (snapshot: IngestSnapshot) => void) => {
+        options.captureIngestProgress?.(listener)
+        return () => undefined
+      },
     },
     distill: {
       progress: () =>
@@ -211,6 +215,13 @@ function classesAround(text: string | RegExp): string {
 }
 
 describe("★★ 学习结果：一个主数字 + 支撑量（不是五个一样大的格子）", () => {
+  it("已有结果进入页面时标成最近一次，不假装本次已经完成", async () => {
+    wrap(forge())
+    expect(await screen.findByText("最近一次已完成")).toBeTruthy()
+    expect(screen.getByText("最近一次学习结果")).toBeTruthy()
+    expect(screen.queryByText("本次已完成")).toBeNull()
+  })
+
   it("★ 「配对」是 hero —— 用排版表里最大的那一档", async () => {
     wrap(forge())
     /**
@@ -419,7 +430,7 @@ describe("★★ 覆盖范围：正在补历史时必须说出来", () => {
    * "已完整入库" —— 也就是说它**锁住的正是那个 bug**。真实故障：采集第一轮
    * 就撞登录过期进 blocked 终态、messages 表空，而引导页报"完成"。
    */
-  it("★ 补完了只报一句确认，不再占三行", async () => {
+  it("★ 扫描结束时展示实际条数，不把采集完成说成学习完成", async () => {
     const now = Date.now()
     wrap(forge(), {
       rangeDays: 90,
@@ -434,7 +445,9 @@ describe("★★ 覆盖范围：正在补历史时必须说出来", () => {
       },
     })
 
-    expect(await screen.findByText(/选定的 90 天区间已完整入库/)).toBeTruthy()
+    expect(await screen.findByText(/已扫描选定的 90 天/)).toBeTruthy()
+    expect(screen.getByText(/当前共入库 900 条聊天记录/)).toBeTruthy()
+    expect(screen.getByText(/不代表学习已经完成/)).toBeTruthy()
     // 「还差」不该出现 —— 补完了却说还差多少是自相矛盾
     expect(screen.queryByText(/还差/)).toBeNull()
   })
@@ -463,7 +476,7 @@ describe("★★ 覆盖范围：正在补历史时必须说出来", () => {
     })
 
     expect(await screen.findByText(/还没有采到任何聊天记录/)).toBeTruthy()
-    expect(screen.queryByText(/已完整入库/)).toBeNull()
+    expect(screen.queryByText(/已扫描选定/)).toBeNull()
   })
 
   it("★ remainingMs 归零也算补完（不显示「还差 0 天」）", async () => {
@@ -481,7 +494,7 @@ describe("★★ 覆盖范围：正在补历史时必须说出来", () => {
       },
     })
 
-    expect(await screen.findByText(/已完整入库/)).toBeTruthy()
+    expect(await screen.findByText(/已扫描选定/)).toBeTruthy()
     expect(screen.queryByText(/还差 0 天/)).toBeNull()
   })
 
@@ -568,6 +581,34 @@ describe("★★ 回填进度：看得出在动", () => {
     })
     expect(await screen.findByText(/12,345 条/)).toBeTruthy()
     expect(screen.queryByText(/当前回填区间/)).toBeNull()
+  })
+
+  it("★★ 主进程推送新快照后实时更新，不需要重新进入页面", async () => {
+    let push: ((snapshot: IngestSnapshot) => void) | undefined
+    wrap(forge(), {
+      rangeDays: 90,
+      backfill: backfilling,
+      captureIngestProgress: (listener) => {
+        push = listener
+      },
+    })
+    expect(await screen.findByText(/12,345 条/)).toBeTruthy()
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33")
+    await waitFor(() => expect(push).toBeTypeOf("function"))
+
+    const advanced = ingestSnapshot({
+      ...backfilling,
+      coveredFrom: now - 45 * 86_400_000,
+      remainingMs: 45 * 86_400_000,
+      activeWindow: { start: now - 47 * 86_400_000, end: now - 45 * 86_400_000 },
+      messages: 13_210,
+    })
+    await act(async () => {
+      push?.(advanced)
+    })
+
+    await waitFor(() => expect(screen.getByText(/13,210 条/)).toBeTruthy())
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50")
   })
 
   it("★★ 旧主进程的快照缺这两个键时不崩（引导流程不能卡死）", async () => {

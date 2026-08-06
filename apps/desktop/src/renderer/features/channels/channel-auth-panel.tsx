@@ -89,6 +89,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * 而它们恰恰是浏览器没自动打开时的唯一兜底。
    */
   const [browserUrl, setBrowserUrl] = useState<string | undefined>(undefined)
+  const [scopeAuthorizationUrl, setScopeAuthorizationUrl] = useState<string | undefined>(undefined)
   const [deviceCode, setDeviceCode] = useState<
     Extract<AuthProgress, { phase: "device-code" }> | undefined
   >(undefined)
@@ -96,6 +97,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   useAuthProgress(channel.id, (next) => {
     setProgress(next)
     if (next.phase === "browser-opened") setBrowserUrl(next.url)
+    if (next.phase === "scope-authorization") setScopeAuthorizationUrl(next.url)
     if (next.phase === "device-code") setDeviceCode(next)
   })
 
@@ -246,6 +248,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const begin = (mode: "loopback" | "device") => {
     setProgress(null)
     setBrowserUrl(undefined)
+    setScopeAuthorizationUrl(undefined)
     setDeviceCode(undefined)
     start.reset()
     start.mutate({ channelId: channel.id, mode })
@@ -341,6 +344,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         <ProgressBlock
           deviceCode={deviceCode}
           browserUrl={browserUrl}
+          scopeAuthorizationUrl={scopeAuthorizationUrl}
           onCancel={() => cancel.mutate({ channelId: channel.id })}
         />
       ) : null}
@@ -777,24 +781,35 @@ function InfoRow({
 function ProgressBlock({
   deviceCode,
   browserUrl,
+  scopeAuthorizationUrl,
   onCancel,
 }: {
   deviceCode: Extract<AuthProgress, { phase: "device-code" }> | undefined
   browserUrl: string | undefined
+  scopeAuthorizationUrl: string | undefined
   onCancel: () => void
 }) {
   const { t } = useDynamicTranslation("channels")
   const { t: tc } = useDynamicTranslation()
+  const showingScopeAuthorization = scopeAuthorizationUrl !== undefined
+  const showingDeviceCode = !showingScopeAuthorization && deviceCode !== undefined
+  const manualUrl = scopeAuthorizationUrl ?? browserUrl
   return (
     <div className="flex flex-col gap-2 radius-md border border-[var(--border-light)] bg-[var(--bg-card-z0)] p-3">
       <div className="flex items-center gap-2">
         <SpinnerIcon className="size-4 animate-spin text-[var(--text-accent-normal)]" />
         <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
-          {t(deviceCode !== undefined ? "progress.enterCode" : "progress.browserOpened")}
+          {t(
+            showingScopeAuthorization
+              ? "progress.scopeAuthorization"
+              : showingDeviceCode
+                ? "progress.enterCode"
+                : "progress.browserOpened",
+          )}
         </span>
       </div>
 
-      {deviceCode !== undefined ? (
+      {showingDeviceCode ? (
         <>
           <code
             className="typography-title-base-600 select-all text-center font-mono-token tracking-[0.2em] text-[var(--text-base-primary)]"
@@ -808,9 +823,9 @@ function ProgressBlock({
         </>
       ) : null}
 
-      {browserUrl !== undefined ? (
+      {manualUrl !== undefined ? (
         <p className="typography-caption-400 break-all text-[var(--text-base-tertiary)]">
-          {t("progress.manualUrl", { url: browserUrl })}
+          {t("progress.manualUrl", { url: manualUrl })}
         </p>
       ) : null}
 

@@ -60,6 +60,7 @@ export {
   parseAuthStatus,
   extractJsonObject,
   extractAuthUrl,
+  extractPatAuthorizationUrl,
   extractDeviceCode,
   extractDeviceVerifyUrl,
   extractDeviceExpiry,

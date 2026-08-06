@@ -9,13 +9,18 @@
 import { describe, expect, it } from "vitest"
 import {
   daysUntil,
+  DingTalkAuth,
   extractAuthUrl,
   extractDeviceCode,
   extractDeviceExpiry,
   extractDeviceVerifyUrl,
   extractJsonObject,
+  extractPatAuthorizationUrl,
   parseAuthStatus,
 } from "@mycontext/channels"
+import type { AuthProgress } from "@mycontext/channels"
+import { createLogger } from "@mycontext/kernel"
+import type { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 
 const NOW = new Date("2026-07-28T11:20:00.000Z")
 
@@ -153,6 +158,16 @@ describe("登录输出解析（fixture 来自实测）", () => {
     expect(extractAuthUrl("无关行")).toBeUndefined()
   })
 
+  it("从 DWS PAT 输出里提取授权范围页 URL", () => {
+    const url =
+      "https://open-dev.dingtalk.com/fe/old?hash=%23%2FpersonalAuthorization%3FflowId%3Dflow-1%26userCode%3DABCD-EFGH#/personalAuthorization?flowId=flow-1&userCode=ABCD-EFGH"
+    expect(extractPatAuthorizationUrl(`  授权链接: ${url}`)).toBe(url)
+    expect(extractPatAuthorizationUrl(`\u001b[36m授权链接: ${url}\u001b[0m`)).toBe(url)
+    expect(
+      extractPatAuthorizationUrl("https://example.com/not-an-authorization-page"),
+    ).toBeUndefined()
+  })
+
   it("从 device 输出里提取授权码（带表格边框）", () => {
     expect(extractDeviceCode("  │    授权码: GFZP-MCVP                    │")).toBe("GFZP-MCVP")
     expect(extractDeviceCode("授权码：ABCD-1234")).toBe("ABCD-1234")
@@ -177,5 +192,63 @@ describe("登录输出解析（fixture 来自实测）", () => {
 
   it("不把普通文本误当成授权码", () => {
     expect(extractDeviceCode("Step 1: 请求设备授权码...")).toBeUndefined()
+  })
+})
+
+describe("DingTalkAuth：OAuth 后继续完成 PAT 范围授权", () => {
+  it("显式启用推荐权限，并依次打开登录页与授权范围页", async () => {
+    const loginUrl =
+      "https://login.dingtalk.com/oauth2/auth?client_id=test&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcallback"
+    const scopeUrl =
+      "https://open-dev.dingtalk.com/fe/old#/personalAuthorization?flowId=flow-1&userCode=ABCD-EFGH"
+    const opened: string[] = []
+    const progress: AuthProgress[] = []
+    let spawnArgs: string[] = []
+    let timeoutMs = 0
+
+    const processes = {
+      spawn: async (spec: {
+        args: string[]
+        timeoutMs?: number
+        onLine: (line: string, stream: "stdout" | "stderr") => void
+      }) => {
+        spawnArgs = spec.args
+        timeoutMs = spec.timeoutMs ?? 0
+        spec.onLine(loginUrl, "stderr")
+        spec.onLine(`授权链接: ${scopeUrl}`, "stderr")
+        return { exitCode: 0, stdout: "", stderr: "", timedOut: false }
+      },
+      exec: async () => ({
+        exitCode: 0,
+        stdout: AUTHORIZED,
+        stderr: "",
+        timedOut: false,
+      }),
+    } as unknown as ProcessRunner
+    const runtime = {
+      resolve: () => ({ name: "dws", path: "/tmp/dws", platform: "test", source: "bundled" }),
+      buildEnv: () => ({}),
+    } as unknown as RuntimeEnv
+    const auth = new DingTalkAuth({
+      runtime,
+      processes,
+      logger: createLogger("DingTalkAuthTest", { level: "error" }),
+      openExternal: (url) => {
+        opened.push(url)
+        return Promise.resolve()
+      },
+    })
+
+    const status = await auth.login({
+      mode: "loopback",
+      signal: new AbortController().signal,
+      onProgress: (event) => progress.push(event),
+    })
+
+    expect(status.state).toBe("authorized")
+    expect(spawnArgs).toEqual(["auth", "login", "--no-browser", "--recommend", "-f", "table"])
+    expect(timeoutMs).toBeGreaterThan(15 * 60 * 1000)
+    expect(opened).toEqual([loginUrl, scopeUrl])
+    expect(progress).toContainEqual({ phase: "scope-authorization", url: scopeUrl })
   })
 })
