@@ -30,7 +30,9 @@ import {
   createDingTalkPlugin,
   createFeishuPlugin,
   createRegistry,
+  scopedChannelId,
   seedChannelProfile,
+  sourceKeyOf,
 } from "@mycontext/channels"
 import { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 import { LlmHolder } from "@mycontext/llm"
@@ -1175,7 +1177,24 @@ export function bootstrapApp(mainDir: string): AppContext {
             ? null
             : { accountId: session.accountId, baseVaultId: vaultId },
         newVaultId: () => randomUUID(),
-        channelId,
+        /**
+         * ★★ 带上「来源应用」那一段，而不是裸的 `channelId`。
+         *
+         * 实测：同一台机器上装了两个不同来源的渠道 CLI（随包的开源版、
+         * 用户自备的闭源版），两者 `auth status` 返回的 `corp_id` 与
+         * `user_id` **完全相同**（逐字段 sha256 比对，13 个字段全等）。
+         * 不带来源的话它们会被判成同一个身份、共用一个 vault ——
+         * 而两者的消息面不同，混进一个库就是把两批语料蒸进同一份画像。
+         *
+         * ★ 内置那份**不加后缀**，所以存量行（`channel_id = "dingtalk"`）
+         * 照旧命中、零迁移。完整的 why 见 `source-key.ts`。
+         *
+         * ★ 读 `dwsSource.path()` 而不是 `runtime` —— 它是同一个值的源头
+         * （`RuntimeEnv` 的 `dwsBinOverride` getter 就是读它），
+         * 而且这里要的是"**现在**用的是哪个二进制"：用户在 UI 上改过路径
+         * 之后立刻生效，与 `resolve()` 的行为一致。
+         */
+        channelId: scopedChannelId(channelId, sourceKeyOf(dwsSource.path() ?? undefined)),
         status,
       })
       await applyPostAuthIdentity(

@@ -108,6 +108,22 @@ function IdentityRow({
    */
   const corp = identity.corpName ?? `${identity.corpId.slice(0, 10)}…`
   const user = identity.userName ?? `${identity.userId.slice(0, 6)}…`
+  /**
+   * ★★ 「来源应用」标记 —— 没有它这一屏会出现**两行一模一样**的条目。
+   *
+   * 实测：同一台机器上两个来源的渠道 CLI（随包的开源版、用户自备的
+   * 闭源版）返回的 `corp_id`/`user_id` 完全相同，于是组织名与花名也相同。
+   * 隔离键靠 `channelId` 上的来源后缀把它们分开（见 `source-key.ts`），
+   * 但那个后缀**不显示**的话，用户看到的是两个无法区分的"某组织 · 某某"，
+   * 而点哪一个的后果不同（各自是一份独立的数据）。
+   *
+   * ★ 只显示"自备"这一档，内置那份不加标记：绝大多数用户只有内置一个来源，
+   * 给它挂个"内置"徽章是纯噪音。有第二个来源时才需要区分。
+   *
+   * ★ **不显示 hash 本身**：它由本机绝对路径算出来，虽然不可逆，
+   * 但一串 `src-3f2a1b8c` 对用户没有意义，而"自备"这个词有。
+   */
+  const custom = identity.channelId.includes("@")
 
   return (
     <li
@@ -125,6 +141,11 @@ function IdentityRow({
           {identity.active ? (
             <span className="typography-caption-400 radius-sm bg-[var(--status-fill-success-container)] px-1.5 py-0.5 text-[var(--status-success)]">
               当前
+            </span>
+          ) : null}
+          {custom ? (
+            <span className="typography-caption-400 radius-sm bg-[var(--bg-card-z1)] px-1.5 py-0.5 text-[var(--text-base-tertiary)]">
+              自备客户端
             </span>
           ) : null}
         </div>

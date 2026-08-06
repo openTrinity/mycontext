@@ -26,7 +26,11 @@
  * 自动生成一遍"。
  */
 import { describe, expect, it } from "vitest"
-import { CHANNEL_EMOJI, replaceChannelEmoji } from "@renderer/features/persona/channel-emoji.js"
+import {
+  CHANNEL_EMOJI,
+  UNMAPPED_OFFICIAL,
+  replaceChannelEmoji,
+} from "@renderer/features/persona/channel-emoji.js"
 import { toDisplayContent } from "@renderer/features/persona/content-display.js"
 
 describe("★ 认识的表情转成 emoji", () => {
@@ -121,7 +125,8 @@ describe("★ 与协议标记清洗的配合", () => {
   })
 
   it("CLI 提示剥掉之后表情仍然转", () => {
-    const raw = "[图片消息](mediaId=@a) 注意：如需下载使用dws chat message download-media命令下载[赞]"
+    const raw =
+      "[图片消息](mediaId=@a) 注意：如需下载使用dws chat message download-media命令下载[赞]"
     expect(toDisplayContent(raw).text).toBe("👍")
   })
 
@@ -154,111 +159,215 @@ describe("★★ 白名单本身的卫生", () => {
    * 而那是一次不可撤回的泄漏（CLAUDE.md §1.1：入了 git 就有 fork、
    * 镜像、CI 日志）。
    *
-   * 判据：每个键都必须落在下面这份**手写**的官方表情名清单里。
-   * 加新表情时要同时加到两处 —— 那点摩擦正是这条断言的目的：
-   * 它让"顺手批量塞一堆键"这个动作变红。
+   * ## 权威从哪来
+   *
+   * 第一版这条断言拿的是**我手写**的一份分类清单当权威 —— 那是循环论证：
+   * 我猜错的键会同时出现在实现与断言里，于是断言永远绿。
+   * 用户当场指出"和 App 里显示的不一样"，核对后我那 90 条里
+   * **28 条官方默认包根本没有**、还漏了 53 条。
+   *
+   * 现在权威是**渠道 App 自己的资源**（`OFFICIAL_EMOJI_NAMES`，
+   * 从 App 包的前端资源里抄下来的 115 条 `{name, englishName}`）。
+   * 它与实现是两个独立来源，所以能真的互相校验。
+   *
+   * ★ 企业自定义表情不在官方包里（`[一脸苦笑]` 188 次、`[鞠躬]` 169 次
+   * 都是真在用的），所以另立一份 `ENTERPRISE_EMOJI_NAMES`。
+   * 两份的并集就是允许的键集 —— 想加新键必须先归类，
+   * 而那点摩擦正是这条断言的目的。
    */
-  const KNOWN_EMOJI_NAMES = new Set([
-    // 笑与开心
-    "微笑",
-    "大笑",
-    "嘿嘿",
-    "傻笑",
-    "憨笑",
-    "偷笑",
-    "坏笑",
-    "冷笑",
-    "呲牙",
-    "笑哭",
-    "捂脸哭",
-    "一脸苦笑",
-    "流汗",
-    // 难过与无奈
-    "流泪",
-    "大哭",
-    "快哭了",
-    "可怜",
-    "衰",
-    "心碎",
-    "裂开",
-    "晕",
-    "发呆",
-    "无聊",
-    "尴尬",
-    "迷惑",
-    "疑问",
-    "惊讶",
-    "惊愕",
-    "惊喜",
-    "让人头大",
-    "一团乱麻",
-    // 情绪与态度
-    "发怒",
-    "闭嘴",
-    "暗中观察",
-    "思考",
-    "专注",
-    "推眼镜",
-    "自信",
-    "可爱",
-    "爱心",
-    "爱意",
-    "比心",
-    "飞吻",
-    "天使",
-    "忍者",
-    "流鼻血",
-    "黑眼圈",
-    "吃瓜",
-    // 手势与互动
-    "赞",
-    "点赞",
-    "加一",
-    "抱拳",
-    "鞠躬",
-    "拜托",
-    "感谢",
-    "跪了",
-    "投降",
-    "鼓掌",
-    "打招呼",
-    "再见",
-    "你强",
-    "加油",
-    "加油干",
-    "胜利",
-    "敲打",
-    "抱大腿",
-    "对不起",
-    "收到",
-    // 物与场景
-    "火",
-    "热",
-    "火箭",
-    "烟花",
-    "撒花",
-    "送花花",
-    "礼物",
-    "魔法棒",
-    "灵感",
-    "地球",
-    "幼苗",
-    "猫咪",
-    "奶茶",
-    "茶",
-    "手机",
-    "元气满满",
-    "虎虎生威",
-    "兔飞猛进",
-    "马上来财",
-    "出差",
-    "在吗",
-    "表情",
+
+  /**
+   * 官方默认表情包的全部名字（115 条）。
+   *
+   * 来源：渠道 App 包内前端资源里的结构化表
+   * `{name:"天使", englishName:"Angel", …, id:"default:58"}`。
+   * 那是**产品资源**，不含任何人的数据 —— 与"从本机库筛"是两件事。
+   */
+  const OFFICIAL_EMOJI_NAMES = new Set([
+    "微笑", // Smile
+    "憨笑", // Wow
+    "色", // Yum
+    "发呆", // Dazed
+    "老板", // Boss
+    "流泪", // Sob
+    "害羞", // Shy
+    "闭嘴", // Silence
+    "睡", // Sleepy
+    "大哭", // Cry
+    "尴尬", // Awkward
+    "发怒", // Steamed
+    "调皮", // Tongueout
+    "大笑", // Laugh
+    "惊讶", // Scowl
+    "流汗", // Sweat
+    "广播", // Shout
+    "自信", // Self-confident
+    "你强", // Awesome
+    "怒吼", // Pumped
+    "惊愕", // What?!
+    "疑问", // Question
+    "OK", // OK
+    "鼓掌", // Clap
+    "握手", // Shake
+    "偷笑", // Chuckle
+    "无聊", // Bored
+    "加油", // YouCanDoIt
+    "快哭了", // TearingUp
+    "吐", // Puke
+    "晕", // Dizzy
+    "摸摸", // Comfort
+    "胜利", // Peace
+    "飞吻", // Blowkiss
+    "跳舞", // Yay
+    "傻笑", // Oops
+    "鄙视", // Dislike
+    "嘘", // Shhh
+    "衰", // Grr
+    "思考", // Hmm…
+    "亲亲", // Kiss
+    "无奈", // Disappointed
+    "感冒", // Pollution
+    "对不起", // Sorry
+    "再见", // Wave
+    "投降", // GiveUp
+    "哼", // Grumpy
+    "欠扁", // FaceSlap
+    "拜托", // Please
+    "可怜", // Aww…
+    "舒服", // Relax
+    "爱意", // Romantic
+    "单挑", // HeyYou!
+    "财迷", // MoneyMoney
+    "迷惑", // Puzzled
+    "委屈", // Worried
+    "灵感", // Idea
+    "天使", // Angel
+    "鬼脸", // SillyFace
+    "凄凉", // Phew
+    "郁闷", // Tired
+    "坏笑", // Trick
+    "忍者", // Sneaky
+    "算账", // SoMuch
+    "炸弹", // Uh-Oh
+    "邮件", // Mail
+    "电话", // Phone
+    "礼物", // Present
+    "爱心", // Love
+    "心碎", // BrokenHeart
+    "嘴唇", // Lips
+    "鲜花", // Rose
+    "残花", // Wilted
+    "出差", // BusinessTrip
+    "干杯", // Cheers
+    "赞", // Like
+    "抱拳", // Salute
+    "感谢", // Thanks
+    "笑哭", // LaughAndCry
+    "嘿嘿", // Smirk
+    "捂脸哭", // Facepalm
+    "抠鼻", // NosePick
+    "流鼻血", // BloodyNose
+    "敲打", // Hammer
+    "跪了", // YouWin
+    "抱抱", // Hug
+    "摊手", // Smugshrug
+    "呲牙", // Grin
+    "吃瓜", // EatingMelon
+    "彩虹", // Rainbow
+    "专注", // Concentrate
+    "二哈", // Doggy
+    "猫咪", // Kitty
+    "红包", // RedPacket
+    "狗子", // Puppy
+    "耶", // Yeah
+    "可爱", // Lovely
+    "捂眼睛", // CannotLook
+    "推眼镜", // PushGlasses
+    "暗中观察", // Peep
+    "脑暴", // Brainstorming
+    "100分", // 100
+    "对勾", // Check
+    "打招呼", // Hi
+    "生日快乐", // Birthday
+    "钉钉", // DingTalk
+    "白眼", // RollEyes
+    "回头", // LookBack
+    "冷笑", // Distressed
+    "开心", // Happy
+    "三多", // SanDuo
+    "送花花", // Flower
+    "惊喜", // Surprised
+    "一团乱麻", // Overwhelmed
+    "KPI", // KPI
   ])
 
-  it("★★ 表里每个键都是已知的官方表情名（挡自动生成）", () => {
-    const unknown = Object.keys(CHANNEL_EMOJI).filter((k) => !KNOWN_EMOJI_NAMES.has(k))
+  /**
+   * 企业/自定义表情：不在官方默认包里，但语料里真在用。
+   *
+   * 实测出现次数（本机 vault）附在后面 —— 它是"这条不是我凭空加的"的证据。
+   */
+  const ENTERPRISE_EMOJI_NAMES = new Set([
+    "一脸苦笑", // 188
+    "鞠躬", // 169
+    "魔法棒", // 77
+    "火", // 98
+    "火箭", // 69
+    "裂开", // 42
+    "加一", // 35
+    "烟花", // 34
+    "比心", // 29
+    "抱大腿", // 23
+    "元气满满", // 22
+    "撒花", // 21
+    "加油干", // 19
+    "黑眼圈", // 13
+    "点赞", // 13
+    "让人头大", // 11
+    "收到", // 11
+    "在吗", // 10
+    "地球", // 10
+    "幼苗", // 6
+    "手机", // 6
+    "奶茶", // 4
+    "虎虎生威", // 4
+    "马上来财", // 4
+    "送花花", // 64
+    "茶", // 3
+    "热", // 3
+    "兔飞猛进", // 3
+  ])
+
+  it("★★ 表里每个键都是官方表情名或已登记的企业表情（挡自动生成）", () => {
+    const unknown = Object.keys(CHANNEL_EMOJI).filter(
+      (k) => !OFFICIAL_EMOJI_NAMES.has(k) && !ENTERPRISE_EMOJI_NAMES.has(k),
+    )
     expect(unknown).toEqual([])
+  })
+
+  /**
+   * ★★ 反过来的一条：官方包里的名字，要么映射了、要么**明确登记为不映射**。
+   *
+   * 这条锁的是"漏"而不是"错"。第一版我漏了 53 条官方表情
+   * （`[对勾]` 190 次、`[广播]` 38 次都在语料里），而漏掉的表现是
+   * 界面上照旧显示方括号 —— 看起来像"这个表情不支持"，
+   * 而不像"我们忘了"。有了这条，漏一个就红。
+   */
+  it("★★ 官方表情要么映射、要么明确登记为不映射（挡「漏」）", () => {
+    const unhandled = [...OFFICIAL_EMOJI_NAMES].filter(
+      (n) => CHANNEL_EMOJI[n] === undefined && !UNMAPPED_OFFICIAL.includes(n),
+    )
+    expect(unhandled).toEqual([])
+  })
+
+  /**
+   * ★ 刻意不映射的那些**必须真的不在表里** —— 否则 `UNMAPPED_OFFICIAL`
+   * 就成了一句谎话（说着"不转"而实际转了）。
+   */
+  it("★ UNMAPPED_OFFICIAL 里的确实都没映射", () => {
+    for (const name of UNMAPPED_OFFICIAL) {
+      expect(CHANNEL_EMOJI[name], name).toBeUndefined()
+      expect(replaceChannelEmoji(`[${name}]`)).toBe(`[${name}]`)
+    }
   })
 
   /**

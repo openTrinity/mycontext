@@ -39,6 +39,17 @@ export type {
 } from "./types.js"
 
 export { createRegistry, ChannelHost } from "./host.js"
+/**
+ * 来源应用的作用域键。隔离键的 `channelId` 那一段要带上它 ——
+ * 同一台机器上两个来源的渠道 CLI 会返回完全相同的 corpId/userId，
+ * 见 `source-key.ts` 的文件头。
+ */
+export {
+  BUILTIN_SOURCE_KEY,
+  sourceKeyOf,
+  scopedChannelId,
+  parseScopedChannelId,
+} from "./source-key.js"
 export type { ChannelRegistry, StartLoginInput } from "./host.js"
 
 export {
