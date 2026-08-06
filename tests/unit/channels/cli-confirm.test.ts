@@ -148,6 +148,79 @@ describe("错误归类：区分终态与可重试", () => {
   })
 
   /**
+   * ★★ 钉住的身份在本机没有登录态 → 终态，**不是**可重试。
+   *
+   * ## 这一组锁的是一场无限重试风暴
+   *
+   * 渠道命令一律用 `--profile <corpId>:<userId>` 钉住当前 vault 绑的身份
+   * （`corpId + userId` 是渠道侧多账号体系的主键：userId 只在企业内唯一，
+   * 跨企业唯一要靠这两个的组合）。而那个身份可能已经不在本机了 ——
+   * 用户在终端跑过登出、或换了台机器只拷了应用数据。
+   *
+   * 实测那时是 exit 3 + `{"category":"validation","message":"organization … not found"}`，
+   * 而 `classifyDwsError` 原本对 code 3 **没有任何分支** —— 于是它落到最下面
+   * 兜底的 `PROCESS_FAILED` + `retryable: true`：每一轮采集都失败、每一次都
+   * 判定可以重试，日志刷屏而用户毫不知情。
+   *
+   * 三条真实文案（三种 `--profile` 写法各触发一种）都必须命中同一个终态。
+   */
+  it.each([
+    ["组织不存在", REAL_ERR_PROFILE_ORG_NOT_FOUND],
+    ["组织存在但账号不存在", REAL_ERR_PROFILE_ACCOUNT_NOT_FOUND],
+    ["profile 串整个不认", REAL_ERR_PROFILE_NOT_FOUND],
+  ])("真实输出 %s → CHANNEL_IDENTITY_UNAVAILABLE 且不可重试", (_label, output) => {
+    const error = classifyDwsError(output)
+    expect(error?.code).toBe("CHANNEL_IDENTITY_UNAVAILABLE")
+    // ★ 关键断言：终态。改成 true 就是那场重试风暴。
+    expect(error?.retryable).toBe(false)
+  })
+
+  /**
+   * ★★ **不能只看 `code === 3`** —— 参数拼错也是 code 3 + validation。
+   *
+   * 实测两种含义，处置完全不同：
+   * ```
+   * --profile 指向不存在的身份 → code 3、无 reason、文案含 not found → 请用户重新授权
+   * 我们自己传了个不存在的 flag → code 3、reason=unknown_flag、文案无 not found → 代码 bug
+   * ```
+   * 只看 code 会把后者也说成「请重新授权」—— 用户照做、扫完码问题还在，
+   * 而真正的原因（参数拼错了）被一条用户友好的文案彻底盖住。
+   *
+   * ★ 真实的 `unknown_flag` 输出里**没有** `not found`，所以是文案判据把它
+   * 挡住的；`isIdentityUnavailable` 里那句 `reason === "unknown_flag"` 是
+   * **第二道**（万一上游哪天把文案改成 `flag … not found` 就靠它）。
+   * 下面第二条用例专门锁那道 —— 它必须用一个**同时**命中两个信号的输入，
+   * 否则删掉那一支这里也不会红（首版就是这样，等于没锁）。
+   */
+  it("★ 参数拼错（真实输出：code 3 + validation）不被当成身份不可用", () => {
+    const error = classifyDwsError(REAL_ERR_UNKNOWN_FLAG)
+    expect(error?.code).not.toBe("CHANNEL_IDENTITY_UNAVAILABLE")
+  })
+
+  /**
+   * ★ 隔离 `reason === "unknown_flag"` 那一支（上面那条锁不住它）。
+   *
+   * 输入是**手构**的：code 3 + `unknown_flag` + 文案含 `not found` ——
+   * 当前上游不产出这种组合（实测 unknown_flag 的文案里没有 not found），
+   * 所以这是一条**前瞻**断言：上游改文案时它替我们守住"参数 bug 不要
+   * 显示成请重新授权"。手构输入在这里是对的，因为要锁的正是"两个信号
+   * 同时出现时谁优先"，而那个状态实测拿不到。
+   */
+  it("★ code 3 + unknown_flag + 文案含 not found → 仍不归身份不可用", () => {
+    const output = `{"error":{"category":"validation","code":3,"reason":"unknown_flag","message":"unknown flag: --profiel not found"}}`
+    expect(classifyDwsError(output)?.code).not.toBe("CHANNEL_IDENTITY_UNAVAILABLE")
+  })
+
+  /**
+   * ★ 隔离"文案含 not found"这一支：code 3 但文案里没有 `not found`
+   * （比如将来上游加了别的 validation 错误）不该被误归成身份问题。
+   */
+  it("code=3 但文案不含 not found → 不归身份不可用（留给上层重试）", () => {
+    const output = `{"error":{"category":"validation","code":3,"message":"limit must be positive"}}`
+    expect(classifyDwsError(output)?.code).not.toBe("CHANNEL_IDENTITY_UNAVAILABLE")
+  })
+
+  /**
    * ★ 隔离 `code===2` 这一支。
    *
    * 不能用整段真实网关输出来锁它：那段文案里带「Token 已过期」，

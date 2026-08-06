@@ -26,10 +26,7 @@ export {
   identityKeyString,
   parseIdentityKeyString,
 } from "./channel-identity-vaults.js"
-export type {
-  ChannelIdentityVaultRecord,
-  ChannelIdentityKey,
-} from "./channel-identity-vaults.js"
+export type { ChannelIdentityVaultRecord, ChannelIdentityKey } from "./channel-identity-vaults.js"
 
 export { SessionStore, SESSION_SETTING_KEY } from "./session.js"
 

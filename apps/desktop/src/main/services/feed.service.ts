@@ -13,7 +13,6 @@
  * 随机端口（固定端口更容易被本机脚本猜到）+ 随机 token，
  * 两者一起写进 `shared/handoff.json`（权限 600）供算法团队读取。
  */
-import { join } from "node:path"
 import type { Clock, Logger } from "@mycontext/kernel"
 import { AppError } from "@mycontext/kernel"
 import {

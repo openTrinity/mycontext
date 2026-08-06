@@ -47,10 +47,7 @@ import { identityKeyString, parseIdentityKeyString } from "@mycontext/store"
 const ACTIVE_IDENTITY_KEY = "active_channel_identity"
 
 /** 渠道 CLI 认的身份寻址形态。上游 `--help` 推荐 `corpId:userId`，实测唯一稳定可用的写法。 */
-export function toChannelProfile(identity: {
-  corpId: string
-  userId: string
-}): string {
+export function toChannelProfile(identity: { corpId: string; userId: string }): string {
   return `${identity.corpId}:${identity.userId}`
 }
 

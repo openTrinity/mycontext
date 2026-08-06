@@ -1750,7 +1750,7 @@ describe("★ 投递即处理：wake() 排唤醒而不是等 8 秒兜底", () =>
     vi.useFakeTimers()
     try {
       const vault = seed()
-      const { service, dirs } = makeService(vault)
+      const { service } = makeService(vault)
       const supervisor = service.inboundSupervisor
       if (supervisor === null) throw new Error("supervisor 未就绪")
 
