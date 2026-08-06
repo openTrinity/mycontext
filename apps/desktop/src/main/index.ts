@@ -223,11 +223,31 @@ if (!app.requestSingleInstanceLock()) {
        * 表现是"第一次进页面没头像，刷新一下就有了"。
        */
       registerLocalFileProtocol({
-        allowedRoots: [
-          // 渠道下载的头像与媒体
+        /**
+         * ★★ 媒体与头像**按身份隔离**之后落在
+         * `vaults/<vaultId>/{media,avatars,uploads}` 下。
+         *
+         * 放行的是 vaults 根 + 一条形状约束（只允许那三个子目录，
+         * 见 `AllowRule`）—— 因为"挂哪个 vault"在注册协议时还不知道
+         * （协议必须在建窗口之前注册，而 vault 是登录后才挂的）。
+         *
+         * ★ 那条约束不是装饰：不加的话 `vaults/<id>/core.sqlite` 也可读，
+         * 渲染层拼个 URL 就能把整个业务库拖走，而这**没有任何症状**。
+         *
+         * ★ 漏了 vaults 根的表现（实测）：新下载的图片全部 broken，而
+         * **老图仍然正常**（它们还在旧的应用级目录下）—— 看起来像
+         * "突然坏了一部分"，最难查的那种。一次会话 191 条 `local file blocked`。
+         */
+        vaultsRoot: context.paths.vaultsRoot,
+        /**
+         * 旧落点，为**存量**保留：库里存的是绝对路径
+         * （`media_assets.path` / `contact_avatars.local_path`），
+         * 所以迁移刻意没搬这两个目录 —— 搬了那些行就全部失效，
+         * 而失效的表现是"图片永久显示不出来"。
+         */
+        legacyRoots: [
           join(context.paths.userData, "avatars"),
           join(context.paths.userData, "media"),
-          // 用户自己上传的（数字人形象 / 头像）
           join(context.paths.userData, "uploads"),
         ],
         logger: context.logger.child("LocalFile"),
