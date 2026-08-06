@@ -1180,7 +1180,9 @@ export const personaActivitySchema = z.object({
    * 比没有入口更糟。
    *
    * ★ 与「有 run 但没 trace」是不同的状态：那时入口要在，展开后明说
-   * "这一轮没有留下过程"（实测 6 轮里 4 轮是这样 —— 走了直连降级）。
+   * "这一轮没有留下过程"。该状态**不该普遍出现** —— 曾经普遍出现过，
+   * 但归因（"走了直连降级"）是错的：真因是 `appendTrace` 的行主键不带
+   * runId，重启后新轮次把旧痕迹改嫁走了（已修，见 store 侧那个方法）。
    */
   runId: z.string().nullable(),
 })

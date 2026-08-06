@@ -17,11 +17,18 @@
  * 一屏可能有 20 条历史，各预取一遍 trace 是真实的性能问题（每条都要读
  * `dh_run_trace` 并解析 JSON），而其中 19 条用户不会展开。
  *
- * ## ★ 「没有过程」是常态，不是异常
+ * ## ★ 「没有过程」要能说出来，但它**不该是常态**
  *
- * 实测本机 6 轮里只有 2 轮有 trace：走**直连降级**那条路（`via: "llm"`）
- * 的轮次不写 trace，升级前生成的也没有。所以空态必须是一句解释，
- * 而不是一片空白。
+ * 走**直连降级**那条路（`via: "llm"`）的轮次不写 trace，升级前生成的也没有
+ * —— 所以空态必须是一句解释，而不是一片空白。
+ *
+ * ★★ 但"实测 6 轮里 4 轮空"曾被当成正常并写进注释，那是**误判**：
+ * 真实原因是 `appendTrace` 的行主键不带 runId（`dh_run_trace.id` 是
+ * PRIMARY KEY，而 item id 来自进程内自增的 turnSeq），重启后新轮次
+ * 把旧轮次那一行 `INSERT OR REPLACE` 改嫁走了。已修（见 store 侧
+ * `appendTrace` 的注释与 `run-trace-collision.test.ts`）。
+ *
+ * 所以：**空态普遍出现是写入侧的 bug 信号**，不要再用"直连降级"解释它。
  */
 import { useMemo, useState } from "react"
 import { EventStream } from "../agent-stream/event-stream.js"

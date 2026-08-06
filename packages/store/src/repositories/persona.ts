@@ -156,8 +156,14 @@ export interface PersonaActivityRow {
    * 两者都不该显示"看处理过程"入口（点了没反应比不显示更糟）。
    *
    * ★ 与「有 run 但没 trace」是**第三种**状态：那时入口要在，
-   * 展开后明说"这一轮没有留下过程"—— 实测 6 轮里有 4 轮是这样
-   * （走了直连降级那条路）。让「没有」与「没加载出来」在界面上可区分。
+   * 展开后明说"这一轮没有留下过程"。让「没有」与「没加载出来」可区分。
+   *
+   * ★★ 这个第三态曾**普遍**出现，而当时的归因（"走了直连降级那条路"）
+   * 是错的：真实原因是 `appendTrace` 的行主键不带 runId，重启后
+   * 新轮次把旧轮次的痕迹整行改嫁走了（见那个方法的注释）。
+   * 也就是说界面说的"没有留下过程"在很多情况下并不诚实 —— 留过，被删了。
+   * 修掉之后它应当退回真正的少数情况（opencode 缺失时的直连路）。
+   * 若再次**普遍**出现，先怀疑写入侧又丢了痕迹，不要再照抄"直连降级"这个解释。
    */
   runId: string | null
 }
@@ -754,6 +760,39 @@ export class PersonaRunRepository {
    * 更完整的版本（tool 状态停在 pending）。
    *
    * 一次事务：半截痕迹比没有痕迹更难读（看起来像 agent 中途死了）。
+   *
+   * ## ★★ 行主键**必须**带 runId —— 不带就是跨轮互相覆盖
+   *
+   * 这修的是「历史处理结果点开几乎全说『没有留下过程』」的真正根因。
+   *
+   * `item.id` 由 reducer 用 `newId: (seq) => `${turnId}_${seq}`` 生成，而
+   * `turnId` 来自 `PersonaAcp.turnSeq` —— 一个**进程内**自增计数器
+   * （`persona-acp.ts:225` 的 `private turnSeq = 0`）。也就是每次应用重启，
+   * 第一轮的 item id 又是 `turn_1_1`。而 `dh_run_trace.id` 是 PRIMARY KEY，
+   * 于是 `INSERT OR REPLACE` 把**上一次装机那一轮的痕迹整行改嫁**给新的 run：
+   * 那一行的 `run_id` 被改写成新 runId，旧 run 就此一行不剩。
+   *
+   * 实测两个本机 vault 里的指纹都对得上（`ORDER BY created_at`）：
+   * ```
+   * 21 轮 run / 只有 13 轮剩下痕迹；且尾部 3 行的 id 是 turn_1_1 / turn_2_1 /
+   * turn_3_1 —— 时间戳却是最新的 3 轮（那次重启后 turnSeq 从 0 重新开始）。
+   * 另一个 vault：566 轮 run / 只剩 38 轮有痕迹，且最早那一轮的 seq 是
+   * 2,3,4 —— seq=1 那行被后来的 turn_1_1 抢走了（现属另一个 run）。
+   * ```
+   * 也就是它不只是"没写进来"，而是**已经写进来的被后面的轮次删掉**，
+   * 而且是最看不出来的那种：库里没有报错，草稿与发送一切正常。
+   *
+   * ★ 反证跑过：把主键改回 `item.id`，`run-trace-collision.test.ts` 里
+   * 那条多 item 的断言立刻红成 `[2,3]` —— 与上面真实库里的指纹一模一样。
+   *
+   * 所以主键在这里就地命名空间化（`<runId>:<itemId>`）——
+   * 而不是去要求调用方保证 turnId 全局唯一：那种要求靠人记，
+   * 而漏掉的表现就是本次这个（静默、跨版本、只在重启后出现）。
+   * 读回来的 `id` 只被渲染层当 React key 用（`toChatItems` → `EventStream`），
+   * 没有任何地方解析它的格式。
+   *
+   * 存量的旧行**没有迁移**：它们的内容已经被覆盖掉了，改主键也换不回来。
+   * 新写入不再命中 `turn_N_M` 那些旧主键，所以旧行从此不会再被误删。
    */
   appendTrace(runId: string, items: readonly PersonaTraceInput[]): number {
     if (items.length === 0) return 0
@@ -767,7 +806,7 @@ export class PersonaRunRepository {
     this.db.transaction(() => {
       for (const item of items) {
         written += statement.run(
-          item.id,
+          `${runId}:${item.id}`,
           runId,
           item.seq,
           item.role,
