@@ -43,6 +43,7 @@ import {
   DistillTaskRepository,
   ProfileFacetRepository,
   SelfIdentityRepository,
+  readCollectionScope,
   type SqliteDatabase,
 } from "@mycontext/store"
 import { IPC_EVENTS, type DistillProgressView } from "@mycontext/ipc-contract"
@@ -605,13 +606,16 @@ export class DistillService {
    *
    * ★ 这个值在接线前是**纯装饰**：引导页把它写进 `distill_sources.scope_json`
    * 而没有任何代码读 —— 用户排除掉的会话照样被蒸进画像，且界面上看不出来。
+   *
+   * 判据走 `@mycontext/store` 的 `readCollectionScope`（唯一权威，
+   * 见 collection-scope.ts 文件头：修复前四处各一份实现且已经漂了）。
    */
   private scopedConversationIds(): readonly string[] {
     const db = this.db
     if (db === null) return []
-    const row = new DistillSourceRepository(db).list().find((source) => source.kind === "chat")
-    if (row === undefined || !row.enabled) return []
-    return row.scope.conversationIds ?? []
+    const scope = readCollectionScope(db)
+    if (!scope.restricted) return []
+    return [...scope.allow]
   }
 
   /** 跑一轮。**不抛**：调用方是定时器。 */

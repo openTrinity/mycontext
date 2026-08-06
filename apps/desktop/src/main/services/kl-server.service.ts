@@ -224,6 +224,18 @@ export interface KlServerServiceOptions {
    * 不给 = `buildSchedule` 为 null（未接自动建图），界面据此不显示那一块。
    */
   buildSchedule?: () => KlGraphOverview["buildSchedule"]
+  /**
+   * 图库被清空（`fresh=true`）之后清零建图水位。
+   *
+   * ★ 与 `buildSchedule` 同一个理由由外面注入：水位在 `FeedService` 的
+   * `GraphSyncService` 里，这个服务只管 kl 进程与图库文件。
+   *
+   * 不给的后果不是崩，而是一个**错的数字**：清库后「待建 N 条」只算清库
+   * 之后新采的那几条（实测 407），而真实要重建的是全部语料（实测 37826 个
+   * chunk / 约 3 小时）。用户据此以为"马上就好"，反复重启，
+   * 而每次重启都让 Phase A 从零开始 —— 于是图永远建不出来。
+   */
+  resetBuildWatermark?: () => boolean
   /** 覆盖端口（默认 8200）。 */
   port?: number
 }
@@ -1379,7 +1391,23 @@ export class KlServerService {
     }
     // 抽取缓存删了才会真的重抽（cache key = md5(msg.id)，不删就命中旧结果）。
     rmSync(join(dir, "extraction_cache"), { recursive: true, force: true })
-    this.options.logger.info("kl graph data wiped for fresh rebuild", { dataDir: dir })
+    /**
+     * ★ 文件删了，建图水位也必须清零 —— 否则「待建条数」会少算两个数量级。
+     *
+     * 实测：清库后游标停在旧位置、head 更高 → 界面显示"待建 407 条"，
+     * 而 kl 实际要重烧 37826 个 chunk。见 `resetBuildWatermark` 选项的注释。
+     *
+     * 清不掉只记 warn 不抛：清库本身已经做完了（不可逆），
+     * 为一个显示用的游标让整个重建失败是把次要问题升级成主要问题。
+     */
+    const watermarkReset = this.options.resetBuildWatermark?.() ?? false
+    this.options.logger.info("kl graph data wiped for fresh rebuild", {
+      dataDir: dir,
+      watermarkReset,
+    })
+    if (!watermarkReset) {
+      this.options.logger.warn("graph build watermark not reset; 待建条数会偏小", {})
+    }
   }
 
   private async start(): Promise<boolean> {

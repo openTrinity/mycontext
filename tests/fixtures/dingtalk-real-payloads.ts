@@ -55,7 +55,7 @@ export const REAL_LIST_ALL_PAGE = {
         messages: [
           {
             // 纯文本 + @真名(花名)
-            content: "@林清和(清和) 说来沙箱那台机器的证书还是去年配的[二哈]要轮换得走工单",
+            content: "@柏松岩(松岩) 说来沙箱那台机器的证书还是去年配的[二哈]要轮换得走工单",
             createTime: "2026-07-29 14:28:25",
             openConversationId: "cid1a9eda76d755a3ba7ccf9e==",
             openMessageId: "msgFAKE0002xxxxxxxxxxxxxx==",
@@ -288,7 +288,7 @@ export const REAL_MINUTES_SUMMARY = {
   errorMsg: "ok",
   result: {
     fullSummary:
-      '> **主题**: 连接器授权策略讨论\n> **时间**: <time data-ts="1785079409000">2026-07-26 23:23:29</time>\n> **参与人**: 沈云舟, 顾行之, 林清和\n\n## 会议背景\n\n组织端连接器授权的短期方案与默认开启逻辑。',
+      '> **主题**: 连接器授权策略讨论\n> **时间**: <time data-ts="1785079409000">2026-07-26 23:23:29</time>\n> **参与人**: 沈云舟, 顾行之, 柏松岩\n\n## 会议背景\n\n组织端连接器授权的短期方案与默认开启逻辑。',
   },
   success: true,
 } as const

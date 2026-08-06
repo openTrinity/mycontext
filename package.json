@@ -58,6 +58,8 @@
     "kl:env": "node scripts/kl-env.mjs",
     "replay:raw": "pnpm run native:node && node scripts/replay-raw.mjs",
     "reset:watermark": "pnpm run native:node && node scripts/reset-watermark.mjs",
+    "reset:vault": "pnpm run native:node && node scripts/reset-vault.mjs",
+    "purge:scope": "pnpm run native:node && node scripts/purge-scope.mjs",
     "backfill": "pnpm run native:node && node scripts/backfill.mjs",
     "sync:kl-graph": "node scripts/sync-kl-graph.mjs",
     "export:kl": "pnpm run native:node && node scripts/export-kl.mjs",

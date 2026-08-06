@@ -22,6 +22,7 @@ import {
   MessageRepository,
   SelfIdentityRepository,
   inferSelfExternalIdFromDirectChats,
+  type PurgeReport,
   type SqliteDatabase,
 } from "@mycontext/store"
 import {
@@ -485,13 +486,37 @@ export class DataPlaneService {
    * （现在依赖是单向的 DataPlane → persona，反过来会成环）。所以 persona
    * 发完消息只发一个**回调**，由 startup 接到这里 —— 数据面是唯一持有
    * ingest 句柄的地方。未 attach（未登录）时静默 no-op。
+   *
+   * @param options.reason `"self-sent"` = 我们自己刚发出一条，要秒级拉回来
+   *   显示。它**绕过范围闸**（见 `IngestService.refreshConversation`）——
+   *   事件叫醒那条路径不传，于是越界会话的事件收到了也不会去拉。
    */
-  async refreshConversation(conversationExternalId: string): Promise<void> {
+  async refreshConversation(
+    conversationExternalId: string,
+    options: { reason?: "self-sent" } = {},
+  ): Promise<void> {
     const ingest = this.ingest
     if (ingest === null) return
-    const changed = await ingest.refreshConversation(conversationExternalId)
+    const changed = await ingest.refreshConversation(conversationExternalId, options)
     // 只有真拉到新消息才推快照 —— 没变化时推一次是白刷（snapshot 有全表 COUNT）。
     if (changed > 0) this.pushSnapshot()
+  }
+
+  /**
+   * 用户改了采集范围之后把库对齐到新范围（清越界 + 让回填重新往回挖）。
+   *
+   * 与 `refreshConversation` 同一个理由放在这一层：ingest 句柄只有数据面
+   * 持有。未登录时返回 null（没库可对齐，不是错误 —— 设置页在登录前
+   * 也可能被打开）。
+   *
+   * ★ 导出与建图**不在这里**触发：那是 `FeedService` 的职责。由装配层
+   * （`startup.ts` 的 `distillSources.onScopeChanged`）在这之后接着调，
+   * 否则 ingest/dataPlane 会反向依赖 feed 而成环。
+   */
+  applyScopeChange(options: { dryRun?: boolean } = {}): PurgeReport | null {
+    const ingest = this.ingest
+    if (ingest === null) return null
+    return ingest.applyScopeChange(options)
   }
 
   /**

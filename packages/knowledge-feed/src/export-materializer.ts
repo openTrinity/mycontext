@@ -128,7 +128,13 @@ export interface ExportOptions {
    * `vault.py:186-208` 记着这个坑被踩过（按 `id` 匹配 0/39，按 `external_id` 32/39）。
    */
   scope?: {
-    /** 会话白名单（external_id）。空 / undefined = 不限会话。 */
+    /**
+     * 会话白名单（external_id）。
+     *
+     * `undefined` = 不限会话。**空数组 = 零个会话**（用户配了范围但一个都
+     * 没勾，或把聊天源关掉了）—— 不是"不限"。见 `run()` 里那段注释：
+     * 修复前把空数组当不限，于是"我一个都不要"被执行成"全都要"。
+     */
     conversationExternalIds?: readonly string[]
     /** 下界（unix ms）。undefined = 不限。 */
     since?: number
@@ -345,10 +351,20 @@ export class ExportMaterializer {
     })
 
     const allConversations = new ConversationRepository(this.options.db).listRecent(10_000)
-    // ★ 会话白名单：只导出用户勾选的那些（external_id 匹配）。空 = 不限。
+    /**
+     * ★ 会话白名单：只导出用户勾选的那些（external_id 匹配）。
+     *
+     * 判据是**白名单存在与否**（`undefined`），不是"它非不空"。
+     * 修复前写的是 `allow === undefined || allow.length === 0 ? 全部 : 过滤`
+     * —— 于是一个**空**白名单（用户一个都没勾 / 把聊天源关掉了）被解读成
+     * "不限"，把全部会话导进了知识图谱。方向正好相反，而且不报错。
+     *
+     * 上游 `FeedService.exportScope` 现在只在真的设了范围时才传这个键，
+     * 所以这里可以安全地把"传了空数组"当作"零个会话"。
+     */
     const allow = this.options.scope?.conversationExternalIds
     const conversations =
-      allow === undefined || allow.length === 0
+      allow === undefined
         ? allConversations
         : allConversations.filter((c) => allow.includes(c.externalId))
     const media = new MediaAssetRepository(this.options.db)

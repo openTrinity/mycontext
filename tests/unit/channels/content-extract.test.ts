@@ -89,7 +89,7 @@ describe("@提及抽取", () => {
   })
 
   it("没有括号的 @ 也能抽", () => {
-    expect(extractMentionTexts("@张涛 看一下")).toEqual(["张涛"])
+    expect(extractMentionTexts("@柏岩 看一下")).toEqual(["柏岩"])
   })
 
   it("一条消息里多个 @", () => {

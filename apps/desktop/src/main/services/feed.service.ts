@@ -28,7 +28,7 @@ import { formatDwsIsoTime } from "@mycontext/channels"
 import {
   ChangelogRepository,
   ConsumerCursorRepository,
-  DistillSourceRepository,
+  readCollectionScope,
   type SqliteDatabase,
 } from "@mycontext/store"
 import type { ExportResultView, FeedInfo, KlGraphOverview } from "@mycontext/ipc-contract"
@@ -379,31 +379,53 @@ export class FeedService {
   /**
    * 从 `distill_sources` 的 `chat` 源读出导出范围。
    *
-   * `enabled === false` 时返回一个**空白名单**语义……不，反过来：
-   * 源没开就当"不限"（`undefined`）——那与"没配范围"一致，导全库。
-   * 真正要收窄的是**开了且配了会话/时间**的情况。`conversationIds` 存的是
-   * external_id（引导写的就是它），直接透传给 materializer 的白名单。
+   * 判据走 `@mycontext/store` 的 `readCollectionScope`（唯一权威，见
+   * collection-scope.ts 文件头）。两个关键语义：
+   * · **没配过**范围 → 不限，导全库；
+   * · **配了但一个都没勾**（含"源被关掉"）→ 空白名单，一条都不导。
+   *
+   * ★ 后者是相对修复前的行为变更。修复前 `enabled === false` 返回 `{}`
+   * （= 不限 = 导全库），于是"把聊天源关掉"这个动作把**全部**聊天记录
+   * 导进了知识图谱 —— 与用户的意图正好相反，而且不报错。
    */
   private exportScope(db: SqliteDatabase): {
     conversationExternalIds?: readonly string[]
     since?: number
     until?: number
   } {
-    const chat = new DistillSourceRepository(db).list().find((s) => s.kind === "chat")
-    if (chat === undefined || !chat.enabled) return {}
+    const collection = readCollectionScope(db)
     const scope: { conversationExternalIds?: readonly string[]; since?: number; until?: number } =
       {}
-    if (chat.scope.conversationIds !== undefined && chat.scope.conversationIds.length > 0) {
-      scope.conversationExternalIds = chat.scope.conversationIds
-    }
-    if (chat.scope.since !== undefined) scope.since = chat.scope.since
-    if (chat.scope.until !== undefined) scope.until = chat.scope.until
+    /**
+     * `restricted` 时**总是**传白名单，即使它是空的。
+     *
+     * 空数组在 materializer 那侧的语义必须是"零个会话"而不是"不限" ——
+     * 那正是修复前 `allow.length === 0 ? allConversations : ...` 的 bug：
+     * 一个空白名单被解读成全量。所以那一处也一起改（见 export-materializer）。
+     */
+    if (collection.restricted) scope.conversationExternalIds = [...collection.allow]
+    if (typeof collection.since === "number") scope.since = collection.since
+    if (collection.until !== undefined) scope.until = collection.until
     return scope
   }
 
   /** 图谱同步的落后条数。状态页用它显示「图谱落后 N 条」。 */
   graphLag(): number {
     return this.graphSync?.lag() ?? 0
+  }
+
+  /**
+   * 图库被清空之后把建图水位清零（见 `GraphSyncService.resetBuildWatermark`）。
+   *
+   * ★ 这是一条**单向**调用：`KlServerService` 清库后调它。刻意不做成
+   * 回调注入 —— `feed.autoBuild` 已经引用 `klServer`，反向再加一条
+   * 会闭合成运行期环，而那个环这个仓库真实炸过一次
+   * （1000 万条 warn / 1.7 GB 日志 / 主进程停摆，见 `graphExists()` 的注释）。
+   *
+   * 未挂载 vault 时返回 false（没有库可清，不假装成功）。
+   */
+  resetGraphBuildWatermark(): boolean {
+    return this.graphSync?.resetBuildWatermark() ?? false
   }
 
   /**

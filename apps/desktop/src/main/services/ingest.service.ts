@@ -49,7 +49,6 @@ import {
   collectStorageStats,
   ConsumerCursorRepository,
   ConversationRepository,
-  DistillSourceRepository,
   FtsIndexRepository,
   MediaAssetRepository,
   MessageRepository,
@@ -59,6 +58,12 @@ import {
   RetentionRunner,
   ProbeSnapshotRepository,
   SelfIdentityRepository,
+  readCollectionScope,
+  isConversationInScope,
+  isSentAtInScope,
+  purgeOutOfScopeMessages,
+  type CollectionScope,
+  type PurgeReport,
   type MessageRow,
   type SqliteDatabase,
 } from "@mycontext/store"
@@ -493,6 +498,24 @@ export interface IngestSnapshot {
      */
     started: boolean
   }
+  /**
+   * 采集范围闸的状态。
+   *
+   * ★ 必须可见，理由与 `backfill` 那一段同源：全局窗（`list-all`）没有
+   * 会话过滤参数，所以"只采勾选的会话"只能靠**落库前丢弃**实现。
+   * 而丢弃不上报的话，"越界被挡住了"与"这段时间本来没消息"在界面上
+   * 完全同形 —— 用户无法确认自己的勾选真的生效了。
+   */
+  scope: {
+    /** 是否设了会话白名单。false = 用户没配过范围（不设限） */
+    restricted: boolean
+    /** 许可的会话数；null = 不限（≠ 0，那是"一个都不许"） */
+    allowed: number | null
+    /** 本进程累计丢弃的越界消息条数 */
+    droppedOutOfScope: number
+    /** 最近一次丢弃的时刻；null = 本进程还没丢过 */
+    lastDroppedAt: number | null
+  }
 }
 
 export class IngestService {
@@ -576,6 +599,22 @@ export class IngestService {
    * 会让它在问题早已消失后继续拖慢回填。
    */
   private backfillWidthOverrideMs: number | null = null
+
+  /**
+   * 因**超出用户勾选范围**而被丢弃的消息累计条数（进程内）。
+   *
+   * ★ 为什么必须记这个数：全局窗（`list-all`）没有会话过滤参数，所以
+   * "只采勾选的会话"只能靠落库前丢弃来实现 —— 而丢弃如果不可见，
+   * 它与"这段时间本来就没消息"在日志和状态页上完全同形。那正是
+   * 这个代码库里最贵的那类静默降级（CLAUDE.md 第 4 节）。
+   *
+   * 只在内存里（不进 DB）是刻意的：它回答的是"这个进程这一段时间挡掉了
+   * 多少"，用于确认闸门真的在工作。累计值持久化反而会让人误读成
+   * "库里现在有这么多越界数据"—— 而那是 `purgeOutOfScopeMessages` 的报告。
+   */
+  private droppedOutOfScope = 0
+  /** 最近一次丢弃的时刻；null = 这个进程还没丢过。状态页据此区分"没配范围"与"配了但最近没越界数据进来"。 */
+  private lastDroppedAt: number | null = null
 
   /**
    * 解析后的轮询周期（可配置，见 `IngestServiceOptions.intervals`）。
@@ -1309,12 +1348,56 @@ export class IngestService {
    * 渠道无 `pullConversation` 能力（或该会话查不到 target）时返回 0，
    * 不报错 —— 调用方退回等全局轮询。
    *
+   * @param options.reason 调用来源。`"self-sent"` 表示"用户/数字人自己刚发出
+   *   一条"，此时**不受范围闸约束**（见下面那段）。
    * @returns 新落库的消息条数
    */
-  async refreshConversation(conversationExternalId: string): Promise<number> {
+  async refreshConversation(
+    conversationExternalId: string,
+    options: { reason?: "self-sent" } = {},
+  ): Promise<number> {
     const ingest = this.options.plugin.ingest
     if (ingest === undefined || ingest.pullConversation === undefined) return 0
     if (!this.running || this.blockedReason !== null) return 0
+
+    /**
+     * ★★ 范围闸：不在用户勾选范围内的会话**一次定向请求都不发**。
+     *
+     * ## 这道闸挡住的是四个入口
+     *
+     * `refreshConversation` 有五个调用方，其中四个的入参完全不受范围约束：
+     * · **探针 hints**（`tickProbe`）—— `list-unread-conversations` 返回的是
+     *   "有未读红点的会话"，与用户勾了什么毫无关系；
+     * · **事件通路**（`DataPlaneService` 的 `onSignal`）——
+     *   `event consume user_im_message_receive_at` 是"一个订阅覆盖全部群"，
+     *   服务端侧**无法**按会话收窄（见 `ChannelEvents` 契约），所以越界事件
+     *   照收；能做的只有"收到了也不去拉"；
+     * · **对账**（`reconcileStaleDirected`）—— 来自 `probe_snapshots`，全量；
+     * · **常驻会话**（`refreshResidents`）—— 数字人正在服务的会话。
+     *
+     * 少了这道闸，前向就算在 `persist` 里把数据丢了，**请求本身仍然发了出去**
+     * —— 那是对一个用户明确排除掉的会话做了一次真实读取。按 CLAUDE.md
+     * 第 5 节，"不许扩大读取面"针对的正是这件事，而不只是"不许存下来"。
+     *
+     * ## 为什么"自己刚发出的"要例外
+     *
+     * `onSentMessage` 那条路径的目的是把**用户自己刚发的**消息秒级拉回来
+     * 显示（发送 API 只返回 openTaskId，消息不在库里）。它不是"扩大采集面"：
+     * 那条消息是用户此刻的主动行为，且他正盯着这个会话等它出现。
+     * 拦掉的话表现是"我发出去了但界面上没有" —— 一个明显的功能缺陷。
+     *
+     * 落库仍然过 `persist` 的范围闸，所以越界会话里这条消息不会进语料；
+     * 这里放行的只是"去把它取回来"这一次请求。
+     */
+    if (options.reason !== "self-sent") {
+      const scope = readCollectionScope(this.options.db)
+      if (!isConversationInScope(scope, conversationExternalId)) {
+        this.options.logger.debug("ingest skipping out-of-scope conversation", {
+          allowed: scope.allow.size,
+        })
+        return 0
+      }
+    }
 
     const conversations = new ConversationRepository(this.options.db)
     const conversation = conversations.findByExternalId(
@@ -2092,14 +2175,14 @@ export class IngestService {
    * 「不限」**，那要一直往回挖；undefined 是"没说"，此时不该启动回填。
    */
   private backfillSince(): number | null | undefined {
-    const row = new DistillSourceRepository(this.options.db).list().find((s) => s.kind === "chat")
-    if (row === undefined || !row.enabled) return undefined
-    // `since` 缺字段 = 用户选了"不限"（引导页对不限就是不写这个键）。
-    return row.scope.since ?? null
+    const scope = readCollectionScope(this.options.db)
+    // 源关掉 → 不回填（`readCollectionScope` 对关掉的源给 since: undefined）
+    if (!scope.enabled) return undefined
+    return scope.since
   }
 
   /**
-   * 用户在引导里**勾选**的会话 external_id。空数组 = 没限定（全部）。
+   * 当前采集范围。**每次现读**，不缓存 —— 用户改勾选要立刻生效。
    *
    * ## ★★ 这个列表曾经完全没有采集方在读
    *
@@ -2113,11 +2196,25 @@ export class IngestService {
    *
    * 后者不只是浪费 —— 按 CLAUDE.md 第 5 节，超出用户选定范围去采集
    * 是**隐私问题**，不是"多采点没坏处"。
+   *
+   * 判据统一走 `@mycontext/store` 的 `readCollectionScope`：修复前采集、
+   * 蒸馏、forge、导出各有一份实现，而它们对"源被关掉"的解读已经漂成了
+   * 「不限」（= 采全部）。四份实现里漂一份就是一次隐私事故且不报错。
+   */
+  private collectionScope(): CollectionScope {
+    return readCollectionScope(this.options.db)
+  }
+
+  /**
+   * 勾选的会话 external_id（逐会话抽干那一趟的驱动列表）。
+   *
+   * 不限（`restricted === false`）时返回空数组 —— 调用方据此整趟跳过，
+   * 因为那时全局窗已经覆盖了全部会话。
    */
   private scopedConversationIds(): string[] {
-    const row = new DistillSourceRepository(this.options.db).list().find((s) => s.kind === "chat")
-    if (row === undefined || !row.enabled) return []
-    return [...(row.scope.conversationIds ?? [])]
+    const scope = this.collectionScope()
+    if (!scope.restricted) return []
+    return [...scope.allow]
   }
 
   /**
@@ -2222,7 +2319,7 @@ export class IngestService {
       const unreadable = conversations.unreadableByExternalId(channelId)
       // ★ 一次 GROUP BY 拿全部会话的库内最新时间 —— 逐个查会阻塞主进程 173 次
       const ours = new MessageRepository(this.options.db).latestSentAtByChannel(channelId)
-      const scoped = new Set(this.scopedConversationIds())
+      const scope = this.collectionScope()
 
       /**
        * 落后的会话 = 渠道说的最后消息时间**晚于**我们库里的最新一条。
@@ -2234,8 +2331,14 @@ export class IngestService {
       for (const item of directory) {
         if (item.lastMessageAt === null) continue
         if (unreadable.has(item.externalId)) continue
-        // 勾选过就只扫勾选的（没勾 = 不限定）
-        if (scoped.size > 0 && !scoped.has(item.externalId)) continue
+        /**
+         * ★ 只扫范围内的。
+         *
+         * 判据走 `isConversationInScope` 而不是 `scoped.size > 0 && ...`：
+         * 后者把"配了范围但一个都没勾"当成"不限"，于是"我一个都不要"
+         * 被执行成"全都要"（见 collection-scope.ts 文件头）。
+         */
+        if (!isConversationInScope(scope, item.externalId)) continue
         const oursAt = ours.get(item.externalId) ?? null
         if (oursAt === null || item.lastMessageAt > oursAt) {
           stale.push({ externalId: item.externalId, remoteAt: item.lastMessageAt, oursAt })
@@ -2693,14 +2796,83 @@ export class IngestService {
         reason: "confidential",
       })
     }
+
+    /**
+     * ★★ 范围闸：把**用户没勾选**的会话与超出时间范围的消息在入库前丢掉。
+     *
+     * ## 为什么必须在这里
+     *
+     * `persist` 是全部五条采集路径的唯一漏斗（增量主窗、对账、回填、
+     * 补空洞、定向补拉）。而**越界数据的主要来源是全局窗**：
+     * `chat message list-all` 只接受时间窗（`--start/--end/--cursor/--limit`），
+     * **没有会话过滤参数** —— 服务端一定会把窗内所有会话的消息都返回。
+     * 也就是说"不采越界会话"这件事在渠道侧无法表达，只能在落库前拦。
+     *
+     * 实测（本机 vault）后果：84,325 条消息里 46,415 条（55%）属于用户
+     * 没勾的 178 个会话，且最近 1 小时新落库的 327 条里仍有 208 条（64%）
+     * 越界 —— 按 CLAUDE.md 第 5 节这是隐私问题，不是"多采点没坏处"。
+     *
+     * ## 为什么不在这里过滤 `page.conversations`
+     *
+     * 会话**目录**要留（它不是聊天内容，只有标题/人数/类型）：
+     * · 引导页的会话选择列表要能列出还没采过的会话（否则用户选不到它）；
+     * · `refreshConversation` 靠库里的会话行判类型、查单聊对端；
+     * · `drainScopedConversations` 的候选过滤前置要求会话行存在。
+     * 把目录也筛掉会让"取消勾选"变成"以后再也勾不回来"。
+     *
+     * ## 丢弃必须**可见**
+     *
+     * 只 `continue` 不计数的话，"越界被丢"与"这段时间没消息"在日志和
+     * 状态页上完全同形 —— 那正是这个代码库里最贵的那类静默降级
+     * （CLAUDE.md 第 4 节）。所以累计进 `droppedOutOfScope` 并进快照。
+     */
+    const scope = readCollectionScope(this.options.db)
+    let scopedPage = page
+    if (scope.restricted) {
+      const kept = page.messages.filter(
+        (message) =>
+          isConversationInScope(scope, message.conversationExternalId) &&
+          isSentAtInScope(scope, message.sentAt),
+      )
+      const dropped = page.messages.length - kept.length
+      if (dropped > 0) {
+        this.droppedOutOfScope += dropped
+        this.lastDroppedAt = this.options.clock.now()
+        this.options.logger.info("ingest dropped out-of-scope messages", {
+          dropped,
+          kept: kept.length,
+          allowed: scope.allow.size,
+        })
+      }
+      scopedPage = { ...page, messages: kept }
+    }
+
+    /**
+     * ★ 整页都越界时**不写 `raw_records`**。
+     *
+     * `rawPayload` 是整页原始响应，里面含窗内**所有**会话的消息正文 ——
+     * 也就是说即使把 `messages` 筛干净了，只要还写 raw，越界的真实聊天
+     * 内容照样以 JSON 形式留在库里（实测 8,705 行 raw 的 `payload_pruned_at`
+     * 全为 NULL，即一条都还没裁）。
+     *
+     * 页内**有**在范围内的消息时仍然写：那一页是那些消息的重放来源，
+     * 而重放能力是解析器 bug 的唯一兜底（见 `prunePayloads` 的注释）。
+     * 这种页里夹带的越界正文由 `RetentionRunner` 到期裁掉。
+     * 这个折中是刻意的：两害相权，宁可留一段有保质期的原始响应，
+     * 也不放弃"解析错了能重放"。
+     */
+    if (scopedPage.messages.length === 0 && page.messages.length > 0) {
+      return { changed: [] as MessageRow[], unchanged: 0 }
+    }
+
     const self = new SelfIdentityRepository(this.options.db).get(this.options.plugin.meta.id)
     const result = persistBatch(
       { db: this.options.db, clock: this.options.clock, logger: this.options.logger },
       normalize({
         channelId: this.options.plugin.meta.id,
-        conversations: page.conversations,
-        messages: page.messages,
-        rawPayload: page.rawPayload,
+        conversations: scopedPage.conversations,
+        messages: scopedPage.messages,
+        rawPayload: scopedPage.rawPayload,
         rawResource: "chat.message",
         selfExternalIds: new Set((self?.openIds ?? []).map((entry) => entry.value)),
         // 显示名用于把 content 里的 `@真名(花名)` 判成"@我"——
@@ -2794,6 +2966,108 @@ export class IngestService {
   }
 
   /**
+   * 用户改了采集范围之后，把库对齐到新范围。**立刻**，不等下一轮。
+   *
+   * ## ★★ 为什么"改了勾选"不能只影响以后
+   *
+   * 范围闸（`persist` / `refreshConversation` 里那两道）只管住"从现在起
+   * 不再采越界的"。而用户把一个会话**取消勾选**时，那个会话的历史消息
+   * 已经在库里、已经在 FTS 索引里、已经被导进知识图谱 —— 只挡前向的话
+   * 用户的动作在他能观察到的每个地方都**没有效果**：搜得到、蒸得到、
+   * 数字人检索事实时照样引用。那与"这个开关是装饰"没有区别。
+   *
+   * ## 三件事，顺序有意义
+   *
+   * 1. **清越界**（`purgeOutOfScopeMessages`）—— 先删，因为下面两步的
+   *    产物都派生自库里的消息；反了的话会先按旧数据重建一次。
+   * 2. **重置回填下界** —— 用户**放宽**范围（勾了新会话 / 把下界往前挪）时
+   *    必须让回填重新往回挖。不重置的话 `nextBackfillWindow` 会从
+   *    `backfillFloor`（上次已达成的下界）继续，而它已经等于旧的 since
+   *    → 返回 null → **新勾的会话永远补不到历史**，只有增量。
+   *    表现是"我勾了这个群，但它只有今天的消息"。
+   * 3. **叫醒逐会话抽干** —— 新勾的会话在下一轮 `tickPull` 就会被
+   *    `drainScopedConversations` 逐个抽干。这里只重置轮转位置，让新加的
+   *    不必等一圈（`scopedDrainOffset` 可能正指在列表中段）。
+   *
+   * 导出与建图**不在这里**做：那是 `FeedService` 的职责（它持有
+   * materializer 与建图触发器），由装配层在调完这个方法之后接着调。
+   * 在这里去碰它们会让 ingest 反向依赖 feed —— 那正是现在刻意避免的环。
+   *
+   * @param options.dryRun 只数不删（给"改动会影响多少条"的预览用）
+   * @returns 清理报告。`messages: 0` = 新范围下没有越界数据（常见且正常）
+   */
+  applyScopeChange(options: { dryRun?: boolean } = {}): PurgeReport {
+    const scope = this.collectionScope()
+    const report = purgeOutOfScopeMessages(
+      this.options.db,
+      this.options.plugin.meta.id,
+      scope,
+      options,
+    )
+    if (options.dryRun === true) return report
+
+    /**
+     * ★ 重置回填下界，让放宽后的范围真的会被往回补。
+     *
+     * `commitFloor` 的 upsert 用的是 `MIN(现有, 新值)`（水位只能往更早走），
+     * 所以**不能**靠它把下界"抬回"到一个更晚的值 —— 那正好是我们要的方向：
+     * 这里要的是"忘掉已达成的下界，重新按 since 挖"。所以直接删那一行。
+     *
+     * 删而不是改：`nextBackfillWindow` 对"没有这一行"（watermark 0）的处理
+     * 是"落回库里最早那条消息"，也就是从现有数据的左端重新往回走 ——
+     * 与首次回填完全同一条路径。少一个特殊分支。
+     */
+    this.options.db.prepare("DELETE FROM sync_cursors WHERE scope = ?").run(this.backfillScopeKey())
+    this.backfillStalled = null
+    this.backfillStalledRounds = 0
+    this.backfillWidthOverrideMs = null
+    /**
+     * 轮转位置归零：新勾的会话排在候选列表里的位置未知，而 offset 可能
+     * 正指在中段 —— 归零让"刚勾的那个"最迟在下一轮就被抽到。
+     */
+    this.scopedDrainOffset = 0
+    this.activeScanOffset = 0
+    /**
+     * ★ 会话目录缓存作废。
+     *
+     * `tickActiveScan` 用它判"哪些会话落后"，而它有 2 分钟 TTL。不清的话
+     * 改完范围后最多两分钟内那一趟仍按旧目录跑 —— 数据是对的（闸在
+     * persist 上），但"刚勾的会话什么时候开始有数据"会被推迟一个 TTL，
+     * 而用户此刻正盯着看。
+     */
+    this.directoryCache = null
+    /**
+     * 丢弃计数归零：它回答的是"当前范围下挡掉了多少"，跨范围累加没有意义
+     * （用户会把改范围之前挡掉的量误读成新范围仍在漏）。
+     */
+    this.droppedOutOfScope = 0
+    this.lastDroppedAt = null
+
+    this.options.logger.info("ingest scope change applied", {
+      restricted: scope.restricted,
+      allowed: scope.restricted ? scope.allow.size : null,
+      purgedMessages: report.messages,
+      purgedConversations: report.conversations,
+      purgedFtsRows: report.ftsRows,
+      purgedMediaAssets: report.mediaAssets,
+    })
+    // 清理会改变库里的条数 —— 推一次快照，否则界面上的数字要等下一批消息才更新。
+    if (report.messages > 0) this.events.emit("batch.persisted", { changed: 0 })
+    return report
+  }
+
+  /**
+   * 回填游标的 scope 键。
+   *
+   * 与 `IngestScheduler.backfillScope` 同一个字符串。刻意从 scheduler 上读
+   * 而不是在这里再拼一遍 —— 拼错的话 `applyScopeChange` 会删掉一行不存在的
+   * 游标（静默无效果：范围放宽了但历史永远补不回来）。
+   */
+  private backfillScopeKey(): string {
+    return this.scheduler.backfillScope
+  }
+
+  /**
    * 记录错误并识别**终态**。
    *
    * 登录过期与缺授权靠重试永远好不了 —— 继续重试只会反复弹窗骚扰用户。
@@ -2846,6 +3120,7 @@ export class IngestService {
     const consumers = new ConsumerCursorRepository(this.options.db, this.options.clock)
     const stats = collectStorageStats(this.options.db, this.options.dbPath)
     const self = new SelfIdentityRepository(this.options.db).get(this.options.plugin.meta.id)
+    const scope = this.collectionScope()
 
     return {
       running: this.running,
@@ -2879,6 +3154,18 @@ export class IngestService {
       backfill: {
         ...this.scheduler.backfillCoverage(this.backfillSince() ?? null),
         stalled: this.backfillStalled,
+      },
+      /**
+       * 范围闸的工作量。见 `IngestSnapshot.scope` 与 `droppedOutOfScope`。
+       *
+       * `allowed` 在不限时报 null 而不是 0：0 会被读成"许可零个会话"，
+       * 而那是完全相反的状态（一个都不采 vs 全都采）。
+       */
+      scope: {
+        restricted: scope.restricted,
+        allowed: scope.restricted ? scope.allow.size : null,
+        droppedOutOfScope: this.droppedOutOfScope,
+        lastDroppedAt: this.lastDroppedAt,
       },
     }
   }

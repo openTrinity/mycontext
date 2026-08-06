@@ -191,6 +191,35 @@ export class GraphSyncService {
     this.cursors.ack(GRAPH_BUILD_CONSUMER_ID, seq)
   }
 
+  /**
+   * 把建图水位清零 —— 图库**被清空**之后必须调。
+   *
+   * ## ★ 为什么不能只删文件
+   *
+   * `wipeGraphData()`（`fresh=true` 的清库）删掉 knowledge.db / qdrant_data /
+   * extraction_cache，也就是图里一条 fact 都不剩了。但这个游标留在旧位置，
+   * 于是「待建条数」= `head - ackedSeq` 只算清库之后新采的那几条 ——
+   * 而真实要重建的是**全部**语料。
+   *
+   * 实测这台机器清库后：游标停在 84988、head 85395，界面据此显示"待建 407 条"，
+   * 而 kl 那边实际要重烧 37826 个 chunk（约 3 小时）。差了两个数量级的预期，
+   * 用户会以为"马上就好"然后反复重启，而每次重启都让 Phase A 从零开始。
+   *
+   * ## 不影响触发判据
+   *
+   * `decideAutoBuild` 判"首次"靠 `graphExists()`（读图库行数）而不是这个游标，
+   * 所以清零**不会**改变"要不要建"，只让"还差多少"说真话。
+   * 也就是这一条修的是可观测性，不是调度 —— 但错的数字会诱发错的操作。
+   *
+   * ★ 必须走 `rewind` 而不是 `ack(…, 0)`：后者是 `MAX(acked_seq, 0)`，
+   * 会被静默忽略（见 `ConsumerCursorRepository.rewind` 的注释）。
+   *
+   * @returns 是否真的清了（游标未注册时 false）
+   */
+  resetBuildWatermark(): boolean {
+    return this.cursors.rewind(GRAPH_BUILD_CONSUMER_ID, 0)
+  }
+
   /** 当前落后多少条。状态页用它显示「图谱落后 N 条」。 */
   lag(): number {
     const head = this.changelog.head()

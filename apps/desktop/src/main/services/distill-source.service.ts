@@ -25,6 +25,7 @@ import type { ChannelPlugin } from "@mycontext/channels"
 import {
   DistillSourceRepository,
   DISTILL_SOURCE_KINDS,
+  type DistillScope,
   type DistillSourceKind,
   type SqliteDatabase,
 } from "@mycontext/store"
@@ -73,6 +74,17 @@ export interface DistillSourceServiceOptions {
   clock: Clock
   logger: Logger
   plugin: ChannelPlugin
+  /**
+   * 用户改了采集范围之后的回调（清越界语料 + 重建图谱，装配处注入）。
+   *
+   * ★ 为什么是回调而不是在这里做：清语料要碰 `DataPlaneService`、
+   * 删媒体字节要碰文件系统、重建图谱要碰 `KlServerService` —— 这一层
+   * 只管 `distill_sources` 那张表。把那三件事塞进来等于让一个配置读写
+   * 服务持有半个应用。
+   *
+   * 不给 = 只存范围、不做后续清理（单测与未接线路径）。
+   */
+  onScopeChanged?: () => void
 }
 
 export class DistillSourceService {
@@ -115,11 +127,39 @@ export class DistillSourceService {
 
   save(input: { kind: DistillSourceKind; enabled: boolean; scope: DistillScopeInput }): true {
     const db = this.requireDb()
-    new DistillSourceRepository(db).upsert(
+    const repo = new DistillSourceRepository(db)
+    /**
+     * ★ 存之前先读旧值 —— 判"范围**实质**变了没有"要拿两边比。
+     *
+     * 只看"有人调了 save"是不够的：引导页的每一次「下一步」都会把九个源
+     * 各存一遍，其中八个原封不动。那样每点一次就触发一次清语料 + 重建图谱
+     * （分钟级、烧 LLM），而用户什么都没改。
+     */
+    const before = repo.list().find((row) => row.kind === input.kind)
+    repo.upsert(
       input.kind,
       { enabled: input.enabled, scope: input.scope },
       this.options.clock.now(),
     )
+
+    /**
+     * ★★ 范围**改小**之后必须清掉越界语料 —— 那是隐私边界，不是缓存。
+     *
+     * 用户把会话白名单从 92 个改成 10 个，库里那 82 个会话的消息若留着，
+     * 「严格遵守用户选的范围」这条就只在**下一次采集**上成立，
+     * 而已经采进来的越界数据会继续喂给蒸馏、图谱与数字人。
+     *
+     * 放在 `save` 里而不是让调用方记得调：这是**唯一**的范围写入口，
+     * 挂在这里才不会漏（IPC / 引导页 / 设置页都走它）。
+     *
+     * ## 只有 `chat` 源触发
+     *
+     * 采集闸（`readCollectionScope`）只读 chat 那一行 —— 其余源的范围
+     * 目前不参与采集，为它们清语料/重建图谱是纯浪费。
+     */
+    if (input.kind === "chat" && scopeChanged(before, input)) {
+      this.options.onScopeChanged?.()
+    }
     return true
   }
 
@@ -227,4 +267,49 @@ export class DistillSourceService {
     if (this.db === null) throw new AppError("DB_UNAVAILABLE", "尚未登录")
     return this.db
   }
+}
+
+/**
+ * 采集范围有没有**实质**变化。
+ *
+ * ## ★ 为什么不能直接比 JSON 字符串
+ *
+ * 引导页每次渲染都重新构造 `conversationIds` 数组，顺序取决于用户勾选的
+ * 先后 —— `["A","B"]` 与 `["B","A"]` 是同一个范围，但 `JSON.stringify`
+ * 不同。用字符串比的话，每点一次「下一步」都会触发一次清语料 + 重建图谱
+ * （分钟级、烧 LLM），而用户什么都没改。
+ *
+ * 所以白名单按**集合**比（排序后逐个对），其余三项按值比。
+ *
+ * ## `undefined` 与 `[]` 视为等价
+ *
+ * 两者在采集闸那边是同一个意思（"没给白名单"），见 `DistillScope
+ * .conversationIds` 的注释。分开处理会造出一个"从不传变成空数组"的
+ * 假变更，而那次变更什么都不改。
+ *
+ * 旧行不存在（第一次存）→ 一律算变了：那时库里没有范围，
+ * 而新范围可能已经排除掉一批会话。
+ */
+function scopeChanged(
+  before: { enabled: boolean; scope: DistillScope } | undefined,
+  after: { enabled: boolean; scope: DistillScopeInput },
+): boolean {
+  if (before === undefined) return true
+  // 开关本身就是范围的一部分：关掉 chat 源 = 一条都不采。
+  if (before.enabled !== after.enabled) return true
+  if (before.scope.since !== after.scope.since) return true
+  if (before.scope.until !== after.scope.until) return true
+  if (!sameSet(before.scope.chatKinds, after.scope.chatKinds)) return true
+  return !sameSet(before.scope.conversationIds, after.scope.conversationIds)
+}
+
+/** 两个字符串数组是否同一个集合（顺序无关，`undefined` ≡ `[]`）。 */
+function sameSet(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  const a = [...(left ?? [])].sort()
+  const b = [...(right ?? [])].sort()
+  if (a.length !== b.length) return false
+  return a.every((value, index) => value === b[index])
 }

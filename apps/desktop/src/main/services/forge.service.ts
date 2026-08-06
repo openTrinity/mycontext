@@ -36,9 +36,9 @@ import { join } from "node:path"
 import { type Clock, type Logger } from "@mycontext/kernel"
 import type { ProcessRunner, ResolvedPython } from "@mycontext/runtime-env"
 import {
-  DistillSourceRepository,
   SelfIdentityRepository,
   openStore,
+  readCollectionScope,
   type SqliteDatabase,
 } from "@mycontext/store"
 
@@ -394,15 +394,18 @@ export class ForgeService {
   /**
    * 用户勾选的会话白名单；空数组 = 不限。
    *
-   * 读 `distill_sources` 的 chat 源 —— 与采集那边读 `since` 是同一行配置，
-   * 「选了什么」只该有一份真源。源关掉时返回空（不限）而不是空集合语义上的
-   * "什么都不蒸"：关掉源的意思是"别按这个范围限制"，不是"别蒸"。
+   * 判据走 `@mycontext/store` 的 `readCollectionScope`（唯一权威）——
+   * 修复前采集/蒸馏/forge/导出各有一份实现，而它们对"源被关掉"的解读
+   * 已经漂成了「不限」（= 蒸全部）。见 collection-scope.ts 文件头。
+   *
+   * ★ 源关掉现在是「一个都不蒸」而不是「不限」：关掉聊天源的语义只可能是
+   * "别用聊天记录"，不可能是"用全部聊天记录"。
    */
   private scopedConversationIds(db: SqliteDatabase): string[] {
     try {
-      const row = new DistillSourceRepository(db).list().find((s) => s.kind === "chat")
-      if (row === undefined || !row.enabled) return []
-      return [...(row.scope.conversationIds ?? [])]
+      const scope = readCollectionScope(db)
+      if (!scope.restricted) return []
+      return [...scope.allow]
     } catch (error) {
       /**
        * 读不出来退回"不限"，不抛。
@@ -562,9 +565,9 @@ export class ForgeService {
 
   /** `distill_sources` 的 chat 源里用户选的下界（unix ms）；null = 没配 / 源关。 */
   private scopeSince(db: SqliteDatabase): number | null {
-    const chat = new DistillSourceRepository(db).list().find((s) => s.kind === "chat")
-    if (chat === undefined || !chat.enabled) return null
-    return chat.scope.since ?? null
+    const scope = readCollectionScope(db)
+    if (!scope.enabled) return null
+    return scope.since ?? null
   }
 
   /**

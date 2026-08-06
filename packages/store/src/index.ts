@@ -36,6 +36,17 @@ export { SessionStore, SESSION_SETTING_KEY } from "./session.js"
 
 export { withTransaction, openConnection } from "./tx.js"
 
+/**
+ * 采集范围（用户在引导里勾的会话 + 时间范围）的**唯一权威**与越界清理。
+ *
+ * 放在 store 而不是各 service 里：它同时被采集、蒸馏、forge、导出四处读，
+ * 而修复前那四处各有一份实现且语义已经漂了（见 collection-scope.ts 文件头）。
+ */
+export { readCollectionScope, isConversationInScope, isSentAtInScope } from "./collection-scope.js"
+export type { CollectionScope } from "./collection-scope.js"
+export { purgeOutOfScopeMessages } from "./purge-scope.js"
+export type { PurgeReport } from "./purge-scope.js"
+
 export { RawRecordRepository } from "./repositories/raw-records.js"
 export type { RawInsertResult } from "./repositories/raw-records.js"
 

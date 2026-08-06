@@ -399,6 +399,34 @@ export class ProbeSnapshotRepository {
         [string, number, number],
         { external_id: string; probe_last: number; ours_last: number | null }
       >(
+        /**
+         * ★★ 两个排除条件都是为了不让这个查询造出一个**永不收敛**的补采集合。
+         *
+         * ## ① 不可读会话（`unreadable_reason IS NOT NULL`）
+         *
+         * 判据是「探针时间 > 我们库里时间」，而保密群的这个差值**永远存在** ——
+         * 服务端不给读，我们就永远补不进来。不排除的话它们每轮都被报成"落后"，
+         * 而 `refreshConversation` 每轮都会在 `unreadable` 守卫处跳过：
+         * 表现是 `attempted:N recovered:0` 无限重复。
+         *
+         * 实测这台机器：252 个会话里 72 个已判定不可读，而被报成落后的 4 个里
+         * **3 个是不可读的** —— 也就是这个查询 75% 的产出是永远补不回来的噪音。
+         *
+         * 排除它们**不会**掩盖真实漏采：不可读是一个显式的落库标记
+         * （`markUnreadable`，服务端明确拒绝才写），语义正是"这个会话读不了"，
+         * 与"我们漏了"是两件事。它该出现在「不可读」那个计数里，而不是补采队列。
+         *
+         * ## ② 时间戳毒丸（`last_msg_at <= 0`）
+         *
+         * 实测库里有一行 `last_msg_at = 0`。`reconciliationWindow()` 拿
+         * `min(oursLastMsgAt ?? probeLastMsgAt - 60s)` 当窗口左端 —— 这一行会
+         * 算出 `-60000`，于是窗口被 `now - INITIAL_BACKFILL_MS` 夹成**恒定 7 天**。
+         * 而近 7 天有 8131 条消息 = 82 页，超过 `RECONCILE_MAX_PAGES`(40) 的预算：
+         * 永远抽不干、每轮从同一起点重跑（实测连续三轮 `pages:40 recovered:0`）。
+         *
+         * `<= 0` 而不是 `= 0`：负数同样是坏值，而它们造成的后果一样。
+         * 这类行不是"落后"，是探针那边的脏数据 —— 靠 0 时间戳去补采没有意义。
+         */
         `SELECT p.conversation_external_id AS external_id,
                 p.last_msg_at              AS probe_last,
                 (SELECT MAX(m.sent_at)
@@ -409,6 +437,13 @@ export class ProbeSnapshotRepository {
            FROM probe_snapshots p
           WHERE p.channel_id = ?
             AND p.last_msg_at IS NOT NULL
+            AND p.last_msg_at > 0
+            AND NOT EXISTS (
+                  SELECT 1 FROM conversations c
+                   WHERE c.channel_id = p.channel_id
+                     AND c.external_id = p.conversation_external_id
+                     AND c.unreadable_reason IS NOT NULL
+                )
             AND (ours_last IS NULL OR p.last_msg_at > ours_last + ?)
           ORDER BY p.last_msg_at DESC
           LIMIT ?`,

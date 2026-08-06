@@ -6,7 +6,7 @@
  * 而不是让应用带着半初始化的状态打开窗口。
  */
 import { randomUUID } from "node:crypto"
-import { statSync } from "node:fs"
+import { rmSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { app, shell, type BrowserWindow } from "electron"
 import { resolveLanguage } from "@mycontext/i18n"
@@ -393,6 +393,88 @@ export function bootstrapApp(mainDir: string): AppContext {
     clock: systemClock,
     logger: logger.child("DistillSource"),
     plugin: dingtalk,
+    /**
+     * ★★ 用户改了采集范围 → 立刻把三层派生物对齐到新范围。
+     *
+     * 这条链是「勾选实时生效」的全部实现，四步的顺序都有理由：
+     *
+     * 1. `dataPlane.applyScopeChange()` —— 删越界消息（连带 FTS/向量/媒体行，
+     *    见 `purgeOutOfScopeMessages`）+ 重置回填下界让放宽后的范围能往回挖。
+     *    必须**最先**：下面两步的产物都派生自库里的消息。
+     * 2. `feed.export()` —— 重导出四件套。导出物是"库的投影"，
+     *    库变了它就过期了，而它正是建图的输入。
+     * 3. `klServer.rebuildGraph(fresh = true)` —— **必须 fresh**。
+     *    增量建图只会往图里加，删掉的会话留在图里的实体与事实**不会消失**
+     *    —— 而数字人检索记忆时读的正是它们。也就是说不 fresh 的话，
+     *    用户取消勾选一个群之后，数字人**仍然会引用那个群里的事情**，
+     *    而界面上完全看不出来。这是这一整轮修复里最容易漏的一环。
+     * 4. `distill.reset()` —— 让画像重蒸（含清 forge 自己的增量水位）。
+     *    不清的话它会从上次蒸到的位置续跑，而"已删掉的语料"已经进过画像了。
+     *
+     * ## 为什么整条链是 `void`（不 await、不阻塞保存）
+     *
+     * 建图是分钟级。保存范围这个动作在 UI 上是一次点击，让它等几分钟
+     * 会表现成"点了没反应"。所以异步跑，进度经 kl 的 `building` 状态与
+     * 图谱面板可见 —— 那两处本来就是给"正在建图"用的。
+     *
+     * ## 失败处置
+     *
+     * 每一步各自 catch：清理成功而重建失败时，库已经是干净的（隐私边界
+     * 已经收紧），只是图谱暂时陈旧 —— 那是可接受的中间态，而让整条链
+     * 因为建图失败而回滚会把"已经删掉的越界数据"重新变成不确定状态。
+     */
+    onScopeChanged: () => {
+      void (async () => {
+        try {
+          const report = dataPlane.applyScopeChange()
+          if (report !== null && report.messages > 0) {
+            logger.info("scope change purged out-of-scope corpus", {
+              messages: report.messages,
+              conversations: report.conversations,
+              ftsRows: report.ftsRows,
+              mediaAssets: report.mediaAssets,
+            })
+            /**
+             * 媒体**字节**由这一层删（store 不碰文件系统，见 PurgeReport）。
+             * 漏删只留下孤儿文件（可观测、可再清），所以逐个 catch 不中断。
+             */
+            for (const path of report.mediaPaths) {
+              try {
+                rmSync(path, { force: true })
+              } catch {
+                /* 孤儿文件不值得让整条链失败 */
+              }
+            }
+          }
+        } catch (error) {
+          logger.warn("scope change purge failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
+        try {
+          feed.export()
+        } catch (error) {
+          logger.warn("scope change re-export failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
+        try {
+          // fresh = true：见上面第 3 步（增量建图删不掉图里已有的实体/事实）
+          await klServer.rebuildGraph(true)
+        } catch (error) {
+          logger.warn("scope change graph rebuild failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
+        try {
+          distill.reset()
+        } catch (error) {
+          logger.warn("scope change distill reset failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
+      })()
+    },
   })
 
   /**
@@ -626,8 +708,14 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 装配这一刻它还不存在，但这个回调要到"用户真发了一条"时才被调，
      * 那时它早已就位。发送 API 只回 taskId、消息不在库里，不补拉的话
      * 要等下一轮 2 分钟的全局轮询才出现（见 `PersonaService.onSentMessage`）。
+     *
+     * ★ `reason: "self-sent"` —— 这一路**刻意绕过采集范围闸**：那条消息是
+     * 用户此刻主动发出的、他正盯着会话等它显示出来。拦掉的表现是
+     * "我发出去了但界面上没有"。落库时仍过 `persist` 的闸，所以越界会话里
+     * 它不会进语料（见 `IngestService.refreshConversation` 的注释）。
      */
-    onSentMessage: (externalId) => void dataPlane.refreshConversation(externalId),
+    onSentMessage: (externalId) =>
+      void dataPlane.refreshConversation(externalId, { reason: "self-sent" }),
     /**
      * ★ 数字人的**记忆**：知识图谱的只读查询（见 persona-memory.ts 的文件头）。
      *
@@ -797,6 +885,14 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 那是"界面说的"与"实际做的"不漂移的唯一办法。
      */
     buildSchedule: (): KlGraphOverview["buildSchedule"] => feed.graphBuildSchedule(),
+    /**
+     * 清库（`fresh=true`）之后把建图水位清零。
+     *
+     * ★ 单向调用（kl → feed），不构成环：`feed.autoBuild` 那边引用 klServer，
+     * 而这一条只写游标、不回读 kl 的任何状态。见 `FeedService
+     * .resetGraphBuildWatermark` 的注释里那次 1.7 GB 日志的事故。
+     */
+    resetBuildWatermark: (): boolean => feed.resetGraphBuildWatermark(),
   })
   // 回填给上面那个 onChange —— 改网关后重起 kl（见那里的注释）。
   klServerRef = klServer

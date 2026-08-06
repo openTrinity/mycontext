@@ -255,6 +255,39 @@ export class ConsumerCursorRepository {
       .run(seq, now, now, now, consumerId)
   }
 
+  /**
+   * **强制**把游标改成 seq —— 允许倒退。运维/清库专用。
+   *
+   * ## ★ 为什么不能用 `ack()` 做这件事
+   *
+   * `ack()` 是 `MAX(acked_seq, ?)`，那个 MAX 是刻意的（并发/重试下水位倒退
+   * 会导致重复消费，见 `ack` 与 `DistillSourceRepository.advance` 的注释）。
+   * 于是 `ack(id, 0)` 会被**静默忽略** —— 一个"我已经清零了"的调用什么都没做，
+   * 而调用方没有任何办法发现（没有返回值、不抛错）。踩过一次：给建图水位写
+   * 清零那一段时用了 `ack(…, 0)`，读回来还是旧值。
+   *
+   * 所以倒退必须是一个**显式命名**的方法：读到 `rewind` 就知道这里在做
+   * 危险的事，而 `ack` 保持"只进不退"的强不变式。
+   *
+   * ## 语义差别（不只是少了个 MAX）
+   *
+   * 不碰 `last_success_at`：倒退**不是**一次成功消费。留着旧的成功时刻是对的
+   * ——「上次真的建成是什么时候」在清库后仍然是有意义的历史。
+   * 而 `heartbeat_at` 同理不动：倒退的是水位，不代表消费者此刻活着。
+   *
+   * @returns 是否真的改到了行（消费者未注册时是 false，不静默假成功）
+   */
+  rewind(consumerId: string, seq: number): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE consumer_cursors
+            SET acked_seq = ?, last_error = NULL, updated_at = ?
+          WHERE consumer_id = ?`,
+      )
+      .run(seq, this.clock.now(), consumerId)
+    return info.changes > 0
+  }
+
   heartbeat(consumerId: string): void {
     const now = this.clock.now()
     this.db

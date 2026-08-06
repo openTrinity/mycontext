@@ -468,6 +468,49 @@ describe("★★ 攒批自动建图的接线", () => {
       vault.close()
     }
   })
+
+  /**
+   * ★★ 图库被清空之后水位必须真的归零。
+   *
+   * 这条锁的是一个**静默的错数字**：`wipeGraphData()` 删掉图库文件，但游标
+   * 留在旧位置时，界面上「待建 N 条」只算清库之后新采的那几条（实测 407），
+   * 而真实要重建的是全部语料（实测 37826 个 chunk / 约 3 小时）。
+   * 用户据此以为"马上就好"、反复重启，而每次重启都让上游的 Phase A 从零开始。
+   *
+   * ★ 必须验"真的归零"而不是"调用没抛" —— `ack()` 是 `MAX(acked_seq, ?)`，
+   * 用它写 0 会被**静默忽略**。第一版实现正是踩了这个（读回来还是旧值），
+   * 所以 `resetBuildWatermark` 走的是 `rewind`。
+   */
+  it("★★ resetBuildWatermark 把建图水位真的清零（ack 的 MAX 挡不住它）", async () => {
+    const vault = openTestVault()
+    try {
+      const head = appendChanges(vault, 7)
+      const { sync } = makeSync(vault)
+      await sync.runOnce()
+      sync.markBuilt(head)
+      expect(sync.buildWatermark().seq).toBe(head)
+
+      expect(sync.resetBuildWatermark()).toBe(true)
+      expect(sync.buildWatermark().seq).toBe(0)
+    } finally {
+      vault.close()
+    }
+  })
+
+  it("清零之后再 markBuilt 仍然能推上去（不是把游标钉死）", async () => {
+    const vault = openTestVault()
+    try {
+      const head = appendChanges(vault, 5)
+      const { sync } = makeSync(vault)
+      await sync.runOnce()
+      sync.markBuilt(head)
+      sync.resetBuildWatermark()
+      sync.markBuilt(head)
+      expect(sync.buildWatermark().seq).toBe(head)
+    } finally {
+      vault.close()
+    }
+  })
 })
 
 /**
