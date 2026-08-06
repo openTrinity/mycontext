@@ -201,7 +201,12 @@ function makeAcp(options: {
     logger,
     runtime,
     processes,
-    workspaceRoot: "/tmp/persona-ws-test",
+    // agent 目录用回调给（vault 跟着登录挂）—— 见 PersonaAcpOptions.dirs
+    dirs: () => ({
+      workspaceRoot: "/tmp/persona-ws-test",
+      home: "/tmp/persona-ws-test/agent-home",
+      npmCache: "/tmp/persona-npm-cache",
+    }),
     klRoot: "/fake/kl",
     klPort: 8200,
     ...(options.onTrace === undefined ? {} : { onTrace: options.onTrace }),

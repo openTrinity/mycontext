@@ -19,7 +19,17 @@ export { AccountRepository, SettingsRepository } from "./accounts.js"
 export type { AccountRecord, CreateAccountInput, SettingsTable } from "./accounts.js"
 
 export { VaultStore } from "./vault.js"
-export type { VaultStoreOptions } from "./vault.js"
+export type { VaultStoreOptions, VaultPaths } from "./vault.js"
+
+export {
+  ChannelIdentityVaultRepository,
+  identityKeyString,
+  parseIdentityKeyString,
+} from "./channel-identity-vaults.js"
+export type {
+  ChannelIdentityVaultRecord,
+  ChannelIdentityKey,
+} from "./channel-identity-vaults.js"
 
 export { SessionStore, SESSION_SETTING_KEY } from "./session.js"
 

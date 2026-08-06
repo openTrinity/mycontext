@@ -52,6 +52,7 @@ import type {
 } from "@mycontext/runtime-env"
 import { createAgentResolver, probeBinaryVersion } from "@mycontext/runtime-env"
 import { delimiter, join } from "node:path"
+import type { AgentDirs } from "./agent-dirs.js"
 
 /**
  * 一轮 turn 的最长等待。
@@ -116,10 +117,20 @@ export interface PersonaAcpOptions {
   logger: Logger
   runtime: RuntimeEnv
   processes: ProcessRunner
-  /** agent workspace 根（`<root>/persona/<conversationId>`） */
-  workspaceRoot: string
-  /** agent 子进程的隔离 HOME —— 不给会读到用户自己装的全部 skill */
-  agentHome?: string
+  /**
+   * 当前 vault 的 agent 目录（workspace 根 + 隔离 HOME + npm 缓存）。
+   *
+   * ## ★ 为什么是**回调**而不是值
+   *
+   * 与下面 `skillPaths` 完全同一个理由：这些路径按 vault 分，而 vault 是
+   * **跟着登录/切身份挂载**的 —— 本类在 `PersonaService` 构造时就 new 出来，
+   * 那一刻还不知道会挂哪个身份。取值的话切身份后 transcript 片段仍写进
+   * 上一个身份的目录，而那个错误是静默的（agent 照常跑、草稿照常出）。
+   *
+   * 返回 null = 还没挂载（未登录）→ 起 agent 这条路直接降级，
+   * 由调用方落回 LlmClient 直连。
+   */
+  dirs: () => AgentDirs | null
   /** kl-graph 代码根：前插进 PATH，让 skill 里的裸 `kl` 命中它 */
   klRoot: string
   /** kl-server 端口（注入 env，kl CLI 据此连服务） */
@@ -289,7 +300,7 @@ export class PersonaAcp {
     const agent = await this.ensureAgent()
     if (agent === null) return null
 
-    const cwd = join(this.options.workspaceRoot, "persona", input.conversationId)
+    const cwd = join(this.requireDirs().workspaceRoot, "persona", input.conversationId)
     const existing = this.sessionIds.get(input.conversationId) ?? null
     const turnId = `turn_${String((this.turnSeq += 1))}`
 
@@ -564,6 +575,17 @@ export class PersonaAcp {
     return this.starting
   }
 
+  /**
+   * 当前 vault 的 agent 目录。未挂载时抛错 —— 调用点（startAgent / cwd）
+   * 都在 try 里，会被当成"agent 起不来"而降级到 LlmClient 直连。
+   * 退回一个应用级目录才是危险的：那是一次静默的跨身份写入。
+   */
+  private requireDirs(): AgentDirs {
+    const dirs = this.options.dirs()
+    if (dirs === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，agent 目录未就绪")
+    return dirs
+  }
+
   private async startAgent(): Promise<AgentHandle | null> {
     const usable = this.resolveOnce()
     // 版本闸没过就降级 —— 用一份太老的 opencode 起 ACP 会一路 -32603（见 binaries.ts）。
@@ -577,10 +599,13 @@ export class PersonaAcp {
         PATH: `${this.options.klRoot}${delimiter}${process.env["PATH"] ?? ""}`,
         KL_SERVER_PORT: String(this.options.klPort),
       }
-      const homeOption =
-        this.options.agentHome === undefined || this.options.agentHome === ""
-          ? {}
-          : { agentHome: this.options.agentHome }
+      /**
+       * ★ agentHome 按 vault 走；npm 缓存留在应用级一份（见 AgentDirs）。
+       * 两个旋钮必须**一起**给：只给前者的话缓存跟着隔离 HOME 走，
+       * 每个身份各攒一份 325 MB。
+       */
+      const dirs = this.requireDirs()
+      const homeOption = { agentHome: dirs.home, npmCache: dirs.npmCache }
       /**
        * ★ skillPaths 每次 startAgent 现调 —— 不是构造时锁死一次。
        * `forgeSkillRoot` 在 attach 时才有值，蒸馏后新出的画像下次起 agent 就生效。
@@ -606,7 +631,7 @@ export class PersonaAcp {
         executable: resolved.path,
         args: hardened.args,
         env: hardened.env,
-        cwd: this.options.workspaceRoot,
+        cwd: dirs.workspaceRoot,
         onLine: (line: string) => client.handleLine(line),
         onStderr: (line: string) => this.options.logger.debug("opencode stderr", { line }),
         onExit: (info) => {
@@ -628,7 +653,7 @@ export class PersonaAcp {
           "fs/read_text_file": (params) =>
             handlers.readTextFile({
               path: (params as { path?: string }).path ?? "",
-              workspaceRoot: this.options.workspaceRoot,
+              workspaceRoot: dirs.workspaceRoot,
             }),
           "fs/write_text_file": () => handlers.writeTextFile(),
         },

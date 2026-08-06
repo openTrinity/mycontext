@@ -34,11 +34,39 @@ import {
 } from "@mycontext/store"
 import type { ExportResultView, FeedInfo, KlGraphOverview } from "@mycontext/ipc-contract"
 
+/**
+ * 这个 vault 的导出落点 —— **attach 时给，不在构造时给**。
+ *
+ * ## ★★ 为什么必须按 vault
+ *
+ * `exportRoot` 里是四件套（聊天正文的投影），`handoffFile` 里是给算法团队的
+ * 一页运行时事实（含 Feed 的 token 与那两个目录的绝对路径）。
+ * 两者都直接派生自这个身份的语料 —— 换个身份就不成立。
+ *
+ * ★ `handoffFile` 原来是**一个**应用级路径（`shared/handoff.json`），
+ * 于是两个身份共用一份、谁后挂载谁覆盖 —— 算法团队拿到的永远是
+ * "最后一次登录的那个身份"，而这件事在文件里完全看不出来。
+ * 现在一身份一份，删 vault 时一并消失。
+ */
+export interface FeedDirs {
+  /** 这个身份的数据根（= vault 目录）。写进 handoff 的 `shared.root` */
+  dataRoot: string
+  /** 四件套导出目录（注入上游的 `KL_DWS_EXPORT_DIR`） */
+  exportRoot: string
+  /** 图谱数据目录（= 算法团队的 `databaseDir`）。只告知，不由本服务写 */
+  klRoot: string
+  /** `handoff.json` 的完整路径 */
+  handoffFile: string
+}
+
 export interface FeedServiceOptions {
   clock: Clock
   logger: Logger
-  /** 共享目录根（导出物化与 handoff.json 的落点） */
-  sharedRoot: string
+  /**
+   * ★ 导出与 handoff 的落点已改为**在 attach 时给**（见 `FeedDirs`）：
+   * 它们按 vault 分（导出物是语料的投影 = 聊天内容）。
+   * 原来这里是 `sharedRoot: string`，一个应用级目录跨身份共用。
+   */
   /**
    * embedding 网关配置：写进 handoff.json 让算法团队零配置调通同一个网关。
    *
@@ -99,6 +127,8 @@ const GRAPH_SYNC_INTERVAL_MS = 10 * 60_000
 export class FeedService {
   private server: FeedServer | null = null
   private db: SqliteDatabase | null = null
+  /** 当前 vault 的导出落点。未 attach 时 null。 */
+  private dirs: FeedDirs | null = null
   private graphSync: GraphSyncService | null = null
   private graphTimer: NodeJS.Timeout | null = null
   private inFlightSync: Promise<unknown> | null = null
@@ -106,9 +136,10 @@ export class FeedService {
   constructor(private readonly options: FeedServiceOptions) {}
 
   /** vault 挂载时调用。幂等：重复调用先停旧的。 */
-  async attach(db: SqliteDatabase): Promise<void> {
+  async attach(db: SqliteDatabase, dirs: FeedDirs): Promise<void> {
     await this.detach()
     this.db = db
+    this.dirs = dirs
     const server = new FeedServer({
       db,
       clock: this.options.clock,
@@ -118,13 +149,16 @@ export class FeedService {
     this.server = server
 
     // handoff.json：算法团队读它就知道端口、token、共享目录与两个网关（LLM + embedding）。
-    const manifestPath = join(this.options.sharedRoot, "handoff.json")
+    const manifestPath = dirs.handoffFile
     const embedding = this.options.embedding()
     const llm = this.options.llm()
     writeHandoffManifest(
       manifestPath,
       buildHandoffManifest({
-        sharedRoot: this.options.sharedRoot,
+        // ★ 三个路径显式给 —— 不让 handoff 那侧再拼一份目录布局（见那里的注释）
+        dataRoot: dirs.dataRoot,
+        dwsExportDir: dirs.exportRoot,
+        klDataDir: dirs.klRoot,
         feedPort: port,
         feedToken: server.token,
         embeddingBaseUrl: embedding.baseUrl,
@@ -307,7 +341,20 @@ export class FeedService {
 
   /** 导出落点。手动导出与自动同步必须是**同一个**目录，否则会有两份不一致的 bundle。 */
   private get exportDir(): string {
-    return join(this.options.sharedRoot, "exports", "dws")
+    return this.requireDirs().exportRoot
+  }
+
+  /**
+   * 当前 vault 的导出落点。
+   *
+   * ★ 未 attach 时抛错而不是退回应用级目录：那种兜底会把"忘了接线"
+   * 变成"导出物写进了公共目录"—— 一次静默的跨身份写入，
+   * 而下游（图谱建图）会照常成功，只是吃的是别人的语料。
+   */
+  private requireDirs(): FeedDirs {
+    const dirs = this.dirs
+    if (dirs === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，导出目录未就绪")
+    return dirs
   }
 
   /**

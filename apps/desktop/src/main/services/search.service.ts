@@ -35,6 +35,7 @@ import {
   type SqliteDatabase,
 } from "@mycontext/store"
 import { recallMessages } from "@mycontext/retrieval"
+import type { AgentDirs } from "./agent-dirs.js"
 import {
   AcpClient,
   AcpSupervisor,
@@ -125,24 +126,25 @@ export interface SearchServiceOptions {
   runtime: RuntimeEnv
   /** 外部进程统一走它（超时/取消/日志脱敏），opencode 也不例外 */
   processes: ProcessRunner
-  /** agent workspace 的根目录（每个会话一个子目录） */
-  workspaceRoot: string
   /**
-   * agent 子进程的隔离 HOME。
+   * agent workspace 与隔离 HOME —— **在 attach 时给，不在构造时给**。
    *
-   * ★ 不给就会继承宿主 HOME，而 opencode 从 `$HOME/.claude/skills` 发现 skill
-   * —— 用户自己装的所有 skill 都会进搜索 agent 的视野（实测泄漏 8 个）。
-   * 见 spawn-hardening 的 `applyHomeIsolation`。
+   * ★ 这两个目录按 vault 分（workspace 里有 transcript 片段 = 聊天内容）。
+   * 构造时锁死的话，切身份后新会话仍落在上一个身份的目录里，
+   * 而那个错误是静默的（agent 能跑、结果也出来，只是文件写在别人那儿）。
+   *
+   * 首版这里是 `workspaceRoot: string` + `agentHome?: string` 两个构造参数，
+   * 而 `attach(db)` 只换 db —— 于是 `create()` 里读到的永远是构造时那份。
+   * 见 `AgentDirs`。
    */
-  agentHome?: string
   /**
-   * 随包分发的 skill 目录（`kl` 等）。建会话时复制进 workspace ——
-   * harness 按 cwd 发现 skill，不放进去 agent 就看不到（见 installSkills）。
+   * 随包分发的 skill 目录（`kl` 等）。**应用级** —— 它是随包的只读资源，
+   * 与身份无关（走 `skills.paths` 指目录，不拷进 workspace）。
    */
   skillsDir?: string
   /**
    * kl-graph 代码根（含可执行的 `kl`）。用于把 klRoot 前插进 opencode 进程的
-   * PATH，让 skill 里的裸 `kl` 命中它。skill 内容本身由 `skillsDir` 复制而来
+   * PATH，让 skill 里的裸 `kl` 命中它。skill 内容本身由 `skillsDir` 提供
    * （单一来源 + `check:kl-skill-sync` 门禁），这里只负责让 `kl` 命令可执行。
    */
   klRoot: string
@@ -201,6 +203,8 @@ export class SearchService {
   }
 
   /** opencode 解析 + 版本闸，**成功后**缓存（见 PersonaAcp 里同款注释）。 */
+  /** 当前 vault 的 agent 目录（attach 时给）。未登录时 null。 */
+  private dirs: AgentDirs | null = null
   private opencodeResolver: (() => OpencodeResolution) | null = null
 
   private resolveOpencode(): OpencodeResolution {
@@ -208,16 +212,30 @@ export class SearchService {
     return this.opencodeResolver()
   }
 
-  attach(db: SqliteDatabase): void {
+  attach(db: SqliteDatabase, dirs: AgentDirs): void {
     this.db = db
+    this.dirs = dirs
     this.sessions = new SearchSessionRepository(db)
   }
 
   detach(): void {
     this.db = null
+    this.dirs = null
     this.sessions = null
     // 换库（登出/切 vault）时旧 session 的流式状态作废。
     this.reducers.clear()
+  }
+
+  /**
+   * 当前 vault 的 agent 目录。
+   *
+   * ★ 未 attach 时抛错而不是退回一个应用级目录：那种兜底会让"忘了 attach"
+   * 表现成"workspace 落在了公共目录"—— 一次静默的跨身份写入。
+   */
+  private requireDirs(): AgentDirs {
+    const dirs = this.dirs
+    if (dirs === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，agent 目录未就绪")
+    return dirs
   }
 
   /**
@@ -287,7 +305,7 @@ export class SearchService {
     const sessions = this.requireSessions()
     const now = this.options.clock.now()
     const id = `srch_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-    const cwd = join(this.options.workspaceRoot, "search", id)
+    const cwd = join(this.requireDirs().workspaceRoot, "search", id)
     mkdirSync(cwd, { recursive: true })
     /**
      * ★ 不再 cpSync skill 到 cwd —— 走 `skills.paths` 指目录。
@@ -742,10 +760,13 @@ export class SearchService {
       }
       // ★ agentHome：把 opencode 的 HOME 换成我们的空目录，否则它会从
       // `$HOME/.claude/skills` 读到用户自己装的全部 skill（隔离漏洞）。
-      const homeOption =
-        this.options.agentHome === undefined || this.options.agentHome === ""
-          ? {}
-          : { agentHome: this.options.agentHome }
+      /**
+       * ★ agentHome 按 vault 走（见 AgentDirs）；npm 缓存留在应用级一份。
+       * 两个旋钮必须**一起**给：只给前者的话缓存会跟着隔离 HOME 走，
+       * 每个身份各攒一份 325 MB。
+       */
+      const dirs = this.requireDirs()
+      const homeOption = { agentHome: dirs.home, npmCache: dirs.npmCache }
       /**
        * ★ 走 `skills.paths` 指目录，不再靠 create() 时 cpSync。
        *
@@ -776,7 +797,7 @@ export class SearchService {
         env: hardened.env,
         // cwd 不传二进制目录：opencode 会在 cwd 下写配置/凭据（见 DuplexSpec 注释）。
         // 每个 session 有自己的 acpCwd，进程级 cwd 用 workspaceRoot 即可。
-        cwd: this.options.workspaceRoot,
+        cwd: dirs.workspaceRoot,
         onLine: (line: string) => client.handleLine(line),
         onStderr: (line: string) => this.options.logger.debug("opencode stderr", { line }),
         onExit: (info) => {
@@ -796,7 +817,7 @@ export class SearchService {
           "fs/read_text_file": (params) =>
             handlers.readTextFile({
               path: (params as { path?: string }).path ?? "",
-              workspaceRoot: this.options.workspaceRoot,
+              workspaceRoot: dirs.workspaceRoot,
             }),
           "fs/write_text_file": () => handlers.writeTextFile(),
         },

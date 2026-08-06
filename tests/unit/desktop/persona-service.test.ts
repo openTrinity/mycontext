@@ -221,13 +221,20 @@ function makeService(
   const service = new PersonaService({
     clock,
     logger,
-    workspaceRoot,
     llmProvider: staticLlmProvider(options.llm ?? null),
     getWindow: () => null,
   })
   // 蒸馏产物按 vault 隔离，所以从 attach 传（与生产一致：登录时才知道是哪个 vault）
-  service.attach(vault.db, options.forgeSkillRoot)
-  return { service, workspaceRoot, clock }
+  // ★ agent 目录按 vault（attach 时给）：workspace 与 HOME 分身份，npm 缓存共用
+  const dirs = {
+    workspaceRoot,
+    home: join(workspaceRoot, "agent-home"),
+    npmCache: join(workspaceRoot, "npm-cache"),
+  }
+  service.attach(vault.db, options.forgeSkillRoot, dirs)
+  // ★ `dirs` 一并返回：用例里模拟"重启"要重挂一次，那时必须是**同一套**目录
+  // （同一个身份）—— 让用例自己再拼一份等于给了一个拼错的机会。
+  return { service, workspaceRoot, clock, dirs }
 }
 
 /**
@@ -591,7 +598,8 @@ describe("★ 蒸馏产出的 skill 包（forge）", () => {
     const bRefs = join(b, "persona-persona", "references")
     mkdirSync(bRefs, { recursive: true })
     writeFileSync(join(bRefs, "decisions.md"), "哨兵串：OTHER_ACCOUNT\n", "utf8")
-    service.attach(vault.db, b)
+    // ★ 只换画像目录、目录组不变（这一组测的是"画像跟着 vault 换"）
+    service.attach(vault.db, b, dirs)
     const systems: string[] = []
     const second = makeService(vault, {
       forgeSkillRoot: b,
@@ -713,7 +721,7 @@ describe("★ 审核反馈只进入当前 resident session", () => {
         } as unknown as Response)
       },
     })
-    const { service, clock } = makeService(vault, { llm })
+    const { service, clock, dirs } = makeService(vault, { llm })
     await runOneTurn(service, vault, clock)
 
     const firstDraft = service.drafts()[0]
@@ -757,7 +765,7 @@ describe("★ 审核反馈只进入当前 resident session", () => {
     expect(requestSystems[1]).toContain("用户丢弃过草稿：我看下")
 
     await service.detach()
-    service.attach(vault.db)
+    service.attach(vault.db, undefined, dirs)
     await deliver("m3", "ext-m3", "第三个问题", NOW + 20_000)
     expect(requestSystems[2]).not.toContain("用户丢弃过草稿")
 
@@ -801,11 +809,15 @@ describe("★ policy 输入来自库而不是写死", () => {
     const service = new PersonaService({
       clock,
       logger,
-      workspaceRoot,
       llmProvider: staticLlmProvider(options.llm ?? null),
       getWindow: () => null,
     })
-    service.attach(vault.db, options.forgeSkillRoot)
+    // ★ agent 目录按 vault（attach 时给）—— 见 AgentDirs
+    service.attach(vault.db, options.forgeSkillRoot, {
+      workspaceRoot,
+      home: join(workspaceRoot, "agent-home"),
+      npmCache: join(workspaceRoot, "npm-cache"),
+    })
     return { service, clock }
   }
 
@@ -1738,7 +1750,7 @@ describe("★ 投递即处理：wake() 排唤醒而不是等 8 秒兜底", () =>
     vi.useFakeTimers()
     try {
       const vault = seed()
-      const { service } = makeService(vault)
+      const { service, dirs } = makeService(vault)
       const supervisor = service.inboundSupervisor
       if (supervisor === null) throw new Error("supervisor 未就绪")
 
@@ -1796,14 +1808,19 @@ describe("★ 真发送：四道门 + 失败不改状态", () => {
     const service = new PersonaService({
       clock,
       logger,
-      workspaceRoot: tempDir("mycontext-ws-"),
       llmProvider: staticLlmProvider(null),
       getWindow: () => null,
       cli: cli as never,
       /** ★ 关掉短路：不关的话第 ① 层会拦住一切，这一组就什么都没验到 */
       forceSendShortCircuit: false,
     })
-    service.attach(vault.db)
+    // ★ agent 目录按 vault（attach 时给）—— 见 AgentDirs
+    const ws = tempDir("mycontext-ws-")
+    service.attach(vault.db, undefined, {
+      workspaceRoot: ws,
+      home: join(ws, "agent-home"),
+      npmCache: join(ws, "npm-cache"),
+    })
     return { service, clock }
   }
 
@@ -2124,7 +2141,6 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
     const service = new PersonaService({
       clock,
       logger,
-      workspaceRoot: tempDir("mycontext-ws-"),
       llmProvider: staticLlmProvider(llm),
       getWindow: () => null,
       cli: cli as never,
@@ -2140,7 +2156,12 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
      * = 三关全返回 null = 每一轮都降级成草稿 —— 而那时"没自动发"是恒真的，
      * 这一组用例什么都验不到。
      */
-    service.attach(vault.db, makeForgeSkillRoot())
+    const ws = tempDir("mycontext-ws-")
+    service.attach(vault.db, makeForgeSkillRoot(), {
+      workspaceRoot: ws,
+      home: join(ws, "agent-home"),
+      npmCache: join(ws, "npm-cache"),
+    })
     service.saveConfig({
       conversationId: "conv-1",
       replyMode: "auto",
@@ -2426,13 +2447,17 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
       const service = new PersonaService({
         clock,
         logger,
-        workspaceRoot: tempDir("mycontext-ws-"),
         llmProvider: staticLlmProvider(shortReplyLlm()),
         getWindow: () => null,
         cli: runner as never,
         forceSendShortCircuit: false,
       })
-      service.attach(vault.db)
+      const ws = tempDir("mycontext-ws-")
+      service.attach(vault.db, undefined, {
+        workspaceRoot: ws,
+        home: join(ws, "agent-home"),
+        npmCache: join(ws, "npm-cache"),
+      })
       service.saveConfig({
         conversationId: "conv-1",
         replyMode: "auto",

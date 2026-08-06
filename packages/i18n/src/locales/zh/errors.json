@@ -54,6 +54,7 @@
     "CHANNEL_UNSUPPORTED": "该渠道尚未开放",
     "SELF_IDENTITY_AMBIGUOUS": "无法唯一确定你的身份，请手动确认后再继续",
     "SELF_IDENTITY_CONFLICT": "这个账号已绑定另一个身份（组织或工号不同）。换身份请新建一个账号，或用原身份重新授权。",
+    "CHANNEL_IDENTITY_UNAVAILABLE": "这个身份在本机没有登录态（可能在别处退出过登录）。请重新授权到它，或切换到其它身份。",
     "PARSE_FAILED": "外部数据格式无法解析",
     "SESSION_EXPIRED": "登录已过期，请重新授权",
     "PERMISSION_REQUIRED": "需要先在来源应用中确认授权",

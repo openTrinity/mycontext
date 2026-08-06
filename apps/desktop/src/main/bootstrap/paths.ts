@@ -41,32 +41,48 @@ export interface AppPaths {
    * 而 forge 是纯 stdlib Python，一份源码在所有平台通用。
    */
   forgeDir: string
-  /** DWS 的配置目录（隔离 profiles 与日志；token 由 Keychain 共享，隔离不了） */
-  dwsHome: string
   /**
-   * 与算法团队共享的目录。
+   * ★★ 以下三个字段是**存量迁移用的旧落点**，新代码一律不要读它们。
    *
-   * 单独一个根目录而不是散落在 userData 下：他们要在这里读导出物与
-   * handoff.json、写自己的索引数据。一个明确的边界让「哪些是共享的」
-   * 一眼可见，也让权限与清理有个统一的落点。
+   * 隔离维度已经从"本地账号"改成"渠道身份"，而这三处原来是**应用级**的
+   * （也就是跨身份共用）：
+   * ```
+   * legacyDwsHome    → vaults/<id>/channels/dingtalk/dws-home
+   * legacySharedRoot → vaults/<id>/{kl,exports/dws,handoff.json}
+   * legacyAgentHome  → vaults/<id>/agent-home  +  <userData>/agent-npm-cache
+   * ```
+   * 当前落点一律走 `VaultStore.paths(vaultId)`（那是唯一真源，
+   * 见它的注释：给一个对象让"漏了一个"变成编译错误）。
+   *
+   * 保留这三个只为让迁移脚本能找到旧数据；迁移完成后它们应当是空的，
+   * 而迁移脚本的最后一步会**断言**这一点 —— 留一个就是留了一条
+   * "老 vault 走老路径"的分支，而那正是「改 userData 目录名静默关掉
+   * 数据检查」那次事故的形状。
    */
-  sharedRoot: string
+  legacyDwsHome: string
+  legacySharedRoot: string
+  legacyAgentHome: string
   /**
-   * Agent 的 workspace 根目录。
+   * Agent 子进程用的 npm 缓存（**应用级，刻意不按 vault 分**）。
    *
-   * 每个会话一个子目录（`search/<sessionId>` / `persona/<conversationId>`）：
-   * agent 只能看到自己那个目录，这既是上下文隔离也是隐私边界。
-   */
-  agentWorkspaces: string
-  /**
-   * Agent 子进程用的隔离 HOME。
+   * ## ★ 为什么它与 agentHome 分开
    *
-   * ★ 不是可选的美化：opencode 从 `$HOME/.claude/skills` 发现 skill，继承宿主
-   * HOME 会让用户自己装的**任意** skill 进入搜索 agent 的视野（实测泄漏 8 个，
-   * 其中一个正是专门检测隔离失效的探针）。指向这个空目录后，agent 只看得到
-   * 我们铺进 workspace 的 kl。详见 spawn-hardening 的 `applyHomeIsolation`。
+   * `agentHome` 里原来同时装着两类东西：opencode 的配置与 session 锁
+   * （`.config` / `.local/state`，**会随会话产生状态** → 必须按身份分），
+   * 以及 `.npm/_cacache`（**registry 的只读镜像**，实测 325 MB，
+   * key 全形如 `registry.npmjs.org/...`）。
+   *
+   * 后者按身份各拷一份是纯浪费：两个身份 650 MB、五个 1.6 GB，
+   * 全是同一批包的副本，而且首次切身份还要重新联网拉一遍。
+   * npm 本来就有 `npm_config_cache` 这个正交旋钮，用它把"缓存"从"HOME"里
+   * 拆出来 —— 隔离与体积两个目标就都成立。
+   *
+   * ★ 里面**没有**任何身份/会话字节：逐项验过（`阿里巴巴`/`hahha`/
+   * `openConversationId` 命中 0 个文件；一条宽正则 `cid[A-Za-z0-9+/]{20}`
+   * 扫到的 19 个命中追进去全是 `web-tree-sitter` 等包元数据里 integrity
+   * hash 的片段 —— 假阳性）。
    */
-  agentHome: string
+  agentNpmCache: string
   /**
    * kl-graph（Python 检索服务）代码根，含 `kl_server.py`。
    *
@@ -160,22 +176,27 @@ export function resolveAppPaths(options: {
   const logs = join(userData, "logs")
   mkdirSync(logs, { recursive: true })
 
-  // DWS 的 profiles/日志放应用数据目录，与用户终端里的 ~/.dws 分开。
-  const dwsHome = join(userData, "channels", "dingtalk", "dws-home")
-  mkdirSync(dwsHome, { recursive: true })
+  /**
+   * ★★ 以下三个是**旧落点**，只为迁移脚本能找到存量数据而保留。
+   *
+   * 它们原来是应用级的（跨身份共用），现在各自的当前落点在 vault 内
+   * （见 `AppPaths.legacy*` 的注释与 `VaultStore.paths()`）。
+   *
+   * ★ 刻意**不再 mkdir**：新装机不该凭空多出三个永远为空的目录，
+   * 而"目录存在"会让迁移脚本那条"迁完应当为空"的断言失去意义
+   * （分不清"空目录"与"没有过数据"）。旧装机上它们本来就在。
+   */
+  const legacyDwsHome = join(userData, "channels", "dingtalk", "dws-home")
+  const legacySharedRoot = join(userData, "shared")
+  const legacyAgentHome = join(userData, "agent-home")
 
-  // 与算法团队共享的根目录。子目录（exports/dws、kl）由各自的写入方按需创建。
-  const sharedRoot = join(userData, "shared")
-  mkdirSync(sharedRoot, { recursive: true })
-
-  // Agent workspace：每个会话一个子目录，由服务按需创建。
-  const agentWorkspaces = join(userData, "agents")
-  mkdirSync(agentWorkspaces, { recursive: true })
-
-  // Agent 子进程的隔离 HOME。**必须真实存在**：opencode 起来会往 HOME 下写
-  // 配置/缓存，指向不存在的路径会让它启动失败。
-  const agentHome = join(userData, "agent-home")
-  mkdirSync(agentHome, { recursive: true })
+  /**
+   * Agent 子进程的 npm 缓存（应用级，见 `AppPaths.agentNpmCache`）。
+   * **必须真实存在**：npm 对不存在的 cache 目录会自己建，但我们提前建
+   * 是为了让权限与位置在第一次 spawn 之前就确定。
+   */
+  const agentNpmCache = join(userData, "agent-npm-cache")
+  mkdirSync(agentNpmCache, { recursive: true })
 
   return {
     userData,
@@ -186,10 +207,10 @@ export function resolveAppPaths(options: {
     binDir: resolveBinDir(packaged, options.mainDir),
     skillsDir: resolveSkillsDir(packaged, options.mainDir),
     forgeDir: resolveForgeDir(packaged, options.mainDir),
-    dwsHome,
-    sharedRoot,
-    agentWorkspaces,
-    agentHome,
+    legacyDwsHome,
+    legacySharedRoot,
+    legacyAgentHome,
+    agentNpmCache,
     klRoot: resolveKlRoot(packaged, options.mainDir),
   }
 }

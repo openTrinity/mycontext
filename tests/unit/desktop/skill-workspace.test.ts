@@ -95,13 +95,16 @@ function makeService(options: { skillsDir?: string; opencodePath?: string } = {}
     logger: createLogger("test-search", { level: "error" }),
     runtime,
     processes,
-    workspaceRoot,
     ...(options.skillsDir === undefined ? {} : { skillsDir: options.skillsDir }),
     klRoot: "/fake/kl-graph",
     klPort: 8200,
     getWindow: () => null,
   })
-  service.attach(vault.db)
+  service.attach(vault.db, {
+    workspaceRoot,
+    home: join(workspaceRoot, "agent-home"),
+    npmCache: join(workspaceRoot, "npm-cache"),
+  })
   return { vault, service, workspaceRoot, captured }
 }
 

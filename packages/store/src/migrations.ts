@@ -119,6 +119,67 @@ ALTER TABLE accounts ADD COLUMN avatar_url    TEXT;
 ALTER TABLE accounts ADD COLUMN avatar_source TEXT;
 `
 
+/**
+ * 渠道身份 → vault 的映射。**隔离维度从「本地账号」改成「渠道身份」。**
+ *
+ * ## ★★ 为什么 `accounts.vault_id` 那个一对一不够
+ *
+ * 一个人可能在**多个组织**里各有一个身份（实测本机就有两个钉钉 profile），
+ * 而每个身份的会话、消息、画像都必须彻底分开 —— 混在一起不是显示问题，
+ * 是把两个组织的语料蒸进同一份画像，而那不可逆。
+ *
+ * 原来的隔离键是 `accountId`，于是"换身份"只能"换本地账号"：
+ * `SelfIdentityRepository.upsert` 撞 `SELF_IDENTITY_CONFLICT` 之后，
+ * 界面能给的唯一出路就是"新建一个账号"—— 那是把渠道的身份问题
+ * 推给了登录体系，而两者本来无关（同一个人、同一个登录，只是换了组织）。
+ *
+ * 现在键是 `(account_id, channel_id, corp_id, user_id)`：
+ * 「谁的 · 哪个渠道 · 哪个组织 · 组织里的哪个人」。
+ * 钉钉与飞书天然分开（`channel_id` 在键里），接飞书时这张表一个字不用改。
+ *
+ * ## ★ 判定键是 `corp_id + user_id`，不是 openId
+ *
+ * 与 `isSameIdentity()`（repositories/conversations.ts）**同一个判据** ——
+ * 两处分叉的话，"算不算同一个身份"会有两个答案，而那种不一致的表现是
+ * 「授权到同一个组织却又建了一个新 vault」（数据凭空一分为二）。
+ *
+ * openId 是渠道专有形态（钉钉一个、飞书三套），放进这张渠道无关的表
+ * 会让接下一个渠道时必须改主键。而 `corpId + userId`（组织 + 成员编号）
+ * 是所有 IM 都有的概念。
+ *
+ * ## ★ `corp_name` / `user_name` 只做显示，不参与判定
+ *
+ * 组织改名、花名改了都不该被判成"换了个人"。所以它们可空、可更新，
+ * 而主键里一个都没有。
+ *
+ * ## ★ `vault_id` 上的 UNIQUE 是一条真不变式
+ *
+ * 一个 vault 只能属于一个身份 —— 这正是 `SelfIdentityRepository.upsert`
+ * 那道 fail-closed 守卫在库层的对应物。两个身份指向同一个 vault_id
+ * 时，那道守卫会在第二个身份写 `channel_self_identity` 时抛错，
+ * 但那时数据已经开始混了。所以在这里用索引挡住。
+ *
+ * `accounts.vault_id` **保留不动**：它是"还没绑任何渠道身份"时的基础
+ * vault（注册即有，onboarding 状态要往里写），也是已发布迁移不能改。
+ * 存量账号的基础 vault 会在首次挂载时按它库里的身份行归属到这张表。
+ */
+const CONTROL_0004_IDENTITY_VAULTS = `
+CREATE TABLE channel_identity_vaults (
+  account_id   TEXT NOT NULL,
+  channel_id   TEXT NOT NULL,
+  corp_id      TEXT NOT NULL,
+  user_id      TEXT NOT NULL,
+  vault_id     TEXT NOT NULL,
+  corp_name    TEXT,
+  user_name    TEXT,
+  created_at   TEXT NOT NULL,
+  last_used_at TEXT,
+  PRIMARY KEY (account_id, channel_id, corp_id, user_id)
+);
+CREATE UNIQUE INDEX idx_identity_vaults_vault ON channel_identity_vaults(vault_id);
+CREATE INDEX idx_identity_vaults_account ON channel_identity_vaults(account_id, channel_id);
+`
+
 /** 单个账号的库。本阶段只有账号级设置（onboarding 状态等）。 */
 const VAULT_0001_INIT = `
 CREATE TABLE vault_settings (
@@ -132,6 +193,7 @@ export const CONTROL_MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: CONTROL_0001_INIT },
   { version: 2, name: "account-vaults", sql: CONTROL_0002_VAULTS },
   { version: 3, name: "account-profile", sql: CONTROL_0003_PROFILE },
+  { version: 4, name: "channel-identity-vaults", sql: CONTROL_0004_IDENTITY_VAULTS },
 ]
 
 /**

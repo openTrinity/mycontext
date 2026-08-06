@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { BrowserWindow } from "electron"
 import { AppError, type Clock, type Logger } from "@mycontext/kernel"
+import type { AgentDirs } from "./agent-dirs.js"
 import type { LlmProvider } from "@mycontext/llm"
 import type { ChatItem } from "@mycontext/agent-runtime"
 import { AGENT_ENTRY_FILENAME, renderEntry } from "@mycontext/distill"
@@ -164,8 +165,11 @@ const DEFAULT_LIMITS: PersonaRuntimeLimits = {
 export interface PersonaServiceOptions {
   clock: Clock
   logger: Logger
-  /** agent workspace 根目录；每个会话一个子目录（上下文隔离 + 隐私边界） */
-  workspaceRoot: string
+  /**
+   * ★ workspace / 隔离 HOME 已改为**在 attach 时给**（见 `AgentDirs`）：
+   * 它们按 vault 分，而构造时还不知道会挂哪个身份。
+   * 原来这里是 `workspaceRoot: string` + `agentHome?: string` 两个构造参数。
+   */
   /**
    * 蒸馏产出的 skill 包所在目录（`<userData>/vaults/<vaultId>/forge/skills`）。
    *
@@ -196,8 +200,6 @@ export interface PersonaServiceOptions {
    */
   runtime?: RuntimeEnv
   processes?: ProcessRunner
-  /** agent 子进程的隔离 HOME（不给会读到用户自己装的全部 skill） */
-  agentHome?: string
   /** kl-graph 代码根：前插进 PATH，让 skill 里的裸 `kl` 命中它 */
   klRoot?: string
   /** kl-server 端口（注入 env，kl CLI 据此连服务） */
@@ -491,8 +493,8 @@ export class PersonaService {
             logger: options.logger.child("Acp"),
             runtime: options.runtime,
             processes: options.processes,
-            workspaceRoot: options.workspaceRoot,
-            ...(options.agentHome === undefined ? {} : { agentHome: options.agentHome }),
+            // ★ 回调：vault 跟着登录挂，构造这一刻还没有（见 PersonaAcpOptions.dirs）
+            dirs: () => this.dirs,
             klRoot: options.klRoot ?? "",
             klPort: options.klPort ?? 0,
             /**
@@ -612,7 +614,24 @@ export class PersonaService {
     this.supervisor?.markProfileChanged()
   }
 
-  attach(db: SqliteDatabase, forgeSkillRoot?: string): void {
+  /** 当前 vault 的 agent 目录（attach 时给）。未登录时 null。 */
+  private dirs: AgentDirs | null = null
+
+  /**
+   * 当前 vault 的 agent 目录。
+   *
+   * ★ 未 attach 时抛错而不是退回应用级目录 —— 后者是一次静默的跨身份写入
+   * （transcript 片段写进别人的目录）。调用点都在 try 内，会降级成
+   * "agent 起不来"并落回 LlmClient 直连。
+   */
+  private requireDirs(): AgentDirs {
+    const dirs = this.dirs
+    if (dirs === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，agent 目录未就绪")
+    return dirs
+  }
+
+  attach(db: SqliteDatabase, forgeSkillRoot?: string, dirs?: AgentDirs): void {
+    this.dirs = dirs ?? null
     this.db = db
     /**
      * 蒸馏产物的落点随 vault 变，所以在 attach 时给而不是构造时给。
@@ -685,6 +704,8 @@ export class PersonaService {
     await this.supervisor?.stop()
     this.supervisor = null
     this.db = null
+    // ★ 目录也要清：留着的话切身份后一次漏接的 attach 会静默写进上一个身份的目录
+    this.dirs = null
     this.reviewFeedback.clear()
   }
 
@@ -1798,7 +1819,7 @@ export class PersonaService {
     if (conversation === null) return
 
     const config = new PersonaConfigRepository(db).get(conversationId)
-    const cwd = join(this.options.workspaceRoot, "persona", conversationId)
+    const cwd = join(this.requireDirs().workspaceRoot, "persona", conversationId)
     mkdirSync(cwd, { recursive: true })
     /**
      * ★ 蒸馏产物**不再** cpSync 到 workspace 里。
@@ -2905,7 +2926,7 @@ export class PersonaService {
       }
     }
 
-    const cwd = join(this.options.workspaceRoot, "persona", conversationId)
+    const cwd = join(this.requireDirs().workspaceRoot, "persona", conversationId)
     const reviewContext = this.renderReviewFeedback(conversationId)
 
     /**

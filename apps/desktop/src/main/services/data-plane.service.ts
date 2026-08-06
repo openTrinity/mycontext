@@ -32,7 +32,7 @@ import {
   type SelfIdentityView,
 } from "@mycontext/ipc-contract"
 import { IngestService } from "./ingest.service.js"
-import type { FeedService } from "./feed.service.js"
+import type { FeedDirs, FeedService } from "./feed.service.js"
 
 export interface DataPlaneOptions {
   clock: Clock
@@ -165,6 +165,8 @@ export class DataPlaneService {
    * （周期是构造时读进 IngestService 的，改了要重建才生效）。
    */
   private dbPath: string | null = null
+  /** 当前 vault 的导出落点（透传给 FeedService；原地重挂时复用） */
+  private feedDirs: FeedDirs | null = null
   /**
    * 实时事件长连接（渠道支持时）。**只当叫醒信号**：收到就定向补拉那个会话，
    * 正文仍走采集。它挂了不影响完整性（见 ChannelEvents 契约注释）。
@@ -184,11 +186,22 @@ export class DataPlaneService {
 
   constructor(private readonly options: DataPlaneOptions) {}
 
-  /** vault 挂载。`dbPath` 用于统计 WAL 体积（状态页显示）。 */
-  async attach(db: SqliteDatabase, dbPath: string): Promise<void> {
+  /**
+   * vault 挂载。`dbPath` 用于统计 WAL 体积（状态页显示）。
+   *
+   * `feedDirs` 只是**透传**给 `FeedService`（导出与 handoff 的落点按 vault 分）。
+   * 本服务不自己存一份 —— 多一个副本就多一个可能过期的真源。
+   */
+  async attach(db: SqliteDatabase, dbPath: string, feedDirs: FeedDirs): Promise<void> {
     await this.detach()
     this.db = db
     this.dbPath = dbPath
+    /**
+     * ★ 记下这套目录：`intervalsSave()` 会**原地重挂**（改采集周期要重建
+     * IngestService），那时必须用同一套 —— 让调用方再传一次等于给了一个
+     * 传错的机会，而传错的表现是导出物落到别的身份目录下且不报错。
+     */
+    this.feedDirs = feedDirs
 
     const ingest = new IngestService({
       db,
@@ -254,7 +267,12 @@ export class DataPlaneService {
 
     ingest.start()
     this.ingest = ingest
-    await this.options.feed.attach(db)
+    /**
+     * ★ 导出落点跟着 vault 走（见 FeedDirs）—— 由这一层透传。
+     * `DataPlaneService` 自己不认识那些路径，只是把 attach 时收到的传下去：
+     * 多一层"它也存一份路径"会多一个可能过期的副本。
+     */
+    await this.options.feed.attach(db, feedDirs)
 
     /**
      * 实时事件长连接（渠道支持时）。收到事件 → 定向补拉那个会话，让
@@ -324,7 +342,15 @@ export class DataPlaneService {
     this.ingest = null
     this.db = null
     this.dbPath = null
+    this.feedDirs = null
     await this.options.feed.detach()
+  }
+
+  /** 当前 vault 的导出落点。未 attach 时抛错（那是接线漏了，不该静默兜底）。 */
+  private requireFeedDirs(): FeedDirs {
+    const dirs = this.feedDirs
+    if (dirs === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，导出目录未就绪")
+    return dirs
   }
 
   /**
@@ -363,7 +389,8 @@ export class DataPlaneService {
 
     this.options.logger.info("ingest intervals saved", { ...next })
     // 重挂让新周期生效（见方法注释）。attach 内部会先 detach。
-    await this.attach(db, dbPath)
+    // ★ 复用 attach 时记下的那套目录（见 feedDirs 的注释）
+    await this.attach(db, dbPath, this.requireFeedDirs())
     this.pushSnapshot()
     return next
   }

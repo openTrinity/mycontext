@@ -396,6 +396,16 @@ interface DwsErrorEnvelope {
   serverErrorCode: string | null
   /** PAT 裸 JSON 顶层的 `code`（字符串码，与上面的数字 `code` 不同层）。 */
   patCode: string | null
+  /**
+   * `error.message` 原文。
+   *
+   * ★ 需要它是因为 **code 3（validation）不止一种含义**，而它们的处置不同：
+   * · `organization "…" not found` —— 钉住的身份在本机没登录态（终态，要重新授权）
+   * · `unknown flag: …`           —— 我们自己传错了参数（终态，但那是代码 bug）
+   * 两者的 `code` 与 `category` 完全一样，只有 `reason` 与文案能分开
+   * （实测前者无 `reason`，后者是 `unknown_flag`）。
+   */
+  message: string | null
 }
 
 function asNonEmptyString(value: unknown): string | null {
@@ -421,7 +431,7 @@ function extractErrorEnvelope(output: string): DwsErrorEnvelope | null {
   if (typeof error !== "object" || error === null) {
     return patCode === null
       ? null
-      : { category: null, code: null, reason: null, serverErrorCode: null, patCode }
+      : { category: null, code: null, reason: null, serverErrorCode: null, patCode, message: null }
   }
   const fields = error as Record<string, unknown>
   return {
@@ -430,7 +440,36 @@ function extractErrorEnvelope(output: string): DwsErrorEnvelope | null {
     reason: asNonEmptyString(fields["reason"]),
     serverErrorCode: asNonEmptyString(fields["server_error_code"]),
     patCode,
+    message: asNonEmptyString(fields["message"]),
   }
+}
+
+/**
+ * 「钉住的那个身份在本机不存在」的判据。
+ *
+ * ## ★★ 为什么不能只看 `code === 3`
+ *
+ * 实测 code 3（`category: "validation"`）**至少两种含义**：
+ *
+ * | 触发                          | code | reason         | message                              |
+ * |-------------------------------|------|----------------|--------------------------------------|
+ * | `--profile` 指向不存在的身份   | 3    | （无）         | `organization "…" not found`         |
+ * | 我们自己传了个不存在的 flag    | 3    | `unknown_flag` | `unknown flag: --xxx`                |
+ *
+ * 只看 code 会把后者也归成"身份不可用"，于是一个**代码 bug**被显示成
+ * 「请重新授权」——用户照做，扫完码问题还在，而真正的原因（参数拼错了）
+ * 被一条用户友好的文案盖住了。这正是本仓库最贵的那类 bug 的形状。
+ *
+ * 所以判据是三段：`code === 3` **且** 不是 `unknown_flag` **且** 文案含
+ * `not found`。三种真实身份错误的文案都命中最后一条（实测）：
+ * `organization "…" not found` / `account "…" not found in organization "…"` /
+ * `profile "…" not found`。
+ */
+function isIdentityUnavailable(envelope: DwsErrorEnvelope): boolean {
+  if (envelope.code !== 3) return false
+  // 参数拼错是我们自己的 bug，不是用户要重新授权 —— 让它走兜底并保留原文。
+  if (envelope.reason === "unknown_flag") return false
+  return (envelope.message ?? "").toLowerCase().includes("not found")
 }
 
 /**
@@ -541,7 +580,31 @@ export function classifyDwsError(output: string): AppError | null {
       }
     }
 
-    // ④ 没有 reason 时退到数字 code（`category` 不可信，见上方矩阵）：
+    /**
+     * ④ 钉住的身份在本机没有登录态（`--profile` 指向一个不存在的组织/账号）。
+     *
+     * ★ 必须在下面的数字 code 分支**之前**，而它本身要比 `code === 3` 更严 ——
+     * 判据见 `isIdentityUnavailable`（code 3 还被 `unknown_flag` 用着，
+     * 那是代码 bug 而不是"请重新授权"）。
+     *
+     * ★★ 终态（`retryable: false`）。不归类的话它落到最下面的兜底
+     * `PROCESS_FAILED` + `retryable: true` —— 那是一场无限重试风暴：
+     * 每一轮采集都失败、每一次都判定可以重试，日志刷屏而用户毫不知情。
+     */
+    if (isIdentityUnavailable(envelope)) {
+      return new AppError(
+        "CHANNEL_IDENTITY_UNAVAILABLE",
+        "这个身份在本机没有登录态，请重新授权到它（或切换到其它身份）",
+        {
+          retryable: false,
+          messageKey: "errors:byCode.CHANNEL_IDENTITY_UNAVAILABLE",
+          // 只记 code：message 里带组织 id，那是标识符，不进日志
+          context: { code: 3 },
+        },
+      )
+    }
+
+    // ⑤ 没有 reason 时退到数字 code（`category` 不可信，见上方矩阵）：
     //    · 2 = auth 一族独占（CategoryAuth 与 AUTH_NOT_CONFIGURED/AUTH_TOKEN_EXPIRED）；
     //    · 4 = 权限不足（PAT 拦截与实测的 HTTP 403 都落在这里）。
     //    ⚠️ 顺序上 4 要先判：403 是权限问题，提示重新扫码对它无效。
@@ -646,6 +709,20 @@ export class DwsCli {
     // 可自动确认的读命令加 -y，避免子进程静默挂在确认提示上。
     if (canAutoConfirm(args) && !finalArgs.includes("-y") && !finalArgs.includes("--yes")) {
       finalArgs.push("-y")
+    }
+    /**
+     * ★★ 钉住身份：这条命令按**当前挂载 vault 绑定的那个身份**作答。
+     *
+     * 不钉的话它跟着 CLI 的全局 `currentProfile` 走 —— 那个值可能被用户在
+     * 终端里改掉，于是我们拿着 A 的库去读 B 的会话（实测过：库里 248 个会话
+     * 属于组织甲，而采集器在按组织乙列会话）。完整的实测数据与为什么用
+     * `--profile` 而不是 `profile switch`，见 `RuntimeEnvOptions.dwsProfile`。
+     *
+     * 调用方已显式指定时不覆盖：那是"我就要问这一个身份"（比如授权后
+     * 拿刚拿到的凭据去核对），比这里的默认更具体。
+     */
+    if (!finalArgs.includes("--profile")) {
+      finalArgs.push(...this.options.runtime.dwsProfileArgs())
     }
 
     const result = await this.options.processes.exec({

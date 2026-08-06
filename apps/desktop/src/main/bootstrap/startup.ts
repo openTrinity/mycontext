@@ -12,6 +12,7 @@ import { resolveLanguage } from "@mycontext/i18n"
 import { createLogger, systemClock, type Logger } from "@mycontext/kernel"
 import {
   AccountRepository,
+  ChannelIdentityVaultRepository,
   ConversationRepository,
   openStore,
   SelfIdentityRepository,
@@ -21,12 +22,14 @@ import {
   VaultStore,
   type SqliteDatabase,
   type StoreHandle,
+  type VaultPaths,
 } from "@mycontext/store"
 import {
   ChannelHost,
   createDingTalkPlugin,
   createFeishuPlugin,
   createRegistry,
+  seedChannelProfile,
 } from "@mycontext/channels"
 import { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 import { LlmHolder } from "@mycontext/llm"
@@ -58,6 +61,7 @@ import { SecretStore } from "../services/secret-store.js"
 import { PreferencesService } from "../services/preferences.service.js"
 import { ScryptPasswordHasher } from "../services/password-hasher.js"
 import { SigningKeyStore } from "../services/signing-key.service.js"
+import { ActiveIdentityService } from "../services/active-identity.service.js"
 import { StatusService } from "../services/status.service.js"
 import { registerIpc } from "../ipc/register.js"
 import { toLocalFileUrl } from "../windows/local-file-url.js"
@@ -159,6 +163,13 @@ export function bootstrapApp(mainDir: string): AppContext {
   const settings = new SettingsRepository(store.db)
   const sessions = new SessionStore(settings)
   const vaults = new VaultStore({ root: paths.vaultsRoot, logger: logger.child("Vault") })
+  /**
+   * 渠道身份 → vault 的映射（control 库）。
+   *
+   * 隔离维度是 `(accountId, channelId, corpId, userId)` —— 见
+   * `CONTROL_0004_IDENTITY_VAULTS` 的注释（为什么不是 accountId）。
+   */
+  const identities = new ChannelIdentityVaultRepository(store.db)
 
   const onboarding = new OnboardingService()
   const preferences = new PreferencesService(settings)
@@ -227,6 +238,20 @@ export function bootstrapApp(mainDir: string): AppContext {
     fallbackPath: resolveDwsSourceValue(config.values.dwsSource),
   })
 
+  /**
+   * 当前挂载的 vault 的全部磁盘落点。null = 未登录。
+   *
+   * ## ★★ 为什么是一个可变引用而不是各服务的构造参数
+   *
+   * 隔离维度是**渠道身份**，而身份可以在运行期切换。凡是派生自聊天记录的
+   * 落点（图库、导出、媒体、agent workspace、渠道 CLI 的配置目录…）都必须
+   * 跟着当前身份走。装配阶段还不知道会挂哪个身份，所以这里存一份引用，
+   * 由挂载/卸载唯一地改它。
+   *
+   * `VaultStore.paths()` 是那些路径的唯一真源 —— 这里只是"当前是哪一套"。
+   */
+  let vaultPaths: VaultPaths | null = null
+
   // 渠道要在 auth 之前装配：登录回调里要挂载数据面，而数据面依赖渠道插件。
   const runtime = new RuntimeEnv({
     binDir: paths.binDir,
@@ -242,7 +267,26 @@ export function bootstrapApp(mainDir: string): AppContext {
     get dwsBinOverride() {
       return dwsSource.path() ?? undefined
     },
-    dwsConfigDir: paths.dwsHome,
+    /**
+     * ★★ 渠道 CLI 的配置目录**按 vault 走** —— 这是身份隔离的主防线。
+     *
+     * 目录里只 seed 当前身份那一条 profile（见 `seedChannelProfile`），
+     * 于是越权读取变成**结构性不可能**：实测在只 seed 组织甲的目录里
+     * 拿组织乙的 `--profile` 去问，直接 `organization "…" not found`。
+     * 而 `--profile` 钉住只是"我们记得传"，漏一处就是泄漏 —— 两道一起上。
+     *
+     * ★ 未登录时退回旧的应用级目录：那时没有 vault，而授权流程
+     * （`auth login`）本身要能跑 —— 它是"还没有身份"时唯一能做的事。
+     * 授权成功后会绑定身份、挂载 vault，之后一律走 vault 内那份。
+     */
+    get dwsConfigDir() {
+      return vaultPaths?.dwsHome ?? paths.legacyDwsHome
+    },
+    /**
+     * ★ 把渠道命令钉在当前身份上（`--profile <corpId>:<userId>`）。
+     * 每条命令现读 —— 切完身份**下一条命令**就用新身份，不必重启。
+     */
+    dwsProfile: () => activeIdentity.currentProfile(),
   })
   const processes = new ProcessRunner(logger.child("Process"))
   const dingtalk = createDingTalkPlugin({
@@ -269,7 +313,6 @@ export function bootstrapApp(mainDir: string): AppContext {
   const feed = new FeedService({
     clock: systemClock,
     logger: logger.child("Pipeline"),
-    sharedRoot: paths.sharedRoot,
     // ★ 网关配置全部从 runtimeConfig 现读（函数）：用户在设置里改了之后，
     // 下次 attach（登录）写出的 handoff.json 就反映新值，不必重启。
     embedding: () => ({
@@ -509,10 +552,6 @@ export function bootstrapApp(mainDir: string): AppContext {
   const media = new MediaService({
     clock: systemClock,
     logger: logger.child("Media"),
-    mediaDir: join(paths.userData, "media"),
-    avatarDir: join(paths.userData, "avatars"),
-    // 用户上传的图片（形象 / 自己的头像）—— 与渠道下载的分开放，便于分别清理
-    uploadDir: join(paths.userData, "uploads"),
     cli: dingtalk.mediaRunner ?? null,
     // 头像能力（契约）。渠道没实现时为 null —— 取头像退化为首字母兜底
     avatars: dingtalk.avatars ?? null,
@@ -522,7 +561,6 @@ export function bootstrapApp(mainDir: string): AppContext {
   const persona = new PersonaService({
     clock: systemClock,
     logger: logger.child("Persona"),
-    workspaceRoot: paths.agentWorkspaces,
     /**
      * ★ 随包的 skill 目录（`kl` 图谱查询）。
      *
@@ -545,7 +583,6 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     runtime,
     processes,
-    agentHome: paths.agentHome,
     klRoot: paths.klRoot,
     klPort,
     /**
@@ -645,10 +682,6 @@ export function bootstrapApp(mainDir: string): AppContext {
     logger: logger.child("Search"),
     runtime,
     processes,
-    workspaceRoot: paths.agentWorkspaces,
-    // ★ 隔离 HOME：不给的话 opencode 会读到用户 `~/.claude/skills` 下的全部
-    // skill（实测泄漏 8 个，含一个专门检测隔离失效的探针）。
-    agentHome: paths.agentHome,
     // kl skill 随包分发；建会话时复制进 workspace（harness 按 cwd 发现 skill）
     skillsDir: paths.skillsDir,
     klRoot: paths.klRoot,
@@ -669,9 +702,12 @@ export function bootstrapApp(mainDir: string): AppContext {
     logger: logger.child("KlServer"),
     processes,
     klRoot: paths.klRoot,
-    dataDir: klDataDirFor(paths.sharedRoot),
-    // 四件套导出目录（FeedService 每 10min 自动物化到这里）；建图读它。
-    exportDir: join(paths.sharedRoot, "exports", "dws"),
+    /**
+     * ★ 构造时给空串占位 —— 真实目录在**挂载时** `rebind()` 换（按 vault）。
+     * 未登录时没有图谱可读，而 `graphExists()` 对空路径走"图不存在"降级。
+     */
+    dataDir: "",
+    exportDir: "",
     port: klPort,
     getWindow: () => window,
     /**
@@ -774,7 +810,8 @@ export function bootstrapApp(mainDir: string): AppContext {
    */
   const graphQuery = new GraphQueryService({
     logger: logger.child("GraphQuery"),
-    dataDir: klDataDirFor(paths.sharedRoot),
+    // ★ 函数：vault 跟着登录挂，装配这一刻还没有（见 GraphQueryOptions.dataDir）
+    dataDir: () => vaultPaths?.klRoot ?? "",
     now: () => systemClock.now(),
     /**
      * ego 图要在实体表里认出「我」—— 判据是本人身份里的显示名。
@@ -832,6 +869,229 @@ export function bootstrapApp(mainDir: string): AppContext {
     onPersonaDelivered: () => persona.onDelivered(),
   })
 
+  /**
+   * 卸载当前 vault：停掉一切在跑的东西，然后关库。
+   *
+   * ## ★★ 顺序是刻意的，每一步都对应一个真实踩过的坑
+   *
+   * ```
+   * ① agent（search）—— 先撤 token + kill opencode，再 detach
+   *                      （换库时旧 agent 不该续命）
+   * ② media / distill / persona —— 都持定时器且会写库
+   * ③ ★ await klServer.stop() —— **必须 await**（见下）
+   * ④ ★ await dataPlane.detach() —— 它会等在途那一轮采集收尾
+   * ⑤ 最后才清 vaultPaths / 身份 / mountedVault，再 closeAll()
+   * ```
+   *
+   * ### ③ 为什么 kl 必须 await（切身份时的竞态）
+   *
+   * kl 绑固定端口 8200，pidfile 放在 dataDir 下。登出时 `void` 无所谓
+   * （后面没人再起），但**切身份**时新 vault 会立刻起一个：新目录里没有
+   * pidfile → 探到旧进程还活着 → 判成"外部进程" → `adopted=true` →
+   * 建图直接报错；而 adopt 成功的分支更糟 —— 那个进程的 `KL_DATA_DIR`
+   * 指着**旧身份的图库**，新身份查到的是上一个人的知识。
+   *
+   * ### ⑤ 为什么身份要**最后**才清
+   *
+   * `dataPlane.detach()` → `eventStream.stop()` → `unsubscribeAll()` →
+   * `dws event stop --all --profile <X>`，而那个 `<X>` 来自身份 getter。
+   * 先清的话退订命令不带 profile，按 CLI 全局 profile 退订 —— 可能停掉
+   * **另一个身份**的订阅（甚至用户自己终端里正在用的那个）。而
+   * `unsubscribeAll` 整段吞异常（退出路径不该抛）→ 停错了不会有任何痕迹。
+   *
+   * 整个函数**不抛**：每一步失败都记日志并继续。卸载失败而不关库
+   * 等于"登出后数据仍可读"，那比丢一条错误日志严重得多。
+   */
+  const unmountVault = async (): Promise<void> => {
+    onboarding.bind(null, null)
+    distillSources.detach()
+    // ① agent：撤 token + kill 进程（无孤儿），再放开 db
+    await search
+      .shutdown()
+      .catch((error: unknown) => {
+        logger.warn("search shutdown failed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      })
+      .finally(() => search.detach())
+    media.detach()
+    // ② 两个持定时器且会写库的
+    await distill.detach().catch(() => undefined)
+    await persona.detach().catch(() => undefined)
+    // ③ ★ await：让它真的让出 8200 并写掉 pidfile（见上面的注释）
+    await klServer.stop().catch((error: unknown) => {
+      logger.warn("kl server stop failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    })
+    // ④ ★ await：等在途那一轮采集收尾（它可能正 await 一个 0.6s 的子进程）。
+    //   不等就关库会抛无人 catch 的 `The database connection is not open`。
+    await dataPlane.detach().catch((error: unknown) => {
+      logger.error("data plane detach failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    })
+    // ⑤ 到这里才清：④ 里的退订要用旧身份的 profile（见上面的注释）
+    mountedVault = null
+    vaultPaths = null
+    activeIdentity.clear()
+    vaults.closeAll()
+  }
+
+  /**
+   * 挂载一个 vault：开库 → 按 vault 铺好全部落点 → attach 各服务。
+   *
+   * ★ 幂等地先卸载：切身份与登录走的是同一条路，而"忘了先卸"的表现是
+   * 两个身份的采集器同时在跑（都往各自的库写，但共用一个 8200 端口）。
+   *
+   * ★★ 每个服务收到的路径都来自 `vaults.paths(vaultId)` 这**一个**对象。
+   * 那是刻意的：漏接一个字段是编译错误，而不是"那一类数据仍写在公共目录"
+   * 这种静默的跨身份写入（见 `VaultStore.paths()` 的注释）。
+   */
+  const mountVault = async (vaultId: string): Promise<void> => {
+    await unmountVault()
+
+    const handle = vaults.handle(vaultId)
+    const vp = vaults.paths(vaultId)
+    // ego 图的两个注入回调与 RuntimeEnv 的 dwsConfigDir getter 都读它
+    mountedVault = handle.db
+    vaultPaths = vp
+
+    /**
+     * ★★ 把渠道 CLI 的配置目录钉死在这个身份上 —— 身份隔离的**主防线**。
+     *
+     * 必须**显式 seed**，不能只建空目录：实测空目录会让 CLI 就地重建一份
+     * profiles，而它取的是钥匙串里那个**全局 current** —— 那个值会被用户
+     * 在终端改掉，也就是把要修的问题原样搬进了新目录。
+     *
+     * 未绑身份（基础 vault）时不 seed：那时还没有"这个 vault 属于谁"，
+     * 而授权流程本身要能跑（`dwsConfigDir` 那个 getter 会退回旧目录）。
+     */
+    const identity = activeIdentity.currentIdentity()
+    if (identity !== null) {
+      const seeded = seedChannelProfile(vp.dwsHome, {
+        corpId: identity.corpId,
+        userId: identity.userId,
+      })
+      if (seeded) logger.info("channel profile seeded for vault", { channelId: identity.channelId })
+    }
+
+    onboarding.bind(
+      new SettingsRepository(handle.db, "vault_settings"),
+      new OnboardingRepository(handle.db),
+    )
+    distillSources.attach(handle.db)
+    /**
+     * 跑 forge（测量型引擎），产出 skill 包。这是画像的**唯一**来源。
+     *
+     * 路径按 vault 给：语料是这个账号的，产物也只该被这个账号看到。
+     *
+     * ★ `since` 由 `DistillService` 给，**不再写死 `null`**。
+     *
+     * 写死的后果（实测）：引导页那个「30 / 90 / 180 天」选择器选完后
+     * `days` 一路传到 `distill.start()` 就被丢掉，forge 永远按增量水位跑
+     * （首次跑退化成 `analysisStart` = 库里最早那条消息的日期）。
+     * 也就是**选什么都一样**，而 `distill_sources.scope_json` 里却
+     * 老实记着用户选的那个 `since` —— 两处不一致，且界面上看不出来。
+     *
+     * `null` 仍然有意义：那是"不限范围"（自动重蒸走这条，见
+     * `DistillService.attach` 里 autoTimer 的注释）。
+     *
+     * ★ 返回**完整**结果而不是 `{ok, reason}`：`messages` / `turns` /
+     * `asks` / `files` / `grade` 是回答"蒸得怎么样"的那五个数，而它们
+     * 曾经在这个边界上被丢掉 —— 于是 UI 只能显示「等待中」。
+     *
+     * `signal` 一路传到 `ProcessRunner.spawn`：不传的话「停止」按钮
+     * 对在跑的那一轮完全无效（超时上限加起来近半小时）。
+     */
+    distill.attach(
+      handle.db,
+      (signal, onStep, since) =>
+        forge.run({
+          db: handle.db,
+          vaultPath: vp.database,
+          forgeRoot: vp.forgeRoot,
+          skillRoot: vp.skillRoot,
+          since: since ?? null,
+          ...(signal === undefined ? {} : { signal }),
+          // 阶段回调透传：让界面能显示"正在测量"而不是干等一句"正在蒸馏"
+          ...(onStep === undefined ? {} : { onStep }),
+        }),
+      /**
+       * 「重新蒸馏」要真的从头来 —— forge 的水位在它自己的派生库里，
+       * 不在 vault 里，所以这一步只能由持有路径的这一层给。
+       */
+      () => forge.resetWatermark(vp.forgeRoot),
+    )
+    /**
+     * agent 的三个目录：workspace 与 HOME 按 vault，npm 缓存应用级一份。
+     *
+     * ★ 缓存不按身份分是一条实测取舍：那是 registry 的只读镜像（325 MB），
+     * 按身份各拷一份等于两个身份 650 MB 且首次切换要重新联网（见 `AgentDirs`）。
+     */
+    const agentDirs = {
+      workspaceRoot: vp.agentWorkspaceRoot,
+      home: vp.agentHome,
+      npmCache: paths.agentNpmCache,
+    }
+    persona.attach(handle.db, vp.skillRoot, agentDirs)
+    media.attach(handle.db, {
+      media: vp.mediaRoot,
+      avatar: vp.avatarRoot,
+      upload: vp.uploadRoot,
+    })
+    /**
+     * ★★ kl 换到这个身份的图库 —— **必须在 `ensureReady()` 之前**。
+     *
+     * 反过来的话它会带着上一个身份的 `KL_DATA_DIR` 起进程，
+     * 而那意味着新身份查到的是上一个人的知识（见 `rebind()` 的注释）。
+     * `unmountVault` 已经 await 过 `stop()`，所以这里端口是干净的。
+     */
+    klServer.rebind({ dataDir: vp.klRoot, exportDir: vp.exportRoot })
+    // kl-server 随登录懒启动（warmup ~90s，不阻塞登录）。fire-and-forget：
+    // ensureReady 内部轮询健康、自己管状态机（starting→ready/failed）并经 IPC
+    // 推 UI，绝不能 await（会卡住登录）。失败只降级（搜索落回本地召回），不抛。
+    void klServer.ensureReady().catch(() => undefined)
+    /**
+     * 数字人调度器随登录启动。
+     *
+     * 启动它是安全的：回复模式默认 `draft`（只出草稿），且自动发送
+     * 还要过白名单与授权门。所以调度器起来了也不会替用户发出任何消息。
+     *
+     * ★ 注意这里**不再**说"默认 listening = 0 所以不处理任何消息" ——
+     * 那个开关已经删了，现在管控层收所有消息（它是订阅者）。
+     * 安全性来自"发不发"那一层，不是"收不收"。
+     */
+    persona.start()
+    search.attach(handle.db, agentDirs)
+    await dataPlane
+      .attach(handle.db, vp.database, {
+        dataRoot: vp.root,
+        exportRoot: vp.exportRoot,
+        klRoot: vp.klRoot,
+        handoffFile: vp.handoffFile,
+      })
+      .catch((error: unknown) => {
+        // 数据面挂载失败不该阻止登录：用户仍能用设置页与授权，
+        // 状态页会显示 lastError。把它变成"登录失败"才是过度反应。
+        logger.error("data plane attach failed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      })
+  }
+
+  /**
+   * 身份切换器。它只管"当前是谁"，真正的挂载动作由上面那个 `mountVault`
+   * 完成（见 `ActiveIdentityService` 的文件头：为什么两者分开）。
+   */
+  const activeIdentity: ActiveIdentityService = new ActiveIdentityService({
+    identities,
+    settings,
+    logger: logger.child("Identity"),
+    now: () => new Date(systemClock.now()),
+    mount: (vaultId) => mountVault(vaultId),
+  })
+
   const auth = new AuthService({
     accounts,
     sessions,
@@ -839,128 +1099,37 @@ export function bootstrapApp(mainDir: string): AppContext {
     hasher: new ScryptPasswordHasher(),
     logger: logger.child("Auth"),
     /**
-     * 登录态变化时挂/摘该账号的 vault 与数据面。
+     * 登录态变化时挂/摘 vault 与数据面。
      *
      * 只有一处地方开关，因此不会出现「登录了但 vault 没开」
      * 或「登出了 vault 还开着」——后者意味着账号级数据在登出后仍可读，
      * 而对数据面来说还意味着「已登出的账号仍在被采集、且 Feed 端口仍在暴露它」。
+     *
+     * ## ★ 挂哪个 vault 由**身份**决定，不再是 `accounts.vault_id`
+     *
+     * 隔离维度已经是「渠道身份」：一个账号下可以有多个身份，各自一个 vault。
+     * `resolveOnLogin` 挑出该用哪个（上次用的 / 最近用过的 / 还没绑过身份时
+     * 退回账号的基础 vault），完整规则见那个方法。
+     *
+     * ★ `void` + `catch`：`AuthService.onSessionChange` 的契约是同步的
+     * （它在返回 session 之前调），而挂载现在是异步的（要 await 卸载里
+     * 那几步）。挂载失败不该让登录失败 —— 用户仍能用设置页与授权。
      */
     onSessionChange: (next) => {
       if (next === null) {
-        onboarding.bind(null, null)
-        distillSources.detach()
-        // 登出：先撤 token + kill opencode，再 detach（换库时旧 agent 不该续命）。
-        void search.shutdown().finally(() => search.detach())
-        media.detach()
-        /**
-         * 蒸馏与数字人也要摘。
-         *
-         * 两者都持定时器且会写库 —— 不摘的话登出后它们还在往一个
-         * 即将关闭的连接上写（实测的表现是 unhandledRejection）。
-         */
-        void distill.detach().catch(() => undefined)
-        void persona.detach().catch(() => undefined)
-        // kl 数据按 vault 隔离：换库前必须停掉旧库的 kl-server（无孤儿）。
-        void klServer.stop()
-        /**
-         * ★ 先停数据面再关库，而且必须**等它真的停了**。
-         *
-         * `dataPlane.detach()` → `ingest.stop()` 现在会 await 在途的那一轮采集
-         * （它可能正在 await 一个 0.6s 的 DWS 子进程）。不等的话 `closeAll()`
-         * 会先跑，那一轮回来后写到已关闭的连接上 —— 实测抛
-         * `The database connection is not open`，且是个 unhandledRejection。
-         *
-         * `.finally` 已经保证了顺序，`.catch` 补的是"detach 自己失败"的情况：
-         * 那时仍然要关库（不关等于登出后账号数据仍可读），但错误要记下来。
-         */
-        void dataPlane
-          .detach()
-          .catch((error: unknown) => {
-            logger.error("data plane detach failed", {
-              detail: error instanceof Error ? error.message : String(error),
-            })
+        void unmountVault().catch((error: unknown) => {
+          logger.error("unmount vault failed", {
+            detail: error instanceof Error ? error.message : String(error),
           })
-          .finally(() => {
-            // ★ 先清引用再关库：不清的话 ego 图仍会拿着一个已关闭的连接，
-            // 而它读的是**上一个账号**的身份与会话（跨账号泄漏）。
-            mountedVault = null
-            vaults.closeAll()
-          })
+        })
         return
       }
-      const handle = vaults.handle(next.vaultId)
-      // ego 图的两个注入回调要用它（见 mountedVault 的注释）
-      mountedVault = handle.db
-      onboarding.bind(
-        new SettingsRepository(handle.db, "vault_settings"),
-        new OnboardingRepository(handle.db),
-      )
-      distillSources.attach(handle.db)
-      /**
-       * 跑 forge（测量型引擎），产出 skill 包。这是画像的**唯一**来源。
-       *
-       * 路径按 vault 给：语料是这个账号的，产物也只该被这个账号看到。
-       *
-       * ★ `since` 由 `DistillService` 给，**不再写死 `null`**。
-       *
-       * 写死的后果（实测）：引导页那个「30 / 90 / 180 天」选择器选完后
-       * `days` 一路传到 `distill.start()` 就被丢掉，forge 永远按增量水位跑
-       * （首次跑退化成 `analysisStart` = 库里最早那条消息的日期）。
-       * 也就是**选什么都一样**，而 `distill_sources.scope_json` 里却
-       * 老实记着用户选的那个 `since` —— 两处不一致，且界面上看不出来。
-       *
-       * `null` 仍然有意义：那是"不限范围"（自动重蒸走这条，见
-       * `DistillService.attach` 里 autoTimer 的注释）。
-       *
-       * ★ 返回**完整**结果而不是 `{ok, reason}`：`messages` / `turns` /
-       * `asks` / `files` / `grade` 是回答"蒸得怎么样"的那五个数，而它们
-       * 曾经在这个边界上被丢掉 —— 于是 UI 只能显示「等待中」。
-       *
-       * `signal` 一路传到 `ProcessRunner.spawn`：不传的话「停止」按钮
-       * 对在跑的那一轮完全无效（超时上限加起来近半小时）。
-       */
-      distill.attach(
-        handle.db,
-        (signal, onStep, since) =>
-          forge.run({
-            db: handle.db,
-            vaultPath: vaults.path(next.vaultId),
-            forgeRoot: vaults.forgeRoot(next.vaultId),
-            skillRoot: vaults.skillRoot(next.vaultId),
-            since: since ?? null,
-            ...(signal === undefined ? {} : { signal }),
-            // 阶段回调透传：让界面能显示"正在测量"而不是干等一句"正在蒸馏"
-            ...(onStep === undefined ? {} : { onStep }),
-          }),
-        /**
-         * 「重新蒸馏」要真的从头来 —— forge 的水位在它自己的派生库里，
-         * 不在 vault 里，所以这一步只能由持有路径的这一层给。
-         */
-        () => forge.resetWatermark(vaults.forgeRoot(next.vaultId)),
-      )
-      persona.attach(handle.db, vaults.skillRoot(next.vaultId))
-      media.attach(handle.db)
-      // kl-server 随登录懒启动（warmup ~90s，不阻塞登录）。fire-and-forget：
-      // ensureReady 内部轮询健康、自己管状态机（starting→ready/failed）并经 IPC
-      // 推 UI，绝不能 await（会卡住登录）。失败只降级（搜索落回本地召回），不抛。
-      // 数据按 vault 隔离，所以起在登录分支而非 bootstrap——登出分支已 stop。
-      void klServer.ensureReady().catch(() => undefined)
-      /**
-       * 数字人调度器随登录启动。
-       *
-       * 启动它是安全的：回复模式默认 `draft`（只出草稿），且自动发送
-       * 还要过白名单与授权门。所以调度器起来了也不会替用户发出任何消息。
-       *
-       * ★ 注意这里**不再**说"默认 listening = 0 所以不处理任何消息" ——
-       * 那个开关已经删了，现在管控层收所有消息（它是订阅者）。
-       * 安全性来自"发不发"那一层，不是"收不收"。
-       */
-      persona.start()
-      search.attach(handle.db)
-      void dataPlane.attach(handle.db, vaults.path(next.vaultId)).catch((error: unknown) => {
-        // 数据面挂载失败不该阻止登录：用户仍能用设置页与授权，
-        // 状态页会显示 lastError。把它变成"登录失败"才是过度反应。
-        logger.error("data plane attach failed", {
+      const vaultId = activeIdentity.resolveOnLogin({
+        accountId: next.accountId,
+        fallbackVaultId: next.vaultId,
+      })
+      void mountVault(vaultId).catch((error: unknown) => {
+        logger.error("mount vault failed", {
           detail: error instanceof Error ? error.message : String(error),
         })
       })

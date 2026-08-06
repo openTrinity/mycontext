@@ -192,6 +192,15 @@ export class DingTalkEventConsumer implements ChannelEvents {
     // ★ 门禁：spawnDuplex 绕过 DwsCli.run 的白名单闸，这里必须显式补上。
     assertAllowedCommand(args)
     const binary = this.options.runtime.resolve("dws")
+    /**
+     * ★ 钉住身份（第三条绕过 DwsCli 的路径）。
+     *
+     * 与门禁那条注释同一个结构：这个文件自己 spawn，所以 `DwsCli` 里加的东西
+     * 一样都到不了这里。不钉的后果是长连接订阅的是**另一个身份**的消息 ——
+     * 于是数字人被别的组织的 @我 唤醒，而库里那个会话根本不存在
+     * （定向补拉会一路失败，而失败看起来像网络问题）。
+     */
+    const finalArgs = [...args, ...this.options.runtime.dwsProfileArgs()]
     this.state = "starting"
 
     return new Promise<void>((resolve) => {
@@ -204,7 +213,7 @@ export class DingTalkEventConsumer implements ChannelEvents {
       try {
         this.handle = this.options.processes.spawnDuplex({
           executable: binary.path,
-          args,
+          args: finalArgs,
           env: this.options.runtime.buildEnv(),
           onLine: (line) => this.onStdoutLine(line),
           onStderr: (line) => {
@@ -276,7 +285,9 @@ export class DingTalkEventConsumer implements ChannelEvents {
         assertAllowedCommand(args)
         const result = await this.options.processes.exec({
           executable: binary.path,
-          args: [...args, "-f", "json"],
+          // ★ 钉住身份：订阅审计要看的是**这个身份**订了什么，
+          // 而不是 CLI 全局 profile 那个人订了什么（见 spawnOnce 的注释）。
+          args: [...args, "-f", "json", ...this.options.runtime.dwsProfileArgs()],
           env: this.options.runtime.buildEnv(),
           timeoutMs: 20_000,
         })
@@ -331,7 +342,15 @@ export class DingTalkEventConsumer implements ChannelEvents {
       const binary = this.options.runtime.resolve("dws")
       await this.options.processes.exec({
         executable: binary.path,
-        args,
+        /**
+         * ★★ 钉住身份 —— 这里**尤其**不能漏。
+         *
+         * `--all` 停的是"这个身份的全部订阅"。不钉的话它按 CLI 全局 profile 走，
+         * 于是切换身份时可能停掉**另一个身份**的订阅（那个身份甚至可能是用户
+         * 自己终端里正在用的）。而这个方法整段吞异常（退出路径不该抛），
+         * 所以停错了人不会有任何痕迹。
+         */
+        args: [...args, ...this.options.runtime.dwsProfileArgs()],
         env: this.options.runtime.buildEnv(),
         timeoutMs: 10_000,
       })

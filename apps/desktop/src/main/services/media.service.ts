@@ -46,11 +46,6 @@ import {
 export interface MediaServiceOptions {
   clock: Clock
   logger: Logger
-  /** 媒体与头像的落地根目录（`<userData>/media`、`<userData>/avatars`） */
-  mediaDir: string
-  avatarDir: string
-  /** 用户上传的图片（数字人形象 / 自己的头像） */
-  uploadDir: string
   /** 渠道 CLI。为 null 时下载不可用（未登录 / 无渠道） */
   cli: MediaRunner | null
   /**
@@ -63,6 +58,29 @@ export interface MediaServiceOptions {
    */
   avatars: ChannelAvatars | null
   channelId: string
+}
+
+/**
+ * 落地目录 —— **在 attach 时给，不在构造时给**。
+ *
+ * ## ★★ 为什么必须跟着 vault 走
+ *
+ * 这三个目录里装的是**聊天内容**：消息里的图片、同事的头像、用户上传的形象。
+ * 原来它们是 `<userData>/{media,avatars,uploads}`（应用级），也就是
+ * 两个身份的图片混在一个目录里 —— 而 vault 分库的全部意义就是
+ * "打开的是哪个文件，能看到的就只有那些数据"。
+ *
+ * 而且必须在 **attach** 时给：构造时锁死的话，切身份后新下载的图片
+ * 仍然落在上一个身份的目录里，且那个错误是静默的（图能显示、库里有行，
+ * 只是文件躺在别人的目录下，删那个 vault 时不会被带走）。
+ */
+export interface MediaDirs {
+  /** 消息里的图片/文件 */
+  media: string
+  /** 联系人头像 */
+  avatar: string
+  /** 用户上传的图片（数字人形象 / 自己的头像） */
+  upload: string
 }
 
 /** 一次批量下载最多几个。用户点一张图时通常只要一张，批量是给"预热"用的。 */
@@ -80,15 +98,32 @@ export interface MediaDownloadResult {
 
 export class MediaService {
   private db: SqliteDatabase | null = null
+  /** 当前 vault 的落地目录。未 attach（未登录）时为 null。 */
+  private dirs: MediaDirs | null = null
 
   constructor(private readonly options: MediaServiceOptions) {}
 
-  attach(db: SqliteDatabase): void {
+  attach(db: SqliteDatabase, dirs: MediaDirs): void {
     this.db = db
+    this.dirs = dirs
   }
 
   detach(): void {
     this.db = null
+    this.dirs = null
+  }
+
+  /**
+   * 取当前 vault 的落地目录。
+   *
+   * ★ 未 attach 时**抛错而不是退回一个应用级目录**：那种兜底会让
+   * "忘了 attach" 表现成"图片落在了公共目录"—— 一次静默的跨身份写入。
+   * 而抛错会在第一次调用时就暴露接线漏了。
+   */
+  private requireDirs(): MediaDirs {
+    const dirs = this.dirs
+    if (dirs === null) throw new AppError("DB_UNAVAILABLE", "尚未登录，媒体目录未就绪")
+    return dirs
   }
 
   /**
@@ -160,9 +195,10 @@ export class MediaService {
       return { ok: false, detail: `暂不支持下载 ${row.resource_kind} 类型（钉盘文件还没接）` }
     }
 
-    mkdirSync(this.options.mediaDir, { recursive: true })
+    const mediaDir = this.requireDirs().media
+    mkdirSync(mediaDir, { recursive: true })
     const name = `${createHash("sha256").update(row.resource_id).digest("hex").slice(0, 32)}`
-    const target = join(this.options.mediaDir, name)
+    const target = join(mediaDir, name)
     const temp = `${target}.part`
 
     try {
@@ -497,7 +533,7 @@ export class MediaService {
       ...(input.groupExternalId === undefined || input.groupExternalId === null
         ? {}
         : { viaConversationExternalId: input.groupExternalId }),
-      outputDir: this.options.avatarDir,
+      outputDir: this.requireDirs().avatar,
     }
 
     /**
@@ -660,7 +696,7 @@ export class MediaService {
       throw new AppError("IPC_BAD_REQUEST", "只支持 PNG / JPEG / GIF / WEBP 图片")
     }
 
-    const dir = join(this.options.uploadDir, input.purpose)
+    const dir = join(this.requireDirs().upload, input.purpose)
     mkdirSync(dir, { recursive: true })
     const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 32)
     const target = join(dir, `${hash}.${extensionFor(mime)}`)

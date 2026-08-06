@@ -54,6 +54,7 @@
     "CHANNEL_UNSUPPORTED": "This channel isn't available yet",
     "SELF_IDENTITY_AMBIGUOUS": "Couldn't identify you uniquely — please confirm manually",
     "SELF_IDENTITY_CONFLICT": "This account is already bound to a different identity (org or member id). Create a new account, or re-authorize with the original identity.",
+    "CHANNEL_IDENTITY_UNAVAILABLE": "This identity has no sign-in on this machine (it may have been signed out elsewhere). Re-authorize it, or switch to another identity.",
     "PARSE_FAILED": "Couldn't parse data from the external source",
     "SESSION_EXPIRED": "Your sign-in expired — please authorize again",
     "PERMISSION_REQUIRED": "Approve the permission in the source app first",

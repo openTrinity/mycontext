@@ -12,7 +12,9 @@ const NOW = 1_785_207_229_147
 
 function build(overrides: Partial<Parameters<typeof buildHandoffManifest>[0]> = {}) {
   return buildHandoffManifest({
-    sharedRoot: "/tmp/shared",
+    dataRoot: "/tmp/vault-a",
+    dwsExportDir: "/tmp/vault-a/exports/dws",
+    klDataDir: "/tmp/vault-a/kl",
     feedPort: 47_123,
     feedToken: "feed-token-abc",
     embeddingBaseUrl: "https://gateway.example/v1",
@@ -45,8 +47,8 @@ describe("handoff manifest", () => {
 
   it("共享目录按约定派生", () => {
     const manifest = build()
-    expect(manifest.shared.dwsExportDir).toBe("/tmp/shared/exports/dws")
-    expect(manifest.shared.klDataDir).toBe("/tmp/shared/kl")
+    expect(manifest.shared.dwsExportDir).toBe("/tmp/vault-a/exports/dws")
+    expect(manifest.shared.klDataDir).toBe("/tmp/vault-a/kl")
   })
 
   /**

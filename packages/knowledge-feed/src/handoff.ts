@@ -11,7 +11,7 @@
  * 给了也用不了，反而会制造"这份能不能复用"的反复讨论。
  */
 import { mkdirSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname } from "node:path"
 
 export interface HandoffManifest {
   /** 我们的 Feed 接口 */
@@ -20,7 +20,14 @@ export interface HandoffManifest {
     token: string
     endpoints: { head: string; changes: string; ack: string; snapshot: string }
   }
-  /** 共享目录：文件物化的落点 */
+  /**
+   * 这个**身份**的文件落点。
+   *
+   * ★ `root` 是 vault 目录（一身份一份），不再是一个跨身份共用的
+   * `shared/`。`klDataDir` 就是算法团队要的 `databaseDir` ——
+   * 他们那侧全部路径都从一个环境变量（`KL_DATA_DIR`）派生，
+   * 所以按身份换目录**不需要改他们的代码**。
+   */
   shared: {
     root: string
     dwsExportDir: string
@@ -70,7 +77,24 @@ export interface HandoffManifest {
 }
 
 export interface BuildHandoffInput {
-  sharedRoot: string
+  /**
+   * 这个身份的数据根（= vault 目录）。
+   *
+   * ★ 改动前叫 `sharedRoot` 且是**一个应用级目录**，两个身份共用一份
+   * handoff —— 谁后挂载谁覆盖，算法团队拿到的永远是"最后一次登录的那个
+   * 身份"。现在按 vault 分，一身份一份。
+   */
+  dataRoot: string
+  /**
+   * 四件套导出目录与图谱数据目录 —— **显式给，不再由 `dataRoot` 拼**。
+   *
+   * ★ 拼接的写法（`join(sharedRoot,"exports","dws")`）等于在这里复制了一份
+   * 目录布局约定，而真源在 `VaultStore.paths()`。两处各写一份必然漂移，
+   * 而漂移的表现是：我们往 A 写导出、却告诉算法团队去 B 找
+   * —— 他们看到的是"目录是空的"，而我们这侧一切正常。
+   */
+  dwsExportDir: string
+  klDataDir: string
   feedPort: number
   feedToken: string
   embeddingBaseUrl: string
@@ -99,9 +123,9 @@ export function buildHandoffManifest(input: BuildHandoffInput): HandoffManifest 
       },
     },
     shared: {
-      root: input.sharedRoot,
-      dwsExportDir: join(input.sharedRoot, "exports", "dws"),
-      klDataDir: join(input.sharedRoot, "kl"),
+      root: input.dataRoot,
+      dwsExportDir: input.dwsExportDir,
+      klDataDir: input.klDataDir,
     },
     embedding: {
       baseUrl: input.embeddingBaseUrl,

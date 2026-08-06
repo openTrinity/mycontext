@@ -40,17 +40,35 @@ function tempDir(): string {
   return dir
 }
 
+/**
+ * 这个 vault 的导出落点。★ 按 vault 分 —— 导出物是聊天正文的投影，
+ * 而 handoff 里带着它们的绝对路径（见 `FeedDirs`）。
+ *
+ * 测试里直接拿 `sharedRoot` 当 vault 根：本组测的是同步逻辑，
+ * 而"路径按 vault 分"由 `vault-paths` 那组锁。
+ */
+function feedDirs(root: string) {
+  return {
+    dataRoot: root,
+    exportRoot: join(root, "exports", "dws"),
+    klRoot: join(root, "kl"),
+    handoffFile: join(root, "handoff.json"),
+  }
+}
+
 function makeFeed(sharedRoot: string) {
-  return new FeedService({
+  const dirs = feedDirs(sharedRoot)
+  const feed = new FeedService({
     clock: new ManualClock(START),
     logger: createLogger("test-feed", { level: "error" }),
-    sharedRoot,
     embedding: () => ({ baseUrl: "http://127.0.0.1:1/v1", model: "m", dim: 2048 }),
     localEmbedding: { model: "m", dim: 1024 },
     llm: () => ({ baseUrl: "http://127.0.0.1:1", model: "qwen" }),
     // 不起定时器：本测试手动 tick，否则后台会真的写盘
     autoStart: false,
   })
+  // ★ 落点与 feed 一起给出：调用方 attach 时要传（按 vault，见 FeedDirs）
+  return Object.assign(feed, { testDirs: dirs })
 }
 
 /** 往 Outbox 写 n 条变更（让同步有活干）。 */
@@ -76,7 +94,7 @@ describe("★ 图谱同步的接线", () => {
     const vault = openTestVault()
     const feed = makeFeed(tempDir())
     try {
-      await feed.attach(vault.db)
+      await feed.attach(vault.db, feed.testDirs)
       const cursor = new ConsumerCursorRepository(vault.db, new ManualClock(START)).get(
         GRAPH_SYNC_CONSUMER_ID,
       )
@@ -95,7 +113,7 @@ describe("★ 图谱同步的接线", () => {
     const feed = makeFeed(shared)
     try {
       appendChanges(vault, 3)
-      await feed.attach(vault.db)
+      await feed.attach(vault.db, feed.testDirs)
       // 没手动 tick → 导出目录不该出现
       expect(existsSync(join(shared, "exports", "dws", "chat", "records.jsonl"))).toBe(false)
     } finally {
@@ -110,7 +128,7 @@ describe("★ 图谱同步的接线", () => {
     const feed = makeFeed(shared)
     try {
       const head = appendChanges(vault, 3)
-      await feed.attach(vault.db)
+      await feed.attach(vault.db, feed.testDirs)
       await feed.tickGraphSync()
 
       // 空库也会写出四件套（对方 loader 读到 0 条会 no-op，不报错）
@@ -133,7 +151,7 @@ describe("★ 图谱同步的接线", () => {
     const shared = tempDir()
     const feed = makeFeed(shared)
     try {
-      await feed.attach(vault.db)
+      await feed.attach(vault.db, feed.testDirs)
       const manual = feed.export()
       expect(manual.exportDir).toBe(join(shared, "exports", "dws"))
 
@@ -151,7 +169,7 @@ describe("★ 图谱同步的接线", () => {
     const vault = openTestVault()
     const feed = makeFeed(tempDir())
     try {
-      await feed.attach(vault.db)
+      await feed.attach(vault.db, feed.testDirs)
       const result = feed.export()
       // chat + minutes + wiki（文档接上之后是三个 source 目录）
       expect(result.sourceCount).toBe(3)
@@ -175,7 +193,7 @@ describe("★ 图谱同步的接线", () => {
     const shared = tempDir()
     const feed = makeFeed(shared)
     appendChanges(vault, 2)
-    await feed.attach(vault.db)
+    await feed.attach(vault.db, feed.testDirs)
     await feed.detach()
     vault.close()
 
@@ -188,8 +206,8 @@ describe("★ 图谱同步的接线", () => {
     const vault = openTestVault()
     const feed = makeFeed(tempDir())
     try {
-      await feed.attach(vault.db)
-      await feed.attach(vault.db)
+      await feed.attach(vault.db, feed.testDirs)
+      await feed.attach(vault.db, feed.testDirs)
       const cursors = new ConsumerCursorRepository(vault.db, new ManualClock(START))
         .list()
         .filter((c) => c.consumerId === GRAPH_SYNC_CONSUMER_ID)

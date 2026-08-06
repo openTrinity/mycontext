@@ -25,6 +25,10 @@ import {
   REAL_ERR_NOT_AUTHENTICATED_TABLE,
   REAL_ERR_PAT_NO_PERMISSION,
   REAL_ERR_PAT_SCOPE_REQUIRED,
+  REAL_ERR_PROFILE_ACCOUNT_NOT_FOUND,
+  REAL_ERR_PROFILE_NOT_FOUND,
+  REAL_ERR_PROFILE_ORG_NOT_FOUND,
+  REAL_ERR_UNKNOWN_FLAG,
 } from "../../fixtures/dingtalk-real-payloads.js"
 
 describe("命令分类", () => {
@@ -530,7 +534,12 @@ describe("★ 白名单每一项都对应真实 dws 子命令", () => {
 describe("DwsCli.run：真实授权失败 → 终态 AppError", () => {
   const runWithStderr = async (stderr: string, exitCode: number) => {
     const cli = new DwsCli({
-      runtime: { resolve: () => ({ path: "/fake/dws" }), buildEnv: () => ({}) } as never,
+      runtime: {
+        resolve: () => ({ path: "/fake/dws" }),
+        buildEnv: () => ({}),
+        // 未绑身份 → 不钉 profile（见 RuntimeEnv.dwsProfileArgs）
+        dwsProfileArgs: () => [],
+      } as never,
       processes: {
         exec: async () => ({ exitCode, stdout: "", stderr, timedOut: false }),
       } as never,

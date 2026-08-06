@@ -77,7 +77,7 @@ function fakeDb(rows: number, capture: { query?: Parameters<GraphReadHandle["sea
 function makeService(rows: number, capture: { query?: unknown } = {}) {
   return new GraphQueryService({
     logger: noopLogger,
-    dataDir: dataDirWithDb(),
+    dataDir: () => dataDirWithDb(),
     now: () => NOW,
     getSelfNames: () => ["小周"],
     getChannelByConversation: () => new Map(),
@@ -156,7 +156,7 @@ describe("★ 图库不存在时降级，而不是抛", () => {
   it("给一句可行动的话（去建图），available 为 false", () => {
     const service = new GraphQueryService({
       logger: noopLogger,
-      dataDir: "/tmp/definitely-not-a-real-kl-dir-xyz",
+      dataDir: () => "/tmp/definitely-not-a-real-kl-dir-xyz",
       now: () => NOW,
       getSelfNames: () => ["小周"],
       getChannelByConversation: () => new Map(),
@@ -167,10 +167,30 @@ describe("★ 图库不存在时降级，而不是抛", () => {
     expect(result.facts).toEqual([])
   })
 
+  /**
+   * ★ 未挂载 vault（`dataDir()` 返回空串）也必须降级。
+   *
+   * 这是身份隔离引入的**新状态**：`dataDir` 从值改成了 getter，而未登录时
+   * 它没有值可给。返回空串时若不走降级，`join("", "knowledge.db")` 会得到
+   * 一个相对路径 `knowledge.db` —— 那会在**进程 cwd** 下找库，
+   * 也就是可能读到仓库目录里某个同名文件，而那比"图不存在"糟得多。
+   */
+  it("未挂载 vault（dataDir 为空）→ 同样降级，不去 cwd 找库", () => {
+    const service = new GraphQueryService({
+      logger: noopLogger,
+      dataDir: () => "",
+      now: () => NOW,
+      getSelfNames: () => ["小周"],
+      getChannelByConversation: () => new Map(),
+    })
+    expect(service.facts(BASE).available).toBe(false)
+    expect(service.ego().available).toBe(false)
+  })
+
   it("ego 图同样降级（同一个判断，两条路径都要有）", () => {
     const service = new GraphQueryService({
       logger: noopLogger,
-      dataDir: "/tmp/definitely-not-a-real-kl-dir-xyz",
+      dataDir: () => "/tmp/definitely-not-a-real-kl-dir-xyz",
       now: () => NOW,
       getSelfNames: () => ["小周"],
       getChannelByConversation: () => new Map(),
@@ -183,7 +203,7 @@ describe("★ 查询层抛错时整块降级，不让异常穿到 IPC", () => {
   it("searchFacts 抛 → available:false + 原因带上 detail", () => {
     const service = new GraphQueryService({
       logger: noopLogger,
-      dataDir: dataDirWithDb(),
+      dataDir: () => dataDirWithDb(),
       now: () => NOW,
       getSelfNames: () => ["小周"],
       getChannelByConversation: () => new Map(),
@@ -208,7 +228,7 @@ describe("★ ego 图找不到「我」时说人话", () => {
   function egoService(over: Partial<GraphReadHandle>, selfNames: readonly string[] = ["小周"]) {
     return new GraphQueryService({
       logger: noopLogger,
-      dataDir: dataDirWithDb(),
+      dataDir: () => dataDirWithDb(),
       now: () => NOW,
       getSelfNames: () => selfNames,
       getChannelByConversation: () => new Map(),
@@ -228,7 +248,7 @@ describe("★ ego 图找不到「我」时说人话", () => {
     let opened = false
     const service = new GraphQueryService({
       logger: noopLogger,
-      dataDir: dataDirWithDb(),
+      dataDir: () => dataDirWithDb(),
       now: () => NOW,
       getSelfNames: () => [],
       getChannelByConversation: () => new Map(),

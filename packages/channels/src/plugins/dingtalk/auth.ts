@@ -57,14 +57,48 @@ export class DingTalkAuth implements ChannelAuth {
   }
 
   async status(): Promise<AuthStatus> {
+    return this.queryStatus({ pinned: true })
+  }
+
+  /**
+   * 查授权状态。`pinned` 决定问的是**哪个身份**。
+   *
+   * ## ★★ 两种问法都需要，而混用任一个都会坏
+   *
+   * · `pinned: true`（默认，`status()`）—— 问「**当前挂载 vault 绑的那个身份**
+   *   现在有效吗」。界面上的组织名、有效期、采集的读取范围都必须是这个，
+   *   否则就回到了"拿着 A 的库读 B 的数据"那个越权读取面。
+   *
+   * · `pinned: false`（`login()` 收尾时用）—— 问「**刚刚扫码登进来的是谁**」。
+   *   这一步**不能**钉：用户添加第二个身份时，那个新身份还没有 vault、
+   *   更没有映射行，钉住的是**旧**身份 —— 于是"授权成功"返回的是旧组织的
+   *   信息，上层据此判定"身份没变"，新身份被静默丢掉。用户扫了码、
+   *   看到成功、而什么都没发生。
+   *
+   * 刚登录时 CLI 的全局 profile 正好就是新登进来的那个（登录会把它切过去），
+   * 所以不钉恰好问到对的人。
+   */
+  private async queryStatus(options: { pinned: boolean }): Promise<AuthStatus> {
     const binary = this.options.runtime.resolve("dws")
     const args = ["auth", "status", "-f", "json"]
     // ★ 门禁：auth 走的是自己的 processes.exec（不经 DwsCli），
     // 首版因此完全绕过白名单 —— 门禁不能只覆盖一条调用路径。
     assertAllowedCommand(args)
+    /**
+     * ★★ 钉住身份 —— 与 `DwsCli.run` 是**同一件事，必须两处都做**。
+     *
+     * 这个文件曾经因为"走的是自己的 exec 而不是 DwsCli"整条路径绕过了白名单
+     * 门禁（见文件头与 cli.ts 的「门禁不能只覆盖一条调用路径」）。钉身份
+     * 面临一模一样的结构：只改 `DwsCli` 的话，会话列表钉住了而**授权状态没有**
+     * —— 于是界面显示的组织仍然是 CLI 全局 profile 那个，而采集按绑定身份走。
+     * 两个数字打在同一张卡片上互相矛盾，且没有任何报错。
+     */
+    const finalArgs = options.pinned
+      ? [...args, ...this.options.runtime.dwsProfileArgs()]
+      : [...args]
     const result = await this.options.processes.exec({
       executable: binary.path,
-      args,
+      args: finalArgs,
       env: this.options.runtime.buildEnv(),
       timeoutMs: STATUS_TIMEOUT_MS,
     })
@@ -75,6 +109,7 @@ export class DingTalkAuth implements ChannelAuth {
     this.options.logger.debug("dws auth status", {
       state: status.state,
       exitCode: result.exitCode,
+      pinned: options.pinned,
     })
     return status
   }
@@ -171,8 +206,16 @@ export class DingTalkAuth implements ChannelAuth {
       })
     }
 
-    // 不以子进程 exit code 判定成功：复查 status 才是唯一可信的结论。
-    const status = await this.status()
+    /**
+     * 不以子进程 exit code 判定成功：复查 status 才是唯一可信的结论。
+     *
+     * ★★ 这一次复查**不钉身份**（`pinned: false`）—— 见 `queryStatus` 的注释。
+     * 一句话：这里要问的是"刚扫码登进来的是**谁**"，而添加第二个身份时
+     * 那个人还没有 vault、没有映射行，钉住的会是**旧**身份。那样返回的
+     * 是旧组织的信息，上层判定"身份没变"，新身份被静默丢掉 ——
+     * 用户扫了码、看到"成功"，而什么都没发生。
+     */
+    const status = await this.queryStatus({ pinned: false })
     if (status.state !== "authorized") {
       ctx.onProgress({ phase: "failed", messageKey: "errors:channel.authNotDetected" })
       throw new AppError("CHANNEL_AUTH_FAILED", "授权流程结束但未检测到有效登录态，请重试", {

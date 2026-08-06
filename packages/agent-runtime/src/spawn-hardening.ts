@@ -256,6 +256,23 @@ export interface OpencodeSpawnOptions {
    * 不给 = 不隔离（保持继承宿主 HOME）—— 测试与非搜索场景用。
    */
   agentHome?: string
+  /**
+   * npm 包缓存目录（注入 `npm_config_cache`）。
+   *
+   * ## ★ 为什么与 `agentHome` 分开
+   *
+   * `agentHome` 是**按身份隔离**的（它下面的 `.config` / `.local/state`
+   * 会随会话产生状态）。而 npm 缓存是 **registry 的只读镜像**
+   * （实测 325 MB，key 全形如 `registry.npmjs.org/...`，逐项验过不含
+   * 任何身份/会话字节）—— 跟着身份各拷一份是纯浪费：两个身份 650 MB、
+   * 五个 1.6 GB，且首次切身份要重新联网拉一遍。
+   *
+   * 所以两个旋钮分开注入：HOME 按身份走，缓存留在应用级一份。
+   *
+   * 不给 = 不覆盖（npm 用它自己的默认位置，也就是 `$HOME/.npm`
+   * —— 那时缓存会落进隔离 HOME 里，功能正常只是会重复占盘）。
+   */
+  npmCache?: string
 }
 
 export interface HardenedSpawn {
@@ -435,6 +452,14 @@ export function buildOpencodeSpawn(options: OpencodeSpawnOptions = {}): Hardened
 
   if (options.agentHome !== undefined && options.agentHome !== "") {
     applyHomeIsolation(env, options.agentHome)
+  }
+  /**
+   * ★ 在 `applyHomeIsolation` **之后**注入：它刚把 `HOME` 换掉，
+   * 而 npm 的默认缓存位置是 `$HOME/.npm` —— 不覆盖的话缓存会跟着
+   * 隔离 HOME 走，也就是每个身份各攒一份 325 MB（见 `npmCache` 的注释）。
+   */
+  if (options.npmCache !== undefined && options.npmCache !== "") {
+    env["npm_config_cache"] = options.npmCache
   }
 
   env["OPENCODE_SERVER_PASSWORD"] = serverPassword

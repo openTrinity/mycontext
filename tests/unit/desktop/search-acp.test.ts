@@ -191,12 +191,16 @@ function makeService(options: { hasOpencode: boolean; fake?: ReturnType<typeof f
     logger: createLogger("test", { level: "error" }),
     runtime,
     processes,
-    workspaceRoot,
     klRoot: "/fake/kl-graph",
     klPort: 8200,
     getWindow: () => fakeWindow,
   })
-  service.attach(handle.db)
+  // agent 目录按 vault（attach 时给）；npm 缓存应用级一份 —— 见 AgentDirs
+  service.attach(handle.db, {
+    workspaceRoot,
+    home: join(workspaceRoot, "agent-home"),
+    npmCache: join(workspaceRoot, "npm-cache"),
+  })
   return {
     service,
     handle,

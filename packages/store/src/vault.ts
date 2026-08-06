@@ -27,6 +27,36 @@ export interface VaultStoreOptions {
   now?: () => Date
 }
 
+/**
+ * 一个 vault 的全部磁盘落点。见 `VaultStore.paths()` 的注释（为什么是一个对象）。
+ *
+ * 全部字段都是**绝对路径**，且全部在 `root` 之下 —— 那是"删账号 = 删一个目录"
+ * 这条收益的前提，也是本类型存在的意义：新增一个落点时，把它加进这里就
+ * 自动落在 vault 内，而不会有人再顺手拼一个应用级路径。
+ */
+export interface VaultPaths {
+  /** vault 目录本身 */
+  root: string
+  /** 业务库 `core.sqlite` */
+  database: string
+  forgeRoot: string
+  skillRoot: string
+  /** 图谱数据目录 = 算法团队的 `databaseDir`（注入 `KL_DATA_DIR`） */
+  klRoot: string
+  /** 四件套导出（注入 `KL_DWS_EXPORT_DIR`） */
+  exportRoot: string
+  /** `handoff.json`（给算法团队的一页运行时事实） */
+  handoffFile: string
+  mediaRoot: string
+  avatarRoot: string
+  uploadRoot: string
+  agentWorkspaceRoot: string
+  /** agent 子进程的隔离 HOME（不含 npm 缓存，见实现处注释） */
+  agentHome: string
+  /** 渠道 CLI 的配置目录（身份隔离的主防线，见实现处注释） */
+  dwsHome: string
+}
+
 export class VaultStore {
   /** 已打开的句柄。同一个 vaultId 只开一次——重复打开同一文件会各自持有 WAL 状态。 */
   private readonly open = new Map<string, StoreHandle>()
@@ -69,6 +99,77 @@ export class VaultStore {
    */
   skillRoot(vaultId: string): string {
     return join(this.forgeRoot(vaultId), "skills")
+  }
+
+  /**
+   * 这个 vault 的**全部**磁盘落点，一次给齐。
+   *
+   * ## ★★ 为什么是一个对象而不是九个方法
+   *
+   * 隔离的判据是「换个身份看，这里的字节还成立吗」——派生自聊天记录的
+   * 全部按 vault 分。而那是**一整套**路径（图库、导出、媒体、agent workspace、
+   * 渠道 CLI 的配置目录…），装配层要把它们逐个喂给对应的服务。
+   *
+   * 给一个对象让"漏了一个"变成**编译错误**而不是运行时的静默降级：
+   * 装配层解构它，少接一个字段 tsc 就报；而九个独立方法里漏调一个，
+   * 表现是那一类数据仍然写在应用级目录 —— 也就是切了身份还在读上一个人的
+   * 数据，而没有任何报错。这个仓库最贵的 bug 全是这个形状。
+   *
+   * ★ 只做**路径拼接**，不建目录（各写入方按需 mkdir，与现有约定一致）。
+   *
+   * 后续要抽得更彻底（比如把"哪个服务吃哪个字段"也编码进类型）由接手的人做；
+   * 这一层先保证「一处定义、一次传递」。
+   */
+  paths(vaultId: string): VaultPaths {
+    const root = this.directory(vaultId)
+    return {
+      root,
+      database: this.path(vaultId),
+      forgeRoot: this.forgeRoot(vaultId),
+      skillRoot: this.skillRoot(vaultId),
+      /**
+       * 知识图谱的数据目录（`knowledge.db` / `qdrant_data` / `extraction_cache`）。
+       *
+       * ★ 这一个目录就是算法团队要的 `databaseDir` —— 上游全部路径都从
+       * 一个环境变量（`KL_DATA_DIR`）派生，所以按 vault 换目录**不需要
+       * 改他们那侧任何代码**。
+       */
+      klRoot: join(root, "kl"),
+      /** 四件套导出（喂图谱的语料投影）。注入上游的 `KL_DWS_EXPORT_DIR`。 */
+      exportRoot: join(root, "exports", "dws"),
+      /** 给算法团队的一页运行时事实。一身份一份，删 vault 时一并消失。 */
+      handoffFile: join(root, "handoff.json"),
+      mediaRoot: join(root, "media"),
+      avatarRoot: join(root, "avatars"),
+      uploadRoot: join(root, "uploads"),
+      /** agent workspace（`persona/<cid>`、`search/<sid>`），含 transcript 片段。 */
+      agentWorkspaceRoot: join(root, "agents"),
+      /**
+       * agent 子进程的隔离 HOME。
+       *
+       * ★ 只放 `.config` / `.local/state`（opencode 的配置与 session 锁，
+       * 会随会话产生状态）。**npm 包缓存不在这里** —— 那是 registry 的只读
+       * 镜像（实测 325 MB），按身份各拷一份纯属浪费且首次切换要重新联网。
+       * 它走应用级的 `npm_config_cache`（见 AppPaths.agentNpmCache）。
+       */
+      agentHome: join(root, "agent-home"),
+      /**
+       * 渠道 CLI 的配置目录（`profiles.json` / 日志 / 事件流）。
+       *
+       * ## ★★ 这是身份隔离的**主防线**，比 `--profile` 强
+       *
+       * 实测：目录里只 seed 该身份那一条 profile 之后，
+       * 拿另一个身份的 `--profile` 去问会直接
+       * `organization "…" not found` —— 越权读取变成**结构性不可能**。
+       * 而 `--profile` 只是"我们记得传"，漏一处就是泄漏。
+       * 两道一起上（同 `vault.ts` 文件头那条推理：靠文件系统，不靠自觉）。
+       *
+       * ★ 必须**显式 seed**，不能只建空目录：实测空目录会取 Keychain 里的
+       * 全局 `current`，而那个值会被用户在终端改掉 —— 那就把要修的问题
+       * 原样搬进了新目录。
+       */
+      dwsHome: join(root, "channels", "dingtalk", "dws-home"),
+    }
   }
 
   /** 打开（或复用）指定 vault，按需应用 vault 迁移。 */

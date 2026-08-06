@@ -93,6 +93,9 @@ export {
 } from "./plugins/dingtalk/cli.js"
 export type { DwsCliOptions, DwsCommandResult } from "./plugins/dingtalk/cli.js"
 
+export { seedChannelProfile } from "./plugins/dingtalk/profile-seed.js"
+export type { ChannelProfileSeed } from "./plugins/dingtalk/profile-seed.js"
+
 export { resolveSelf } from "./plugins/dingtalk/self-identity.js"
 export type { ResolvedSelfIdentity } from "./plugins/dingtalk/self-identity.js"
 

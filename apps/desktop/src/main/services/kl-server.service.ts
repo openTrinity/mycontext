@@ -139,7 +139,16 @@ export interface KlServerServiceOptions {
   processes: ProcessRunner
   /** kl-graph 代码根（含 kl_server.py）。缺失 = kl 未集成，永远 stopped。 */
   klRoot: string
-  /** kl 运行数据的根目录（按 vault 隔离；注入 KL_DATA_DIR）。 */
+  /**
+   * kl 运行数据的根目录（注入 `KL_DATA_DIR`）。
+   *
+   * ★★ 注释与实现曾经不一致：这里写着"按 vault 隔离"，而装配层传的是
+   * `klDataDirFor(paths.sharedRoot)` —— 一个**应用级**目录。于是第二个身份
+   * 登录后读到的是第一个身份的图谱，而没有任何报错。
+   *
+   * 现在真的按 vault 走，且**切身份时用 `rebind()` 换**（见那个方法）。
+   * 这个字段是构造时的初值（未登录时的占位）。
+   */
   dataDir: string
   /**
    * 四件套导出目录（`sharedRoot/exports/dws`，由 FeedService 自动物化）。
@@ -305,11 +314,53 @@ export class KlServerService {
    */
   private gatewayPrint = ""
   private readonly port: number
+  /**
+   * 当前生效的数据目录与导出目录 —— **可变**，切身份时由 `rebind()` 换。
+   *
+   * ★ 不能是 `readonly options.dataDir`：那样切身份后仍指着上一个身份的图库，
+   * 而症状是"换了身份，图谱面板显示的还是上一个人的实体与事实"——
+   * 不报错，只是答错。
+   */
+  private dataDir: string
+  private exportDir: string
   /** 最近的 Python stderr。启动崩溃时带进失败原因，避免日志只剩 exit code。 */
   private readonly stderrTail: string[] = []
 
   constructor(private readonly options: KlServerServiceOptions) {
     this.port = options.port ?? DEFAULT_KL_PORT
+    this.dataDir = options.dataDir
+    this.exportDir = options.exportDir ?? ""
+  }
+
+  /**
+   * 换到另一个身份的图谱数据目录。
+   *
+   * ## ★★ 调用方**必须先** `await stop()`
+   *
+   * 三件事都绑在旧目录上：跑着的子进程（`KL_DATA_DIR` 在它的 env 里，
+   * spawn 之后改不了）、pidfile（放在 dataDir 下）、以及 8200 端口。
+   *
+   * 不先停就 rebind 的后果是一条真实的竞态：新目录里没有 pidfile →
+   * `probeExisting(8200)` 探到旧身份那个进程还活着 → `reclaimOrphan()`
+   * 找不到 pidfile → 判定它是"用户手工起的**外部进程**" → `adopted=true`。
+   * 之后建图走到 `if (this.adopted)` 直接报错；而更糟的分支是 adopt 成功 ——
+   * 那个进程的 `KL_DATA_DIR` 指着**旧身份的图库**，于是新身份的 `/ask`
+   * 查到的是上一个人的知识。这正是 `KL_PIDFILE_NAME` 注释里记的那个坑
+   * （Broken pipe / 图库停在 500 条 fact）换了个入口。
+   *
+   * 所以本方法只改字段、**不碰进程**：顺序的责任在装配层
+   * （`unmountVault` 里那句 `await klServer.stop()` 必须是 await 而不是 void
+   * —— 登出时 void 无所谓，因为后面没人再起；切身份时就是上面这条竞态）。
+   *
+   * ★ 本方法不 `ensureReady()`：起不起由调用方决定（挂载分支自己会起），
+   * 在这里顺手起会让"换目录"这个纯赋值动作带上一次 90s 的 warmup。
+   */
+  rebind(next: { dataDir: string; exportDir: string }): void {
+    this.dataDir = next.dataDir
+    this.exportDir = next.exportDir
+    // 换目录等于换了一份图 —— 上一个身份的失败原因不该留在界面上
+    this.reason = null
+    this.options.logger.info("kl data dir rebound", { dataDir: next.dataDir })
   }
 
   /** 当前状态快照（IPC 查询 + 推送共用）。 */
@@ -502,7 +553,7 @@ export class KlServerService {
         edges: 0,
       })
     }
-    if (this.options.exportDir === undefined || this.options.exportDir === "") {
+    if (this.exportDir === undefined || this.exportDir === "") {
       return this.logBuildOutcome(fresh, {
         ok: false,
         reason: "没有导出目录（还没采集到数据）",
@@ -542,7 +593,7 @@ export class KlServerService {
 
     this.options.logger.info("graph build started", {
       fresh,
-      exportDir: this.options.exportDir,
+      exportDir: this.exportDir,
       // 网关有没有 —— 只记布尔，不记 baseUrl/key（密钥不进日志是全仓规矩）
       hasGateway: this.hasGatewayEgress(),
     })
@@ -625,7 +676,7 @@ export class KlServerService {
         })
       }
 
-      const started = await this.postIngest(this.options.exportDir)
+      const started = await this.postIngest(this.exportDir)
       if (started !== null) {
         this.setBuilding(false)
         /**
@@ -786,7 +837,7 @@ export class KlServerService {
    * 白跑一趟，而多一道闸反而会挡住合理的重试。
    */
   private freshRebuildBlocker(): string | null {
-    const exportDir = this.options.exportDir ?? ""
+    const exportDir = this.exportDir ?? ""
     if (exportDir !== "" && !existsSync(join(exportDir, "chat", "records.jsonl"))) {
       return "还没有可建图的数据（导出未生成）—— 清空重建会让现有图谱直接消失，已取消"
     }
@@ -836,7 +887,7 @@ export class KlServerService {
    * 区分上面几档的关键。同一份文件、只读打开，与 `graphOverview` 同一套理由。
    */
   private emptyGraphReason(): string {
-    const exportDir = this.options.exportDir ?? ""
+    const exportDir = this.exportDir ?? ""
     if (exportDir !== "" && !existsSync(join(exportDir, "chat", "records.jsonl"))) {
       return "没有可建图的数据（导出还没生成）—— 等下一轮采集完成后会自动重建"
     }
@@ -902,7 +953,7 @@ export class KlServerService {
    * `graphOverview()` 复用它（反向依赖：轻的不依赖重的）。
    */
   graphExists(): boolean {
-    const dbPath = join(this.options.dataDir, "knowledge.db")
+    const dbPath = join(this.dataDir, "knowledge.db")
     if (!existsSync(dbPath)) return false
     const open = this.options.openGraphDb ?? defaultOpenGraphDb
     let db: GraphDbHandle | null = null
@@ -1005,7 +1056,7 @@ export class KlServerService {
       buildSchedule: schedule,
     })
 
-    const dbPath = join(this.options.dataDir, "knowledge.db")
+    const dbPath = join(this.dataDir, "knowledge.db")
     if (!existsSync(dbPath)) {
       return empty("还没建过图（点「重新建图」开始，需要几分钟且会出网）")
     }
@@ -1322,7 +1373,7 @@ export class KlServerService {
 
   /** 清空图数据 + 抽取缓存（重建前用；必须在 server stop 后调）。 */
   private wipeGraphData(): void {
-    const dir = this.options.dataDir
+    const dir = this.dataDir
     for (const name of ["knowledge.db", "knowledge.db-shm", "knowledge.db-wal", "qdrant_data"]) {
       rmSync(join(dir, name), { recursive: true, force: true })
     }
@@ -1411,7 +1462,7 @@ export class KlServerService {
     }
 
     // 数据目录必须存在：kl 会在里面开 SQLite / Qdrant。
-    mkdirSync(this.options.dataDir, { recursive: true })
+    mkdirSync(this.dataDir, { recursive: true })
     this.setState("starting")
 
     try {
@@ -1639,7 +1690,7 @@ export class KlServerService {
 
   /** pidfile 的绝对路径（放在 vault 隔离的 dataDir 下）。 */
   private pidfilePath(): string {
-    return join(this.options.dataDir, KL_PIDFILE_NAME)
+    return join(this.dataDir, KL_PIDFILE_NAME)
   }
 
   /**
@@ -1652,7 +1703,7 @@ export class KlServerService {
     if (pid === undefined) return
     const record: KlPidfile = { pid, port: this.port, startedAt: this.options.clock.now() }
     try {
-      mkdirSync(this.options.dataDir, { recursive: true })
+      mkdirSync(this.dataDir, { recursive: true })
       writeFileSync(this.pidfilePath(), JSON.stringify(record))
     } catch (error) {
       this.options.logger.debug("write pidfile failed", {
@@ -1831,11 +1882,11 @@ export class KlServerService {
     for (const [key, value] of Object.entries(base)) {
       if (value !== undefined) env[key] = value
     }
-    env["KL_DATA_DIR"] = this.options.dataDir
+    env["KL_DATA_DIR"] = this.dataDir
     env["KL_SERVER_PORT"] = String(this.port)
     // 建图（kl ingest）读四件套导出目录；server 查询用不到，但注入无害且统一。
-    if (this.options.exportDir !== undefined && this.options.exportDir !== "")
-      env["KL_DWS_EXPORT_DIR"] = this.options.exportDir
+    if (this.exportDir !== undefined && this.exportDir !== "")
+      env["KL_DWS_EXPORT_DIR"] = this.exportDir
 
     const gw = this.options.gateway?.()
     if (gw !== undefined) {

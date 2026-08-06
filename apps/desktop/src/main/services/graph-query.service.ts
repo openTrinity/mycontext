@@ -68,8 +68,21 @@ export interface GraphReadHandle {
 
 export interface GraphQueryOptions {
   logger: Logger
-  /** kl 的数据目录（`<shared>/kl`），图库是它下面的 `knowledge.db` */
-  dataDir: string
+  /**
+   * kl 的数据目录（图库是它下面的 `knowledge.db`）。
+   *
+   * ## ★ 为什么是**函数**而不是值
+   *
+   * 它按 vault 分，而 vault 是跟着登录/切身份挂载的 —— 本服务在装配阶段
+   * 就构造好了，那一刻还不知道会挂哪个身份。取值的话切身份后 ego 图
+   * 读的还是上一个身份的图库，而症状是"换了身份，关系图还是上一个人的"
+   * —— 不报错，只是答错。
+   *
+   * 用 getter 而不是 `rebind()`：本服务每次查询才 `existsSync` + 开一个
+   * 只读连接，没有需要维护的状态（与它现有的 `getSelfNames` 惰性取值
+   * 同一个形状）。返回空串 = 还没挂载 → 各方法走"图不存在"那条降级。
+   */
+  dataDir: () => string
   /** 本人在渠道里的显示名 —— ego 图据此在实体表里认出「我」 */
   getSelfNames: () => readonly string[]
   /** `会话 externalId → 渠道 id`，把关系归到 IM 渠道 */
@@ -86,7 +99,9 @@ export class GraphQueryService {
   constructor(private readonly options: GraphQueryOptions) {}
 
   private get dbPath(): string {
-    return join(this.options.dataDir, "knowledge.db")
+    const dir = this.options.dataDir()
+    // 未挂载（空串）→ 给一个必然不存在的路径，让 existsSync 走降级分支
+    return dir === "" ? "" : join(dir, "knowledge.db")
   }
 
   /**

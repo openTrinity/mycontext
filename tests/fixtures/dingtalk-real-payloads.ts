@@ -553,3 +553,86 @@ export const REAL_ERR_PAT_NO_PERMISSION = `{
 
 /** PAT 缺 scope：★ exit **5**（不是 4），同样是裸 JSON 单行。 */
 export const REAL_ERR_PAT_SCOPE_REQUIRED = `{"code":"PAT_SCOPE_AUTH_REQUIRED","data":{"missingScope":"chat.message:read","openBrowser":true},"success":false}`
+
+/**
+ * ★★ `--profile` 钉住的身份在本机不存在 —— 三种真实形态，全是 exit 3。
+ *
+ * 复现（不碰真实登录态、不改全局 profile）：拿一个编造的 profile 值去跑
+ * `auth status --profile <假值>`。实测 dws v1.0.56，三种写法各触发一种文案：
+ *
+ * | 传的值                  | message                                        |
+ * |-------------------------|------------------------------------------------|
+ * | 假 corpId:假 userId     | `organization "…" not found`                   |
+ * | 真 corpId:假 userId     | `account "…" not found in organization "…"`    |
+ * | 一个不含 `:` 的串       | `profile "…" not found`                        |
+ *
+ * ★ 三段的 `corpId` / `userId` 都已替换成假值（CLAUDE.md §1.2）；
+ * 形状（字段、转义、exit code）逐字节照实测。
+ *
+ * ★ 三条都**没有** `reason` 字段 —— 这正是与下面 `UNKNOWN_FLAG` 区分的关键。
+ */
+export const REAL_ERR_PROFILE_ORG_NOT_FOUND = `{
+  "error": {
+    "category": "validation",
+    "code": 3,
+    "message": "organization \\"dingFAKECORP0001\\" not found"
+  }
+}`
+
+export const REAL_ERR_PROFILE_ACCOUNT_NOT_FOUND = `{
+  "error": {
+    "category": "validation",
+    "code": 3,
+    "message": "account \\"FAKEUSER0009\\" not found in organization \\"dingFAKECORP0001\\""
+  }
+}`
+
+export const REAL_ERR_PROFILE_NOT_FOUND = `{
+  "error": {
+    "category": "validation",
+    "code": 3,
+    "message": "profile \\"garbagevalue\\" not found"
+  }
+}`
+
+/**
+ * ★★ 参数拼错（**我们自己的 bug**）：也是 `category: validation` + `code: 3`。
+ *
+ * 这一段的存在就是为了钉住「不能只看 code 3」：把它误归成
+ * `CHANNEL_IDENTITY_UNAVAILABLE` 的话，一个代码 bug 会被显示成
+ * 「请重新授权」—— 用户照做，扫完码问题还在，而真正的原因被一条
+ * 用户友好的文案彻底盖住。区分靠 `reason: "unknown_flag"`。
+ *
+ * 实测触发：`dws chat list-all-conversations --bogusflag`。
+ */
+export const REAL_ERR_UNKNOWN_FLAG = `{
+  "error": {
+    "actions": [
+      "Run 'dws chat list-all-conversations --help' for valid flags"
+    ],
+    "available_flags": [
+      "client-id",
+      "client-secret",
+      "cursor",
+      "debug",
+      "dry-run",
+      "exclude-muted",
+      "fields",
+      "format",
+      "help",
+      "jq",
+      "limit",
+      "mock",
+      "profile",
+      "timeout",
+      "verbose",
+      "yes"
+    ],
+    "category": "validation",
+    "cause": "unknown flag: --bogusflag",
+    "code": 3,
+    "hint": "Run 'dws chat list-all-conversations --help' to see available options",
+    "message": "unknown flag: --bogusflag\\nSee 'dws chat list-all-conversations --help' for usage.",
+    "reason": "unknown_flag"
+  }
+}`

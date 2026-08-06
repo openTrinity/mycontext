@@ -44,6 +44,26 @@ export const ERROR_CODES = [
    * 之后 749 条消息被标成 `is_self=1` —— 全是错的。
    */
   "SELF_IDENTITY_CONFLICT",
+  /**
+   * 钉住的那个渠道身份在本机**没有登录态**（上游报「组织未找到」）。
+   *
+   * ## 为什么必须独立一个码，而不是落到兜底的 `PROCESS_FAILED`
+   *
+   * 渠道命令一律用 `--profile <corpId>:<userId>` 钉住当前 vault 绑定的身份
+   * （见 `RuntimeEnvOptions.dwsProfile`）。而那个身份可能已经不在本机了 ——
+   * 用户在终端跑过 `dws auth logout`，或换了台机器只拷了应用数据。
+   *
+   * 实测那时是 exit 3 + `{"error":{"category":"validation",
+   * "message":"organization \"…\" not found"}}`。而 `classifyDwsError` 原本
+   * 对 code 3 没有任何分支，于是它落到兜底的 `PROCESS_FAILED` +
+   * `retryable: true` —— 也就是**一场无限重试风暴**：每一轮采集都失败、
+   * 每一次都判定"可以重试"，日志刷屏而用户什么都不知道。
+   *
+   * 终态（`retryable: false`）：重试永远好不了，唯一出路是重新授权到这个身份
+   * （或切到另一个身份）。与 `SESSION_EXPIRED` 分开是因为处置不同 ——
+   * 那个是"这个身份的凭据过期了，重新扫码"，这个是"这个身份在本机根本不存在"。
+   */
+  "CHANNEL_IDENTITY_UNAVAILABLE",
   /** 外部数据格式与预期不符（时间串、分页结构等） */
   "PARSE_FAILED",
   // 外部会话与授权：这两个都是**终态**，重试永远好不了

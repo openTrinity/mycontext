@@ -74,6 +74,8 @@ function makeConsumer(
     runtime: {
       resolve: () => ({ path: "/fake/dws" }),
       buildEnv: () => ({}),
+      // 未绑身份 → 不钉 profile（钉住本身在 dws-profile-pinning.test.ts 里锁）
+      dwsProfileArgs: () => [],
     } as never,
     processes: fake.processes,
     logger: createLogger("test-events", { level: "error" }),

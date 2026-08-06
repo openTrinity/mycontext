@@ -69,11 +69,60 @@ export interface RuntimeEnvOptions {
    */
   dwsBinOverride?: string | undefined
   /**
-   * DWS 的配置目录：隔离 profiles 与日志到应用数据目录下。
+   * DWS 的配置目录（`profiles.json` / 日志 / 事件流）。
    *
    * **必须是绝对路径**，见 buildEnv() 的断言与其注释。
+   *
+   * ## ★★ 它是**按 vault** 的，所以装配层传的是一个 getter
+   *
+   * 这个目录里的 `profiles.json` 决定「本机有哪些身份、当前用哪个」。
+   * 每个 vault 一份**只含它那一个身份**的 profiles 之后，越权读取变成
+   * 结构性不可能（实测：在只 seed 组织甲的目录里拿组织乙的 `--profile`
+   * 去问，直接 `organization "…" not found`）。
+   *
+   * 声明成 `string` 而不是函数是刻意的：TS 的属性声明对 getter 天然成立
+   * （`dwsChannel` / `dwsBinOverride` 已经是这么用的，见 startup.ts），
+   * 于是"每次现读"这件事对**本类的实现完全透明** —— `buildEnv()` 里那句
+   * `this.options.dwsConfigDir` 不需要知道它背后是常量还是 getter。
+   * 而那条"必须绝对路径"的断言会继续保护它（切身份后仍然每次 buildEnv 都查）。
    */
   dwsConfigDir: string
+  /**
+   * 把渠道命令**钉死在某一个身份**上（上游 `--profile <corpId>:<userId>`）。
+   *
+   * ## ★★ 为什么必须钉：不钉就是一个越权读取面
+   *
+   * CLI 的登录态按**系统用户**存，而"用哪个身份作答"由它自己的全局
+   * `currentProfile` 决定 —— 那个值可能被用户在终端里、或上一次授权改掉。
+   * 于是应用会拿着 A 的 vault，去读 B 的会话列表与消息。
+   *
+   * 实测（本机，两个身份都已登录）：
+   * ```
+   * profiles.json:   primary=组织甲   current=组织乙
+   * auth status                                  → 组织乙   ← 界面显示这个
+   * vault channel_self_identity                  → 组织甲   ← 库里绑这个
+   * chat list-all-conversations                  → 38 个会话（组织乙的）
+   * chat list-all-conversations --profile 组织甲  → 100 个会话
+   * ```
+   * 库里躺着组织甲的会话与消息，采集器却在按组织乙列会话。
+   * 这不是显示不准，是读到了不属于用户预期范围的内容（CLAUDE.md 第 5 节）。
+   *
+   * ## ★ 为什么是 `--profile` 而不是 `profile switch`
+   *
+   * `--profile` 是**单次生效、无副作用**的；`profile switch` 改的是全局状态，
+   * 会踩掉用户自己终端里的登录态。而且实测 `profile switch --dry-run`
+   * **真的会改** `currentProfile`（上游的 bug）—— 连"预览"都不安全。
+   *
+   * ## ★ 取值是函数（getter）
+   *
+   * 与 `dwsChannel` / `dwsBinOverride` 同一个理由：`RuntimeEnv` 启动时构造一次，
+   * 而当前挂载的是哪个 vault 会随身份切换而变。传静态值的话切完身份仍在读旧
+   * 身份的数据 —— 而那正是这条要修的问题换了个形式回来。
+   *
+   * 缺省 undefined / 返回空 = 不钉（退回 CLI 的全局 profile）。
+   * 这只该发生在"这个 vault 还没绑任何渠道身份"时。
+   */
+  dwsProfile?: (() => string | undefined) | undefined
   /** 覆盖环境变量来源（测试注入用；缺省读 process.env） */
   env?: NodeJS.ProcessEnv
 }
@@ -355,6 +404,34 @@ export class RuntimeEnv {
    */
   tryResolvePython(runVersionProbe?: PythonVersionProbe): ResolvedPython | null {
     return resolvePython(this.options.env ?? process.env, runVersionProbe)
+  }
+
+  /**
+   * 钉住身份的命令行参数（`["--profile", "<corpId>:<userId>"]`，没钉时空数组）。
+   *
+   * ## ★ 为什么是命令行参数而不是环境变量
+   *
+   * 上游没有等价的环境变量 —— 身份只能经 `--profile` 传。所以它**不能**
+   * 放进 `buildEnv()`：那会是一个看起来生效、实际被完全忽略的注入
+   * （而"设了没生效"是本仓库反复出现的那类静默失效）。
+   *
+   * ## ★ 追加在**子命令之后**是安全的
+   *
+   * 白名单门禁的 `commandPath()` 遇到第一个 `-` 开头的 token 就停，
+   * 所以追加在末尾既不影响命令匹配，也不影响 `-y` 的注入判定。
+   * 实测上游对 `dws auth status -f json --profile X` 与
+   * `dws --profile X auth status -f json` 行为一致。
+   *
+   * ## ★ 空值一律当"没钉"
+   *
+   * getter 返回空串/空白（vault 还没绑身份、或反查不到）时给空数组，
+   * 而不是 `["--profile", ""]` —— 后者会让上游报"组织未找到"，
+   * 把"还没绑身份"这个正常状态变成一个错误。
+   */
+  dwsProfileArgs(): string[] {
+    const value = this.options.dwsProfile?.()
+    if (value === undefined || value.trim() === "") return []
+    return ["--profile", value.trim()]
   }
 
   /**
