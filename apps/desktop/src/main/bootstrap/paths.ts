@@ -77,7 +77,7 @@ export interface AppPaths {
    * npm 本来就有 `npm_config_cache` 这个正交旋钮，用它把"缓存"从"HOME"里
    * 拆出来 —— 隔离与体积两个目标就都成立。
    *
-   * ★ 里面**没有**任何身份/会话字节：逐项验过（`阿里巴巴`/`hahha`/
+   * ★ 里面**没有**任何身份/会话字节：逐项验过（本机的组织名/用户花名/
    * `openConversationId` 命中 0 个文件；一条宽正则 `cid[A-Za-z0-9+/]{20}`
    * 扫到的 19 个命中追进去全是 `web-tree-sitter` 等包元数据里 integrity
    * hash 的片段 —— 假阳性）。

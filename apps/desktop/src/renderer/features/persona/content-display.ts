@@ -46,6 +46,8 @@
  */
 
 /** 一段 @提及。渲染层据此把它做成 chip。 */
+import { replaceChannelEmoji } from "./channel-emoji.js"
+
 export interface MentionSpan {
   /** 原文里的完整形态，如 `@柳文(小李)` */
   raw: string
@@ -169,6 +171,24 @@ export function toDisplayContent(raw: string | null): DisplayContent {
   for (const mention of mentions) {
     text = text.split(mention.raw).join(mention.display)
   }
+
+  /**
+   * ★ 表情标记 → emoji（`[天使]` → 😇），与钉钉 App 里看到的一致。
+   *
+   * ## 顺序：必须在**协议标记清洗之后**
+   *
+   * `[图片消息](mediaId=…)` 里也有方括号。先转表情的话，
+   * 那个 `[图片消息]` 会先被 emoji 正则匹到（虽然查表查不到、原样返回，
+   * 但如果哪天有人往表里加了"图片"就会出事）。清洗完再转，
+   * 进到这一步的方括号就只剩用户自己打的了。
+   *
+   * ## 只转白名单里的
+   *
+   * 实测 610 种 `[xx]` 里大量不是表情（`[FIRING:1]` `[必填]` 甚至有人把
+   * 真实姓名写在方括号里）。无脑转会把告警群的状态词变成笑脸 ——
+   * 详见 `channel-emoji.ts` 的文件头。
+   */
+  text = replaceChannelEmoji(text)
 
   /**
    * 收尾：压掉连续空白并 trim。
