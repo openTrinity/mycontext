@@ -106,6 +106,95 @@ describe("★ 单聊发送目标：必须是对端的人，不是会话 id", () 
   })
 
   /**
+   * ★★ 一个单聊里有**两套对端 openId** 时必须挑主对端（消息最多那个）。
+   *
+   * ## 这条锁的是一次真实的"发错人"
+   *
+   * openDingTalkId 的定义是「**当前用户视角下**的目标用户唯一标识，
+   * 不可跨用户共享」。所以同一个人在不同观察者视角下是**不同**的 openId，
+   * 而一个会话里可能同时躺着两个视角采到的消息（用户换过 CLI／换过身份）。
+   *
+   * 实测本机 143 个单聊里正好有 1 个是这样（用户自己两个身份之间的单聊）：
+   * ```
+   * D0AUGT…aw(33)  is_self=0  21 条  ← 主对端，历史都是跟他聊的
+   * DMvqYy…  (34)  is_self=0   2 条  ← 同一个人的另一套 openId
+   * ```
+   * 而实现原来是 `LIMIT 1` **无 ORDER BY** —— 挑哪个由 SQLite 决定。
+   * 实测它挑中了只有 2 条的那个，于是「发给 A 的消息进了 B 的对话」，
+   * 而两个 openId 的**显示名相同**，界面上看不出任何异常。
+   *
+   * ★ 断言"取次数最多的"而不是"取某个具体值"：那才是判据本身。
+   */
+  it("★★ 有两套对端 openId 时取消息最多的那个（无序 LIMIT 1 会挑错人）", () => {
+    const { vault } = seedDirect()
+    const messages = new MessageRepository(vault.db)
+    /** 主对端：再补 4 条，让它总数 5 条。 */
+    const main = `D${"B".repeat(32)}`
+    /** 同一个人的另一套 openId（34 字符，与真实数据同形），只 1 条但**更新**。 */
+    const alt = `D${"Z".repeat(33)}`
+    messages.upsertMany([
+      ...Array.from({ length: 4 }, (_, i) => ({
+        id: `m-main-${String(i)}`,
+        channelId: "dingtalk",
+        conversationId: "conv-direct",
+        externalId: `ext-main-${String(i)}`,
+        senderExternalId: main,
+        contentText: "历史消息",
+        sentAt: NOW - 10_000 + i,
+        direction: "inbound" as const,
+        isSelf: false,
+        createdAt: NOW,
+      })),
+      {
+        id: "m-alt",
+        channelId: "dingtalk",
+        conversationId: "conv-direct",
+        externalId: "ext-alt",
+        senderExternalId: alt,
+        contentText: "另一套视角的那条",
+        // ★ 刻意**更新**：只按时间排的话会挑中它，那正是要排除的实现
+        sentAt: NOW + 999_999,
+        direction: "inbound" as const,
+        isSelf: false,
+        createdAt: NOW,
+      },
+    ])
+
+    const resolved = new ConversationRepository(vault.db).findPeerExternalId("conv-direct")
+    expect(resolved).toBe(main)
+    expect(resolved).not.toBe(alt)
+  })
+
+  /**
+   * ★ 次数并列时取**最近还在说话**的那套 openId。
+   *
+   * 两套各一条时"谁是主对端"无从判断，那时"现在还在用的那个"是更好的猜 ——
+   * 而更要紧的是它**确定**：同一个会话每次问都得到同一个答案。
+   * 不确定本身就是上面那个 bug 的成因。
+   */
+  it("★ 次数并列 → 取 sent_at 更晚的（结果必须确定）", () => {
+    const { vault } = seedDirect()
+    const newer = `D${"Z".repeat(33)}`
+    new MessageRepository(vault.db).upsertMany([
+      {
+        id: "m-newer",
+        channelId: "dingtalk",
+        conversationId: "conv-direct",
+        externalId: "ext-newer",
+        senderExternalId: newer,
+        contentText: "更近的那条",
+        sentAt: NOW + 5000,
+        direction: "inbound",
+        isSelf: false,
+        createdAt: NOW,
+      },
+    ])
+    // seed 里主对端只有 1 条（sentAt = NOW），新加的也 1 条但更晚
+    const resolved = new ConversationRepository(vault.db).findPeerExternalId("conv-direct")
+    expect(resolved).toBe(newer)
+  })
+
+  /**
    * 群聊返回 null —— 群聊走的是 `--group <openConversationId>`，
    * 不需要"某个人"。这里锁的是**别顺手给群聊也返回一个人**：
    * 那会让群聊消息被发成一条私聊，而"发错地方"比"发不出去"糟得多。

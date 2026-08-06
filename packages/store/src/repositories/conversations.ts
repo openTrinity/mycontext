@@ -111,9 +111,35 @@ export class ConversationRepository {
    * 「单聊时 receiverUid 不能为空」—— 也就是它**根本没把 cid 认成一个人**。
    * 于是点「发送」永远失败，而失败原因指向一个我们没传的参数名。
    *
-   * 取"第一条非本人消息的发送者"是可靠的：单聊只有两个人，任一条对方的
-   * 消息都指向同一个 openDingTalkId。取不到只有一种情况 —— 该单聊里
-   * 对方从没说过话，那时也确实没有人可发。
+   * ## ★★ 「单聊只有两个人，所以随便取一条对方的消息」——**这个前提不成立**
+   *
+   * 我原来在这里写过那句话，实测推翻了它。本机 143 个单聊里有 1 个的
+   * 「非本人 sender」是**两个**：
+   *
+   * ```
+   * 会话「某某」（用户自己两个身份之间的单聊）
+   *   D0AUGT…ay(33)  is_self=1   ← 当前 vault 绑的"我"
+   *   D0AUGT…aw(33)  is_self=0   ← 对端，21 条历史消息都是它
+   *   DMvqYy…(34)    is_self=0   ← ★ 同一个人的**另一套** openId，只 2 条
+   * ```
+   *
+   * 成因是 openDingTalkId 的定义：它是「**当前用户视角下**的目标用户唯一
+   * 标识，不可跨用户共享」。同一个人在不同观察者视角下是不同的 openId，
+   * 而一个会话里可能同时躺着**两个视角**采到的消息（换过 CLI／换过身份）。
+   *
+   * ★ 于是 `LIMIT 1` **无 ORDER BY** 就是一个真 bug：挑哪个由 SQLite 决定。
+   * 实测它挑中了只出现 2 条的那个（而不是 21 条的主对端）—— 表现是
+   * 「发给 A 的消息进了 B 的对话」，而两个 openId 的显示名相同，
+   * 界面上看不出任何异常。
+   *
+   * ## 判据：取**出现次数最多**的那个，并列时取最近说过话的
+   *
+   * 主对端一定是消息最多的那个（历史都是跟他聊的）。次数并列时取
+   * `MAX(sent_at)` 更大的 —— 那是"现在还在用的那套 openId"。
+   * 两级排序让结果**确定**：同一个会话每次问都得到同一个答案，
+   * 而"不确定"本身就是上面那个 bug 的成因。
+   *
+   * 取不到只有一种情况 —— 该单聊里对方从没说过话，那时也确实没有人可发。
    */
   findPeerExternalId(conversationId: string): string | null {
     const row = this.db
@@ -125,6 +151,11 @@ export class ConversationRepository {
             AND c.type = 'direct'
             AND m.is_self = 0
             AND m.sender_external_id IS NOT NULL
+          GROUP BY m.sender_external_id
+          -- ★ 两级排序让结果**确定**（见方法注释）：主对端是消息最多的那个，
+          --   并列时取最近还在说话的那套 openId。无 ORDER BY 的 LIMIT 1
+          --   会在"一个会话里有两套视角的 openId"时挑错人。
+          ORDER BY COUNT(*) DESC, MAX(m.sent_at) DESC
           LIMIT 1`,
       )
       .get(conversationId)

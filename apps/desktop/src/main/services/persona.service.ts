@@ -1742,7 +1742,23 @@ export class PersonaService {
       draftId: draft.id,
       conversationId: draft.conversationId,
       targetKind,
-      targetExternalId: conversation.externalId,
+      /**
+       * ★★ 记**真正发出去的那个**目标，不是会话 id。
+       *
+       * 这里原来写的是 `conversation.externalId` —— 于是单聊的审计行记的是
+       * `cid…`（会话 id，47 字符），而实际传给 CLI 的是对端的
+       * `openDingTalkId`（`D…`，33-34 字符）。两个值不同，而这张表的
+       * **唯一用途**就是事后追"这条发给了谁"。
+       *
+       * 实测踩到过（本机 2026-08-06 21:55 那条）：`target_kind=open_id` 而
+       * `target_external_id=cidTuLn1kt…`，也就是一行自相矛盾的审计 ——
+       * 声称"按人发"却记了个会话 id。真要追一次误发，那个值指向的东西
+       * **在钉钉里根本不是一个人**，而 `target_kind` 又让人以为它是。
+       *
+       * ★ 会话 id 并没有丢：它就在同一行的 `conversation_id` 列里。
+       * 也就是说改这一处不损失任何信息，只是让两列各自说真话。
+       */
+      targetExternalId,
       atExternalIds: [],
       contentHash: hash,
       /**

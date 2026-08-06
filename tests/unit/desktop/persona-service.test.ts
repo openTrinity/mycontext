@@ -161,6 +161,17 @@ function recordingLlm(systems: string[]): LlmClient {
   })
 }
 
+/**
+ * 从实际跑出去的命令行里取某个 flag 的值。
+ *
+ * ★ 断言"审计表记的 == 真正传给 CLI 的"必须这么比：拿两个我们自己算的
+ * 常量互相比是同义反复，只有拿**命令行实参**当真源才能发现"审计记了另一个值"。
+ */
+function sendArgAfter(args: readonly string[], flag: string): string | undefined {
+  const index = args.indexOf(flag)
+  return index === -1 ? undefined : args[index + 1]
+}
+
 function seed() {
   const vault = openTestVault()
   new ConversationRepository(vault.db).upsert({
@@ -2294,6 +2305,24 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
     expect(attempt?.grant_id).toBe("g1")
 
     /**
+     * ★★ 审计记的目标必须是**真正发出去的那个**。
+     *
+     * 群聊时 `--group <externalId>`，所以 target 就是会话 external_id ——
+     * 这条在群聊上是恒真的。真正会咬人的是**单聊**：那时发送用的是对端
+     * `openDingTalkId` 而审计原来记的是 `conversation.externalId`（cid），
+     * 一行自相矛盾的审计。单聊那条断言在下面单独一个用例里
+     * （群聊这里锁不住它 —— 两个值恰好相同）。
+     */
+    const target = vault.db
+      .prepare<
+        [],
+        { kind: string; ext: string }
+      >(`SELECT target_kind AS kind, target_external_id AS ext FROM dh_send_attempts LIMIT 1`)
+      .get()
+    expect(target?.kind).toBe("group")
+    expect(target?.ext).toBe(sendArgAfter(send ?? [], "--group"))
+
+    /**
      * ④ ★ 判定层的三关都真的跑过。
      *
      * 行为断言（"发出去了"）证明不了这个：少跑一关时它照样发。
@@ -2324,6 +2353,65 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
       .prepare<[], { source: string }>(`SELECT source FROM dh_send_attempts LIMIT 1`)
       .get()
     expect(source?.source).toBe("agent_auto")
+
+    await service.detach()
+    vault.close()
+  })
+
+  /**
+   * ★★ 单聊：审计记的目标必须是**对端的人**，不是会话 id。
+   *
+   * ## 这一条锁的是一次真实的"审计说谎"
+   *
+   * 单聊发送用 `--open-dingtalk-id <对端 openDingTalkId>`，而审计原来记的是
+   * `conversation.externalId`（`cid…`，会话 id）。实测本机那条记录就是
+   * `target_kind=open_id` + `target_external_id=cid…` —— 一行**自相矛盾**的
+   * 审计：声称"按人发"却记了个会话 id。
+   *
+   * 而这张表的唯一用途就是事后追"这条发给了谁"。真要追一次误发，
+   * 那个值指向的东西在渠道里根本不是一个人，而 `target_kind` 又让人
+   * 以为它是 —— 于是排查会从一开始就走错方向。
+   *
+   * ★ 断言形式：拿**实际命令行**里 `--open-dingtalk-id` 后面那个值当真源
+   * （见 `sendArgAfter`）。拿两个我们自己算的常量互比是同义反复。
+   */
+  it("★★ 单聊：审计记的是对端 openDingTalkId，不是会话 cid", async () => {
+    const vault = seed()
+    // 把会话改成单聊，并给一个形状真实的对端（D… 33 字符）
+    const peer = `D${"P".repeat(32)}`
+    vault.db.prepare(`UPDATE conversations SET type = 'direct' WHERE id = 'conv-1'`).run()
+    vault.db
+      .prepare(`UPDATE messages SET sender_external_id = ?, is_self = 0 WHERE id = 'm1'`)
+      .run(peer)
+    mentionSelf(vault)
+    grantSend(vault)
+    const { calls, runner } = sendCli()
+    const { service, clock } = serviceReadyToAutoSend(
+      vault,
+      runner,
+      shortReplyLlm(),
+      passingGate().gate,
+    )
+
+    await runTurn(service, vault, clock)
+
+    const send = calls.find((args) => args[0] === "chat" && args[1] === "message")
+    expect(send, `没有调用发送命令；实际调用：${JSON.stringify(calls)}`).toBeDefined()
+    // 真传给 CLI 的那个值（真源）
+    const sentTo = sendArgAfter(send ?? [], "--open-dingtalk-id")
+    expect(sentTo).toBe(peer)
+
+    const target = vault.db
+      .prepare<
+        [],
+        { kind: string; ext: string }
+      >(`SELECT target_kind AS kind, target_external_id AS ext FROM dh_send_attempts LIMIT 1`)
+      .get()
+    expect(target?.kind).toBe("open_id")
+    // ★ 审计 == 真传的。改回记 conversation.externalId 时这条必红。
+    expect(target?.ext).toBe(sentTo)
+    // ★ 反面：显式钉住"不是会话 id"（造数据失误也不会让它假绿）
+    expect(target?.ext).not.toBe("cid-1")
 
     await service.detach()
     vault.close()
