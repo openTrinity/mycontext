@@ -39,6 +39,7 @@ import type { KlGraphOverview } from "@mycontext/ipc-contract"
 import { bootstrapConfig } from "./config.js"
 import { resolveAppPaths, type AppPaths } from "./paths.js"
 import { applyPostAuthIdentity, routeAuthorizedIdentity } from "./post-auth-identity.js"
+import { teardownVault } from "./vault-teardown.js"
 import { DwsSourceService } from "../services/dws-source.service.js"
 import { runShutdownStep } from "./shutdown.js"
 import { AuthService } from "../services/auth.service.js"
@@ -903,41 +904,31 @@ export function bootstrapApp(mainDir: string): AppContext {
    * 整个函数**不抛**：每一步失败都记日志并继续。卸载失败而不关库
    * 等于"登出后数据仍可读"，那比丢一条错误日志严重得多。
    */
-  const unmountVault = async (): Promise<void> => {
-    onboarding.bind(null, null)
-    distillSources.detach()
-    // ① agent：撤 token + kill 进程（无孤儿），再放开 db
-    await search
-      .shutdown()
-      .catch((error: unknown) => {
-        logger.warn("search shutdown failed", {
-          detail: error instanceof Error ? error.message : String(error),
-        })
-      })
-      .finally(() => search.detach())
-    media.detach()
-    // ② 两个持定时器且会写库的
-    await distill.detach().catch(() => undefined)
-    await persona.detach().catch(() => undefined)
-    // ③ ★ await：让它真的让出 8200 并写掉 pidfile（见上面的注释）
-    await klServer.stop().catch((error: unknown) => {
-      logger.warn("kl server stop failed", {
-        detail: error instanceof Error ? error.message : String(error),
-      })
+  const unmountVault = (): Promise<void> =>
+    teardownVault({
+      onboarding,
+      distillSources,
+      search,
+      media,
+      distill,
+      persona,
+      klServer,
+      dataPlane,
+      /**
+       * ★★ 清引用 + 关库 —— 由 `teardownVault` 在**最后**调。
+       *
+       * 顺序不能提前：数据面 detach 时那条 `event stop --all --profile <旧>`
+       * 要用身份 getter，先清就会退订错身份（而那条路径吞异常、无痕迹）。
+       * 完整推理见 `VaultTeardownDeps.releaseVault` 的注释。
+       */
+      releaseVault: () => {
+        mountedVault = null
+        vaultPaths = null
+        activeIdentity.clear()
+        vaults.closeAll()
+      },
+      logger,
     })
-    // ④ ★ await：等在途那一轮采集收尾（它可能正 await 一个 0.6s 的子进程）。
-    //   不等就关库会抛无人 catch 的 `The database connection is not open`。
-    await dataPlane.detach().catch((error: unknown) => {
-      logger.error("data plane detach failed", {
-        detail: error instanceof Error ? error.message : String(error),
-      })
-    })
-    // ⑤ 到这里才清：④ 里的退订要用旧身份的 profile（见上面的注释）
-    mountedVault = null
-    vaultPaths = null
-    activeIdentity.clear()
-    vaults.closeAll()
-  }
 
   /**
    * 挂载一个 vault：开库 → 按 vault 铺好全部落点 → attach 各服务。
