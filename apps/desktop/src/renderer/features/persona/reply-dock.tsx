@@ -40,9 +40,10 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Button, Tag, cn } from "@mycontext/design"
 import type { PersonaDraftView } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
-import { usePersonaRunTrace, usePersonaTrace } from "../../lib/queries.js"
+import { usePersonaTrace } from "../../lib/queries.js"
 import { EventStream } from "../agent-stream/event-stream.js"
 import { toChatItems } from "../agent-stream/to-chat-items.js"
+import { RunTraceDisclosure } from "./run-trace-disclosure.js"
 import { PersonaSignature } from "./persona-signature.js"
 import { explainDecisionReason, type ReasonKind } from "./decision-reason.js"
 
@@ -624,13 +625,13 @@ function DraftPanel({
         ★ 回看这条草稿是怎么想出来的。
 
         **默认收起**：这一块的主任务是审正文，过程是次要的 —— 常驻展开会把
-        发送按钮挤到屏幕外。展开才去查库（`usePersonaRunTrace` 的 enabled），
+        发送按钮挤到屏幕外。展开才去查库（见 `RunTraceDisclosure` 的 enabled 门控），
         一屏十条草稿不会各预取一遍。
 
         `runId` 为 null（用户自己写的那条 / 老库里的草稿）时**整块不渲染** ——
         显示一个点了没反应的按钮比不显示更糟。
       */}
-      {draft.runId === null ? null : <DraftTrace runId={draft.runId} />}
+      {draft.runId === null ? null : <RunTraceDisclosure runId={draft.runId} />}
       {/*
         ★ 边界必须说清：点「发送」是**真的以本人身份发出去**。
         放在按钮下面而不是这一块顶部：它解释的是那个按钮。
@@ -730,52 +731,6 @@ function ComposePanel({ busy, onCompose }: { busy: boolean; onCompose: (text: st
       >
         {t("dockComposeSend")}
       </Button>
-    </div>
-  )
-}
-
-/**
- * 「看生成过程」—— 草稿卡上的折叠区。
- *
- * 与「正在处理」那一档看到的是**同一套渲染**（`EventStream`）与同一份数据
- * （`dh_run_trace` 存的就是流式时推过的那些 item）—— 所以"刷新后看到的"
- * 与"当时看到的"不会不一样。两套渲染路径是 UI bug 的主要来源。
- *
- * 自己管展开态而不是抬到 DraftPanel：切草稿 tab 时 `key={draft.id}` 会重建
- * 整个面板，展开态自然回到默认（收起）—— 那是对的，用户在草稿 2 上没表达
- * 过"我要看过程"。
- */
-function DraftTrace({ runId }: { runId: string }) {
-  const { t } = useDynamicTranslation("persona")
-  const [open, setOpen] = useState(false)
-  const trace = usePersonaRunTrace(runId, open)
-  const items = useMemo(() => toChatItems(trace.data ?? []), [trace.data])
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="typography-caption-400 self-start text-[var(--text-base-tertiary)] transition-colors duration-150 hover:text-[var(--text-base-secondary)]"
-      >
-        {open ? t("dockTraceHide") : t("dockTraceShow")}
-      </button>
-      {!open ? null : trace.isPending ? (
-        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-          {t("dockTraceLoading")}
-        </span>
-      ) : items.length === 0 ? (
-        /**
-         * 没有痕迹是**正常状态**（这一轮走的是直连降级那条路，或者是升级前
-         * 生成的旧草稿）—— 说清"没有"，而不是显示一个空白区域让人以为没加载出来。
-         */
-        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-          {t("dockTraceEmpty")}
-        </span>
-      ) : (
-        <EventStream items={items} />
-      )}
     </div>
   )
 }

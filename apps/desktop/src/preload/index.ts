@@ -93,6 +93,7 @@ const api: MyContextApi = {
     composeSend: (input) => ipcRenderer.invoke(IPC_CHANNELS.personaComposeSend, input),
     runs: (input) => ipcRenderer.invoke(IPC_CHANNELS.personaRuns, input),
     runTrace: (input) => ipcRenderer.invoke(IPC_CHANNELS.personaRunTrace, input),
+    runDetail: (input) => ipcRenderer.invoke(IPC_CHANNELS.personaRunDetail, input),
     liveTrace: (input) => ipcRenderer.invoke(IPC_CHANNELS.personaLiveTrace, input),
     onTrace: (listener) => {
       const handler = (_event: unknown, payload: PersonaTraceEvent) => listener(payload)

@@ -104,6 +104,8 @@ export type {
   DhConversationConfigRow,
   DhDraftRow,
   DhRunRow,
+  PersonaActivityRow,
+  PersonaRunDetailRow,
   PersonaTraceInput,
   PersonaTraceRow,
   ReplyMode,

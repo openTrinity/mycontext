@@ -31,6 +31,7 @@ import {
   klGraphFactsInputSchema,
   personaMessagesInputSchema,
   personaRunsInputSchema,
+  personaRunDetailInputSchema,
   personaRunTraceInputSchema,
   personaLiveTraceInputSchema,
   personaActivitiesInputSchema,
@@ -335,6 +336,9 @@ export function registerIpc(deps: IpcDependencies): void {
   )
   ipcMain.handle(IPC_CHANNELS.personaRunTrace, (_event, payload: unknown) =>
     attempt(() => persona.runTrace(parse(personaRunTraceInputSchema, payload).runId)),
+  )
+  ipcMain.handle(IPC_CHANNELS.personaRunDetail, (_event, payload: unknown) =>
+    attempt(() => persona.runDetail(parse(personaRunDetailInputSchema, payload).runId)),
   )
   ipcMain.handle(IPC_CHANNELS.personaLiveTrace, (_event, payload: unknown) =>
     attempt(() => persona.liveTrace(parse(personaLiveTraceInputSchema, payload).conversationId)),

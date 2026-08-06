@@ -653,6 +653,23 @@ export function usePersonaRunTrace(runId: string | null, enabled: boolean) {
   })
 }
 
+/**
+ * 那一轮的元信息（触发消息 / 判定与原因 / 耗时 token）。
+ *
+ * 与 `usePersonaRunTrace` 同一套门控：`enabled` 让它只在用户真的展开
+ * 某一条时才查 —— 历史面板一屏 20 条，各预取一遍是白花的库查询。
+ *
+ * `staleTime: Infinity` 同理：跑完的那一轮不会再变。
+ */
+export function usePersonaRunDetail(runId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["persona", "run-detail", runId] as const,
+    queryFn: async () => unwrap(await window.mycontext.persona.runDetail({ runId: runId ?? "" })),
+    staleTime: Infinity,
+    enabled: enabled && runId !== null,
+  })
+}
+
 export function useResolveDraft() {
   return usePersonaMutation(
     async (input: { draftId: string; action: "send" | "discard"; editedText?: string }) =>

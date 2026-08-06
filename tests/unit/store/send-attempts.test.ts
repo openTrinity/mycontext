@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest"
 import { ManualClock, MS_PER_MINUTE } from "@mycontext/kernel"
 import { evaluatePolicy, DEFAULT_WORK_HOURS, UNEVALUATED_CONFIDENCE } from "@mycontext/persona"
 import type { PolicyInput } from "@mycontext/persona"
-import { ConversationRepository, PersonaRunRepository } from "@mycontext/store"
+import { ConversationRepository, MessageRepository, PersonaRunRepository } from "@mycontext/store"
 import { openTestVault } from "../../helpers/vault.js"
 
 /** 工作日下午 3 点（周三）：默认工作时间内，免得撞上作息判定。 */
@@ -58,6 +58,37 @@ function attempt(over: Partial<Parameters<PersonaRunRepository["recordSendAttemp
     source: "agent_auto" as const,
     ...over,
   }
+}
+
+/**
+ * 造一条触发消息 —— `runDetail` 要 join 它才能回答"为什么这轮会跑"。
+ *
+ * 会话与消息都建：`messages` 有指向 `conversations` 的外键。
+ */
+function seedTriggerMessage(vault: ReturnType<typeof openTestVault>): void {
+  new ConversationRepository(vault.db).upsert({
+    id: "conv-1",
+    channelId: "dingtalk",
+    externalId: "cid-1",
+    type: "group",
+    title: "某群",
+    createdAt: NOW,
+  })
+  new MessageRepository(vault.db).upsertMany([
+    {
+      id: "msg-trigger",
+      channelId: "dingtalk",
+      conversationId: "conv-1",
+      externalId: "ext-trigger",
+      senderExternalId: "D-peer",
+      senderDisplayName: "小李",
+      contentText: "这个能帮忙看下吗",
+      sentAt: NOW - 5000,
+      direction: "inbound",
+      isSelf: false,
+      createdAt: NOW,
+    },
+  ])
 }
 
 describe("★ 写入 → 频率判定读得到（闭环，不只是「写进去了」）", () => {
@@ -155,11 +186,15 @@ describe("★ 数字分身活动流只展示成功发生的用户结果", () => 
   it("区分自动发送、原样采纳与编辑后发送，并排除失败尝试", () => {
     const vault = seed()
     const runs = new PersonaRunRepository(vault.db)
-    const addDraft = (id: string, text: string) =>
+    /**
+     * `runId` 可给 —— 界面拿它回看"这句话是怎么想出来的"。
+     * 缺省 null = 用户自己写的那条（`composeSend`），本来就没有 run。
+     */
+    const addDraft = (id: string, text: string, runId: string | null = null) =>
       runs.insertDraft(
         {
           id,
-          runId: null,
+          runId,
           conversationId: "conv-1",
           replyToExternalId: null,
           text,
@@ -169,7 +204,27 @@ describe("★ 数字分身活动流只展示成功发生的用户结果", () => 
         NOW,
       )
 
-    addDraft("auto-draft", "自动回复")
+    /**
+     * ★ 先建 run 再建 draft：`dh_drafts.run_id` 有指向 `dh_agent_runs(id)`
+     * 的外键。倒过来会 FOREIGN KEY constraint failed —— 而那个约束正是
+     * "runId 指向一个真实存在的轮次"这件事的库层保证。
+     */
+    runs.insertRun(
+      {
+        id: "run-auto-1",
+        conversationId: "conv-1",
+        triggerMessageId: null,
+        draftText: "自动回复",
+        confidence: 0.9,
+        decision: "auto_sent",
+        decisionReason: null,
+        latencyMs: 1200,
+        costTokens: 800,
+        error: null,
+      },
+      NOW,
+    )
+    addDraft("auto-draft", "自动回复", "run-auto-1")
     runs.recordSendAttempt(
       attempt({
         idempotencyKey: "auto",
@@ -218,6 +273,8 @@ describe("★ 数字分身活动流只展示成功发生的用户结果", () => 
         kind: "user_edited",
         text: "用户改后的正文",
         occurredAt: NOW - 1,
+        // 用户自己改的那条没有 run —— 界面据此不给"看处理过程"入口
+        runId: null,
       },
       {
         id: "accepted",
@@ -225,6 +282,7 @@ describe("★ 数字分身活动流只展示成功发生的用户结果", () => 
         kind: "user_accepted",
         text: "原样采纳",
         occurredAt: NOW - 2,
+        runId: null,
       },
       {
         id: "auto",
@@ -232,9 +290,96 @@ describe("★ 数字分身活动流只展示成功发生的用户结果", () => 
         kind: "auto_sent",
         text: "自动回复",
         occurredAt: NOW - 3,
+        /**
+         * ★ agent 生成的那条**必须**带出 runId。
+         *
+         * 界面拿它回看"这句话是怎么想出来的"（触发消息 / 判定原因 /
+         * agent 过程）。取不到的话历史面板每一项就只剩正文，
+         * 而"分身替我说了这句话"最需要回答的恰恰是**为什么**。
+         *
+         * ★ 这一列是白拿的：`recentActivities` 的 SQL 为了取正文本来就
+         * `JOIN dh_drafts`，`run_id` 就在那张表上。
+         */
+        runId: "run-auto-1",
       },
     ])
     vault.close()
+  })
+
+  /**
+   * ★ 那一轮的元信息：触发消息 / 判定与原因 / 耗时 token。
+   *
+   * 与 trace（过程）分成两个查询 —— 两者都只在用户**展开某一条**时才需要，
+   * 塞进列表查询等于给 19 条不会被展开的记录白做 join。
+   */
+  it("runDetail 给出判定、耗时与触发消息", () => {
+    const vault = openTestVault()
+    const runs = new PersonaRunRepository(vault.db)
+    seedTriggerMessage(vault)
+    runs.insertRun(
+      {
+        id: "run-1",
+        conversationId: "conv-1",
+        triggerMessageId: "msg-trigger",
+        draftText: "收到",
+        confidence: 0.9,
+        decision: "drafted",
+        // 未自动发送时的原因 —— 界面用 explainDecisionReason 翻成人话
+        decisionReason: "grant_missing",
+        latencyMs: 4615,
+        costTokens: 15_629,
+        error: null,
+      },
+      NOW,
+    )
+
+    expect(runs.runDetail("run-1")).toEqual({
+      runId: "run-1",
+      decision: "drafted",
+      decisionReason: "grant_missing",
+      latencyMs: 4615,
+      costTokens: 15_629,
+      error: null,
+      // ★ 触发消息 join 得到 —— 它回答"为什么这轮会跑"
+      trigger: { senderDisplayName: "小李", contentText: "这个能帮忙看下吗" },
+    })
+  })
+
+  /**
+   * ★ 触发消息被保留策略清掉之后，其余元信息**仍然要给**。
+   *
+   * 用 LEFT JOIN 而不是 INNER：判定与耗时不该因为那条消息没了就整个查不到
+   * —— 而"查不到"与"这轮没有元信息"在界面上是两种不同的话。
+   */
+  it("★ 触发消息已被清理 → trigger 为 null，其余字段仍在", () => {
+    const vault = openTestVault()
+    const runs = new PersonaRunRepository(vault.db)
+    runs.insertRun(
+      {
+        id: "run-2",
+        conversationId: "conv-1",
+        // 指向一条不存在的消息（已被清理）
+        triggerMessageId: "msg-gone",
+        draftText: null,
+        confidence: null,
+        decision: "silent",
+        decisionReason: null,
+        latencyMs: 100,
+        costTokens: null,
+        error: null,
+      },
+      NOW,
+    )
+
+    const detail = runs.runDetail("run-2")
+    expect(detail?.trigger).toBeNull()
+    expect(detail?.decision).toBe("silent")
+    expect(detail?.latencyMs).toBe(100)
+  })
+
+  it("查不到的 runId 返回 null（老库 / 已清理，界面据此明说「查不到」）", () => {
+    const vault = openTestVault()
+    expect(new PersonaRunRepository(vault.db).runDetail("nope")).toBeNull()
   })
 })
 

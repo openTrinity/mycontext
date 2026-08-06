@@ -22,6 +22,7 @@ import type {
   PersonaMessageView,
   PersonaRunView,
   PersonaActivityView,
+  PersonaRunDetailView,
   PersonaMemberView,
   PersonaMessageHit,
   PersonaSnapshotView,
@@ -241,6 +242,16 @@ export interface MyContextApi {
     runs(input: { conversationId: string }): Promise<Result<PersonaRunView[]>>
     /** 回看某一轮的 agent 过程（thinking / 正文 / tool 调用）。没有痕迹时返回空数组 */
     runTrace(input: { runId: string }): Promise<Result<PersonaTraceItem[]>>
+    /**
+     * 那一轮的**元信息**：触发消息 / 判定与原因 / 耗时与 token。
+     *
+     * ★ 与 `runTrace` 分开而不是合成一个"详情"：那条给过程、这条给结论，
+     * 而过程可能很长（要滚动）而结论只有三行 —— 合并会让"我只想知道
+     * 为什么只出草稿"也得等整段 trace 传过来。
+     *
+     * `null` = 这个 runId 查不到（老库 / 已被清理）。
+     */
+    runDetail(input: { runId: string }): Promise<Result<PersonaRunDetailView | null>>
     /**
      * 取某个会话**当前正在生成**的那一轮 trace 快照（含未完成）。
      *

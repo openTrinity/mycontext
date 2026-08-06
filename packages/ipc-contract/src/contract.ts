@@ -72,6 +72,14 @@ export const IPC_CHANNELS = {
    * 两者返回同一个形状 —— 落库形态与渲染形态相同（见 v19 迁移文件头）。
    */
   personaRunTrace: "mycontext:persona/run-trace",
+  /**
+   * 读某一轮的**元信息**（触发消息 / 判定与原因 / 耗时与 token）。
+   *
+   * ★ 与 `personaRunTrace` 分开：那条给**过程**（thinking/正文/tool），
+   * 这条给**结论与代价**。两者都只在用户展开某一条历史时才需要，
+   * 所以都不塞进 `personaActivities`（一次 20 条，19 条不会被展开）。
+   */
+  personaRunDetail: "mycontext:persona/run-detail",
   personaLiveTrace: "mycontext:persona/live-trace",
   personaActivities: "mycontext:persona/activities",
   personaMessages: "mycontext:persona/messages",
@@ -1164,9 +1172,56 @@ export const personaActivitySchema = z.object({
   kind: z.enum(["auto_sent", "user_accepted", "user_edited"]),
   text: z.string(),
   occurredAt: z.number(),
+  /**
+   * 产生这条回复的那一轮 run —— 界面拿它回看「这句话是怎么想出来的」。
+   *
+   * ★ 可空：用户自己写的那条本来就没有 run，升级前的旧记录也没有。
+   * 那时界面**不显示**"看处理过程"入口 —— 一个点了没反应的入口
+   * 比没有入口更糟。
+   *
+   * ★ 与「有 run 但没 trace」是不同的状态：那时入口要在，展开后明说
+   * "这一轮没有留下过程"（实测 6 轮里 4 轮是这样 —— 走了直连降级）。
+   */
+  runId: z.string().nullable(),
 })
 
 export type PersonaActivityView = z.infer<typeof personaActivitySchema>
+
+/**
+ * 一轮 run 的元信息 —— 回答「为什么会跑、判成了什么、贵不贵」。
+ *
+ * ★ 与 `personaRunTrace`（过程）分成两个通道：两者都只在用户**展开某一条**
+ * 时才需要，塞进列表查询等于给 19 条不会被展开的记录白做 join。
+ */
+export const personaRunDetailSchema = z.object({
+  runId: z.string(),
+  decision: z.string(),
+  /**
+   * 未自动发送时的原因（机器码）。
+   *
+   * ★ 界面**必须**用 `explainDecisionReason()` 翻成人话，而不是各写一份映射
+   * —— 同一个 reason 在运行日志与这里必须是同一句话，否则用户会以为
+   * 是两回事。
+   */
+  decisionReason: z.string().nullable(),
+  latencyMs: z.number().nullable(),
+  costTokens: z.number().nullable(),
+  error: z.string().nullable(),
+  /** 触发这一轮的那条消息。null = 已被保留策略清掉（其余字段仍有效） */
+  trigger: z
+    .object({
+      senderDisplayName: z.string().nullable(),
+      contentText: z.string().nullable(),
+    })
+    .nullable(),
+})
+
+export type PersonaRunDetailView = z.infer<typeof personaRunDetailSchema>
+
+/** 读某一轮的元信息。与 `personaRunTraceInputSchema` 同形（都按 runId）。 */
+export const personaRunDetailInputSchema = z.object({ runId: z.string().min(1) })
+
+export type PersonaRunDetailInput = z.infer<typeof personaRunDetailInputSchema>
 
 /** 消息可视化用的一条消息。 */
 export const personaMessageSchema = z.object({

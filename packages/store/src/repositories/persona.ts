@@ -147,6 +147,40 @@ export interface PersonaActivityRow {
   kind: "auto_sent" | "user_accepted" | "user_edited"
   text: string
   occurredAt: number
+  /**
+   * 产生这条回复的那一轮 agent run。**用来回看"这句话是怎么想出来的"**。
+   *
+   * ★ 可空，而两种空的含义不同（界面要分开处置）：
+   * · 用户自己写的那条（`composeSend`）—— 本来就没有 run，没有过程可言；
+   * · 升级前的旧记录 —— 那时还不记 run_id。
+   * 两者都不该显示"看处理过程"入口（点了没反应比不显示更糟）。
+   *
+   * ★ 与「有 run 但没 trace」是**第三种**状态：那时入口要在，
+   * 展开后明说"这一轮没有留下过程"—— 实测 6 轮里有 4 轮是这样
+   * （走了直连降级那条路）。让「没有」与「没加载出来」在界面上可区分。
+   */
+  runId: string | null
+}
+
+/**
+ * 一轮 agent run 的元信息 —— 回答「为什么会跑、判成了什么、贵不贵」。
+ *
+ * ## ★ 为什么与 trace 分成两个查询
+ *
+ * trace 是那一轮的**过程**（thinking / 正文 / tool），这个是**结论与代价**。
+ * 两者都只在用户**展开某一条**时才需要，所以都不该塞进
+ * `recentActivities`（一次 20 条，其中 19 条不会被展开 —— 那是 19 次白做的 join）。
+ */
+export interface PersonaRunDetailRow {
+  runId: string
+  decision: string
+  /** 未自动发送时的原因（机器码，界面用 `explainDecisionReason` 翻译） */
+  decisionReason: string | null
+  latencyMs: number | null
+  costTokens: number | null
+  error: string | null
+  /** 触发这一轮的那条消息 —— 回答「为什么这轮会跑」 */
+  trigger: { senderDisplayName: string | null; contentText: string | null } | null
 }
 
 const REPLY_MODES: ReadonlySet<string> = new Set(["auto", "draft", "yolo"])
@@ -971,6 +1005,7 @@ export class PersonaRunRepository {
           text: string
           edited_text: string | null
           occurred_at: number
+          run_id: string | null
         }
       >(
         `SELECT a.idempotency_key AS id,
@@ -978,7 +1013,10 @@ export class PersonaRunRepository {
                 a.source,
                 d.text,
                 d.edited_text,
-                COALESCE(a.sent_at, a.attempted_at) AS occurred_at
+                COALESCE(a.sent_at, a.attempted_at) AS occurred_at,
+                -- ★ run_id 白拿：这个 JOIN 本来就在（为了取正文），
+                --   多带一列就让界面能回看那一轮的过程。见 PersonaActivityRow.runId
+                d.run_id
            FROM dh_send_attempts a
            JOIN dh_drafts d ON d.id = a.draft_id
           WHERE a.conversation_id = ?
@@ -999,7 +1037,53 @@ export class PersonaRunRepository {
               : ("user_accepted" as const),
         text: raw.edited_text ?? raw.text,
         occurredAt: raw.occurred_at,
+        runId: raw.run_id,
       }))
+  }
+
+  /**
+   * 一轮 run 的元信息（含触发消息）。找不到返回 null。
+   *
+   * ★ `LEFT JOIN messages`：`trigger_message_id` 可能指向一条已被保留策略
+   * 清掉的消息 —— 那时元信息的其余部分（判定、耗时）仍然有价值，
+   * 不该因为触发消息没了就整个查不到。
+   */
+  runDetail(runId: string): PersonaRunDetailRow | null {
+    const row = this.db
+      .prepare<
+        [string],
+        {
+          id: string
+          decision: string
+          decision_reason: string | null
+          latency_ms: number | null
+          cost_tokens: number | null
+          error: string | null
+          sender_display_name: string | null
+          content_text: string | null
+        }
+      >(
+        `SELECT r.id, r.decision, r.decision_reason, r.latency_ms, r.cost_tokens, r.error,
+                m.sender_display_name, m.content_text
+           FROM dh_agent_runs r
+           LEFT JOIN messages m ON m.id = r.trigger_message_id
+          WHERE r.id = ?`,
+      )
+      .get(runId)
+    if (row === undefined) return null
+    return {
+      runId: row.id,
+      decision: row.decision,
+      decisionReason: row.decision_reason,
+      latencyMs: row.latency_ms,
+      costTokens: row.cost_tokens,
+      error: row.error,
+      // 两个字段都空 = 触发消息查不到（已被清理），那时给 null 而不是一个空对象
+      trigger:
+        row.sender_display_name === null && row.content_text === null
+          ? null
+          : { senderDisplayName: row.sender_display_name, contentText: row.content_text },
+    }
   }
 
   /**

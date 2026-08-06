@@ -74,6 +74,7 @@ import {
   IPC_EVENTS,
   type PersonaConversationView,
   type PersonaDraftView,
+  type PersonaRunDetailView,
   type PersonaTraceItem,
   type PersonaMessageView,
   type PersonaRunView,
@@ -1368,6 +1369,20 @@ export class PersonaService {
       turnId: row.turnId,
       createdAt: row.createdAt,
     }))
+  }
+
+  /**
+   * 那一轮的元信息（触发消息 / 判定与原因 / 耗时 token）。
+   *
+   * ★ 与 `runTrace` 分开的理由见契约那侧的注释：过程可能很长，
+   * 而"为什么只出草稿"只有三行 —— 合并会让后者也要等前者传完。
+   *
+   * 未挂载（未登录）或 runId 查不到时返回 null，由界面说清"查不到"。
+   */
+  runDetail(runId: string): PersonaRunDetailView | null {
+    const db = this.db
+    if (db === null) return null
+    return new PersonaRunRepository(db).runDetail(runId)
   }
 
   /**
