@@ -170,28 +170,31 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   /**
    * ★★ 身份错位：**渠道当前用的组织** ≠ **这个账号绑定的组织**。
    *
-   * ## 为什么必须显式告警（这是个隐私问题，不只是显示不准）
+   * ## 这条告警现在是「异常兜底」，不再是常态
    *
-   * dws 的会话列表、消息采集全都按它**当前生效的 profile** 来答，而那个
-   * profile 由 `primaryProfile` 决定。实测过一次真实错位：用户在应用里授权到
-   * 组织 A，token 也写进去了（`token.json` 的 updated_at 就是那一刻），
-   * 但 `primaryProfile` 仍指着组织 B（且 B 已过期）—— 于是：
+   * 改动前它是常态：渠道命令跟着 CLI 的全局 `currentProfile` 走，而那个值
+   * 会被用户在终端改掉，于是应用拿着 A 的库去读 B 的会话。实测过一次真实
+   * 错位（库里绑组织甲、248 个会话，而 `chat list-all-conversations` 按组织乙
+   * 答 38 个）—— 那是**越权读取面**，与 CLAUDE.md 第 5 节同一类问题。
    *
-   * · 引导页「学习范围」列出的单聊是**组织 B** 的联系人（实测 43 个），
-   *   而 vault 身份行绑的是组织 A（库里只有 19 个单聊）；
-   * · 用户授权的是 A，应用却在按 B 列会话 —— 这是**越权读取面**，
-   *   与 CLAUDE.md 第 5 节「严格遵守用户选的范围」是同一类问题。
+   * 现在两道防线把它从根上关掉了：
+   * ① 渠道配置目录**按 vault**，挂载时只 seed 当前身份那一条 profile ——
+   *    结构性隔离（实测拿另一个身份的 `--profile` 去问直接
+   *    `organization "…" not found`）；
+   * ② 每条命令再显式钉一次 `--profile <corpId>:<userId>`。
    *
-   * ## 为什么只能告警，不能自动修
+   * ## ★ 那为什么还留着它
    *
-   * 修它需要让 dws 把 primary 切到 A，而实测**每一种** `--profile` 形式
-   * （`corpId:userId` / `corpId` / `corpName` / `corpName:userName`）都报
-   * `organization … not found`，`profile switch --dry-run` 也一样 ——
-   * 因为 `dws profile list` 只认 1 个槽位，而 `profiles.json` 里记了 3 个。
-   * 那是 dws 侧两份记录不一致，应用这侧无法寻址到另外两个。
+   * 因为它现在能抓到一件**真的异常**：seed 逻辑失效（比如那个目录被外部
+   * 改过、或 CLI 在里面跑过一次 `auth login` 又加进一个身份）。
+   * 那时两个值会重新分叉，而没有这条告警的话它又是静默的。
    *
-   * 所以这里的目标是把一个**静默**的错位变成**可见**的：告诉用户是哪两个
-   * 组织、并指出重新授权是唯一出路。
+   * ★ 一条过期的注释已按实测改掉：这里原来写「实测**每一种** `--profile`
+   * 形式都报 organization not found，所以只能告警不能修」。那是**旧 CLI
+   * 版本**的结论 —— 在 v1.0.56 上 `--profile <corpId>:<userId>` 四类命令
+   * 全部正常，且放在子命令之后也生效。所以"不能修"已经不成立，
+   * 修法就是上面那两道。（`profile switch` 仍然不用：它改全局状态，
+   * 会踩掉用户终端里的登录态，而且实测 `--dry-run` 也会真的改。）
    *
    * ★ 比对用 `corpId` 而不是 `corpName`（后者是显示名，写法可能变）。
    * 两侧任一为空就不判 —— 缺值时报警只会制造假阳性。

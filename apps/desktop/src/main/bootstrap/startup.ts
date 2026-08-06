@@ -1196,6 +1196,7 @@ export function bootstrapApp(mainDir: string): AppContext {
 
   registerIpc({
     auth,
+    activeIdentity,
     status,
     channels,
     onboarding,

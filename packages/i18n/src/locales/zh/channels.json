@@ -74,7 +74,7 @@
   "settings": {
     "expiredHint": "授权已过期，需要重新扫码",
     "expiryWarning": "授权将在 {{days}} 天后过期，建议现在重新授权。",
-    "identityMismatch": "身份不一致：渠道当前生效的是「{{channelCorp}}」，而这个账号绑定的是「{{boundCorp}}」。会话列表与采集都会按前者来，可能读到不属于你预期范围的内容 —— 请重新授权到「{{boundCorp}}」，或新建一个账号使用「{{channelCorp}}」。",
+    "identityMismatch": "身份配置异常：这份数据绑定的是「{{boundCorp}}」，而渠道配置目录里当前生效的是「{{channelCorp}}」。正常情况下两者应当一致（每个身份有自己独立的一份数据与配置）—— 请重新授权到「{{boundCorp}}」把它恢复，或切换到「{{channelCorp}}」自己的那份数据。",
     "sharedCredentialNote": "授权凭据由钉钉官方 CLI 保存在系统钥匙串，与你在终端里的登录态共用。如需彻底清除，请在终端执行 <1>{{command}}</1>。"
   },
   "progress": {

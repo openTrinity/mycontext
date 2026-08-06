@@ -27,6 +27,7 @@ import {
   type ThemePreference,
 } from "../../lib/use-theme.js"
 import { ChannelAuthPanel } from "../channels/channel-auth-panel.js"
+import { IdentitySwitcher } from "../channels/identity-switcher.js"
 import { AdvancedAiPanel } from "./advanced-ai.js"
 import { ModelConfigForm } from "./model-config-form.js"
 import { IdentityPanel } from "./identity-panel.js"
@@ -556,6 +557,12 @@ function ChannelsSection() {
           {(channels.data ?? []).map((channel) => (
             <ChannelAuthPanel key={channel.id} channel={channel} variant="settings" />
           ))}
+          {/*
+            ★ 身份切换器放在授权卡片**之后**：先回答"连的是谁"，
+            再给"换成另一个谁"。反过来的话用户会先看到一个列表而不知道
+            它在说什么。只有一个身份时它自己不渲染（见组件注释）。
+          */}
+          <IdentitySwitcher />
         </div>
       )}
     </Section>

@@ -56,6 +56,8 @@ const api: MyContextApi = {
     },
     adoptableSession: () => ipcRenderer.invoke(IPC_CHANNELS.channelAdoptableSession),
     adoptSession: () => ipcRenderer.invoke(IPC_CHANNELS.channelAdoptSession),
+    identityList: () => ipcRenderer.invoke(IPC_CHANNELS.channelIdentityList),
+    identitySwitch: (input) => ipcRenderer.invoke(IPC_CHANNELS.channelIdentitySwitch, input),
     conversations: () => ipcRenderer.invoke(IPC_CHANNELS.channelConversations),
   },
   onboarding: {

@@ -1,5 +1,7 @@
 import type { Result } from "@mycontext/kernel"
 import type {
+  ChannelIdentity,
+  ChannelIdentitySwitchInput,
   AdvancedAiConfigView,
   DwsSourceView,
   AuthSession,
@@ -122,6 +124,23 @@ export interface MyContextApi {
      * 幂等：已经有身份行时什么都不做并返回 false。
      */
     adoptSession(): Promise<Result<{ adopted: boolean }>>
+    /**
+     * 这个账号下的全部渠道身份（身份切换列表）。最近用过的在前。
+     *
+     * 未登录时返回空数组（那时没有账号，也就没有身份）。
+     */
+    identityList(): Promise<Result<ChannelIdentity[]>>
+    /**
+     * 切到另一个渠道身份。
+     *
+     * ★ 是个**重动作**：卸载当前 vault（停采集、卸 agent、停图谱服务）→
+     * 挂载那个身份的。切完图谱要重付一次 warmup（实测冷启约 90s），
+     * 所以界面要把"正在切换 / 正在准备图谱"表达出来，
+     * 否则用户会以为数据丢了。
+     *
+     * 幂等：切到当前身份直接返回（不白付一次卸载+挂载）。
+     */
+    identitySwitch(input: ChannelIdentitySwitchInput): Promise<Result<{ switched: boolean }>>
     /**
      * 会话列表（蒸馏范围选择用）。
      *

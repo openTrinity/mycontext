@@ -162,6 +162,20 @@ export const IPC_CHANNELS = {
   channelAdoptableSession: "mycontext:channel/adoptable-session",
   /** 采纳本机已有的登录态：落身份行 + 刷新账号头像与显示名（用户显式触发）。 */
   channelAdoptSession: "mycontext:channel/adopt-session",
+  /**
+   * 这个账号下的**全部渠道身份**（界面上的身份切换列表）。
+   *
+   * 隔离维度是 `(channelId, corpId, userId)` —— 一个人可能在多个组织里
+   * 各有一个身份，每个身份一份独立的数据。查询，无副作用。
+   */
+  channelIdentityList: "mycontext:channel/identity-list",
+  /**
+   * 切到另一个渠道身份（**卸载当前 vault → 挂载那个身份的**）。
+   *
+   * ★ 是个重动作：会停采集、卸 agent、停图谱服务（切完要重付一次
+   * warmup，实测冷启约 90s）。界面必须把"正在切换"表达出来。
+   */
+  channelIdentitySwitch: "mycontext:channel/identity-switch",
   ingestIntervals: "mycontext:ingest/intervals",
   ingestIntervalsSave: "mycontext:ingest/intervals-save",
   pipelineFeedInfo: "mycontext:pipeline/feed-info",
@@ -1665,6 +1679,43 @@ export const selfIdentityViewSchema = z.object({
 })
 
 export type SelfIdentityView = z.infer<typeof selfIdentityViewSchema>
+
+/**
+ * 一个渠道身份（界面上的身份切换列表用）。
+ *
+ * ## ★ 为什么 `corpId`/`userId` 也要给渲染层
+ *
+ * 切换时要拿它们当键回传（`(channelId, corpId, userId)` 才唯一定位一个身份
+ * —— userId 只在**企业内**唯一，同一个人在两家企业下是两个不同的 userId）。
+ * 它们是标识符而不是凭据，且渲染层本来就通过 `selfIdentityView.corpId`
+ * 看得到当前那个，所以这里不构成新的暴露面。
+ *
+ * ★ **不含** vaultId：那是存储布局，渲染层不需要知道（与 `AuthSession`
+ * 刻意不带 vaultId 同一条原则）。
+ */
+export const channelIdentitySchema = z.object({
+  channelId: z.string(),
+  corpId: z.string(),
+  userId: z.string(),
+  /** 组织名与真名 —— 仅展示（会改，不参与判定） */
+  corpName: z.string().nullable(),
+  userName: z.string().nullable(),
+  /** 是不是当前生效的那个 */
+  active: z.boolean(),
+  /** 最近用过的时间（ISO）。null = 绑定后还没用过 */
+  lastUsedAt: z.string().nullable(),
+})
+
+export type ChannelIdentity = z.infer<typeof channelIdentitySchema>
+
+/** 切身份的输入。键必须是三元组，见 `channelIdentitySchema` 的注释。 */
+export const channelIdentitySwitchInputSchema = z.object({
+  channelId: z.string().min(1),
+  corpId: z.string().min(1),
+  userId: z.string().min(1),
+})
+
+export type ChannelIdentitySwitchInput = z.infer<typeof channelIdentitySwitchInputSchema>
 
 /**
  * Feed 接口信息。

@@ -74,7 +74,7 @@
   "settings": {
     "expiredHint": "Authorization expired — you'll need to scan again",
     "expiryWarning": "This authorization expires in {{days}} days. Re-authorizing now is a good idea.",
-    "identityMismatch": "Identity mismatch: the channel is currently acting as \"{{channelCorp}}\", but this account is bound to \"{{boundCorp}}\". Conversation lists and collection follow the former, so you may see content outside your intended scope — re-authorize to \"{{boundCorp}}\", or create a separate account for \"{{channelCorp}}\".",
+    "identityMismatch": "Identity misconfigured: this data is bound to \"{{boundCorp}}\", but the channel config directory currently resolves to \"{{channelCorp}}\". These should always match (each identity keeps its own data and config) — re-authorize to \"{{boundCorp}}\" to restore it, or switch to \"{{channelCorp}}\" and its own data.",
     "sharedCredentialNote": "The official DingTalk CLI stores credentials in your system keychain, shared with the CLI in your terminal. To clear them completely, run <1>{{command}}</1> in a terminal."
   },
   "progress": {

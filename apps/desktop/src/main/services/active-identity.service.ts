@@ -31,6 +31,7 @@
  * （实测：库里 248 个会话属于组织甲，而采集器在按组织乙列会话）。
  */
 import { AppError, type Logger } from "@mycontext/kernel"
+import type { ChannelIdentity } from "@mycontext/ipc-contract"
 import type {
   ChannelIdentityKey,
   ChannelIdentityVaultRecord,
@@ -96,9 +97,34 @@ export class ActiveIdentityService {
     return identity === null ? undefined : toChannelProfile(identity)
   }
 
-  /** 某账号下的全部身份（界面上的身份切换列表）。最近用过的在前。 */
+  /** 某账号下的全部身份（最近用过的在前）。 */
   list(accountId: string, channelId?: string): ChannelIdentityVaultRecord[] {
     return this.options.identities.listByAccount(accountId, channelId)
+  }
+
+  /**
+   * 给渲染层的身份列表。
+   *
+   * ★ 与 `list()` 分开是因为**边界不同**：这个要过 IPC，所以
+   * **不带 vaultId**（那是存储布局，渲染层不需要知道 —— 与 `AuthSession`
+   * 刻意不带 vaultId 同一条原则）。`active` 由这一层算，
+   * 免得渲染层再去比一次（两处比会分叉）。
+   */
+  listView(accountId: string, channelId?: string): ChannelIdentity[] {
+    const current = this.current
+    return this.list(accountId, channelId).map((row) => ({
+      channelId: row.channelId,
+      corpId: row.corpId,
+      userId: row.userId,
+      corpName: row.corpName,
+      userName: row.userName,
+      active:
+        current !== null &&
+        current.channelId === row.channelId &&
+        current.corpId === row.corpId &&
+        current.userId === row.userId,
+      lastUsedAt: row.lastUsedAt,
+    }))
   }
 
   /**

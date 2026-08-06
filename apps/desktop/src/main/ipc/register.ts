@@ -12,6 +12,7 @@ import {
   IPC_CHANNELS,
   channelAuthStartInputSchema,
   channelIdInputSchema,
+  channelIdentitySwitchInputSchema,
   createSearchSessionInputSchema,
   credentialsSchema,
   distillSourceResetInputSchema,
@@ -54,6 +55,7 @@ import type { BootstrapState } from "@mycontext/ipc-contract"
 import { z } from "zod"
 import type { AuthService } from "../services/auth.service.js"
 import type { ChannelService } from "../services/channel.service.js"
+import type { ActiveIdentityService } from "../services/active-identity.service.js"
 import type { OnboardingService } from "../services/onboarding.service.js"
 import type { DistillSourceService } from "../services/distill-source.service.js"
 import type { DistillService } from "../services/distill.service.js"
@@ -75,6 +77,8 @@ export interface IpcDependencies {
   auth: AuthService
   status: StatusService
   channels: ChannelService
+  /** 身份切换器 —— 列身份与切身份两个通道用它 */
+  activeIdentity: ActiveIdentityService
   onboarding: OnboardingService
   distillSources: DistillSourceService
   distill: DistillService
@@ -113,6 +117,7 @@ export function registerIpc(deps: IpcDependencies): void {
     auth,
     status,
     channels,
+    activeIdentity,
     onboarding,
     distillSources,
     distill,
@@ -231,6 +236,42 @@ export function registerIpc(deps: IpcDependencies): void {
         channelStatus: () => channels.safeStatus("dingtalk"),
       })
       return { adopted }
+    }),
+  )
+
+  /**
+   * 这个账号下的全部渠道身份（界面上的身份切换列表）。
+   *
+   * ★ 未登录时给空数组而不是抛：设置页在登录前也会渲染，
+   * 而"读不到就报错"会让整页红，而事实只是"还没登录"。
+   */
+  ipcMain.handle(IPC_CHANNELS.channelIdentityList, () =>
+    attempt(() => {
+      const session = auth.currentSession()
+      if (session === null) return []
+      return activeIdentity.listView(session.accountId)
+    }),
+  )
+
+  /**
+   * 切到另一个渠道身份。
+   *
+   * ★ 这是个**重动作**（卸采集/卸 agent/停图谱 → 挂新的），所以由
+   * `ActiveIdentityService` 自己串顺序并挡并发（见它的 in-flight 闸）。
+   * 这一层只做参数校验与登录态检查。
+   */
+  ipcMain.handle(IPC_CHANNELS.channelIdentitySwitch, (_event, payload: unknown) =>
+    attempt(async () => {
+      const input = parse(channelIdentitySwitchInputSchema, payload)
+      const session = auth.currentSession()
+      if (session === null) throw new AppError("AUTH_NOT_SIGNED_IN", "尚未登录")
+      const switched = await activeIdentity.switchTo({
+        accountId: session.accountId,
+        channelId: input.channelId,
+        corpId: input.corpId,
+        userId: input.userId,
+      })
+      return { switched: switched !== null }
     }),
   )
 

@@ -53,7 +53,7 @@
     "CHANNEL_AUTH_FAILED": "渠道授权失败",
     "CHANNEL_UNSUPPORTED": "该渠道尚未开放",
     "SELF_IDENTITY_AMBIGUOUS": "无法唯一确定你的身份，请手动确认后再继续",
-    "SELF_IDENTITY_CONFLICT": "这个账号已绑定另一个身份（组织或工号不同）。换身份请新建一个账号，或用原身份重新授权。",
+    "SELF_IDENTITY_CONFLICT": "这份数据属于另一个身份（组织或工号不同）。每个身份有自己的一份数据 —— 去渠道设置里切换身份，或重新授权到你想用的那个。",
     "CHANNEL_IDENTITY_UNAVAILABLE": "这个身份在本机没有登录态（可能在别处退出过登录）。请重新授权到它，或切换到其它身份。",
     "PARSE_FAILED": "外部数据格式无法解析",
     "SESSION_EXPIRED": "登录已过期，请重新授权",

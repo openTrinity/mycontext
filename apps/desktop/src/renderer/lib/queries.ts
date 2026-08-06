@@ -33,6 +33,8 @@ export const QUERY_KEYS = {
   selfIdentity: ["self-identity"] as const,
   /** 本机是否有一份可采纳的渠道登录态（见 useAdoptableSession） */
   adoptableSession: ["adoptable-session"] as const,
+  /** 这个账号下的全部渠道身份（身份切换器） */
+  channelIdentities: ["channel", "identities"] as const,
   feed: ["feed"] as const,
   searchSessions: ["search", "sessions"] as const,
   advancedAi: ["advanced-ai"] as const,
@@ -200,6 +202,43 @@ export function useAdoptSession() {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.selfIdentity })
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.adoptableSession })
     },
+  })
+}
+
+/**
+ * 这个账号下的全部渠道身份（身份切换器的数据源）。
+ *
+ * 一个人可能在多个组织里各有一个身份，每个身份一份独立的数据 ——
+ * 隔离维度是 `(channelId, corpId, userId)`。未登录时主进程给空数组。
+ */
+export function useChannelIdentities(enabled = true) {
+  return useQuery({
+    queryKey: QUERY_KEYS.channelIdentities,
+    queryFn: async () => unwrap(await window.mycontext.channels.identityList()),
+    enabled,
+  })
+}
+
+/**
+ * 切到另一个渠道身份。
+ *
+ * ## ★★ 切完要把**几乎所有**缓存都作废
+ *
+ * 这不是"刷新一个字段"，而是换了一整份数据：会话、消息、画像、图谱、
+ * 数字人配置、引导进度全部跟着变。漏掉任何一个 key 的表现是
+ * "切了身份但某一块还显示上一个人的东西" —— 而那正是这轮要修的那类
+ * 静默错误换了个位置（只不过这次在渲染层）。
+ *
+ * 所以这里**不逐个列**，直接 `invalidateQueries()` 全清 —— 少列一个的
+ * 代价（显示别人的数据）远大于多刷几个查询的代价。
+ */
+export function useSwitchChannelIdentity() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { channelId: string; corpId: string; userId: string }) =>
+      unwrap(await window.mycontext.channels.identitySwitch(input)),
+    // ★ 全清：见上面的注释（漏一个 key 就是显示上一个身份的数据）
+    onSettled: () => void queryClient.invalidateQueries(),
   })
 }
 
