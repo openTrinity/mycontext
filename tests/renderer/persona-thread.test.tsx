@@ -399,6 +399,7 @@ function draft(over: Partial<PersonaDraftView> = {}): PersonaDraftView {
     conversationId: "conv-a",
     text: "沙箱那边我下午确认一下",
     editedText: null,
+    runId: null,
     notSentReason: "grant_missing",
     citations: [],
     createdAt: DAY_ONE,
@@ -411,6 +412,7 @@ describe("★ 草稿可编辑，且只在真改过时传 editedText", () => {
     const calls: Parameters<React.ComponentProps<typeof ReplyDock>["onResolve"]>[0][] = []
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft()]}
         busy={false}
         errorText={null}
@@ -434,6 +436,7 @@ describe("★ 草稿可编辑，且只在真改过时传 editedText", () => {
     const calls: Parameters<React.ComponentProps<typeof ReplyDock>["onResolve"]>[0][] = []
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft()]}
         busy={false}
         errorText={null}
@@ -457,6 +460,7 @@ describe("★ 草稿可编辑，且只在真改过时传 editedText", () => {
   it("正文被清空时发送按钮禁用（空消息发出去毫无意义）", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft()]}
         busy={false}
         errorText={null}
@@ -582,6 +586,7 @@ describe("★ 引用可点：判断「是不是在瞎编」的唯一手段", () 
     const shown: string[][] = []
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ citations: ["msg-7", "msg-9"] })]}
         busy={false}
         errorText={null}
@@ -600,6 +605,7 @@ describe("★ 引用可点：判断「是不是在瞎编」的唯一手段", () 
   it("没有引用时不显示这个按钮（点了没反应比没有更糟）", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ citations: [] })]}
         busy={false}
         errorText={null}
@@ -642,6 +648,7 @@ describe("★ 原因说人话，且分清能不能自己改", () => {
   it("grant_missing 显示人话 + 标成「可以自己改」+ 给出去申请授权", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ notSentReason: "grant_missing" })]}
         busy={false}
         errorText={null}
@@ -669,6 +676,7 @@ describe("★ 原因说人话，且分清能不能自己改", () => {
   it("agent_requires_review 标成「本来就这样」+ 不给动作", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ notSentReason: "agent_requires_review" })]}
         busy={false}
         errorText={null}
@@ -696,6 +704,7 @@ describe("★ 原因说人话，且分清能不能自己改", () => {
     const because = "risk class `commitment` — never settled by the owner alone"
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ notSentReason: because })]}
         busy={false}
         errorText={null}
@@ -712,6 +721,7 @@ describe("★ 原因说人话，且分清能不能自己改", () => {
   it("rate_limited 给出下一步动作（它是能自己改的）", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ notSentReason: "rate_limited" })]}
         busy={false}
         errorText={null}
@@ -729,6 +739,7 @@ describe("★ 原因说人话，且分清能不能自己改", () => {
   it("★ 未知 reason 原样显示，不给兜底文案", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ notSentReason: "generation_failed" })]}
         busy={false}
         errorText={null}
@@ -763,6 +774,7 @@ describe("★ 全局草稿数与右栏数字不能互相矛盾", () => {
   it("别的会话还有草稿时，右栏必须说出来", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[]}
         busy={false}
         errorText={null}
@@ -783,6 +795,7 @@ describe("★ 全局草稿数与右栏数字不能互相矛盾", () => {
   it("没有别处的草稿时不显示那行（凭空冒出一个 0 会让人以为出错了）", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft()]}
         busy={false}
         errorText={null}
@@ -1568,6 +1581,7 @@ describe("★ 草稿署名：名字与形象", () => {
   it("显示引导页设的数字人名字", async () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ id: "d1" })]}
         busy={false}
         errorText={null}
@@ -1592,6 +1606,7 @@ describe("★ 草稿署名：名字与形象", () => {
   it("形象渲染成一张图（DiceBear 离线生成，不依赖网络）", () => {
     wrap(
       <ReplyDock
+        conversationId="conv-a"
         drafts={[draft({ id: "d1" })]}
         busy={false}
         errorText={null}

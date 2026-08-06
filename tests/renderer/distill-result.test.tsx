@@ -91,6 +91,7 @@ function ingestSnapshot(backfill: IngestSnapshot["backfill"]): IngestSnapshot {
     minutes: 0,
     storage: { mainBytes: 0, walBytes: 0, rawRecords: 0, rawPruned: 0, vectors: 0 },
     staleConsumers: [],
+    eventStream: null,
     backfill,
   }
 }

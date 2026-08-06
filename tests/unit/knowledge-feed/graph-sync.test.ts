@@ -498,7 +498,7 @@ describe("★★ 建图被主动打断（退出应用 / 停服务）不进退避
     ready: true,
   })
 
-  it("★ 返回 \"cancelled\" → 不算失败，下一轮照常建", async () => {
+  it('★ 返回 "cancelled" → 不算失败，下一轮照常建', async () => {
     const vault = openTestVault()
     try {
       appendChanges(vault, 600) // 够 500 条阈值 → lag-threshold

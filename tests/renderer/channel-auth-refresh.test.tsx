@@ -64,7 +64,7 @@ describe("★★ 授权成功后失效的缓存（修重授权身份只刷一半
     const { result } = renderHook(() => useStartChannelAuth(), { wrapper: wrapper(client) })
 
     await act(async () => {
-      await result.current.mutateAsync({ channelId: "dingtalk", mode: "self" })
+      await result.current.mutateAsync({ channelId: "dingtalk", mode: "loopback" })
     })
 
     await waitFor(() => expect(invalidated.length).toBeGreaterThanOrEqual(3))

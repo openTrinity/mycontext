@@ -38,7 +38,9 @@ const CURRENT = {
 }
 
 function wrap() {
-  const save = vi.fn(() => Promise.resolve({ ok: true as const, data: CURRENT }))
+  const save = vi.fn<
+    (input: Parameters<MyContextApi["ingest"]["intervalsSave"]>[0]) => Promise<unknown>
+  >(() => Promise.resolve({ ok: true as const, data: CURRENT }))
   const api = {
     ingest: {
       intervals: () => Promise.resolve({ ok: true as const, data: CURRENT }),

@@ -1723,10 +1723,7 @@ describe("KlServerService · 生命周期绑定（pidfile 自愈 + 建图不 ado
   function dataDirWithPidfile(pid: number, port = 8200): string {
     const dir = mkdtempSync(join(tmpdir(), "mycontext-kl-pidfile-"))
     dirs.push(dir)
-    writeFileSync(
-      join(dir, "kl-server.pid"),
-      JSON.stringify({ pid, port, startedAt: 1_000 }),
-    )
+    writeFileSync(join(dir, "kl-server.pid"), JSON.stringify({ pid, port, startedAt: 1_000 }))
     return dir
   }
 

@@ -52,7 +52,7 @@ function makeFakeProcesses() {
     },
     async exec(spec: { args: string[] }): Promise<ExecResult> {
       execCalls.push(spec.args)
-      return { exitCode: 0, stdout: "", stderr: "" }
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false }
     },
   }
   return {

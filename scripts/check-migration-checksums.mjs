@@ -22,9 +22,11 @@
  *
  * ① **全历史**：同一个 SQL 常量的所有历史变体，语义 checksum 必须相同。
  *    非空 = 有人真的改过已发布迁移的 schema —— 那是判据放行不了的，必须人工看。
- * ② **登记表**：`legacyChecksums` 每一项都能在历史里找到产出它的那一版，
- *    且那一版与当前 SQL 同 schema。防的是往白名单里塞一个 schema 真不同的值
- *    （那等于给某个版本单独关掉校验，而且完全静默）。
+ * ② **登记表**：`legacyChecksums` 每一项，若能在历史里找到产出它的那一版，
+ *    那一版必须与当前 SQL 同 schema（找到了但 schema 不同 = 硬失败：那等于给
+ *    某个版本单独关掉校验）。**找不到不算失败** —— 本仓是压成单 commit 发布的，
+ *    压平之前的历史变体的 blob 不在本仓 `rev-list --all` 里，「找不到」是发布方式
+ *    的必然，不代表 schema 被改过；这一档的真正兜底是 ④（本机 vault 对账）。
  * ③ **剥注释没写坏**：剥完不该变空，不同迁移不该撞出同一个 checksum。
  *    这两种形态都不报错，只是让整道校验失效。
  * ④ **本机 vault 对账**：逐条归因，出现无法归因的就红。
@@ -162,16 +164,46 @@ try {
   }
 
   console.log(`\n登记表核对：${report.legacy.length} 项`)
+  /**
+   * ★ legacy 值的判定分三档，而不是原来的「找不到就红」。
+   *
+   * 起因：本仓是**压成单 commit 发布**的（源在别处，历史不随包公开）。
+   * 而 legacyChecksums 里登记的旧值，是**压平之前**那些「只改注释、schema
+   * 没变」的历史变体 —— 产出它们的那一版迁移文件的 blob 已经不在本仓的
+   * `git rev-list --all` 里了。于是「在历史里找到产出它的那一版」这个前提
+   * 在快照仓里**永远不成立**，而它本身不代表任何 schema 被改过。
+   *
+   * 为什么降级是安全的：② 的「找不到就红」只是双保险。legacy 值真正被**用到**
+   * 的地方是 ④（本机 vault 对账）—— 一个 schema 真不同的 legacy 值会在那里
+   * 让某个版本的漂移变成「已登记」而放行，而 ④ 在任何有该 vault 的机器上照跑、
+   * 照红。所以这里把「找不到」降为**告警不失败**，并不放掉真正的保护；
+   * 真正危险的一档（历史里**找到了**、但 schema 与当前不同）仍然硬失败。
+   *
+   * 而且这是**自愈**的：等 mycontext 自己攒出历史、某个 legacy 值的产出版本
+   * 重新出现在 `rev-list --all` 里，它就自动回到「找到 → 核对 schema」这条路。
+   * 前向保护由 ①（全历史 semantic-drift）承担，它在快照仓里照样有效。
+   */
   for (const item of report.legacy) {
+    if (item.foundSchema === null) {
+      // 快照仓：产出它的那一版已随历史压平被丢弃 —— 无法用历史核对，不失败。
+      console.log(
+        `  ⚠ v${item.version} ${item.name} ${item.legacy} — ` +
+          "历史里没有产出它的那一版（快照发布，历史已压平），改由 vault 对账（④）兜底",
+      )
+      continue
+    }
     const ok = item.foundSchema === item.currentSchema
     if (!ok) failed = true
-    const detail =
-      item.foundSchema === null
-        ? "全历史里找不到产出它的那一版"
-        : `schema=${item.foundSchema}（当前 ${item.currentSchema}）`
-    console.log(`  ${ok ? "✓" : "✗"} v${item.version} ${item.name} ${item.legacy} — ${detail}`)
+    console.log(
+      `  ${ok ? "✓" : "✗"} v${item.version} ${item.name} ${item.legacy} — ` +
+        `schema=${item.foundSchema}（当前 ${item.currentSchema}）`,
+    )
   }
-  if (report.legacy.some((item) => item.foundSchema !== item.currentSchema)) {
+  if (
+    report.legacy.some(
+      (item) => item.foundSchema !== null && item.foundSchema !== item.currentSchema,
+    )
+  ) {
     console.error(
       "  legacyChecksums 只能登记**已确认与当前 SQL 同 schema**的旧值；\n" +
         "  登记一个 schema 不同的值等于给这个版本单独关掉校验。",

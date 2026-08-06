@@ -2083,7 +2083,12 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
           return Promise.resolve({
             verdict: "reply" as const,
             because: ["measured default"],
-            answering: { text: "在改\n好了叫我", lastText: "好了叫我", messageCount: 2 },
+            answering: {
+              text: "在改\n好了叫我",
+              lastText: "好了叫我",
+              messageCount: 2,
+              sender: "对方",
+            },
             respondingTo: { sender: "我", text: "推了吗" },
             precedents: [{ given: "[them] 推了吗", theyReplied: "好 推了说一声" }],
           })
@@ -2655,7 +2660,7 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
           Promise.resolve({
             verdict: "silent" as const,
             because: ["pure acknowledgement, not an ask"],
-            answering: { text: "收到", lastText: "收到", messageCount: 1 },
+            answering: { text: "收到", lastText: "收到", messageCount: 1, sender: "对方" },
             respondingTo: null,
             precedents: [],
           }),
