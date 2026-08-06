@@ -58,12 +58,39 @@ export interface AcpClientOptions {
   reverseHandlers?: Record<string, ReverseMethodHandler>
   /** 单次请求超时。默认 60s：模型响应可能很慢，但不能无限等 */
   requestTimeoutMs?: number
+  /**
+   * 按方法覆盖超时。`null` = **不设限**（那个方法永不因超时被拒）。
+   *
+   * ## ★ 为什么需要按方法分开，而不是调大全局值
+   *
+   * 这个 client 上跑着两类语义完全不同的请求：
+   *
+   * · `initialize` / `session/new` / `session/dispose` —— **协议动作**。
+   *   它们要么毫秒级返回，要么就是真的坏了（子进程没起来 / 协议不匹配）。
+   *   给它们无限等 = 一个起不来的 opencode 会让调用方永久挂住；
+   * · `session/prompt` —— **一整轮 agent 推理**。它的耗时取决于模型要
+   *   调几次工具，而那不是我们能预估的量。
+   *
+   * 原来两类共用一个 120s，代价实测过：一次跨消息+文档的汇总问题跑了
+   * 8 次检索，到 116s 第 8 条命令还在跑，120s 到点整轮被掐掉 → 降级成
+   * 「本地召回」只回两段原文。**本地其实已经搜到了要的数据**
+   * （85 条 PPL、248 个商机），只是没来得及归纳。
+   *
+   * 那次失败的形态说明了这个超时的问题：它掐掉的是**快要成功的长查询**，
+   * 而真正该被它抓住的故障（模型完全不响应）另有更可靠的判据 ——
+   * 子进程死了 / 连接断了，那两个都不依赖墙钟。
+   *
+   * 与 `KlServerService.awaitIngest` 删掉墙钟超时是同一个判断：
+   * **"太慢"不等于"坏了"**，而按时间猜出来的失败会真的降低可用性。
+   */
+  methodTimeouts?: Readonly<Record<string, number | null>>
 }
 
 interface Pending {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
-  timer: NodeJS.Timeout
+  /** `null` = 这个方法不设限（见 `methodTimeouts`），没有定时器要清。 */
+  timer: NodeJS.Timeout | null
   /**
    * 发出的方法名 —— 错误响应回来时把它塞进 AppError 的 context。
    *
@@ -116,15 +143,31 @@ export class AcpClient {
     if (params !== undefined) payload.params = params
 
     const promise = new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id)
-        reject(
-          new AppError("PROCESS_TIMEOUT", `ACP 请求超时：${method}`, {
-            retryable: true,
-            context: { method },
-          }),
-        )
-      }, this.options.requestTimeoutMs ?? 60_000)
+      /**
+       * `methodTimeouts` 里显式给 `null` = 不设限 → 不装定时器。
+       *
+       * ★ 用 `in` 判断而不是 `?? 全局值`：`null` 是**有意义的值**
+       * （"不设限"），而 `??` 会把它当"没配"直接落回全局超时 ——
+       * 那样这个功能会静默失效，且外观与配了一样。
+       */
+      const overrides = this.options.methodTimeouts
+      const timeoutMs =
+        overrides !== undefined && method in overrides
+          ? overrides[method]
+          : (this.options.requestTimeoutMs ?? 60_000)
+
+      const timer =
+        timeoutMs === null || timeoutMs === undefined
+          ? null
+          : setTimeout(() => {
+              this.pending.delete(id)
+              reject(
+                new AppError("PROCESS_TIMEOUT", `ACP 请求超时：${method}`, {
+                  retryable: true,
+                  context: { method },
+                }),
+              )
+            }, timeoutMs)
 
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
@@ -153,7 +196,7 @@ export class AcpClient {
       return
     }
     this.pending.delete(response.id)
-    clearTimeout(pending.timer)
+    if (pending.timer !== null) clearTimeout(pending.timer)
 
     if (response.error !== undefined) {
       /**
@@ -212,11 +255,18 @@ export class AcpClient {
     await this.options.transport.writeLine(JSON.stringify(payload))
   }
 
-  /** 关闭：拒绝所有在途请求（否则调用方会永远等）。 */
+  /**
+   * 关闭：拒绝所有在途请求（否则调用方会永远等）。
+   *
+   * ★ 这条路径是**不设限请求的终止保证**（见 `methodTimeouts`）：
+   * 一个没有定时器的 `session/prompt` 不会自己放弃，但子进程死掉 /
+   * 连接断掉时 `close()` 会拒了它。也就是"永不超时"不等于"永远挂住" ——
+   * 它换的是判据：从"猜它太慢"变成"连接确实没了"。
+   */
   close(): void {
     this.closed = true
     for (const [id, pending] of this.pending) {
-      clearTimeout(pending.timer)
+      if (pending.timer !== null) clearTimeout(pending.timer)
       pending.reject(new AppError("PROCESS_CANCELLED", "ACP 连接已关闭"))
       this.pending.delete(id)
     }

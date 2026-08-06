@@ -148,16 +148,68 @@ export class DocumentRepository {
    *
    * ★ 按 `updated_at` **新→旧**：最近改过的文档最可能被问到，
    * 而正文是逐篇一次 CLI 调用 —— 顺序决定了"前几轮就把有用的补上"。
+   *
+   * ## ★★ `readableExtensions` 必须在 SQL 里过滤，不能留给调用方
+   *
+   * 表格（`able`/`axls`）、脑图（`dingfm`）、图片、快捷链接这些
+   * **永远**取不到正文。而它们与真文档混在同一个 `updated_at` 序里 ——
+   * 实测这个库队首 8 篇里就有 2 篇 `able`，也就是每轮 5 个配额里
+   * 有 40% 白烧在必然失败的调用上，而且**每轮都是同样那几篇**
+   * （取不到 → `content_text` 仍是 null → 下一轮又排在前面）。
+   *
+   * 调用方按后缀跳过不能解决这个：那样只是不发 CLI 调用，
+   * 配额已经被占掉了。必须在**取队列这一步**就排除。
+   *
+   * 不传 = 不过滤（老行为，给不关心后缀的调用方留着）。
    */
-  listMissingBody(channelId: string, limit: number): DocumentRow[] {
+  listMissingBody(
+    channelId: string,
+    limit: number,
+    readableExtensions?: readonly string[],
+  ): DocumentRow[] {
+    if (readableExtensions === undefined || readableExtensions.length === 0) {
+      return this.db
+        .prepare<[string, number], DocumentDbRow>(
+          `SELECT * FROM documents
+            WHERE channel_id = ? AND content_text IS NULL
+            ORDER BY updated_at DESC NULLS LAST LIMIT ?`,
+        )
+        .all(channelId, limit)
+        .map(toDocument)
+    }
+    // 后缀集合是代码里的常量（不是用户输入），但仍走占位符 —— 拼串是习惯问题。
+    const holes = readableExtensions.map(() => "?").join(", ")
     return this.db
-      .prepare<[string, number], DocumentDbRow>(
+      .prepare<[string, ...string[], number], DocumentDbRow>(
         `SELECT * FROM documents
           WHERE channel_id = ? AND content_text IS NULL
+            AND lower(coalesce(extension, '')) IN (${holes})
           ORDER BY updated_at DESC NULLS LAST LIMIT ?`,
       )
-      .all(channelId, limit)
+      .all(channelId, ...readableExtensions.map((e) => e.toLowerCase()), limit)
       .map(toDocument)
+  }
+
+  /**
+   * 还缺多少篇正文（只算**能读**的后缀）。
+   *
+   * ★ 供采集侧决定用"冷启动速率"还是"稳态速率"（见
+   * `ingest.service.ts` 的 `DOCUMENTS_BODY_PER_ROUND`）。
+   * 必须按后缀过滤 —— 否则那些永远取不到正文的（实测本机 104 篇）
+   * 会让判据恒为"还没追平"，于是永远跑冷启动档。
+   */
+  countMissingBody(channelId: string, readableExtensions: readonly string[]): number {
+    if (readableExtensions.length === 0) return 0
+    const holes = readableExtensions.map(() => "?").join(", ")
+    return (
+      this.db
+        .prepare<[string, ...string[]], { c: number }>(
+          `SELECT count(*) AS c FROM documents
+            WHERE channel_id = ? AND content_text IS NULL
+              AND lower(coalesce(extension, '')) IN (${holes})`,
+        )
+        .get(channelId, ...readableExtensions.map((e) => e.toLowerCase()))?.c ?? 0
+    )
   }
 
   /** 有正文的文档（导出给图谱时只导这些 —— 没正文的进去只是噪声）。 */

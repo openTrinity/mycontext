@@ -442,5 +442,12 @@ export function createDingTalkDocuments(cli: Pick<DwsCli, "json">): ChannelDocum
     body(doc, signal) {
       return docs.readBody(doc, signal)
     },
+
+    /**
+     * 与 `readBody` 的前置过滤**同一个集合** —— 见契约里那段注释：
+     * 那边挡的是"别发无谓的 CLI 调用"，这边挡的是"别占正文配额"。
+     * 两处必须一致，所以都读 `READABLE_EXTENSIONS`。
+     */
+    readableExtensions: [...READABLE_EXTENSIONS],
   }
 }

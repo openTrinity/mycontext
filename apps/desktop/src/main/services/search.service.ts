@@ -74,8 +74,41 @@ const FALLBACK_RECALL_LIMIT = 20
  */
 const HOST_MCP_PORT = 47_999
 
-/** 一轮 agent turn 的最长等待。模型可能很慢，但不能无限等（超时 → 落回召回）。 */
-const AGENT_TURN_TIMEOUT_MS = 120_000
+/**
+ * **协议动作**的超时（`initialize` / `session/new` / `session/dispose`）。
+ *
+ * 这些要么毫秒级返回，要么就是真的坏了（opencode 没起来 / 协议不匹配）。
+ * 30s 足够宽松，同时保证一个起不来的子进程不会让调用方永久挂住。
+ *
+ * ★ `session/prompt`**不**走这个值 —— 见 `ACP_METHOD_TIMEOUTS`。
+ */
+const ACP_PROTOCOL_TIMEOUT_MS = 30_000
+
+/**
+ * 按方法覆盖超时。`null` = 不设限。
+ *
+ * ## ★★ 为什么 agent turn 不该有墙钟超时
+ *
+ * 原来整个 client 共用一个 120s，实测的后果是**掐掉快要成功的长查询**：
+ * 一次跨消息+文档的汇总问题跑了 8 次检索，116s 时第 8 条命令还在跑，
+ * 120s 到点整轮被拒 → 降级成「本地召回」，页面上只剩两段原文。
+ * 而本地其实已经搜到了要的东西（85 条 PPL、248 个商机），
+ * 只是没来得及归纳成答案。
+ *
+ * 一轮 agent turn 的耗时取决于模型决定调几次工具，那不是我们能预估的量 ——
+ * 按一个猜出来的秒数掐它，掐掉的是"慢但有效"，而不是"坏了"。
+ *
+ * ## 那靠什么终止
+ *
+ * 靠**事实**而不是推测：子进程死了 / 连接断了 → `AcpClient.close()`
+ * 会拒掉所有在途请求（见那里的注释）；用户不想等了 → 关窗口 / 停服务。
+ * 这与 `KlServerService.awaitIngest` 删掉墙钟超时是同一个判断
+ * （那条也曾把正常建图误报成「超时失败」并触发 30 分钟退避）。
+ *
+ * 代价是"卡住时界面一直显示在搜" —— 但那与事实一致（模型确实还在跑），
+ * 比谎报一个失败并把已搜到的数据丢掉要诚实。
+ */
+const ACP_METHOD_TIMEOUTS = { "session/prompt": null } as const
 
 /**
  * 回灌历史时单条**助手答案**保留的字数上限（用户提问不截断 —— 那是问题本身）。
@@ -640,23 +673,45 @@ export class SearchService {
       const modelConfig = resolveGatewayModelConfig(process.env)
 
       /**
-       * ★ 没配网关时**必须显式告警**，不能静默继续。
+       * ★ 没配网关时**直接拒绝启动**，不是"告警后照常起"。
        *
        * 这是同事机器上"搜索完全没法用"的真实根因，而它极难排查：
        * `resolveGatewayModelConfig` 两组来源（`MYCONTEXT_LLM_*` 与
        * `ANTHROPIC_*`）都拿不到时返回 null，我们不传 modelConfig，
        * opencode 退回它自己的默认 provider，那条路要查**被墙的 models.dev
-       * 注册表**—— 拉不到时它不报错，只是 `session/prompt` 一直不返回，
-       * 最后表现为 `ACP 请求超时：session/prompt`（120s）。
+       * 注册表**—— 拉不到时它不报错，只是 `session/prompt` 一直不返回。
        *
-       * 于是日志上看到的是"超时"，而真因是"没配密钥"—— 两者相隔甚远，
-       * 中间还隔着一次 120 秒的等待。加这条 warn 把因果直接摆出来。
+       * 原来靠 120s 超时兜底：用户等两分钟看到「超时」，虽然信息误导
+       * （真因是没配密钥）但至少会结束。而 `session/prompt` 现在**不设限**
+       * （见 `ACP_METHOD_TIMEOUTS`）—— 同一条路会永久挂住。
+       *
+       * 所以判据前移：起进程之前就知道"没有模型可用"，那时抛错让调用方
+       * 走降级（落回本地召回），用户立刻看到结果 + 一条可照做的提示。
        */
       if (modelConfig === null) {
         this.options.logger.warn(
-          "search agent has no gateway model config; turns will time out. " +
+          "search agent has no gateway model config; refusing to start agent. " +
             "Set MYCONTEXT_LLM_BASE_URL + MYCONTEXT_LLM_API_KEY in .env (see .env.example)",
           { hasLlmBaseUrl: process.env["MYCONTEXT_LLM_BASE_URL"] !== undefined },
+        )
+        /**
+         * ★★ 直接**拒绝启动** agent，而不是起了再等它超时。
+         *
+         * 这条 throw 是把 `session/prompt` 改成不设限（见 `ACP_METHOD_TIMEOUTS`）
+         * 的**必要配套**，不是顺手加的防御：
+         *
+         * 原来这里只 warn 然后照常起 agent，靠那个 120s 超时兜底 ——
+         * 用户等两分钟看到「超时」，虽然信息误导（真因是没配密钥），
+         * 但至少**会结束**。去掉超时之后同一条路就变成**永久挂住**，
+         * 那比原来的坏体验更糟。
+         *
+         * 而"没有模型可用"根本不需要等：它在起进程之前就是已知事实。
+         * 抛出去让调用方走降级（落回本地召回）——用户立刻看到结果，
+         * 日志里有上面那条可照做的提示。
+         */
+        throw new AppError(
+          "CONFIG_INVALID",
+          "搜索需要 LLM 网关：请在设置里配置模型（或在 .env 里给 MYCONTEXT_LLM_BASE_URL + MYCONTEXT_LLM_API_KEY）",
         )
       } else {
         // 成功路径也留一条：出问题时第一个要确认的就是"到底用了哪个模型"。
@@ -745,7 +800,8 @@ export class SearchService {
             }),
           "fs/write_text_file": () => handlers.writeTextFile(),
         },
-        requestTimeoutMs: AGENT_TURN_TIMEOUT_MS,
+        requestTimeoutMs: ACP_PROTOCOL_TIMEOUT_MS,
+        methodTimeouts: ACP_METHOD_TIMEOUTS,
       })
 
       // ACP 握手：initialize 必须先成功，否则 session/new 会被拒。
@@ -860,10 +916,11 @@ ${history}
    *
    * ① 没装 opencode —— 装一下就好；
    * ② **没配网关密钥** —— 这是最容易踩且最难自查的一档：agent 装着、进程也起来了，
-   *    但没有模型可用，于是 `session/prompt` 一直不返回、满 120 秒超时。
+   *    但没有模型可用。现在起 agent 之前就会拒（见那处 `modelConfig === null`），
+   *    所以表现是立刻降级而不是等着；原来是满 120 秒超时。
    *    原来这一档和 ③ 共用"Agent 暂不可用"的文案，用户会去查 agent 装没装
    *    （而它明明装了），真正要做的是往 .env 里加两个变量；
-   * ③ 其它运行时失败（真超时、进程崩、turn 报错）。
+   * ③ 其它运行时失败（进程崩、turn 报错、协议动作超时）。
    *
    * 判据用 env 而不是"上一轮为什么失败"：后者要把失败原因一路带出来，
    * 而 env 这个判据在**降级发生时**就能直接读到，且它恰好覆盖了最难查的那档。

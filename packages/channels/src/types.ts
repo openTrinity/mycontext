@@ -522,6 +522,24 @@ export interface ChannelDocuments {
     doc: Pick<ParsedDocumentLike, "externalId" | "extension">,
     signal?: AbortSignal,
   ): Promise<{ contentText: string | null; rawPayload: string | null }>
+  /**
+   * 哪些后缀**可能**读到正文（小写，不带点）。
+   *
+   * ## ★ 为什么这要进契约，而不是让采集侧硬编码
+   *
+   * 采集侧的正文队列有**每轮配额**（见 `DOCUMENTS_BODY_PER_ROUND`）。
+   * 而表格 / 脑图 / 图片 / 快捷链接这些**永远**取不到正文，却与真文档
+   * 混在同一个 `updated_at` 序里 —— 实测队首 8 篇有 2 篇是表格，
+   * 也就是每轮配额被白占 40%，而且**每轮都是同样那几篇**
+   * （取不到 → 仍是 null → 下一轮又排在前面）。
+   *
+   * 光靠 `body()` 内部跳过不够：那只是不发 CLI 调用，配额已经花掉了。
+   * 要在**取队列的 SQL** 里就排除，而 SQL 在采集侧 ——
+   * 于是渠道必须把这个集合说出来。
+   *
+   * 不给 = 不过滤（队列里什么都可能有，退回老行为）。
+   */
+  readableExtensions?: readonly string[]
 }
 
 /** 本人身份。**蒸馏正确性的地基**，见 self-identity 的实现注释。 */

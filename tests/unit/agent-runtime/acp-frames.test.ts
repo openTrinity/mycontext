@@ -89,6 +89,83 @@ describe("请求与响应配对", () => {
     ).not.toThrow()
   })
 
+  /**
+   * ★★ 按方法覆盖超时（`methodTimeouts`）。
+   *
+   * 存在的理由见 `AcpClientOptions.methodTimeouts`：一轮 agent turn 的耗时
+   * 取决于模型决定调几次工具，那不是能预估的量，而原来它与 `initialize`
+   * 这类协议动作共用一个 120s —— 实测掐掉过一次**快要成功**的长查询
+   * （116s 时第 8 条检索还在跑，本地数据已经搜到了，只是没来得及归纳）。
+   */
+  describe("★★ 按方法覆盖超时", () => {
+    it("★ null = 不设限：全局超时到点了也不拒", async () => {
+      const transport = fakeTransport()
+      const client = new AcpClient({
+        transport: transport.handle,
+        requestTimeoutMs: 10,
+        methodTimeouts: { "session/prompt": null },
+      })
+      const promise = client.request<{ done: boolean }>("session/prompt")
+      // 等到远超全局超时（10ms）—— 不设限的话这时它必须还在等
+      await new Promise((r) => setTimeout(r, 60))
+
+      const sent = transport.parsed() as unknown as { id: number }[]
+      client.handleLine(JSON.stringify({ jsonrpc: "2.0", id: sent[0]?.id, result: { done: true } }))
+      /**
+       * ★ 60ms 后才回的响应仍然被接住。
+       *
+       * 这一条断了会 reject（PROCESS_TIMEOUT）—— 也就是"不设限"没生效。
+       * 而生产上那个失效是静默的：用户只看到搜索降级成本地召回。
+       */
+      await expect(promise).resolves.toEqual({ done: true })
+    })
+
+    it("★ 同一个 client 上，没被覆盖的方法照常超时", async () => {
+      const transport = fakeTransport()
+      const client = new AcpClient({
+        transport: transport.handle,
+        requestTimeoutMs: 10,
+        methodTimeouts: { "session/prompt": null },
+      })
+      /**
+       * 这一条锁住修复**没有把所有请求都变成无限等**。
+       *
+       * `initialize` 卡住是真故障（子进程没起来 / 协议不匹配），
+       * 它必须仍然会超时 —— 否则一个起不来的 opencode 会让调用方永久挂住。
+       */
+      await expect(client.request("initialize")).rejects.toThrow(/超时/)
+    })
+
+    it("覆盖成一个数字时按那个数字算（不是只能给 null）", async () => {
+      const transport = fakeTransport()
+      const client = new AcpClient({
+        transport: transport.handle,
+        requestTimeoutMs: 10_000,
+        methodTimeouts: { "session/dispose": 5 },
+      })
+      // 全局 10s 但这个方法只给 5ms → 立刻超时
+      await expect(client.request("session/dispose")).rejects.toThrow(/超时/)
+    })
+
+    it("★ 不设限的请求靠 close() 终止（永不超时 ≠ 永远挂住）", async () => {
+      const transport = fakeTransport()
+      const client = new AcpClient({
+        transport: transport.handle,
+        methodTimeouts: { "session/prompt": null },
+      })
+      const promise = client.request("session/prompt")
+      /**
+       * ★★ 这是删掉墙钟超时之后**唯一**的终止保证，所以必须锁住。
+       *
+       * 判据从"猜它太慢"换成了"连接确实没了" —— 而后者只有在
+       * `close()` 真的拒掉在途请求时才成立。这条断了的表现是
+       * 退出应用/停服务时有一个 promise 永远不 settle。
+       */
+      client.close()
+      await expect(promise).rejects.toThrow(/已关闭/)
+    })
+  })
+
   it("关闭时拒绝所有在途请求（否则调用方永远等）", async () => {
     const transport = fakeTransport()
     const client = new AcpClient({ transport: transport.handle })

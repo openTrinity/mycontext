@@ -85,27 +85,81 @@ const PULL_INTERVAL_MS = 2 * 60_000
  */
 const MINUTES_INTERVAL_MS = 30 * 60_000
 /**
- * 文档轮询周期。
+ * 文档轮询周期。**分两档**（见 `documentsInterval()`）。
  *
- * ★ 60 分钟，比听记还低频。理由：文档的**变更频率低**（一篇文档一天改几次
- * 已经算活跃），而一轮的成本不小 —— `wiki space list` + 每个知识库递归
- * `node list`（实测该账号 20+ 个库、每库若干层）+ `drive recent` 翻页。
+ * ## ★★ 为什么必须分档：60 分钟 × 5 篇 = 冷启动要 8.7 天
  *
- * 而且文档不像消息有"秒级可见"的需求：没人会因为一篇文档晚一小时进库而
- * 感觉产品坏了。把它压到低频是给消息侧让出采集锁（同一个 busy 锁）。
+ * 原来只有一个 60 分钟 + 每轮 5 篇。两个数字各自都有理由
+ * （文档变更频率低；一轮列举成本不小，要给消息侧让出 busy 锁），
+ * 但**没人把它们相除**：
+ *
+ * 实测这台机器 `documents` 表 1147 篇，可读后缀 1043 篇，而**只有 4 篇
+ * 取到了正文**。按 5 篇/小时补 1039 篇 = **8.7 天连续运行** ——
+ * 而桌面应用开开关关，实际累计跑过的轮次寥寥。
+ *
+ * 而下游代价是实打实的：导出侧只导有正文的（没正文的进图只是空 chunk），
+ * 于是 kl 只看到 4 篇文档。而实测文档的信息密度远高于聊天
+ * （44 个 wiki chunk 产出 158 条事实，占全图 18.7%，而 chunk 数只占 2.4%）
+ * —— 补齐那 1039 篇粗估能多出一万多条事实，是现在整个图的十几倍。
+ *
+ * ## 参数是从听记抄的，而两者规模差 52 倍
+ *
+ * `DOCUMENTS_BODY_PER_ROUND` 的原注释是「与听记同一个理由，但给多一点
+ * （5 vs 3）」。听记 20 条，3 篇/轮 30 分钟一轮 → 3.3 小时补完，够用。
+ * 文档 1043 篇，同一套参数搬过去慢了 60 倍 ——
+ * 决定时参照的是**单次调用成本**，没有参照**队列长度**。
+ *
+ * ## 分档：追平前后是两种工况
+ *
+ * · **冷启动**（还缺 >`DOCUMENTS_BACKLOG_THRESHOLD` 篇）：10 分钟 × 20 篇
+ *   = 2880 篇/天 → 一天内追平。这一档只在首次接入/清库重来时存在；
+ * · **稳态**（追平了）：60 分钟 × 5 篇 = 原来的参数，原来那些理由
+ *   （低频变更、让出采集锁）**在稳态下全部成立**，所以一个字不改。
+ *
+ * 也就是说这不是"把保守参数调激进"，而是让那些理由只管它们该管的那一段。
  */
 const DOCUMENTS_INTERVAL_MS = 60 * 60_000
 /**
- * 单轮最多补几篇文档正文。
+ * 冷启动档的轮询周期。10 分钟。
+ *
+ * ★ 不敢再快的理由仍然成立：一轮要跑 `wiki space list` + 每库递归
+ * `node list`（实测 20+ 个库）+ `drive recent` 翻页，且占着 busy 锁 ——
+ * 消息侧的 2 分钟一轮在等它。10 分钟给了 6 倍提速，同时一小时里
+ * 仍有 50 分钟完全不碰采集锁。
+ */
+const DOCUMENTS_INTERVAL_BACKLOG_MS = 10 * 60_000
+/**
+ * 还缺多少篇才算"冷启动"。
+ *
+ * 50：一天的稳态产能（5 × 24 = 120）能覆盖它，也就是跨过这条线之后
+ * 稳态速率追得上，不会在阈值上下反复抖。
+ *
+ * ★ 判据只算**可读后缀**（`countMissingBody` 按白名单过滤）——
+ * 不过滤的话那 104 篇永远取不到正文的表格/图片会让判据恒为真，
+ * 于是永远跑冷启动档（每 10 分钟跑一轮全量列举，一天 144 次）。
+ */
+const DOCUMENTS_BACKLOG_THRESHOLD = 50
+/**
+ * 单轮最多补几篇文档正文（稳态档）。
  *
  * 与听记的 `MINUTES_BODY_PER_ROUND` 同一个理由，但给得多一点（5 vs 3）：
  * 文档正文是**一次** CLI 调用（听记要两次：summary + transcription），
  * 且 `doc read` 实测 0.3-0.8s。5 篇约 2-4 秒，可接受。
  *
- * ★ 不要为了"快点补齐"把它调大：这一轮占着 busy 锁，而消息侧在等。
- * 补齐是几轮之后的事，而每一轮都不该长时间阻塞。
+ * ★ 这个值只管**稳态**。冷启动走 `DOCUMENTS_BODY_PER_ROUND_BACKLOG`
+ * —— 原注释说"不要为了快点补齐把它调大，补齐是几轮之后的事"，
+ * 而实际是 5000 轮之后（见 `DOCUMENTS_INTERVAL_MS` 那段算术）。
  */
 const DOCUMENTS_BODY_PER_ROUND = 5
+/**
+ * 冷启动档单轮补几篇。20 篇 × 0.3-0.8s ≈ 6-16 秒。
+ *
+ * ★ 这是这次改动里唯一真正"更占锁"的地方，所以给了上限而不是不设限：
+ * 16 秒的最坏情况下消息侧最多晚一轮（它的周期是 2 分钟）。
+ * 而串行 100 篇会占到一分钟以上 —— 那时探针命中的新消息会被推迟，
+ * 那是用户能感知的（"消息怎么半天不出现"）。
+ */
+const DOCUMENTS_BODY_PER_ROUND_BACKLOG = 20
 /** 单轮最多补几条听记正文。正文是逐条两次 CLI 调用（summary + transcription）。 */
 const MINUTES_BODY_PER_ROUND = 3
 /**
@@ -542,17 +596,22 @@ export class IngestService {
     this.pullIntervalMs = clamp(iv.pullMs, PULL_INTERVAL_MS, 30_000, 10 * 60_000)
     this.minutesIntervalMs = clamp(iv.minutesMs, MINUTES_INTERVAL_MS, 5 * 60_000, 2 * 60 * 60_000)
     /**
-     * 文档周期 15min–6h。
+     * 文档周期 10min–6h（**稳态**档；冷启动见 `documentsInterval()`）。
      *
      * ★ 原先写死（注释写的是"等有人真需要再给"）—— 而它与其余四项
      * 不同源这件事本身就是个坑：「采集频率」面板宣称能配采集，
      * 却漏了一路，于是"文档多久拉一次"只有能开 SQLite 的人配得了。
      * 区间给得比听记更宽：知识库重度用户想更勤，纯聊天用户想更懒。
+     *
+     * ★ 下界从 15min 放到 10min：与 `DOCUMENTS_INTERVAL_BACKLOG_MS` 对齐 ——
+     * 冷启动档要用 10 分钟，而它同样要过这个 clamp（用户配得比冷启动档
+     * 还勤时应当听用户的）。下界卡在 15min 的话冷启动档会被静默钳到 15min，
+     * 那种"设了没生效"是最难查的一类。
      */
     this.documentsIntervalMs = clamp(
       iv.documentsMs,
       DOCUMENTS_INTERVAL_MS,
-      15 * 60_000,
+      10 * 60_000,
       6 * 60 * 60_000,
     )
     /**
@@ -743,7 +802,7 @@ export class IngestService {
        * 而引导跑完用户就想看到"文档也采到了"。
        */
       if (this.options.plugin.documents !== undefined) {
-        this.documentsTimer = setInterval(() => void this.tickDocuments(), this.documentsIntervalMs)
+        this.scheduleDocuments()
         void this.tickDocuments()
       }
 
@@ -799,7 +858,7 @@ export class IngestService {
     if (this.probeTimer !== null) clearTimeout(this.probeTimer)
     if (this.pullTimer !== null) clearInterval(this.pullTimer)
     if (this.minutesTimer !== null) clearInterval(this.minutesTimer)
-    if (this.documentsTimer !== null) clearInterval(this.documentsTimer)
+    if (this.documentsTimer !== null) clearTimeout(this.documentsTimer)
     if (this.activeScanTimer !== null) clearInterval(this.activeScanTimer)
     this.probeTimer = null
     this.pullTimer = null
@@ -987,6 +1046,66 @@ export class IngestService {
   }
 
   /**
+   * 还缺多少篇**可读**文档的正文。
+   *
+   * 只算白名单后缀（见 `ChannelDocuments.readableExtensions`）——
+   * 表格/图片/快捷链接永远取不到，算进来会让"追平了吗"恒为否。
+   * 渠道没给白名单时返回 0（判据不可靠时按"已追平"走保守档）。
+   */
+  private documentsBacklog(): number {
+    const exts = this.options.plugin.documents?.readableExtensions
+    if (exts === undefined || exts.length === 0) return 0
+    return new DocumentRepository(this.options.db).countMissingBody(
+      this.options.plugin.meta.id,
+      exts,
+    )
+  }
+
+  /**
+   * 本轮该用哪一档（周期 + 每轮篇数）。见 `DOCUMENTS_INTERVAL_MS` 的算术。
+   *
+   * ★ 每轮**现算**而不是启动时定一次：追平之后要自己降回稳态，
+   * 而"清空重来"之后要自己升回冷启动档。存一个快照的话这两个转换都不会发生。
+   */
+  private documentsPace(): { intervalMs: number; bodiesPerRound: number; backlog: number } {
+    const backlog = this.documentsBacklog()
+    if (backlog > DOCUMENTS_BACKLOG_THRESHOLD) {
+      return {
+        /**
+         * ★ 取**更勤的那个**：用户可能把周期配得比冷启动档还短
+         * （下界 10min），那时该听用户的。反过来用户配了 6 小时也不该
+         * 让冷启动卡在 6 小时 —— 那个配置表达的是稳态期望。
+         */
+        intervalMs: Math.min(DOCUMENTS_INTERVAL_BACKLOG_MS, this.documentsIntervalMs),
+        bodiesPerRound: DOCUMENTS_BODY_PER_ROUND_BACKLOG,
+        backlog,
+      }
+    }
+    return {
+      intervalMs: this.documentsIntervalMs,
+      bodiesPerRound: DOCUMENTS_BODY_PER_ROUND,
+      backlog,
+    }
+  }
+
+  /**
+   * 排下一轮文档采集。
+   *
+   * 用 `setTimeout` 自重排而不是 `setInterval`：周期是**分档**的
+   * （见 `documentsPace`），而 `setInterval` 的周期在创建时就固定了 ——
+   * 那样追平之后仍会每 10 分钟跑一轮全量列举（一天 144 次），
+   * 而冷启动结束这件事恰恰是我们要能观察到的。
+   */
+  private scheduleDocuments(): void {
+    if (this.documentsTimer !== null) clearTimeout(this.documentsTimer)
+    if (!this.running) return
+    const { intervalMs } = this.documentsPace()
+    this.documentsTimer = setTimeout(() => {
+      void this.tickDocuments().finally(() => this.scheduleDocuments())
+    }, intervalMs)
+  }
+
+  /**
    * 文档采集：列元信息 → 落库 → 给缺正文的补正文。
    *
    * 结构与 `tickMinutes` 同构（列全量 + 每轮补 N 篇），理由见
@@ -1081,9 +1200,28 @@ export class IngestService {
         totals.changed = result.changed.length
       }
 
-      // ② 给缺正文的补正文（每轮限量，见常量注释）。
+      /**
+       * ② 给缺正文的补正文。
+       *
+       * ★ 两处**都**用分档的值（见 `documentsPace`）：篇数是这一档的配额，
+       * 而队列按 `readableExtensions` 过滤 —— 后者不做的话每轮配额会被
+       * 表格/图片白占（实测队首 8 篇里 2 篇是 `able`，而且每轮都是同样那几篇）。
+       */
+      const pace = this.documentsPace()
+      const readable = documents.readableExtensions
       const repo = new DocumentRepository(this.options.db)
-      for (const row of repo.listMissingBody(channelId, DOCUMENTS_BODY_PER_ROUND)) {
+      if (pace.backlog > DOCUMENTS_BACKLOG_THRESHOLD) {
+        /**
+         * 冷启动档要能被看到：它跑 10 分钟一轮、每轮 20 篇，
+         * 而"为什么这会儿采集这么频繁"必须查得出来。追平后这条自然消失。
+         */
+        this.options.logger.info("documents backlog; using catch-up pace", {
+          backlog: pace.backlog,
+          intervalMs: pace.intervalMs,
+          bodiesPerRound: pace.bodiesPerRound,
+        })
+      }
+      for (const row of repo.listMissingBody(channelId, pace.bodiesPerRound, readable)) {
         if (!this.running) break
         const body = await documents.body({
           externalId: row.externalId,
