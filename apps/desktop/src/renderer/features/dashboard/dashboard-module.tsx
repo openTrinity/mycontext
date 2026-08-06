@@ -43,6 +43,7 @@ import { useEffect, useRef, useState } from "react"
 import { Avatar, Button, cn } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
+  useAdoptableSession,
   useBootstrapState,
   useDistillProgress,
   useFeedInfo,
@@ -70,6 +71,7 @@ import {
   describeKl,
   formatCount,
   readIdentityBar,
+  readIdentityProblem,
   readIngest,
   readPersona,
   readProcessing,
@@ -216,6 +218,18 @@ export function DashboardModule() {
     channels: [],
     personaName: personaIdentity.name,
     selfConfirmed: ingest.data?.selfConfirmed ?? null,
+  })
+
+  /**
+   * ★ 未确认时那条红字该指向哪个入口 —— 见 `readIdentityProblem` 的注释。
+   *
+   * 只在**真的未确认**时才查（`enabled`）：这个查询会在主进程跑一次
+   * `auth status`（子进程），而已确认的账号问它答案必然是 null。
+   */
+  const adoptable = useAdoptableSession(identity.selfState === "unconfirmed")
+  const identityProblem = readIdentityProblem({
+    selfState: identity.selfState,
+    adoptable: adoptable.data,
   })
 
   /**
@@ -384,11 +398,23 @@ export function DashboardModule() {
           ★ 身份未确认排在**最前面** —— 它的后果比其余几条都重：
           蒸馏会拒掉**全部**语料，且不报错。上面那些数字看起来一切正常，
           而实际上画像是空的。
+
+          ★★ 指向哪个入口**分情形**（判据走 `readIdentityProblem`，有单测）：
+          最常见的成因是"继承来的登录态"，它的正确动作在**渠道页**
+          （设置 → 渠道 → 采纳本机登录态），而「解析身份」按钮解决不了它。
+
+          ★ 另一半说的是「运行状态」页而不是「设置」——
+          `SelfIdentityPanel` 挂在 `StatusPanel` 里（见 data-plane-panel.tsx）。
+          从前那句写的是"去设置里确认一下"，而那个页面上根本没有这个入口。
         */}
-        {identity.selfState === "unconfirmed" ? (
+        {identity.selfState === "unconfirmed" && identityProblem !== null ? (
           <div className="col-span-12">
             <ProblemLine
-              text="本人身份还没确认 —— 蒸馏会拒掉全部语料，去设置里确认一下"
+              text={
+                identityProblem.kind === "adopt"
+                  ? `本人身份还没确认 —— 蒸馏会拒掉全部语料。本机已登录「${identityProblem.corpName}」，去设置的渠道页采纳这份登录态`
+                  : "本人身份还没确认 —— 蒸馏会拒掉全部语料，去「运行状态」页解析并确认"
+              }
               tone="bad"
             />
           </div>

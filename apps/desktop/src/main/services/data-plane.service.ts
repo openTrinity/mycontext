@@ -21,6 +21,7 @@ import {
   ConversationRepository,
   MessageRepository,
   SelfIdentityRepository,
+  inferSelfExternalIdFromDirectChats,
   type SqliteDatabase,
 } from "@mycontext/store"
 import {
@@ -479,9 +480,37 @@ export class DataPlaneService {
       throw new AppError("CHANNEL_UNSUPPORTED", "该渠道不支持身份解析")
     }
 
+    /**
+     * ★ 注入「单聊交集」这条兜底判据（完整说明见 store 的
+     * `inferSelfExternalIdFromDirectChats` 与 self-identity.ts 文件头 §5）。
+     *
+     * 为什么在这里注入而不是让插件自己查库：`channels`(L2) 不能依赖 `store`(L3)，
+     * 而这条推断本质是一句 SQL。所以由这一层把结果喂进去。
+     *
+     * 它救的是"search 那条路失败"的场景 —— 从前那时只能弹窗要用户手动确认，
+     * 而未确认期间蒸馏会拒掉**全部**语料。推不出来就返回 null，行为与从前一致。
+     */
+    const inferFromMessages = (): string | null => {
+      const inference = inferSelfExternalIdFromDirectChats(db, this.options.plugin.meta.id)
+      if (inference.ok) {
+        this.options.logger.info("self openId inferred from direct chats", {
+          directChats: inference.directChats,
+        })
+        return inference.externalId
+      }
+      // 推不出来是正常状态（库为空 / 单聊不足 / 交集不唯一）—— 记 debug 不记 warn。
+      this.options.logger.debug("self openId inference unavailable", {
+        reason: inference.reason,
+        directChats: inference.directChats,
+      })
+      return null
+    }
+
     // 抛出的 SELF_IDENTITY_AMBIGUOUS 直接透给 UI：
     // 「无法唯一确定」必须让用户看到，不能退回到"挑一个"。
-    const resolved = await identity.resolveSelf()
+    const resolved = await identity.resolveSelf({ inferFromMessages })
+    // 走的哪条路要可见：三条路的可靠性不同，出问题时第一个要问的就是这个。
+    this.options.logger.info("self identity resolved", { source: resolved.source })
     const repository = new SelfIdentityRepository(db)
     repository.upsert({
       channelId: this.options.plugin.meta.id,

@@ -31,6 +31,7 @@ import {
   lagTone,
   readDistill,
   readIdentityBar,
+  readIdentityProblem,
   readIngest,
   readPersona,
   worstConsumer,
@@ -505,6 +506,65 @@ describe("★★ readIdentityBar：渠道 / 分身 / 身份三态", () => {
     expect(readIdentityBar({ ...base, selfConfirmed: null }).selfState).toBe("unknown")
     expect(readIdentityBar({ ...base, selfConfirmed: true }).selfState).toBe("confirmed")
     expect(readIdentityBar({ ...base, selfConfirmed: false }).selfState).toBe("unconfirmed")
+  })
+})
+
+/**
+ * ★★ 未确认时那条红字**指向哪个入口**。
+ *
+ * ## 为什么这个判据值得单独锁
+ *
+ * 身份未确认有两个成因，正确动作在**不同页面**上：
+ *
+ * · **继承来的登录态**（最常见）：渠道登录态按系统用户共享，新注册的应用
+ *   账号一进来就显示"已连接"，于是用户没有理由去点重新授权 → 落身份行的
+ *   `onAuthorized` 从不触发。这时要去**渠道页**采纳，「解析身份」按钮
+ *   解决不了它。
+ * · **解析失败/歧义**：这时才该去解析并确认。
+ *
+ * 从前一律说"去设置里确认一下"。那不是"文案不精确"，而是**把人指向一个
+ * 按了没用的按钮** —— 而未确认期间蒸馏拒掉全部语料，用户在错误的地方
+ * 反复尝试时画像一直是空的。这类错误没有任何报错，只能靠门禁锁住。
+ */
+describe("★★ readIdentityProblem：红字指向哪个入口", () => {
+  it("已确认 / 还在读 → 不说话", () => {
+    // ★ `unknown` 是加载态，报警是狼来了（与 readIdentityBar 那条三态是一对）
+    expect(readIdentityProblem({ selfState: "unknown", adoptable: null })).toBeNull()
+    expect(readIdentityProblem({ selfState: "confirmed", adoptable: null })).toBeNull()
+    // 即使有可采纳的登录态，已确认就不该再提
+    expect(
+      readIdentityProblem({
+        selfState: "confirmed",
+        adoptable: { corpName: "示例集团", userName: "王强" },
+      }),
+    ).toBeNull()
+  })
+
+  it("★ 有可采纳的登录态 → 指向渠道页，并说清是哪个组织", () => {
+    const problem = readIdentityProblem({
+      selfState: "unconfirmed",
+      adoptable: { corpName: "示例集团", userName: "王强" },
+    })
+    expect(problem).toEqual({ kind: "adopt", corpName: "示例集团", userName: "王强" })
+  })
+
+  it("没有可采纳的登录态 → 指向解析入口", () => {
+    expect(readIdentityProblem({ selfState: "unconfirmed", adoptable: null })).toEqual({
+      kind: "resolve",
+    })
+  })
+
+  it("★ 还没查出来（undefined）→ 按「去解析」处理，不是不说话", () => {
+    /**
+     * `undefined` = 那个查询还在跑 / 没启用。此时**仍要报警** ——
+     * 身份未确认这件事已经确定了（`selfState` 说的），不确定的只是
+     * "该指向哪里"。沉默会让这条唯一的出口在加载期间消失。
+     *
+     * 指向解析入口是更保守的选择：那条路对两种成因都至少是可尝试的。
+     */
+    expect(readIdentityProblem({ selfState: "unconfirmed", adoptable: undefined })).toEqual({
+      kind: "resolve",
+    })
   })
 })
 

@@ -245,6 +245,11 @@ export function createDingTalkIngest(cli: Pick<DwsCli, "json">): ChannelIngest {
 
 export function createDingTalkIdentity(cli: Pick<DwsCli, "json">): ChannelIdentity {
   return {
-    resolveSelf: () => resolveSelf(cli, "dingtalk"),
+    resolveSelf: (options) =>
+      resolveSelf(cli, "dingtalk", {
+        ...(options?.inferFromMessages === undefined
+          ? {}
+          : { inferFromMessages: options.inferFromMessages }),
+      }),
   }
 }

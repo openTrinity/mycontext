@@ -439,3 +439,39 @@ export function readIdentityBar(input: {
       input.selfConfirmed === null ? "unknown" : input.selfConfirmed ? "confirmed" : "unconfirmed",
   }
 }
+
+/**
+ * 身份未确认时，那条红字该把用户指向**哪个**入口。
+ *
+ * ## ★★ 为什么要分情形（从前一律说"去设置里确认"）
+ *
+ * 未确认有两个成因，而它们的正确动作在**不同的页面**上：
+ *
+ * · **继承来的登录态**（最常见）：渠道登录态按系统用户共享，新注册的应用
+ *   账号一进来就是"已连接"，于是用户没有理由去点重新授权 → 落身份行的
+ *   `onAuthorized` **从不触发**。这时该做的是去**渠道页**点「采纳本机登录态」，
+ *   而那个「解析身份」按钮解决不了它（完整机理见主进程
+ *   `adoptExistingSession` 的注释）。
+ * · **解析失败/歧义**：这时才该去解析并确认。
+ *
+ * 把两者说成同一句话的后果不是"文案不精确"，而是**把人指向一个按了没用的
+ * 按钮** —— 而未确认期间蒸馏拒掉全部语料，用户在错误的地方反复尝试时
+ * 画像一直是空的。
+ *
+ * ★ 抽成纯函数与 `readIdentityBar` 同理：判据要能被单测锁住，
+ * 而在组件里只能靠渲染探针去验，那种断言又慢又脆。
+ *
+ * @param adoptable 本机有一份可采纳的登录态吗（来自 `useAdoptableSession`）。
+ *   `undefined` = 还在查 / 没查（那时按"解析失败"处理，那是更保守的指向：
+ *   那条路对两种成因都至少是可尝试的）。
+ */
+export function readIdentityProblem(input: {
+  selfState: IdentityBarView["selfState"]
+  adoptable: { corpName: string; userName: string } | null | undefined
+}): { kind: "adopt"; corpName: string; userName: string } | { kind: "resolve" } | null {
+  // 只在真的"读到了、但没确认"时说话。`unknown` 是加载态，报警是狼来了。
+  if (input.selfState !== "unconfirmed") return null
+  const adoptable = input.adoptable
+  if (adoptable === null || adoptable === undefined) return { kind: "resolve" }
+  return { kind: "adopt", corpName: adoptable.corpName, userName: adoptable.userName }
+}

@@ -322,6 +322,127 @@ export class ActorRepository {
   }
 }
 
+/** 单聊交集推断的结果。`null` 分支各自带原因，便于日志里区分"为什么没推出来"。 */
+export type SelfExternalIdInference =
+  | { ok: true; externalId: string; directChats: number }
+  /** 双方都发过言的单聊不足 2 个 —— 交集必然含对方，分不出谁是我。 */
+  | { ok: false; reason: "not_enough_direct_chats"; directChats: number }
+  /** 交集为空或多于一个 —— 数据异常（多半是 type 判错把群当成了单聊）。 */
+  | { ok: false; reason: "not_unique"; candidates: number; directChats: number }
+
+/**
+ * 从**单聊**里反推本人在消息中使用的标识（钉钉的 `openDingTalkId`）。
+ *
+ * ## ★★ 为什么需要它：授权给的编号和消息里的编号不是一套
+ *
+ * 授权成功只给 `corpId + userId`（工号，实测输出见 `parseAuthStatus`），
+ * 而消息的发送者字段是 `senderOpenDingTalkId` —— 两个**互不相通**的标识符
+ * 空间，且渠道没有开放「工号 → 聊天标识」的接口（`get-self` 实测不给后者）。
+ *
+ * 于是 `resolveSelf` 只能绕道：拿姓名去 `contact user search` 搜一批人，
+ * 再用工号从里面精确挑出本人。判定是准的（最终判据是工号），但**这条路
+ * 失败率高**：搜不到、花名与实名不一致搜不着、字段缺失都会让它抛
+ * `SELF_IDENTITY_AMBIGUOUS`，而那时用户只能看着一条红字手动处理 ——
+ * 未确认期间蒸馏会拒掉**全部**语料（`assertDistillable` 第一条守卫）。
+ *
+ * ## ★★ 判据：在多个单聊里都出现的那个人，只能是我
+ *
+ * 单聊定义上只有两人。所以：
+ *
+ * ```
+ * 单聊①（和 A）：出现过 D-aaa、D-me
+ * 单聊②（和 B）：出现过 D-bbb、D-me
+ * 单聊③（和 C）：出现过 D-ccc、D-me
+ * ```
+ *
+ * A/B/C 是三个不同的人，各自只出现在自己那个单聊里；而**跨全部单聊的交集
+ * 只可能是我自己** —— 不存在第三个人同时在我的多个单聊里（否则它就不是单聊）。
+ *
+ * ★ 这条路**完全不碰姓名**。姓名匹配是灾难性的（实测同名同姓搜出 6 个不同
+ * `openDingTalkId`，见 self-identity.ts 文件头「为什么姓名绝对不参与判定」），
+ * 而这里是纯结构推断：不查通讯录、不多跑一次子进程、一条 SQL。
+ *
+ * ## ★ 两道自检，宁可返回 null 也不给可能错的答案
+ *
+ * 1. **至少 2 个"双方都发过言"的单聊。** 只有 1 个时交集是 `{我, 对方}`
+ *    两个元素，无从分辨 —— 这时必须放弃，不能挑一个。
+ * 2. **交集必须唯一。** 不唯一说明数据不符合假设（最可能是 `type` 判错，
+ *    把群当成了单聊 —— 那个判据实测踩过坑，见 `classifyConversation`），
+ *    这时同样放弃。
+ *
+ * ★ `HAVING count(...) = <单聊总数>` 里的分母只算**双方都发过言**的单聊：
+ * 若把"我只收没发"的单聊也算进分母，我自己就达不到那个计数而被排除掉 ——
+ * 那会让这条路在"有几个只收不发的单聊"时静默失效。
+ *
+ * ## 局限（调用方必须知道）
+ *
+ * **首次授权那一刻用不了** —— 库里还没有消息。所以它是 `search` 路径的
+ * **兜底与交叉校验**，不是替代品。好在采集不依赖身份（照常跑），
+ * 所以等用户看到那条红字时，库里通常已经有消息了。
+ */
+export function inferSelfExternalIdFromDirectChats(
+  db: SqliteDatabase,
+  channelId: string,
+): SelfExternalIdInference {
+  /**
+   * 只认「双方都发过言」的单聊（`distinct sender >= 2`）。
+   *
+   * 单方独白的单聊对交集毫无贡献却会抬高分母：如果那条独白是对方发的，
+   * 我不在里面 → 我达不到分母 → 交集为空；如果是我发的，它不影响正确性
+   * 但也不提供任何区分力。两种情况下排除掉都更稳。
+   */
+  const usable = db
+    .prepare<[string], { id: string }>(
+      `SELECT c.id AS id
+         FROM conversations c
+        WHERE c.channel_id = ? AND c.type = 'direct'
+          AND (SELECT count(DISTINCT m.sender_external_id)
+                 FROM messages m
+                WHERE m.conversation_id = c.id
+                  AND m.sender_external_id IS NOT NULL) >= 2`,
+    )
+    .all(channelId)
+
+  // 自检 1：少于 2 个可用单聊 → 交集必然含对方，放弃。
+  if (usable.length < 2) {
+    return { ok: false, reason: "not_enough_direct_chats", directChats: usable.length }
+  }
+
+  const placeholders = usable.map(() => "?").join(",")
+  /**
+   * ★ 分母直接内插成字面量而不是绑定参数：它是 `usable.length`（本函数自己算的
+   * 整数，不经任何外部输入），而混着绑 id 字符串与一个数字会让参数元组的类型
+   * 退化成 `unknown[]` —— 那正好盖住"绑错顺序"这类真错误。
+   */
+  const candidates = db
+    .prepare<string[], { sender_external_id: string }>(
+      `SELECT m.sender_external_id AS sender_external_id
+         FROM messages m
+        WHERE m.conversation_id IN (${placeholders})
+          AND m.sender_external_id IS NOT NULL
+        GROUP BY m.sender_external_id
+       HAVING count(DISTINCT m.conversation_id) = ${String(usable.length)}`,
+    )
+    .all(...usable.map((row) => row.id))
+
+  // 自检 2：交集必须唯一。不唯一多半是 type 判错（群被当成单聊）。
+  const only = candidates.length === 1 ? candidates[0] : undefined
+  if (only === undefined) {
+    return {
+      ok: false,
+      reason: "not_unique",
+      candidates: candidates.length,
+      directChats: usable.length,
+    }
+  }
+
+  return {
+    ok: true,
+    externalId: only.sender_external_id,
+    directChats: usable.length,
+  }
+}
+
 /**
  * 是否同一个身份。判据是 `(corpId, userId)` —— 「哪个组织的哪个工号」。
  *

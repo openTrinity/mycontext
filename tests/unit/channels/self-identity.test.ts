@@ -141,30 +141,36 @@ describe("候选列表的多种包装形态都能解开", () => {
  *
  * 而这个失败在采集链路里完全看不见（采集不依赖身份），所以必须单独测。
  */
-describe("★★ 真实的嵌套响应形状（orgEmployeeModel）", () => {
-  const NESTED_SELF = [
-    {
-      isAdmin: false,
-      orgEmployeeModel: {
-        corpId: "dingexampleorgid0001",
-        orgName: "示例集团",
-        orgUserName: "王强",
-        userId: "100001",
-      },
-    },
-  ]
-
-  const SEARCH_WITH_FLOWER = [
-    {
-      flowerName: "澄一",
-      name: "王强",
-      nick: "小王",
-      openDingTalkId: "DeMINE",
+/**
+ * 真实的嵌套 get-self 响应，与配套的 search 结果。
+ *
+ * ★ 提到 describe 外面是因为下面「单聊交集」那一组也要用它们做交叉校验 ——
+ * 而交叉校验必须拿**真实形状**测，用压平后的假形状测等于绕开了那个坑。
+ */
+const NESTED_SELF = [
+  {
+    isAdmin: false,
+    orgEmployeeModel: {
+      corpId: "dingexampleorgid0001",
+      orgName: "示例集团",
+      orgUserName: "王强",
       userId: "100001",
     },
-    { name: "王强", openDingTalkId: "DeOTHER", userId: "999" },
-  ]
+  },
+]
 
+const SEARCH_WITH_FLOWER = [
+  {
+    flowerName: "澄一",
+    name: "王强",
+    nick: "小王",
+    openDingTalkId: "DeMINE",
+    userId: "100001",
+  },
+  { name: "王强", openDingTalkId: "DeOTHER", userId: "999" },
+]
+
+describe("★★ 真实的嵌套响应形状（orgEmployeeModel）", () => {
   it("从 result[0].orgEmployeeModel 里取到 userId（首版在这里必然失败）", async () => {
     const identity = await resolveSelf(
       fakeCli({ getSelf: NESTED_SELF, search: SEARCH_WITH_FLOWER }),
@@ -196,5 +202,124 @@ describe("★★ 真实的嵌套响应形状（orgEmployeeModel）", () => {
       fakeCli({ getSelf: NESTED_SELF, search: SEARCH_WITH_FLOWER }),
     )
     expect(identity.openIds[0]?.value).not.toBe("DeOTHER")
+  })
+})
+
+/**
+ * ★★ 第二条判据：单聊交集（`inferFromMessages`）。
+ *
+ * ## 为什么加这条路
+ *
+ * 上面那些用例锁的都是 `search` 那条路 —— 它**判定是准的**（最终判据是
+ * userId），但**失败率高**：搜不到、花名与实名不一致搜不着、上游少给一个
+ * 字段，都会抛 `SELF_IDENTITY_AMBIGUOUS`。而那时用户只能看着一条红字手动
+ * 确认，未确认期间蒸馏拒掉**全部**语料 —— 也就是说"解析失败"的真实代价
+ * 是画像完全出不来。
+ *
+ * 单聊交集完全不碰姓名（判据与自检在 store 的
+ * `inferSelfExternalIdFromDirectChats`，那里有专门的测试文件）。
+ * 这一组只锁 `resolveSelf` 里的**编排**：什么时候用它、和 search 冲突时怎么办。
+ */
+describe("★★ 单聊交集作为兜底判据", () => {
+  const INFERRED = "DeFROMCHATS"
+
+  it("★ search 搜不到本人时用交集兜底（从前这里必然抛错）", async () => {
+    const cli = fakeCli({
+      // userId 不在候选里 → search 那条路失败
+      getSelf: { userId: "not-in-list", orgUserName: "王强" },
+      search: FIVE_SAME_NAME,
+    })
+    const identity = await resolveSelf(cli, "dingtalk", {
+      inferFromMessages: () => INFERRED,
+    })
+    expect(identity.openIds).toEqual([{ kind: "openDingTalkId", value: INFERRED }])
+    expect(identity.source).toBe("direct-chat-intersection")
+  })
+
+  it("★ 没有姓名时也能兜底（花名/实名对不上导致搜不着的那类失败）", async () => {
+    const identity = await resolveSelf(fakeCli({ getSelf: { userId: "100001" } }), "dingtalk", {
+      inferFromMessages: () => INFERRED,
+    })
+    expect(identity.openIds[0]?.value).toBe(INFERRED)
+    expect(identity.source).toBe("direct-chat-intersection")
+  })
+
+  it("推不出来（返回 null）时行为与从前一致 —— 照旧抛错", async () => {
+    try {
+      await resolveSelf(
+        fakeCli({
+          getSelf: { userId: "not-in-list", orgUserName: "王强" },
+          search: FIVE_SAME_NAME,
+        }),
+        "dingtalk",
+        { inferFromMessages: () => null },
+      )
+      expect.unreachable("应当抛 SELF_IDENTITY_AMBIGUOUS")
+    } catch (error) {
+      expect(isAppError(error)).toBe(true)
+      if (isAppError(error)) expect(error.code).toBe("SELF_IDENTITY_AMBIGUOUS")
+    }
+  })
+
+  it("get-self 直给标识时不走交集（路 1 优先，最省）", async () => {
+    let called = false
+    const identity = await resolveSelf(
+      fakeCli({ getSelf: { userId: "100001", orgUserName: "王强", openDingTalkId: "DeDIRECT" } }),
+      "dingtalk",
+      {
+        inferFromMessages: () => {
+          called = true
+          return INFERRED
+        },
+      },
+    )
+    expect(identity.openIds[0]?.value).toBe("DeDIRECT")
+    expect(identity.source).toBe("get-self")
+    expect(called).toBe(false)
+  })
+
+  it("两条路一致 → 采用（并保留 search 带回的花名）", async () => {
+    const identity = await resolveSelf(
+      fakeCli({ getSelf: NESTED_SELF, search: SEARCH_WITH_FLOWER }),
+      "dingtalk",
+      { inferFromMessages: () => "DeMINE" },
+    )
+    expect(identity.openIds[0]?.value).toBe("DeMINE")
+    expect(identity.source).toBe("search")
+    // 花名只有 search 那条路能带回来，交叉校验不该把它弄丢
+    expect(identity.displayNames).toContain("澄一")
+  })
+
+  /**
+   * ★★ 这一条是本次改动**提高**安全性的地方。
+   *
+   * 从前 search 给出唯一匹配就直接采用，没有任何第二来源能证伪它。
+   * 现在两条独立判据冲突时抛错 —— 因为无从知道哪条是错的，而"挑一个"
+   * 等于有 50% 概率把别人的消息当本人语料，代价是**不可逆**的画像污染
+   * （污染后的结论会作为下一轮的基线继续放大）。
+   */
+  it("★★ 两条路冲突 → 抛错，不挑一个", async () => {
+    try {
+      await resolveSelf(fakeCli({ getSelf: NESTED_SELF, search: SEARCH_WITH_FLOWER }), "dingtalk", {
+        inferFromMessages: () => "DeCONFLICT",
+      })
+      expect.unreachable("冲突时应当抛 SELF_IDENTITY_AMBIGUOUS")
+    } catch (error) {
+      expect(isAppError(error)).toBe(true)
+      if (isAppError(error)) {
+        expect(error.code).toBe("SELF_IDENTITY_AMBIGUOUS")
+        // ★ 标识符不进日志/上下文，只记"冲突了"这个事实
+        expect(JSON.stringify(error.context)).not.toContain("DeCONFLICT")
+        expect(JSON.stringify(error.context)).not.toContain("DeMINE")
+      }
+    }
+  })
+
+  it("不传 inferFromMessages 时完全是旧行为（首次授权、库为空的那一刻）", async () => {
+    const identity = await resolveSelf(
+      fakeCli({ getSelf: NESTED_SELF, search: SEARCH_WITH_FLOWER }),
+    )
+    expect(identity.openIds[0]?.value).toBe("DeMINE")
+    expect(identity.source).toBe("search")
   })
 })

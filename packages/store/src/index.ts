@@ -36,8 +36,10 @@ export {
   ConversationRepository,
   ActorRepository,
   SelfIdentityRepository,
+  inferSelfExternalIdFromDirectChats,
 } from "./repositories/conversations.js"
 export type { PersonaConversationExclusionReason } from "./repositories/conversations.js"
+export type { SelfExternalIdInference } from "./repositories/conversations.js"
 
 export { MessageRepository } from "./repositories/messages.js"
 export type { MessageUpsertResult } from "./repositories/messages.js"

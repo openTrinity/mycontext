@@ -34,6 +34,34 @@
  * 蒸馏守卫的 `identity_unconfirmed` **拒掉全部语料**。
  * 也就是说数字人即使接上 UI 也没有任何可蒸馏的数据，而这一步的失败
  * 在采集链路里完全看不见（采集不依赖身份）。
+ *
+ * ## ★★ 5. 三条路，姓名那条降为最后
+ *
+ * 上面 §1-3 描述的绕路（按姓名 search → 用 userId 精确挑）**判定是准的**
+ * （最终判据是 userId，不是姓名），但**失败率高**：搜不到、花名与实名不一致
+ * 搜不着、上游少给一个字段，都会让它抛 `SELF_IDENTITY_AMBIGUOUS`。
+ * 而那时用户只能看着一条红字手动处理 —— 未确认期间蒸馏拒掉**全部**语料。
+ *
+ * 于是加了第二条**完全不碰姓名**的路：**单聊交集**。
+ * 单聊定义上只有两人，所以「在我的多个单聊里都出现过的标识」只能是我自己
+ * （不存在第三个人同时在我的多个单聊里）。判据与两道自检写在 store 的
+ * `inferSelfExternalIdFromDirectChats`；这里只消费它的结果。
+ *
+ * 现在的顺序：
+ *
+ * | 路 | 手段 | 靠姓名 | 何时可用 |
+ * |---|---|---|---|
+ * | 1 | `get-self` 直接给 openDingTalkId | 否 | 偶尔（实测通常不给） |
+ * | 2 | 单聊交集 | **否** | 有 ≥2 个双方都发过言的单聊 |
+ * | 3 | `search` + userId 精确匹配 | 是（仅作检索词） | 首次授权、库为空时 |
+ *
+ * ★ 路 2 **不是** 路 3 的替代品：首次授权那一刻库里还没有消息，那时只有
+ * 路 3 可用。它是兜底 —— 好在采集不依赖身份（照常跑），所以等用户看到
+ * 那条红字时库里通常已经有消息了，这正是路 2 能救回的场景。
+ *
+ * ★★ 两条路都有结论时**交叉校验**：不一致就抛错，不挑一个。
+ * 这比从前严格 —— 从前 search 给出唯一匹配就直接采用，没有任何第二来源
+ * 能证伪它。而 50% 概率把别人的消息当本人语料，代价是不可逆的画像污染。
  */
 import { AppError } from "@mycontext/kernel"
 import type { DwsCli } from "./cli.js"
@@ -46,7 +74,28 @@ export interface ResolvedSelfIdentity {
   displayNames: string[]
   corpId: string | null
   corpName: string | null
+  /**
+   * 这次的 openId 是从哪条路得来的。只用于日志与诊断，**不参与任何判定**。
+   *
+   * 三条路的可靠性不同（`direct-chat-intersection` 是结构推断、
+   * `search` 依赖姓名检索），出问题时第一个要问的就是"这次走的哪条"。
+   */
+  source: "get-self" | "search" | "direct-chat-intersection"
 }
+
+/**
+ * 从库里的单聊反推本人标识 —— `resolveSelf` 的**兜底与交叉校验**来源。
+ *
+ * ## ★ 为什么是注入的回调，而不是直接查库
+ *
+ * 分层：`@mycontext/channels`（L2）**不能**依赖 `@mycontext/store`（L3）。
+ * 而这条推断本质是一句 SQL（见 store 的 `inferSelfExternalIdFromDirectChats`，
+ * 那里有完整的判据说明）。所以由上层把结果喂进来，这里只消费一个字符串。
+ *
+ * 返回 `null` = 推不出来（单聊不足 / 交集不唯一 / 库还是空的）。
+ * **不抛** —— 推不出来是正常状态，调用方要能继续走其它路。
+ */
+export type InferSelfFromMessages = () => string | null
 
 interface GetSelfPayload {
   userId?: unknown
@@ -131,11 +180,21 @@ function toCandidateArray(payload: unknown): SearchCandidate[] {
 /**
  * 解析本人身份。
  *
- * @throws AppError(SELF_IDENTITY_AMBIGUOUS) 当 userId 精确匹配到 0 个或 >1 个候选。
+ * ## 三条路，按可靠性排序（详见文件头 §5）
+ *
+ * 1. `get-self` 直接给 `openDingTalkId` —— 最快，但实测通常不给；
+ * 2. **单聊交集**（`options.inferFromMessages`）—— 纯结构推断，不碰姓名；
+ * 3. `contact user search` + userId 精确匹配 —— 要靠姓名当检索词，失败率高。
+ *
+ * ★ 2 与 3 都成功时**交叉校验**：两条独立的路得出同一个标识才采用，
+ * 冲突则抛错。这比只信任一条更安全（见文件头 §5）。
+ *
+ * @throws AppError(SELF_IDENTITY_AMBIGUOUS) 三条路都没能唯一确定标识时。
  */
 export async function resolveSelf(
   cli: Pick<DwsCli, "json">,
   channelId = "dingtalk",
+  options: { inferFromMessages?: InferSelfFromMessages } = {},
 ): Promise<ResolvedSelfIdentity> {
   // ★ 必须压平：真实形状是数组 + orgEmployeeModel 嵌套（见文件头 §4）。
   const self = flattenSelfPayload(await cli.json<unknown>(["contact", "user", "get-self"]))
@@ -159,19 +218,42 @@ export async function resolveSelf(
   const corpId = str(self.corpId, self.corp_id)
   const corpName = str(self.corpName, self.corp_name, self.orgName, self.org_name)
 
-  // get-self 有时直接带 openDingTalkId —— 有就用，省一次 search（也省掉歧义风险）。
-  const direct = str(self.openDingTalkId, self.open_dingtalk_id)
-  if (direct !== null) {
-    return {
-      userId,
-      openIds: [{ kind: "openDingTalkId", value: direct }],
-      displayNames: [...new Set(displayNames)],
-      corpId,
-      corpName,
-    }
-  }
+  const base = { userId, corpId, corpName }
+  const done = (
+    openId: string,
+    source: ResolvedSelfIdentity["source"],
+    extraNames: (string | null)[] = [],
+  ): ResolvedSelfIdentity => ({
+    ...base,
+    openIds: [{ kind: "openDingTalkId", value: openId }],
+    displayNames: [
+      ...new Set(
+        [...displayNames, ...extraNames].filter((value): value is string => value !== null),
+      ),
+    ],
+    source,
+  })
 
+  // ── 路 1：get-self 有时直接带 openDingTalkId —— 有就用，省一次 search（也省掉歧义风险）。
+  const direct = str(self.openDingTalkId, self.open_dingtalk_id)
+  if (direct !== null) return done(direct, "get-self")
+
+  /**
+   * ── 路 2：单聊交集。**先于 search 算**，因为它不碰姓名。
+   *
+   * 即使 search 那条路也能走通，这个结果仍然有用 —— 下面用它交叉校验。
+   * 推不出来返回 null（库为空 / 单聊不足 / 交集不唯一），不影响后续。
+   */
+  const inferred = options.inferFromMessages?.() ?? null
+
+  /**
+   * ── 路 3：search。
+   *
+   * ★ 只在**没有姓名**且路 2 也没结论时才算无从下手 —— 有了路 2，
+   * "花名与实名不一致导致搜不着"这类失败不再是死路。
+   */
   if (orgName === null) {
+    if (inferred !== null) return done(inferred, "direct-chat-intersection")
     throw new AppError("SELF_IDENTITY_AMBIGUOUS", "本人姓名缺失，无法定位消息中使用的标识", {
       messageKey: "errors:byCode.SELF_IDENTITY_AMBIGUOUS",
       context: { channelId, userId },
@@ -187,10 +269,54 @@ export async function resolveSelf(
     (candidate) => str(candidate.userId, candidate.user_id) === userId,
   )
 
-  if (matched.length !== 1) {
+  // search 结果里的 name / nick / flowerName 都收进显示名 ——
+  // 实测 `{name:"高鹏", nick:"小周", flowerName:"知白"}` 三种形态都可能出现在 @ 里。
+  const first = matched.length === 1 ? matched[0] : undefined
+  const searchOpenId =
+    first === undefined ? null : str(first.openDingTalkId, first.open_dingtalk_id)
+  const candidateNames =
+    first === undefined
+      ? []
+      : [str(first.name), str(first.nick), str(first.flowerName, first.flower_name)]
+
+  /**
+   * ★★ 两条路都有结论 → **必须一致**，否则抛错。
+   *
+   * 不一致意味着有一条是错的，而我们无从知道是哪条。此时"挑一个"等于
+   * 有 50% 概率把别人的消息当本人语料 —— 而画像污染是**不可逆**的
+   * （污染后的结论会作为下一轮的基线继续放大）。所以宁可挡住，让用户确认。
+   *
+   * 这一档比"只信 search"严格：从前 search 给出唯一匹配就直接采用，
+   * 没有任何第二来源能证伪它。
+   */
+  if (searchOpenId !== null && inferred !== null && searchOpenId !== inferred) {
     throw new AppError(
       "SELF_IDENTITY_AMBIGUOUS",
-      `按 userId 精确匹配到 ${matched.length} 条记录（期望 1 条），需要人工确认身份`,
+      "两条独立判据得出的本人标识不一致，需要人工确认身份",
+      {
+        messageKey: "errors:byCode.SELF_IDENTITY_AMBIGUOUS",
+        // ★ 不记 openId 本身（是标识符，不进日志）——只记"冲突了"这个事实。
+        context: { channelId, userId, conflict: "search-vs-direct-chats" },
+      },
+    )
+  }
+
+  // 一致，或只有 search 有结论 → 采用 search（它顺带带回花名）。
+  if (searchOpenId !== null) return done(searchOpenId, "search", candidateNames)
+
+  // search 没结论 → 用路 2 兜底。这是本次改动救回的主要场景。
+  if (inferred !== null) return done(inferred, "direct-chat-intersection")
+
+  /**
+   * 三条路都没结论 → 抛错要求人工确认。
+   *
+   * 分成两句是为了让日志能区分"搜出来一堆但没一个是我"与"搜到我了但那条
+   * 记录缺 openDingTalkId" —— 前者是同名歧义，后者是上游字段缺失。
+   */
+  if (first === undefined) {
+    throw new AppError(
+      "SELF_IDENTITY_AMBIGUOUS",
+      `按 userId 精确匹配到 ${String(matched.length)} 条记录（期望 1 条），需要人工确认身份`,
       {
         messageKey: "errors:byCode.SELF_IDENTITY_AMBIGUOUS",
         context: {
@@ -202,32 +328,8 @@ export async function resolveSelf(
       },
     )
   }
-
-  const openId = str(matched[0]?.openDingTalkId, matched[0]?.open_dingtalk_id)
-  if (openId === null) {
-    throw new AppError("SELF_IDENTITY_AMBIGUOUS", "匹配到本人但缺少消息中使用的标识", {
-      messageKey: "errors:byCode.SELF_IDENTITY_AMBIGUOUS",
-      context: { channelId, userId },
-    })
-  }
-
-  // search 结果里的 name / nick / flowerName 都收进显示名 ——
-  // 实测 `{name:"高鹏", nick:"小周", flowerName:"知白"}` 三种形态都可能出现在 @ 里。
-  const candidateNames = [
-    str(matched[0]?.name),
-    str(matched[0]?.nick),
-    str(matched[0]?.flowerName, matched[0]?.flower_name),
-  ]
-
-  return {
-    userId,
-    openIds: [{ kind: "openDingTalkId", value: openId }],
-    displayNames: [
-      ...new Set(
-        [...displayNames, ...candidateNames].filter((value): value is string => value !== null),
-      ),
-    ],
-    corpId,
-    corpName,
-  }
+  throw new AppError("SELF_IDENTITY_AMBIGUOUS", "匹配到本人但缺少消息中使用的标识", {
+    messageKey: "errors:byCode.SELF_IDENTITY_AMBIGUOUS",
+    context: { channelId, userId },
+  })
 }

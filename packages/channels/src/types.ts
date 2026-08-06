@@ -544,12 +544,23 @@ export interface ChannelDocuments {
 
 /** 本人身份。**蒸馏正确性的地基**，见 self-identity 的实现注释。 */
 export interface ChannelIdentity {
-  resolveSelf(signal?: AbortSignal): Promise<{
+  /**
+   * @param options.inferFromMessages 从**已采集的消息**反推本人标识的兜底判据。
+   *   由上层注入而不是插件自己查库：`channels`(L2) 不能依赖 `store`(L3)。
+   *   返回 `null` = 推不出来（正常状态，不是错误）。
+   *   完整判据见 store 的 `inferSelfExternalIdFromDirectChats`。
+   */
+  resolveSelf(options?: {
+    signal?: AbortSignal | undefined
+    inferFromMessages?: (() => string | null) | undefined
+  }): Promise<{
     userId: string
     openIds: { kind: string; value: string }[]
     displayNames: string[]
     corpId: string | null
     corpName: string | null
+    /** 这次走的哪条路。只用于日志与诊断，不参与判定。 */
+    source: "get-self" | "search" | "direct-chat-intersection"
   }>
 }
 
