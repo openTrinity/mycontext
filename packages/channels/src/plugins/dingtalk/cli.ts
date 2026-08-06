@@ -504,6 +504,18 @@ export function classifyDwsError(output: string): AppError | null {
 
     // ② 服务端业务码：保密群等「授权也解决不了」的终态。
     if (envelope.serverErrorCode !== null) {
+      /**
+       * 开源版 v1.0.56 的 `list_group_member_by_ids` 也会复用 1001 表示
+       * `no permission: org not match`。它不是保密群，只是该群所属组织与
+       * 当前 profile 不匹配；仍归 RESOURCE_FORBIDDEN，但不能给用户错误文案。
+       */
+      if (envelope.serverErrorCode === "1001" && output.toLowerCase().includes("org not match")) {
+        return new AppError("RESOURCE_FORBIDDEN", "该资源所属组织与当前登录组织不一致", {
+          retryable: false,
+          messageKey: "errors:byCode.RESOURCE_FORBIDDEN",
+          context: { serverErrorCode: envelope.serverErrorCode, reason: "org_not_match" },
+        })
+      }
       const mapped = SERVER_ERROR_CODES[envelope.serverErrorCode]
       if (mapped !== undefined) {
         return new AppError(mapped.code, mapped.message, {

@@ -44,6 +44,7 @@ import {
   createDingTalkAvatars,
   fetchAvatar,
 } from "../../../packages/channels/src/plugins/dingtalk/avatar.js"
+import { AppError } from "../../../packages/kernel/src/index.js"
 
 /**
  * 假 CLI。
@@ -57,6 +58,8 @@ function fakeCli(behavior: {
   groups?: { openConversationId: string }[]
   /** 每个群里这个人的成员详情：undefined = 不在这个群（members: []） */
   memberByGroup?: Record<string, { avatarMediaId: string | null }>
+  /** 开源 DWS 无法读取成员详情的群（跨组织 / 保密群） */
+  unreadableGroups?: string[]
   /** download-media 是否写出文件（false = 模拟下载失败） */
   writeFile?: boolean
   runThrows?: unknown
@@ -76,6 +79,11 @@ function fakeCli(behavior: {
         }
         if (args.includes("list-by-ids")) {
           const groupId = args[args.indexOf("--id") + 1] ?? ""
+          if (behavior.unreadableGroups?.includes(groupId) === true) {
+            return Promise.reject(
+              new AppError("RESOURCE_FORBIDDEN", "该资源所属组织与当前登录组织不一致"),
+            )
+          }
           const member = behavior.memberByGroup?.[groupId]
           // 不在这个群 → `members: []`（实测形态）
           return Promise.resolve({ members: member === undefined ? [] : [member] } as T)
@@ -173,6 +181,64 @@ describe("★ 「有共同群但没设头像」不能报成「没有共同群」
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.reason).toBe("no_common_group")
+  })
+})
+
+describe("★ 开源 DWS 的跨组织群拒绝不能中断头像查找", () => {
+  it("第一个共同群不可读时继续尝试后面的可读群", async () => {
+    const { calls, cli } = fakeCli({
+      groups: [{ openConversationId: "cidCROSS" }, { openConversationId: "cidLOCAL" }],
+      unreadableGroups: ["cidCROSS"],
+      memberByGroup: { cidLOCAL: { avatarMediaId: MEDIA_ID } },
+    })
+
+    const result = await fetchAvatar(cli, {
+      openDingTalkId: PEER,
+      nick: "小吴",
+      outputDir: outDir(),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(
+      calls
+        .filter((args) => args.includes("list-by-ids"))
+        .map((args) => args[args.indexOf("--id") + 1]),
+    ).toEqual(["cidCROSS", "cidLOCAL"])
+  })
+
+  it("所有共同群都不可读时返回可重试失败，不误判为没有共同群", async () => {
+    const { cli } = fakeCli({
+      groups: [{ openConversationId: "cidCROSS" }],
+      unreadableGroups: ["cidCROSS"],
+    })
+
+    const result = await createDingTalkAvatars(cli).ofUser({
+      externalId: PEER,
+      displayName: "外部同事",
+      outputDir: outDir(),
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe("failed")
+  })
+
+  it("已知群不可读时仍回退到共同群搜索", async () => {
+    const { calls, cli } = fakeCli({
+      groups: [{ openConversationId: "cidLOCAL" }],
+      unreadableGroups: ["cidKNOWN"],
+      memberByGroup: { cidLOCAL: { avatarMediaId: MEDIA_ID } },
+    })
+
+    const result = await fetchAvatar(cli, {
+      openDingTalkId: PEER,
+      nick: "小吴",
+      groupExternalId: "cidKNOWN",
+      outputDir: outDir(),
+    })
+
+    expect(result.ok).toBe(true)
+    expect(calls.some((args) => args.includes("search-common"))).toBe(true)
   })
 })
 

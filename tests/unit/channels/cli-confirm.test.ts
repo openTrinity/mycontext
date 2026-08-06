@@ -177,6 +177,35 @@ describe("错误归类：区分终态与可重试", () => {
     expect(classifyDwsError(output)?.code).toBe("PERMISSION_REQUIRED")
   })
 
+  it("开源版复用 1001 表示跨组织群不可读时，不误报成保密会话", () => {
+    const output = JSON.stringify({
+      error: {
+        category: "api",
+        code: 5,
+        server_error_code: "1001",
+        message: "no permission: org not match",
+      },
+    })
+    const error = classifyDwsError(output)
+    expect(error?.code).toBe("RESOURCE_FORBIDDEN")
+    expect(error?.message).toContain("组织")
+    expect(error?.context?.["reason"]).toBe("org_not_match")
+  })
+
+  it("1001 的保密群错误仍保留原有分类与文案", () => {
+    const output = JSON.stringify({
+      error: {
+        category: "api",
+        code: 5,
+        server_error_code: "1001",
+        message: "该群为保密群，无法获取消息记录",
+      },
+    })
+    const error = classifyDwsError(output)
+    expect(error?.code).toBe("RESOURCE_FORBIDDEN")
+    expect(error?.message).toContain("保密会话")
+  })
+
   it.each([
     "Error: refresh token expired",
     "not authenticated",

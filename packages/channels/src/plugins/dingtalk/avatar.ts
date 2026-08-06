@@ -32,6 +32,7 @@
  *
  * · `no_common_group` —— 与这个人没有共同群。**正常**，退回文字头像；
  * · `no_avatar_set` —— 他自己没设头像（钉钉也显示文字头像）。**正常**；
+ * · `group_unreadable` —— 搜到共同群，但当前组织身份不能读成员详情。**可重试**；
  * · `download_failed` —— 换 URL 或下载失败。**这个才值得重试**。
  *
  * 合成一个 "失败" 的后果：每次打开页面都会对那些"本来就没有头像"的人
@@ -51,6 +52,7 @@
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs"
 import { join } from "node:path"
+import { isAppError } from "@mycontext/kernel"
 import type {
   ChannelAvatarMiss,
   ChannelAvatarRequest,
@@ -63,7 +65,8 @@ import type {
  * 取不到头像的原因。
  *
  * `no_common_group` / `no_avatar_set` 是**终态**（重试没有意义），
- * `download_failed` / `lookup_skipped` 可以重试 —— 调用方据此决定要不要再问一次。
+ * `group_unreadable` / `download_failed` / `lookup_skipped` 可以重试 ——
+ * 调用方据此决定要不要再问一次。
  *
  * ## ★ `lookup_skipped`：「我们压根没去找」不能算终态
  *
@@ -78,6 +81,7 @@ import type {
 export type AvatarMissReason =
   | "no_common_group"
   | "no_avatar_set"
+  | "group_unreadable"
   | "download_failed"
   | "lookup_skipped"
 
@@ -131,10 +135,9 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  * 合成一个 null 的后果见 `findViaCommonGroups`：那会把"没设头像"
  * 误报成"没有共同群"。
  */
-interface GroupMemberAvatar {
-  inGroup: boolean
-  mediaId: string | null
-}
+type GroupMemberAvatar =
+  | { readable: true; inGroup: boolean; mediaId: string | null }
+  | { readable: false }
 
 async function mediaIdFromGroup(
   cli: Pick<MediaRunner, "json">,
@@ -142,17 +145,48 @@ async function mediaIdFromGroup(
   openDingTalkId: string,
   signal?: AbortSignal,
 ): Promise<GroupMemberAvatar> {
-  const payload = await cli.json<unknown>(
-    ["chat", "group", "members", "list-by-ids", "--id", groupExternalId, "--users", openDingTalkId],
-    signal === undefined ? {} : { signal },
-  )
+  let payload: unknown
+  try {
+    payload = await cli.json<unknown>(
+      [
+        "chat",
+        "group",
+        "members",
+        "list-by-ids",
+        "--id",
+        groupExternalId,
+        "--users",
+        openDingTalkId,
+      ],
+      signal === undefined ? {} : { signal },
+    )
+  } catch (error) {
+    /**
+     * 开源版 v1.0.56 对部分跨组织共同群返回
+     * `server_error_code=1001, errorMsg="no permission: org not match"`。
+     *
+     * 这只说明**这个群**不可读，不说明这个人没有头像。直接把异常抛出去会
+     * 在第一个不可读群处中断，而 search-common 后面的同组织群本来可能可读。
+     * 真正的网络/登录/授权错误仍然抛出，只有资源级拒绝可以安全跳过。
+     */
+    if (isAppError(error) && error.code === "RESOURCE_FORBIDDEN") {
+      return { readable: false }
+    }
+    throw error
+  }
   const record = asRecord(payload)
   // 形状实测是 `{ members: [...] }`；剥信封之后 result 就是这个对象
   const members = record === null ? null : record["members"]
-  if (!Array.isArray(members) || members.length === 0) return { inGroup: false, mediaId: null }
+  if (!Array.isArray(members) || members.length === 0) {
+    return { readable: true, inGroup: false, mediaId: null }
+  }
   const first = asRecord(members[0]) as MemberPayload | null
-  if (first === null) return { inGroup: false, mediaId: null }
-  return { inGroup: true, mediaId: str(first.avatarMediaId) ?? str(first.avatar_media_id) }
+  if (first === null) return { readable: true, inGroup: false, mediaId: null }
+  return {
+    readable: true,
+    inGroup: true,
+    mediaId: str(first.avatarMediaId) ?? str(first.avatar_media_id),
+  }
 }
 
 /**
@@ -184,6 +218,8 @@ type CommonGroupSearch =
   | { kind: "no_group" }
   /** 缺花名 → **没查**（不是"没有群"）。可重试，见 `lookup_skipped` */
   | { kind: "skipped" }
+  /** 搜到了共同群，但开源 DWS 对这些群都拒绝成员详情读取 */
+  | { kind: "unreadable" }
 
 async function findViaCommonGroups(
   cli: Pick<MediaRunner, "json">,
@@ -193,6 +229,7 @@ async function findViaCommonGroups(
   if (nick === null || nick === undefined || nick === "") return { kind: "skipped" }
 
   let cursor = "0"
+  let sawUnreadableGroup = false
   for (let page = 0; page < MAX_COMMON_GROUP_PAGES; page += 1) {
     const payload = await cli.json<unknown>(
       [
@@ -219,6 +256,10 @@ async function findViaCommonGroups(
       const groupId = group === null ? null : str(group["openConversationId"])
       if (groupId === null) continue
       const found = await mediaIdFromGroup(cli, groupId, input.openDingTalkId, input.signal)
+      if (!found.readable) {
+        sawUnreadableGroup = true
+        continue
+      }
       if (found.mediaId !== null) {
         return { kind: "found", mediaId: found.mediaId, groupExternalId: groupId }
       }
@@ -231,6 +272,7 @@ async function findViaCommonGroups(
     if (!hasMore || next === null) break
     cursor = next
   }
+  if (sawUnreadableGroup) return { kind: "unreadable" }
   return { kind: "no_group" }
 }
 
@@ -252,8 +294,8 @@ export async function fetchAvatar(
   const known = input.groupExternalId
   if (known !== null && known !== undefined && known !== "") {
     const direct = await mediaIdFromGroup(cli, known, input.openDingTalkId, input.signal)
-    if (direct.mediaId !== null) found = [direct.mediaId, known]
-    else if (direct.inGroup) {
+    if (direct.readable && direct.mediaId !== null) found = [direct.mediaId, known]
+    else if (direct.readable && direct.inGroup) {
       /**
        * ★ 他在这个群里但成员详情里没有 `avatarMediaId` → 判 `no_avatar_set`，
        * **不再去搜别的群**。
@@ -277,6 +319,7 @@ export async function fetchAvatar(
     if (search.kind === "no_avatar") return { ok: false, reason: "no_avatar_set" }
     // 缺花名 = 没查过，**不是**终态（花名可能只是还没采到）
     if (search.kind === "skipped") return { ok: false, reason: "lookup_skipped" }
+    if (search.kind === "unreadable") return { ok: false, reason: "group_unreadable" }
     if (search.kind === "no_group") return { ok: false, reason: "no_common_group" }
     found = [search.mediaId, search.groupExternalId]
   }
@@ -347,12 +390,14 @@ export async function fetchAvatar(
  * 映射本身要保住「终态 vs 可重试」这条线（见 `ChannelAvatarMiss`）：
  * · `no_avatar_set`   → `not_set`        （终态 → 终态）
  * · `no_common_group` → `not_reachable`  （终态 → 终态）
+ * · `group_unreadable`→ `failed`         （可重试 → 可重试）
  * · `lookup_skipped`  → `not_attempted`  （可重试 → 可重试）
  * · `download_failed` → `failed`         （可重试 → 可重试）
  */
 const MISS_MAP: Record<AvatarMissReason, ChannelAvatarMiss> = {
   no_avatar_set: "not_set",
   no_common_group: "not_reachable",
+  group_unreadable: "failed",
   lookup_skipped: "not_attempted",
   download_failed: "failed",
 }
