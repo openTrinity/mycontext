@@ -226,9 +226,11 @@ describe("★★ 取消勾选之后，那个会话的已有语料被清掉", () 
     vault.close()
   })
 
-  it("★ 不限（没配范围）时什么都不删 —— 那时「越界」没有定义", () => {
+  it("★ 显式选了「不限」（只配时间不配会话）时什么都不删 —— 那时「越界」没有定义", () => {
     const vault = openTestVault()
     seed(vault)
+    // 有 chat 行但不带 conversationIds = 不限会话
+    setScope(vault, undefined, START - 86_400_000)
     const report = purgeOutOfScopeMessages(vault.db, CHANNEL, readCollectionScope(vault.db))
 
     expect(report.messages).toBe(0)

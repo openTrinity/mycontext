@@ -91,8 +91,20 @@ export function isSentAtInScope(scope: CollectionScope, sentAt: number): boolean
  *
  * 注意与 `minutesEnabled()` / `documentsEnabled()` 的三态判断不同：那两处
  * 要区分"没配过"（默认开）与"显式关"，因为引导默认勾了它们。而 chat 源
- * 的 `enabled` 由引导第 3 步显式写入，没有"没配过但应该开"的情形 ——
- * 表里没这一行时下面走的是 `restricted: false`（不限），与老库兼容。
+ * 的 `enabled` 由引导第 3 步显式写入。
+ *
+ * ## ★★ 「表里没有这一行」也是「一个都不采」
+ *
+ * 这一条曾经反着写（返回 `restricted: false` = 不限 = 采全部），理由是
+ * "兼容没配过范围的老库"。但那让**清空渠道数据**变成一个陷阱：清完之后
+ * `distill_sources` 是空的 → 读成"不限" → 采集把**全部**会话都拉回来，
+ * 而用户刚刚明确表达的是"我要归零"。方向正好相反，且不报错。
+ *
+ * 现在的判据是「**没有明确说要采什么，就什么都不采**」。代价是老库
+ * （从没走过引导第 3 步的）会停采，而那恰恰是对的：用户没选过范围，
+ * 我们就不该替他决定去采他的全部聊天记录 —— 按 CLAUDE.md 第 5 节，
+ * 「严格遵守用户在引导里选的范围」的默认值只能是空，不能是全部。
+ * 走一遍引导（或在设置里存一次范围）就会恢复。
  */
 export function readCollectionScope(db: SqliteDatabase): CollectionScope {
   const row = db
@@ -102,10 +114,13 @@ export function readCollectionScope(db: SqliteDatabase): CollectionScope {
     >("SELECT enabled, scope_json FROM distill_sources WHERE kind = ?")
     .get("chat")
 
-  // 表里没有这一行 = 从没配过（老库 / 跳过了引导第 3 步）→ 不设限。
+  /**
+   * 表里没有这一行 = 用户还没说过要采什么（全新库 / 刚被清空 / 跳过了
+   * 引导第 3 步）→ **一个都不采**（见上面那段：默认值只能是空）。
+   */
   if (row === undefined) {
     return {
-      restricted: false,
+      restricted: true,
       allow: new Set(),
       since: undefined,
       until: undefined,

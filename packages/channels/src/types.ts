@@ -103,6 +103,17 @@ export interface ChannelAuth {
   describeStepKeys(): string[]
   status(): Promise<AuthStatus>
   login(ctx: AuthContext): Promise<AuthStatus>
+  /**
+   * 退出授权。**渠道不支持时可省略**。
+   *
+   * ★ 为什么这是必需能力而不是"删掉配置目录就行"：token 的密钥在系统
+   * 钥匙串里（钉钉实测），删目录之后 CLI 会从钥匙串重建一份 profiles，
+   * `auth status` 照样返回已授权。所以"退出授权"只能由渠道自己做。
+   *
+   * 返回是否真的退出了（复查 status 得到的结论，不看 exit code）。
+   * **不抛**：失败只降级成"凭据还在"，由调用方决定怎么呈现。
+   */
+  logout?(): Promise<boolean>
 }
 
 // ---------------------------------------------------------------

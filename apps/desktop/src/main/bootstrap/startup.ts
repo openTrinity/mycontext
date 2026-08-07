@@ -314,15 +314,6 @@ export function bootstrapApp(mainDir: string): AppContext {
    */
   let mountedVault: SqliteDatabase | null = null
   const vaultDb = (): SqliteDatabase | null => mountedVault
-  /**
-   * 当前挂载的 vaultId。null = 没登录。
-   *
-   * ★ 为什么要单独记：「清空当前渠道数据」要 **卸载 → 清 → 重挂同一个**，
-   * 而 `unmountVault()` 会把 `activeIdentity` 也清掉（那是它的正确行为，
-   * 见 `releaseVault` 的注释）—— 清完之后就没人知道刚才挂的是哪一个了。
-   * 从 `activeIdentity` 现读会拿到 null，于是重挂不回去。
-   */
-  let mountedVaultId: string | null = null
 
   const feed = new FeedService({
     clock: systemClock,
@@ -1034,16 +1025,6 @@ export function bootstrapApp(mainDir: string): AppContext {
         vaultPaths = null
         activeIdentity.clear()
         vaults.closeAll()
-        /**
-         * ★ 刻意**不清** `mountedVaultId`。
-         *
-         * 「清空渠道数据」要卸载后重挂**同一个** vault，而这个回调正是卸载
-         * 的最后一步 —— 清了它就没人知道刚才挂的是哪一个了。
-         *
-         * 登出后它是过期值，但那是无害的：唯一的读者（`channelDataWipe`）
-         * 会先经 `currentVault()` 判断有没有登录，而那个读的是 `vaultPaths`
-         * （这里已置 null）。也就是过期的 id 到不了任何真实动作。
-         */
       },
       logger,
     })
@@ -1066,8 +1047,6 @@ export function bootstrapApp(mainDir: string): AppContext {
     // ego 图的两个注入回调与 RuntimeEnv 的 dwsConfigDir getter 都读它
     mountedVault = handle.db
     vaultPaths = vp
-    // ★ 记住挂的是哪一个：「清空渠道数据」要卸载后重挂同一个（见声明处）
-    mountedVaultId = vaultId
 
     /**
      * ★★ 把渠道 CLI 的配置目录钉死在这个身份上 —— 身份隔离的**主防线**。
@@ -1193,37 +1172,6 @@ export function bootstrapApp(mainDir: string): AppContext {
   }
 
   /**
-   * 「清空当前渠道的数据」。
-   *
-   * ★ 复用 `unmountVault` / `mountVault` 这两个**已有**编排，而不是自己
-   * 停一遍服务：那两个函数里每一步都对应一个实测过的坑（await 采集收尾、
-   * 先停 kl 再换 dataDir、退订要用旧身份的 profile…），见
-   * `vault-teardown.ts` 的文件头。自己写一遍必然漏掉其中几条，
-   * 而漏掉的表现是"清完之后某一块仍按旧数据工作"。
-   *
-   * 装配位置必须在 `mountVault` **之后**（它是 const 箭头，有 TDZ）。
-   */
-  const channelDataWipe = new ChannelDataWipeService({
-    clock: systemClock,
-    logger: logger.child("DataWipe"),
-    currentVault: () => {
-      const vp = vaultPaths
-      // 判据用 vaultPaths 而不是 mountedVaultId：后者在登出后是过期值（见 releaseVault）
-      return vp === null ? null : { root: vp.root, database: vp.database }
-    },
-    unmount: () => unmountVault(),
-    remount: async () => {
-      const vaultId = mountedVaultId
-      if (vaultId === null) {
-        // 没有可重挂的目标（理论上到不了这里：wipe 已经判过登录态）
-        logger.warn("channel data wipe: nothing to remount", {})
-        return
-      }
-      await mountVault(vaultId)
-    },
-  })
-
-  /**
    * 身份切换器。它只管"当前是谁"，真正的挂载动作由上面那个 `mountVault`
    * 完成（见 `ActiveIdentityService` 的文件头：为什么两者分开）。
    */
@@ -1281,6 +1229,90 @@ export function bootstrapApp(mainDir: string): AppContext {
   // 持久化的会话 token 在装配阶段校验：窗口打开前就定好登录态，
   // 避免渲染层先闪一下登录页再跳进主壳。
   const restored = auth.restoreSession()
+
+  /**
+   * 「清空当前渠道的数据」—— 把这个渠道身份**整个归零**。
+   *
+   * ## ★ 装配位置：必须在 `auth` 与 `activeIdentity` 之后
+   *
+   * 它要读"当前是哪个身份"（解绑用）与"当前登录的是哪个账号"
+   * （重挂时挑新目标用）。放在它们之前会踩 const 的 TDZ。
+   *
+   * ## 复用三个已有能力，不自己实现
+   *
+   * · `unmountVault` —— 停服务的顺序里每一步都对应一个实测过的坑
+   *   （await 采集收尾、先停 kl 再换 dataDir、退订要用旧身份的 profile），
+   *   见 `vault-teardown.ts` 的文件头；
+   * · `vaults.destroy` —— 先 close 句柄再删目录（含 WAL/SHM 残留）；
+   * · `activeIdentity.resolveOnLogin` —— 解绑之后"该挂哪个"的规则。
+   *   自己判会得到第二份同义实现，而两份必然分叉。
+   */
+  const channelDataWipe = new ChannelDataWipeService({
+    clock: systemClock,
+    logger: logger.child("DataWipe"),
+    currentVault: () => {
+      const vp = vaultPaths
+      // 判据用 vaultPaths 而不是 mountedVaultId：后者在登出后是过期值（见 releaseVault）
+      return vp === null ? null : { root: vp.root, database: vp.database }
+    },
+    currentIdentity: () => {
+      const current = activeIdentity.currentIdentity()
+      if (current === null) return null
+      return {
+        key: {
+          accountId: current.accountId,
+          channelId: current.channelId,
+          corpId: current.corpId,
+          userId: current.userId,
+        },
+        vaultId: current.vaultId,
+      }
+    },
+    unmount: () => unmountVault(),
+    /**
+     * 退授权：清钥匙串里那份 token（见 `ChannelDataWipeService` 文件头）。
+     *
+     * ★ 这一步是"清了还是已授权"那个 bug 的修法。删 vault 目录带不走
+     * 钥匙串里的密钥，所以必须让渠道 CLI 自己去清。
+     */
+    revokeAuth: (channelId) => channels.logout(channelId),
+    destroyVault: (vaultId) => {
+      vaults.destroy(vaultId)
+    },
+    unbindIdentity: (key) => {
+      identities.unbind(key)
+      /**
+       * ★ 一并清掉"上次用的是哪个身份"那条记忆。
+       *
+       * 不清的话下次登录 `resolveOnLogin` 会先查它 —— 虽然那里对
+       * 查不到的情况有兜底（删掉记录再往下走），但留着等于让每次登录
+       * 都先撞一次空。而且刚被归零的那个身份不该出现在任何"上次用的"里。
+       */
+      activeIdentity.clear()
+    },
+    remount: async () => {
+      /**
+       * 解绑之后重新挑一个 vault 挂上。
+       *
+       * ★ 走 `resolveOnLogin` 而不是重挂刚才那个：那条规则会在
+       * "这个账号还有别的身份"时挑最近用过的，在"一个都没有"时退回
+       * 账号的**基础 vault** —— 后者正是"注册了但还没连渠道"的状态，
+       * 也就是用户会看到未授权 + 引导流程重新出现。
+       */
+      const session = auth.currentSession()
+      const fallbackVaultId = auth.currentVaultId()
+      if (session === null || fallbackVaultId === null) {
+        // 没登录（理论上到不了：wipe 已经判过 vaultPaths 非空）
+        logger.warn("channel data wipe: no session; nothing to remount", {})
+        return
+      }
+      const vaultId = activeIdentity.resolveOnLogin({
+        accountId: session.accountId,
+        fallbackVaultId,
+      })
+      await mountVault(vaultId)
+    },
+  })
 
   const status = new StatusService({
     paths,

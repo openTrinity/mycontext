@@ -73,6 +73,24 @@ export class ChannelHost {
     return status
   }
 
+  /**
+   * 退出某个渠道的授权。
+   *
+   * ★ **必须清缓存**：`status()` 有 TTL 缓存，不清的话退登之后界面上
+   * 还会显示"已授权"直到缓存过期 —— 而那正是"点了清空但还是已授权"
+   * 这类问题最容易复发的地方。
+   *
+   * 渠道没实现 logout 时返回 false（不抛）：调用方据此如实告知
+   * "数据清了但凭据还在"，而不是假装退成功了。
+   */
+  async logout(channelId: string): Promise<boolean> {
+    const auth = this.registry.get(channelId).auth
+    if (auth.logout === undefined) return false
+    const ok = await auth.logout()
+    this.cache.delete(channelId)
+    return ok
+  }
+
   /** 是否有渠道已授权：Onboarding 的判定依据。 */
   async hasAnyAuthorized(): Promise<boolean> {
     for (const plugin of this.registry.list()) {

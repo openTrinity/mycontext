@@ -29,7 +29,11 @@ import type {
   ChannelPlugin,
   ChannelPullPage,
 } from "@mycontext/channels"
-import { ConversationRepository, MessageRepository } from "@mycontext/store"
+import {
+  ConversationRepository,
+  DistillSourceRepository,
+  MessageRepository,
+} from "@mycontext/store"
 import { IngestService } from "@main/services/ingest.service.js"
 import { openTestVault } from "../../helpers/vault.js"
 
@@ -92,6 +96,14 @@ function makePlugin(
 
 function makeService(plugin: ChannelPlugin, clock: ManualClock) {
   const vault = openTestVault()
+  /**
+   * ★ 显式写一行「不限会话」的 chat 源。
+   *
+   * 不写的话 `readCollectionScope` 读成「还没说过要采什么」= 一个都不采
+   * （见 collection-scope.ts：清空渠道数据之后正是那个形态，默认值只能是空）。
+   * 这些用例测的不是范围闸，所以要把范围明确置成"不限"。
+   */
+  new DistillSourceRepository(vault.db).upsert("chat", { enabled: true, scope: {} }, 0)
   const service = new IngestService({
     db: vault.db,
     clock,

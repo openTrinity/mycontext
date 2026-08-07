@@ -207,14 +207,14 @@
   },
   "dataWipe": {
     "action": "Clear this channel's data",
-    "hint": "Deletes all messages, indexes, graph data and downloaded files collected for this channel. Keeps your login, your identity and the conversations you picked. Not reversible.",
+    "hint": "Resets this channel completely: deletes all messages, indexes, graph data and downloaded files, and signs out. You will need to authorize, confirm your identity and pick a learning scope again. Not reversible.",
     "confirmTitle": "Clear this channel's data?",
-    "confirmDetail": "The messages, search index, knowledge graph, persona output and downloaded images collected for this channel will be permanently deleted. This cannot be undone.",
+    "confirmDetail": "Everything collected for this channel will be permanently deleted and the channel will be **signed out**. This cannot be undone.",
     "counting": "Counting what will be deleted…",
     "countFailed": "Could not count — you can still proceed, but without a total.",
     "willDelete": "Will delete {{rows}} rows (messages, indexes and run traces)",
-    "keeps": "Kept: your login, your identity, the conversations and time range you picked, onboarding progress, and your own search history. The app will collect again from scratch.",
-    "confirmAction": "Delete permanently",
+    "resets": "After clearing you will need to: authorize again, confirm your identity, pick a learning scope, and set up the persona again.",
+    "confirmAction": "Delete and sign out",
     "cancel": "Cancel"
   },
   "onboarding": {

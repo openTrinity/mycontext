@@ -100,6 +100,30 @@ export class ChannelService {
     return this.options.host.status(channelId, { refresh })
   }
 
+  /**
+   * 退出某个渠道的授权（清掉钥匙串里那份 token）。
+   *
+   * ★ 为什么「清空渠道数据」必须调它：token 在**系统钥匙串**里，不在
+   * vault 目录下。删目录之后 CLI 会从钥匙串重建 profiles，`auth status`
+   * 照样返回已授权 —— 那正是用户报的"清了还是已授权状态"。
+   *
+   * 返回是否真的退出了。**不抛**：退登失败只是"凭据还在"，
+   * 而让整个清空动作因此回滚是更坏的选择（那时数据已经删了）。
+   */
+  async logout(channelId: string): Promise<boolean> {
+    try {
+      const ok = await this.options.host.logout(channelId)
+      this.options.logger.info("channel logout", { channelId, ok })
+      return ok
+    } catch (error) {
+      this.options.logger.warn("channel logout failed", {
+        channelId,
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  }
+
   async startLogin(channelId: string, mode: AuthMode): Promise<AuthStatus> {
     this.options.logger.info("channel login start", { channelId, mode })
     const status = await this.options.host.startLogin({

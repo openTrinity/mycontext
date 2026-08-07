@@ -534,8 +534,6 @@ export const distillSourceResetInputSchema = z.object({ kind: distillSourceKindS
  */
 export const channelDataWipeInputSchema = z.object({
   dryRun: z.boolean().default(true),
-  /** 连用户自己手打的搜索提问历史一起清。默认不清（那不是采集来的数据） */
-  dropSearch: z.boolean().default(false),
 })
 
 export const channelDataWipeResultSchema = z.object({
@@ -543,8 +541,21 @@ export const channelDataWipeResultSchema = z.object({
   byTable: z.array(z.object({ table: z.string(), rows: z.number() })),
   removedPaths: z.number(),
   dryRun: z.boolean(),
-  /** null = 库里没有 FTS 表，跳过了自检（如实区分"验过"与"没验"） */
-  ftsIntegrityOk: z.boolean().nullable(),
+  /**
+   * 身份映射有没有被解除（预演时是"将会解除"）。
+   *
+   * ★ 与 `rows` 分开：用户要确认的不只是"删了多少条"，更是"是不是真的
+   * 要重新授权了"。而后者的判据是这一行 —— 归零的语义就在它上面。
+   */
+  identityUnbound: z.boolean(),
+  /**
+   * 授权有没有真的退掉。
+   *
+   * ★ 与 `identityUnbound` 分开：token 在系统钥匙串里，删 vault 目录带不走
+   * 它 —— 退登是一次子进程调用，会独立失败。合成一个字段的话
+   * "数据清了但仍然已授权"这个真实中间态就没法如实告诉用户。
+   */
+  authRevoked: z.boolean(),
 })
 
 export type ChannelDataWipeInput = z.infer<typeof channelDataWipeInputSchema>

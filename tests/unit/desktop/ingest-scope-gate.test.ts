@@ -180,13 +180,21 @@ describe("★★ 全局窗的越界消息在落库前被丢掉（隐私边界）
     vault.close()
   })
 
-  it("没配范围（老库 / 跳过引导）→ 不设限，两个都落库", async () => {
+  it("★★ 没配范围（全新库 / 刚清空 / 跳过引导）→ 一条都不采", async () => {
     const { vault, service } = setup({})
 
     await service.tickPull()
 
-    expect(countIn(vault, PICKED)).toBe(1)
-    expect(countIn(vault, NOT_PICKED)).toBe(1)
+    /**
+     * 这一条曾经反着断言（"不设限，两个都落库"）。改掉的理由见
+     * collection-scope.ts 的「表里没有这一行也是一个都不采」那段：
+     * 清空渠道数据之后 `distill_sources` 是空的，读成"不限"会把全部会话
+     * 又拉回来 —— 而用户刚刚明确表达的是"我要归零"。
+     *
+     * 默认值只能是空，不能是全部（CLAUDE.md 第 5 节）。
+     */
+    expect(countIn(vault, PICKED)).toBe(0)
+    expect(countIn(vault, NOT_PICKED)).toBe(0)
     vault.close()
   })
 
@@ -261,11 +269,21 @@ describe("★★ 全局窗的越界消息在落库前被丢掉（隐私边界）
     vault.close()
   })
 
-  it("不限时 allowed 报 null 而不是 0（0 会被读成「许可零个」）", async () => {
+  it("★ 显式选了「不限」（只配时间不配会话）时 allowed 报 null 而不是 0", async () => {
     const { vault, service } = setup({})
+    // 写一行 chat 源但**不带** conversationIds —— 那才是"不限会话"
+    new DistillSourceRepository(vault.db).upsert(
+      "chat",
+      { enabled: true, scope: { since: START - 86_400_000 } },
+      START,
+    )
 
     await service.tickPull()
 
+    /**
+     * `allowed` 在不限时必须是 null 而不是 0 —— 0 会被读成"许可零个会话"，
+     * 而那是完全相反的状态（一个都不采 vs 全都采）。
+     */
     expect(service.snapshot().scope.restricted).toBe(false)
     expect(service.snapshot().scope.allowed).toBeNull()
     vault.close()
@@ -305,9 +323,12 @@ describe("★★ 定向补拉（探针/事件/对账/常驻）不碰越界会话
 })
 
 describe("范围权威（readCollectionScope）的三态", () => {
-  it("表里没这一行 = 没配过 → 不设限", () => {
+  it("★★ 表里没这一行 = 还没说过要采什么 → 一个都不采（不是「不限」）", () => {
     const vault = openTestVault()
-    expect(readCollectionScope(vault.db).restricted).toBe(false)
+    // 见 collection-scope.ts：默认值只能是空。清空渠道数据后正是这个形态。
+    const scope = readCollectionScope(vault.db)
+    expect(scope.restricted).toBe(true)
+    expect(scope.allow.size).toBe(0)
     vault.close()
   })
 

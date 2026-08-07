@@ -162,13 +162,25 @@ function setup(
       ])
     }
   }
-  if (scoped.length > 0) {
-    new DistillSourceRepository(vault.db).upsert(
-      "chat",
-      { enabled: true, scope: { since: START - 86_400_000, conversationIds: scoped } },
-      START,
-    )
-  }
+  /**
+   * 采集范围。
+   *
+   * ★ `scoped` 为空时也要写一行 —— 只是**不带** `conversationIds`
+   * （那才是"不限会话"）。完全不写的话 `readCollectionScope` 现在读成
+   * 「还没说过要采什么」= 一个都不采（见 collection-scope.ts 那段：
+   * 清空渠道数据之后正是这个形态，默认值只能是空）。
+   */
+  new DistillSourceRepository(vault.db).upsert(
+    "chat",
+    {
+      enabled: true,
+      scope: {
+        since: START - 86_400_000,
+        ...(scoped.length > 0 ? { conversationIds: scoped } : {}),
+      },
+    },
+    START,
+  )
   return { vault, service, pulled, calls, conversations }
 }
 

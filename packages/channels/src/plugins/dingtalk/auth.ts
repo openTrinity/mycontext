@@ -227,4 +227,55 @@ export class DingTalkAuth implements ChannelAuth {
     ctx.onProgress({ phase: "succeeded", status })
     return status
   }
+
+  /**
+   * 退出授权（`dws auth logout`）。
+   *
+   * ## ★★ 为什么删目录不够、必须调它
+   *
+   * token 的密钥在**系统钥匙串**里，不在 `DWS_CONFIG_DIR` 那个目录里。
+   * 实测（见 `profile-seed.ts` 文件头）：全新空目录跑 `auth status` 仍返回
+   * `authenticated: true` —— CLI 会就地从钥匙串重建一份 `profiles.json`。
+   *
+   * 也就是说「删掉 vault 目录」**不等于退出授权**：清空之后下一次
+   * `auth status` 照样是已授权，而那正是用户报的"清了还是已授权状态"。
+   * 要真的退出，只能让 CLI 自己去清钥匙串里那份 token。
+   *
+   * ## 钉身份
+   *
+   * 带 `--profile`：这台机器上可能有多个身份，不钉的话退的是 CLI 的
+   * 全局 current —— 可能是**另一个**身份（甚至用户自己终端里正在用的那个）。
+   *
+   * ## 不抛
+   *
+   * 返回是否真的退成功。失败只降级成"凭据还在"，由调用方决定怎么说 ——
+   * 而让整个清空动作因为退登失败而回滚是更坏的选择：那时数据已经删了。
+   */
+  async logout(): Promise<boolean> {
+    const binary = this.options.runtime.resolve("dws")
+    const args = ["auth", "logout"]
+    // ★ 门禁：这个文件走自己的 processes.exec（不经 DwsCli），必须显式调
+    assertAllowedCommand(args)
+    try {
+      const result = await this.options.processes.exec({
+        executable: binary.path,
+        args: [...args, ...this.options.runtime.dwsProfileArgs()],
+        env: this.options.runtime.buildEnv(),
+        timeoutMs: STATUS_TIMEOUT_MS,
+      })
+      /**
+       * 复查 status 才是可信结论（与 `login` 同一条纪律：不看 exit code）。
+       * 退成功 = 现在问它是未授权。
+       */
+      const after = await this.queryStatus({ pinned: true })
+      const ok = after.state !== "authorized"
+      this.options.logger.info("dws auth logout", { exitCode: result.exitCode, ok })
+      return ok
+    } catch (error) {
+      this.options.logger.warn("dws auth logout failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  }
 }
