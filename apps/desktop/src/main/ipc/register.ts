@@ -681,7 +681,10 @@ export function registerIpc(deps: IpcDependencies): void {
   )
 
   ipcMain.handle(IPC_CHANNELS.searchSessionCreate, (_event, payload: unknown) =>
-    attempt(() => search.create(parse(createSearchSessionInputSchema, payload).query)),
+    attempt(() => {
+      const input = parse(createSearchSessionInputSchema, payload)
+      return search.create(input.query, input.scope)
+    }),
   )
 
   ipcMain.handle(IPC_CHANNELS.searchSessionRename, (_event, payload: unknown) =>

@@ -39,6 +39,7 @@ import { VAULT_0021_MEDIA_URL_KIND } from "./migrations/vault/v21-media-url-kind
 import { VAULT_0022_UNWRAP_RICH_CONTENT } from "./migrations/vault/v22-unwrap-rich-content.js"
 import { VAULT_0023_CONVERSATION_UNREADABLE } from "./migrations/vault/v23-conversation-unreadable.js"
 import { VAULT_0024_MINUTES_COVERAGE } from "./migrations/vault/v24-minutes-coverage.js"
+import { VAULT_0025_SEARCH_GRAPH_SCOPE } from "./migrations/vault/v25-search-graph-scope.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -293,6 +294,12 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
     name: "minutes-coverage",
     sql: VAULT_0024_MINUTES_COVERAGE,
   },
+  /**
+   * ★ 这一条 rebase 时从 v24 顺延到 v25 —— main 上已经有 v24
+   * （`minutes-coverage`）。迁移编号是**全局单调**的，撞号会让两台机器
+   * 的同一个版本号跑不同的 SQL，而那是不可修复的分叉。
+   */
+  { version: 25, name: "search-graph-scope", sql: VAULT_0025_SEARCH_GRAPH_SCOPE },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */

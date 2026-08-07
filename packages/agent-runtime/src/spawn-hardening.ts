@@ -84,6 +84,19 @@ export const KL_SKILL_PERMISSION = {
     "*": "deny",
     kl: "allow",
     "kl *": "allow",
+    /**
+     * ★ 多图检索：`KL_SERVER_PORT=<n> kl ...` —— **前缀赋值是另一个命令串**。
+     *
+     * `kl` 与 `kl *` 都匹配不到它（模式是对整条命令串做 glob，而这条以
+     * `KL_SERVER_PORT=` 开头）。漏了这一条的表现是混合档位下 agent 的每次
+     * 换端口查询都被拒 —— 而它会退回只查默认端口那个图，也就是**静默**
+     * 给出一个"只搜了一个来源"的答案。
+     *
+     * 放行面刻意窄到一个变量名：`*=* kl *` 会让 agent 能设任意环境变量
+     * （含 `PATH` / `LD_PRELOAD`），那等于把 deny-all 拆掉。
+     */
+    "KL_SERVER_PORT=* kl": "allow",
+    "KL_SERVER_PORT=* kl *": "allow",
   },
 } as const
 
@@ -257,6 +270,18 @@ export interface OpencodeSpawnOptions {
    */
   agentHome?: string
   /**
+   * 连 XDG 数据/状态/缓存目录一起隔离。**默认 false**。
+   *
+   * ★ 多个 opencode 同时活着时**必需**：它们否则共用
+   * `~/.local/share/opencode/opencode.db`，而实测后起的那个撞在
+   * `CREATE TABLE workspace` 上直接起不来。
+   *
+   * ★ 默认必须留 false：那是"现有档位逐字节不变"的保证 ——
+   * 已有会话的 `session/resume` 靠的就是那个共享数据目录。
+   * 完整推理见 `applyHomeIsolation`。
+   */
+  isolateData?: boolean
+  /**
    * npm 包缓存目录（注入 `npm_config_cache`）。
    *
    * ## ★ 为什么与 `agentHome` 分开
@@ -315,13 +340,47 @@ export interface HardenedSpawn {
  * `$HOME/.local/share/opencode/auth.json`。哪天有人改成读 auth.json，
  * 就必须重新考虑这里的隔离（否则 agent 读不到凭据）。
  */
-function applyHomeIsolation(env: Record<string, string>, agentHome: string): void {
+/**
+ * ## ★★ `isolateData`：多进程并存时必须连数据目录一起隔离
+ *
+ * 上面那一组（HOME 隔离 + XDG_DATA_HOME 指回真实 HOME）的前提是
+ * **同时只有一个 opencode**。多档位检索之后不成立了：三个档位 + 数字人
+ * 可能有四个进程同时活着，而它们共用 `~/.local/share/opencode/opencode.db`。
+ *
+ * 实测：两个 opencode 共用一个数据目录 → **后起的那个直接起不来**，
+ * 撞在 `CREATE TABLE workspace` 上（SQLite 那个库不是为并发写设计的）。
+ * 完整 XDG 隔离（DATA/STATE/CACHE 三个都指进 agentHome）→ 两个都活、零错误。
+ *
+ * ## 代价：`session/resume` 会失败一次
+ *
+ * 换了数据目录 = 换了 session 存储，旧 sessionId 在新库里不存在。
+ * 表现是一次降级重建（回灌历史），之后正常。所以：
+ *
+ * ★ **默认必须是 `false`** —— 那是"钉钉档位逐字节不变"的保证。
+ * 已有会话的 resume 靠的就是那个共享数据目录，默认改成 true 等于让
+ * 所有存量会话各降级一次，而那不是这次改动该带来的代价。
+ *
+ * `true` 时**不尊重父进程已设的 XDG 值**（与 DATA_HOME 那条相反）：
+ * 隔离的意义就是不共享，父进程设了什么都不该影响它。
+ */
+function applyHomeIsolation(
+  env: Record<string, string>,
+  agentHome: string,
+  isolateData = false,
+): void {
   const realHome = env["HOME"]
   env["HOME"] = agentHome
   // 配置目录也指进隔离区：`$HOME/.config` 之外还有人显式设 XDG_CONFIG_HOME，
   // 那一份同样会被 opencode 读到，一起挡掉。
   env["XDG_CONFIG_HOME"] = `${agentHome}/.config`
-  // ★ 但 session 存储必须留在原处，否则 resume 全灭（见上面的注释）。
+  if (isolateData) {
+    // ★ 三个都指进来，且**覆盖**父进程的值（见上面那段）
+    env["XDG_DATA_HOME"] = `${agentHome}/.local/share`
+    env["XDG_STATE_HOME"] = `${agentHome}/.local/state`
+    env["XDG_CACHE_HOME"] = `${agentHome}/.cache`
+    return
+  }
+  // ★ 不隔离数据时 session 存储必须留在原处，否则 resume 全灭（见上面的注释）。
   if (env["XDG_DATA_HOME"] === undefined && realHome !== undefined && realHome !== "") {
     env["XDG_DATA_HOME"] = `${realHome}/.local/share`
   }
@@ -547,7 +606,7 @@ export function buildOpencodeSpawn(options: OpencodeSpawnOptions = {}): Hardened
   }
 
   if (options.agentHome !== undefined && options.agentHome !== "") {
-    applyHomeIsolation(env, options.agentHome)
+    applyHomeIsolation(env, options.agentHome, options.isolateData ?? false)
   }
   /**
    * ★ 在 `applyHomeIsolation` **之后**注入：它刚把 `HOME` 换掉，

@@ -52,7 +52,7 @@ import type {
 } from "@mycontext/runtime-env"
 import { createAgentResolver, probeBinaryVersion } from "@mycontext/runtime-env"
 import { delimiter, join } from "node:path"
-import type { AgentDirs } from "./agent-dirs.js"
+import { agentHomeFor, type AgentDirs } from "./agent-dirs.js"
 
 /**
  * **协议动作**的超时（`initialize` / `session/new` / `session/dispose`）。
@@ -739,7 +739,23 @@ export class PersonaAcp {
        * 每个身份各攒一份 325 MB。
        */
       const dirs = this.requireDirs()
-      const homeOption = { agentHome: dirs.home, npmCache: dirs.npmCache }
+      /**
+       * ★★ 数字分身用**自己的** HOME，与搜索不共用。
+       *
+       * 改动前两者共用 `agentHome`，而 opencode 的 session 存储在
+       * `$XDG_DATA_HOME/opencode/opencode.db` —— 实测两个 opencode 共用
+       * 同一个数据目录时，后起的那个撞在 `CREATE TABLE workspace` 上
+       * **直接起不来**。现在没炸只是因为两条路径都是懒启动、时序上还没撞上；
+       * 搜索加了档位之后一定会撞（三个档位 + 数字人 = 四个进程可能同时活着）。
+       *
+       * ★ 代价为零：`sessionIds` 是内存 Map（见文件头），重启后本来就不
+       * resume —— 换数据目录不损失任何东西。
+       */
+      const homeOption = {
+        agentHome: agentHomeFor(dirs.home, "persona"),
+        npmCache: dirs.npmCache,
+        isolateData: true,
+      }
       /**
        * ★ skillPaths 每次 startAgent 现调 —— 不是构造时锁死一次。
        * `forgeSkillRoot` 在 attach 时才有值，蒸馏后新出的画像下次起 agent 就生效。

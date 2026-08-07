@@ -1172,8 +1172,8 @@ export function useSearchSessionDetail(sessionId: string | null) {
 export function useCreateSearchSession() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async (query: string) =>
-      unwrap(await window.mycontext.search.sessionCreate({ query })),
+    mutationFn: async (input: { query: string; scope?: string }) =>
+      unwrap(await window.mycontext.search.sessionCreate(input)),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.searchSessions }),
   })
 }

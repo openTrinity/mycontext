@@ -394,7 +394,6 @@ export function bootstrapApp(mainDir: string): AppContext {
    * `vaultDb()` 返回 null 就是"还没登录"，调用方据此降级。
    */
   let mountedVault: SqliteDatabase | null = null
-  const mountedSourceVaults = new Map<string, SqliteDatabase>()
   const vaultDb = (): SqliteDatabase | null => mountedVault
 
   const feed = new FeedService({
@@ -1021,6 +1020,20 @@ export function bootstrapApp(mainDir: string): AppContext {
     skillsDir: paths.skillsDir,
     klRoot: paths.klRoot,
     klPort,
+    /**
+     * ★ 主渠道 id：默认档位（= 存量会话的档位）就是它。
+     * 它同时决定"用哪个 HOME"与"要不要开 isolateData"，而两者都影响
+     * 存量会话能不能 resume —— 见 `SearchServiceOptions.primaryChannelId`。
+     */
+    primaryChannelId: dingtalk.meta.id,
+    /**
+     * 非主渠道档位要连的 kl 端口。★ 函数：端口由 pipeline 在登录后
+     * 真探测后分配，装配这一刻还不知道。
+     */
+    klPortOf: (channelId) => pipelines.portOf(channelId) ?? undefined,
+    /** `all` 档注入 `KL_GRAPHS_JSON` 用（让 skill 逐个问每个图）。 */
+    klGraphs: () =>
+      Object.fromEntries(pipelines.all().map((item) => [item.channelId, item.klPort])),
     /**
      * agent 进程也用内置 Python 环境。
      *

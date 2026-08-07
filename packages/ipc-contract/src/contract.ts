@@ -2031,6 +2031,12 @@ export const searchSessionSummarySchema = z.object({
   lastActiveAt: z.number(),
   createdAt: z.number(),
   state: z.enum(["idle", "streaming", "error"]),
+  /**
+   * 检索档位（侧栏要显示"这个会话搜的是哪些渠道"）。
+   * **可选**：旧主进程 + 新渲染层时不存在（见 `buildProgress.startedAt`
+   * 那条同款注释）。用它之前必须判 undefined。
+   */
+  graphScope: z.string().optional(),
 })
 
 export type SearchSessionSummary = z.infer<typeof searchSessionSummarySchema>
@@ -2077,6 +2083,20 @@ export type SearchSessionDetail = z.infer<typeof searchSessionDetailSchema>
 export const createSearchSessionInputSchema = z.object({
   /** 首个查询：用它生成标题 */
   query: z.string().trim().min(1).max(4000),
+  /**
+   * 检索档位：这个会话去问哪几个渠道的图谱。
+   *
+   * ## ★ 为什么只在**建会话**时给，`searchPromptInput` 里没有
+   *
+   * 档位决定连哪个 kl，而那是 opencode **进程**的 env（spawn 之后改不了）。
+   * 允许每轮改的话，同一个会话的前后两轮会跑在两个进程上 —— 而 ACP 的
+   * session 是绑进程的，换进程就意味着 resume 失败 + 回灌历史。
+   * 也就是"改档位"实际上等于"新建一个会话"，那不如让它就是新建。
+   *
+   * 不给 = `"dingtalk"`（与迁移 v24 的 DEFAULT 一致）。★ 缺省**不能**是
+   * `all`：那会让不带这个字段的旧渲染层建出的会话突然检索全部渠道。
+   */
+  scope: z.string().min(1).optional(),
 })
 
 export const searchPromptInputSchema = z.object({

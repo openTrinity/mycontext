@@ -154,20 +154,6 @@ function editedSinceDays(spec: ChannelPullSpec): number {
   return Math.max(1, Math.ceil((spec.end - spec.start) / 86_400_000))
 }
 
-function parseDriveCursor(value: string | null): { page: number; token: string } | null {
-  if (value === null) return null
-  try {
-    const row = object(JSON.parse(value) as unknown)
-    return row["kind"] === "feishu-drive" &&
-      typeof row["page"] === "number" &&
-      typeof row["token"] === "string"
-      ? { page: row["page"], token: row["token"] }
-      : null
-  } catch {
-    return null
-  }
-}
-
 /** 一路的采集结果：这一页的内容 + 下一页位置（null = 抽干）+ 是否撞了上限。 */
 interface BranchResult {
   page: ChannelPullPage

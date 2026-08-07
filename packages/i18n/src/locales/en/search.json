@@ -38,5 +38,9 @@
     "noAgent": "Showing local recall results directly; answers are not agent-composed yet",
     "noGraph": "Graph service isn't running — results come from the local index",
     "noVector": "Vector index unavailable — full-text search only"
+  },
+  "scope": {
+    "label": "Scope",
+    "all": "All sources"
   }
 }

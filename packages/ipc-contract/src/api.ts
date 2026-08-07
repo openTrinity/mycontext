@@ -454,7 +454,15 @@ export interface MyContextApi {
     sessionList(): Promise<Result<SearchSessionSummary[]>>
     sessionDetail(input: { sessionId: string }): Promise<Result<SearchSessionDetail>>
     /** 建会话。用首个查询生成标题 */
-    sessionCreate(input: { query: string }): Promise<Result<SearchSessionSummary>>
+    /**
+     * 建会话。`scope` = 检索档位（去问哪几个渠道的图谱）。
+     * 不给 = 主渠道 —— 见 `createSearchSessionInputSchema` 里为什么缺省
+     * 不能是 `all`。
+     */
+    sessionCreate(input: {
+      query: string
+      scope?: string
+    }): Promise<Result<SearchSessionSummary>>
     sessionRename(input: { sessionId: string; title: string }): Promise<Result<true>>
     sessionPin(input: { sessionId: string; pinned: boolean }): Promise<Result<true>>
     sessionDelete(input: { sessionId: string }): Promise<Result<true>>

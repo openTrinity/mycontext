@@ -728,3 +728,41 @@ L3 (component-level) -> "Specific facts + evidence"
 - High-degree entities (>200 edges) get auto-filtered to last 90 days on timeline (use --from/--to to override)
 - Check `kl status` first — if server not running, use `kl start`
 - Time range: 2025-09 to 2026-07
+
+
+---
+
+## 多图谱检索（宿主注入 `KL_GRAPHS_JSON` 时）
+
+本宿主可能同时运行**多个** kl-server —— 一个数据来源一个，各自独立的
+图库与端口，彼此物理隔离（这是隐私边界：来源之间不做 JOIN）。
+
+`KL_SERVER_PORT` 只指向其中一个。若环境里还有 `KL_GRAPHS_JSON`，
+它是一个 `{"<来源名>": <端口>}` 的映射，列出**全部**可查的图：
+
+```bash
+# 例：{"dingtalk":8200,"feishu":8201}
+echo "$KL_GRAPHS_JSON"
+```
+
+问一个跨来源的问题时，**逐个图各问一次**，然后在回答里合并。
+先看一眼有哪些图，再对每个端口各发一条命令：
+
+```bash
+echo "$KL_GRAPHS_JSON"
+# 假设读到 {"dingtalk":8200,"feishu":8201}，就发两条：
+KL_SERVER_PORT=8200 kl ask "<question>" --pretty
+KL_SERVER_PORT=8201 kl ask "<question>" --pretty
+```
+
+不要写 shell 循环去解析那个 JSON —— 你已经读到了它的内容，
+直接按读到的端口逐条发命令。宿主的命令白名单只放行 `kl` 与
+`KL_SERVER_PORT=<n> kl ...` 这两种形态，别的写法会被拒。
+
+两条要求：
+
+- **不要**把一个来源的事实归到另一个来源。回答里涉及具体事实时说清它来自哪个。
+- 某个图查不通时**说出来**，不要静默只用另一个的结果 —— 那会让用户以为
+  搜过了全部来源。
+
+没有 `KL_GRAPHS_JSON` 时忽略本节，按 `KL_SERVER_PORT` 查那一个图即可。

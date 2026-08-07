@@ -223,11 +223,68 @@ export function transformFor(rel, text) {
 }
 
 /** 把文本里的真名与商标换掉。幂等 —— 已经换过的文本再跑一次不变。 */
+/**
+ * 我们**追加**在 skill 末尾的一段（上游那份没有，也不该有）。
+ *
+ * ## ★★ 为什么必须走 sanitize 而不是手改产物
+ *
+ * `check:kl-skill-sync` 的判据是 `fingerprint(源, sanitize) === fingerprint(产物)`。
+ * 手改产物的话下一次 `pnpm sync:kl-skill` 会把它整个覆盖掉 —— 而那不报错，
+ * 只是"混合检索档位突然只查一个图"（一个静默的错答案）。
+ * 把追加写进 `sanitize` 之后，生产者与门禁用的是**同一个**变换。
+ *
+ * ## 这一段在说什么
+ *
+ * 多渠道之后一个身份下有多个物理隔离的图库，各自一个 kl-server 与端口。
+ * `KL_SERVER_PORT` 只能指一个 —— 混合档位的 agent 要问全部图，就得知道
+ * 每个图在哪个端口。宿主在 spawn 时注入 `KL_GRAPHS_JSON`。
+ */
+const MYCONTEXT_APPENDIX = `
+
+---
+
+## 多图谱检索（宿主注入 \`KL_GRAPHS_JSON\` 时）
+
+本宿主可能同时运行**多个** kl-server —— 一个数据来源一个，各自独立的
+图库与端口，彼此物理隔离（这是隐私边界：来源之间不做 JOIN）。
+
+\`KL_SERVER_PORT\` 只指向其中一个。若环境里还有 \`KL_GRAPHS_JSON\`，
+它是一个 \`{"<来源名>": <端口>}\` 的映射，列出**全部**可查的图：
+
+\`\`\`bash
+# 例：{"dingtalk":8200,"feishu":8201}
+echo "$KL_GRAPHS_JSON"
+\`\`\`
+
+问一个跨来源的问题时，**逐个图各问一次**，然后在回答里合并。
+先看一眼有哪些图，再对每个端口各发一条命令：
+
+\`\`\`bash
+echo "$KL_GRAPHS_JSON"
+# 假设读到 {"dingtalk":8200,"feishu":8201}，就发两条：
+KL_SERVER_PORT=8200 kl ask "<question>" --pretty
+KL_SERVER_PORT=8201 kl ask "<question>" --pretty
+\`\`\`
+
+不要写 shell 循环去解析那个 JSON —— 你已经读到了它的内容，
+直接按读到的端口逐条发命令。宿主的命令白名单只放行 \`kl\` 与
+\`KL_SERVER_PORT=<n> kl ...\` 这两种形态，别的写法会被拒。
+
+两条要求：
+
+- **不要**把一个来源的事实归到另一个来源。回答里涉及具体事实时说清它来自哪个。
+- 某个图查不通时**说出来**，不要静默只用另一个的结果 —— 那会让用户以为
+  搜过了全部来源。
+
+没有 \`KL_GRAPHS_JSON\` 时忽略本节，按 \`KL_SERVER_PORT\` 查那一个图即可。
+`
+
 export function sanitize(text) {
   let out = text
   for (const [real, alias] of matchedNames(text)) out = out.split(real).join(alias)
   for (const [from, to] of Object.entries(TRADEMARK_TO_NEUTRAL)) out = out.split(from).join(to)
-  return out
+  // ★ 只对 SKILL.md 追加（目录里可能还有别的文件，给它们加就是噪音）
+  return out.includes("KL_SERVER_PORT") ? `${out.trimEnd()}\n${MYCONTEXT_APPENDIX}` : out
 }
 
 /**

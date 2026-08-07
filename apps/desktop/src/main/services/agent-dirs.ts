@@ -44,3 +44,32 @@ export interface AgentDirs {
    */
   npmCache: string
 }
+
+/**
+ * 一个 agent **用途**的隔离 HOME。
+ *
+ * ## ★★ 为什么同一个 vault 里要分出多个 HOME
+ *
+ * `AgentDirs.home` 原来是**一个**目录，搜索与数字分身共用它。而 opencode
+ * 把 session 存储放在 `$XDG_DATA_HOME/opencode/opencode.db` —— 实测两个
+ * opencode 共用同一个数据目录时，**后起的那个直接起不来**（撞在
+ * `CREATE TABLE workspace` 上）。
+ *
+ * 现在没炸只是因为两条路径都是懒启动、时序上还没撞上。多档位检索之后
+ * 一定会撞：三个档位 + 数字分身 = 四个进程可能同时活着。
+ *
+ * ## ★ `"dingtalk"` 必须映射到**原来那个目录**
+ *
+ * 那是零迁移的全部内容：默认档位的已有会话仍然 `session/resume` 得上。
+ * 换成 `agent-home/search/dingtalk` 的话，所有存量会话各降级重建一次
+ * —— 而那不是这次改动该带来的代价。
+ *
+ * @param base `AgentDirs.home`（= `VaultPaths.agentHome`）
+ * @param purpose `"dingtalk"` = 默认搜索档（原目录）；其余各一个子目录
+ */
+export function agentHomeFor(base: string, purpose: string): string {
+  // ★ 这一条锁住零迁移，改它等于让所有存量会话降级一次
+  if (purpose === "dingtalk") return base
+  if (purpose === "persona") return `${base}/persona`
+  return `${base}/search/${purpose}`
+}

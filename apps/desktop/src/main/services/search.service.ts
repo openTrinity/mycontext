@@ -35,7 +35,7 @@ import {
   type SqliteDatabase,
 } from "@mycontext/store"
 import { recallMessages } from "@mycontext/retrieval"
-import type { AgentDirs } from "./agent-dirs.js"
+import { agentHomeFor, type AgentDirs } from "./agent-dirs.js"
 import {
   AcpClient,
   AcpSupervisor,
@@ -149,8 +149,27 @@ export interface SearchServiceOptions {
    * （单一来源 + `check:kl-skill-sync` 门禁），这里只负责让 `kl` 命令可执行。
    */
   klRoot: string
-  /** kl-server 端口（注入进 opencode 进程 env，kl CLI 据此连服务）。 */
+  /** 主渠道 kl-server 的端口（默认档位与 `all` 档都连它）。 */
   klPort: number
+  /**
+   * 主渠道的 id。默认档位（= 存量会话的档位）就是它。
+   *
+   * ★ 为什么要显式给而不是写死 `"dingtalk"`：这个判据同时决定
+   * 「用哪个 HOME」与「要不要开 isolateData」，而两者都影响**存量会话
+   * 能不能 resume**。写死一个字符串的话，哪天主渠道换了名字，
+   * 所有存量会话会静默降级一次而没人知道原因。
+   */
+  primaryChannelId: string
+  /**
+   * 某个非主渠道的 kl 端口（`channelId → port`）。
+   *
+   * ★ **函数**：端口由 `ChannelPipelineManager` 在登录后真探测后分配，
+   * 而本服务在装配阶段就构造好了。返回 undefined = 那个渠道没挂管线
+   * （没连 / 还在挂载中）→ 退回主渠道端口。
+   */
+  klPortOf?: (channelId: string) => number | undefined
+  /** 全部已挂渠道的 kl 端口（`all` 档注入 `KL_GRAPHS_JSON` 用）。 */
+  klGraphs?: () => Readonly<Record<string, number>>
   /**
    * 取激活后的 Python 环境（`VIRTUAL_ENV` + `PATH` 前插 venv/bin）。
    *
@@ -197,9 +216,23 @@ export class SearchService {
    * 懒启动的 opencode 句柄。null = 还没起（或已 dispose）。
    * 起失败时保持 null（下次 prompt 再试），并让本轮落回 recallOnly。
    */
-  private agent: AgentHandle | null = null
-  /** 正在进行的 ensureAgent（避免并发 prompt 起多个进程）。 */
-  private agentStarting: Promise<AgentHandle | null> | null = null
+/**
+   * 懒启动的 opencode 句柄，**按档位一个**。
+   *
+   * ## ★★ 为什么必须按档位分进程，而不是一个进程查多个图
+   *
+   * kl 的连接目标是 `KL_SERVER_PORT`，而那是 **spawn 那一刻的 env** ——
+   * 一个进程起来之后改不了。而每个档位要连的 kl 不同（一渠道一个 kl）。
+   * 所以"这次搜索查哪些图"这件事只能落在进程边界上。
+   *
+   * ★ 每个档位还必须有**自己的 HOME**：opencode 的 session 存储在
+   * `$XDG_DATA_HOME/opencode/opencode.db`，实测两个 opencode 共用一个数据
+   * 目录时后起的那个撞在 `CREATE TABLE workspace` 上直接起不来。
+   * 见 `agentHomeFor` 与 `applyHomeIsolation` 的 `isolateData`。
+   */
+  private readonly agents = new Map<string, AgentHandle>()
+  /** 正在进行的 ensureAgent，**按档位**（避免并发 prompt 起多个进程）。 */
+  private readonly agentStarting = new Map<string, Promise<AgentHandle | null>>()
 
   /**
    * 每个 session 一个 reducer（流式聚合按 session 隔离；跨轮续 seq）。
@@ -323,7 +356,13 @@ export class SearchService {
    * 那要多一次调用、多一次失败路径，而截断的查询已经足够辨认。
    * 用户可以重命名。
    */
-  create(query: string): SearchSessionSummary {
+  /**
+   * 建会话。`scope` 决定它去问哪几个图（见 `createSearchSessionInputSchema`）。
+   *
+   * ★ 不给就是主渠道 —— 与迁移 v24 的 DEFAULT 一致。两处的缺省必须相同，
+   * 否则"新建的会话"与"迁移填的存量会话"档位不一样，而看不出来。
+   */
+  create(query: string, scope?: string): SearchSessionSummary {
     const sessions = this.requireSessions()
     const now = this.options.clock.now()
     const id = `srch_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
@@ -345,6 +384,7 @@ export class SearchService {
       acpCwd: cwd,
       title: query.slice(0, 40),
       createdAt: now,
+      graphScope: scope ?? this.options.primaryChannelId,
     })
     return toSummary(created)
   }
@@ -398,8 +438,13 @@ export class SearchService {
         return
       }
 
-      // ② 第二档降级：只做召回，不生成答案。
-      const items = this.recallOnly(sessionId, query)
+      /**
+       * ② 第二档降级：只做召回，不生成答案。
+       *
+       * ★ 按会话的档位过滤召回源 —— 否则"只搜钉钉"的会话在降级时会看到
+       * 飞书的消息，而用户看不出这一轮走的是哪条路（两条路的结果长得一样）。
+       */
+      const items = this.recallOnly(sessionId, query, sessions.findById(sessionId)?.graphScope)
       sessions.appendMessages(items.map((item) => toAppendInput(sessionId, item)))
       sessions.setState(sessionId, "idle", this.options.clock.now())
       this.pushStream(sessionId, [], true, this.degradedReason())
@@ -483,7 +528,12 @@ export class SearchService {
     const record = sessions.findById(sessionId)
     if (record === null) return false
 
-    const agent = await this.ensureAgent()
+    /**
+     * ★ 档位来自**这个会话**（建会话时定的），不是全局配置。
+     * 读不到就用主渠道 —— 那是存量会话的行为。
+     */
+    const scope = record.graphScope === "" ? this.options.primaryChannelId : record.graphScope
+    const agent = await this.ensureAgent(scope)
     if (agent === null) return false
 
     try {
@@ -672,14 +722,45 @@ export class SearchService {
    * ★ 必须走 `buildOpencodeSpawn`（spawn-wiring 门禁扫源码），且反向 handler
    * 必须实现（不实现的话工具调用被静默拒绝）。
    */
-  private async ensureAgent(): Promise<AgentHandle | null> {
-    if (this.agent !== null) return this.agent
-    if (this.agentStarting !== null) return this.agentStarting
+  private async ensureAgent(scope: string): Promise<AgentHandle | null> {
+    const existing = this.agents.get(scope)
+    if (existing !== undefined) return existing
+    const starting = this.agentStarting.get(scope)
+    if (starting !== undefined) return starting
 
-    this.agentStarting = this.startAgent().finally(() => {
-      this.agentStarting = null
+    const pending = this.startAgent(scope).finally(() => {
+      this.agentStarting.delete(scope)
     })
-    return this.agentStarting
+    this.agentStarting.set(scope, pending)
+    return pending
+  }
+
+  /**
+   * 这个档位要连的 kl 端口。
+   *
+   * · 单渠道档（`dingtalk` / `feishu` / …）→ 那个渠道的 kl；
+   * · `all` → 主渠道的端口（**同时**注入 `KL_GRAPHS_JSON` 让 skill 知道
+   *   全部图的端口，见 `startAgent`）。
+   *
+   * 找不到那个渠道的端口时退回主渠道：那时该档位查不到它想查的图，
+   * 但**仍能查到主渠道的** —— 比整个搜索起不来好。
+   */
+  /**
+   * `all` 档要注入的全部图端口。
+   *
+   * 没接 `klGraphs` 时只给主渠道那一个 —— 那时 `all` 退化成"只查主渠道"，
+   * 而这是**诚实的降级**（我们确实只知道一个图的位置）。
+   */
+  private klGraphsMap(): Readonly<Record<string, number>> {
+    const graphs = this.options.klGraphs?.()
+    return graphs === undefined || Object.keys(graphs).length === 0
+      ? { [this.options.primaryChannelId]: this.options.klPort }
+      : { [this.options.primaryChannelId]: this.options.klPort, ...graphs }
+  }
+
+  private klPortFor(scope: string): number {
+    if (scope === "all" || scope === this.options.primaryChannelId) return this.options.klPort
+    return this.options.klPortOf?.(scope) ?? this.options.klPort
   }
 
   /**
@@ -699,7 +780,7 @@ export class SearchService {
     return value
   }
 
-  private async startAgent(): Promise<AgentHandle | null> {
+  private async startAgent(scope: string): Promise<AgentHandle | null> {
     const usable = this.resolveOpencode()
     // 版本闸没过就降级（太老的 opencode 起 ACP 一路 -32603，见 binaries.ts）。
     if (!usable.ok) return null
@@ -780,8 +861,15 @@ export class SearchService {
       const baseEnv: NodeJS.ProcessEnv = {
         ...(activated?.env ?? process.env),
         PATH: `${basePath}${delimiter}${this.options.klRoot}`,
-        // 注入 KL_SERVER_PORT 让 kl CLI 连到 KlServerService 管的那个服务。
-        KL_SERVER_PORT: String(this.options.klPort),
+        // 注入 KL_SERVER_PORT 让 kl CLI 连到这个档位对应的那个 kl。
+        KL_SERVER_PORT: String(this.klPortFor(scope)),
+        /**
+         * ★ `all` 档额外告知**全部**图的端口，让 skill 能逐个问。
+         *
+         * 只给 `KL_SERVER_PORT` 的话 `all` 档退化成"只查主渠道" ——
+         * 那是一个静默的错答案（用户选了混合检索，拿到的是单渠道结果）。
+         */
+        ...(scope === "all" ? { KL_GRAPHS_JSON: JSON.stringify(this.klGraphsMap()) } : {}),
       }
       // ★ agentHome：把 opencode 的 HOME 换成我们的空目录，否则它会从
       // `$HOME/.claude/skills` 读到用户自己装的全部 skill（隔离漏洞）。
@@ -791,7 +879,19 @@ export class SearchService {
        * 每个身份各攒一份 325 MB。
        */
       const dirs = this.requireDirs()
-      const homeOption = { agentHome: dirs.home, npmCache: dirs.npmCache }
+      /**
+       * ★ 档位各自一个 HOME，且**默认档位映射到原目录**（零迁移：
+       * 已有会话仍 resume 得上）。见 `agentHomeFor`。
+       *
+       * `isolateData` 只对非默认档位开：那几个档位是新的（没有存量会话），
+       * 而默认档位一开就会让所有存量会话各降级重建一次。
+       */
+      const isDefaultScope = scope === this.options.primaryChannelId
+      const homeOption = {
+        agentHome: agentHomeFor(dirs.home, scope),
+        npmCache: dirs.npmCache,
+        ...(isDefaultScope ? {} : { isolateData: true }),
+      }
       /**
        * ★ 走 `skills.paths` 指目录，不再靠 create() 时 cpSync。
        *
@@ -828,7 +928,7 @@ export class SearchService {
         onExit: (info) => {
           this.options.logger.warn("opencode exited", { code: info.code, signal: info.signal })
           // 进程没了：句柄作废，下次 prompt 重新懒启动。
-          if (this.agent?.transport === transport) this.agent = null
+          if (this.agents.get(scope)?.transport === transport) this.agents.delete(scope)
         },
       })
 
@@ -879,12 +979,12 @@ export class SearchService {
         supervisor,
         serverPassword: hardened.serverPassword,
       }
-      this.agent = handle
+      this.agents.set(scope, handle)
       return handle
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      this.options.logger.warn("opencode start failed, staying on recall", { detail })
-      this.agent = null
+      this.options.logger.warn("opencode start failed, staying on recall", { detail, scope })
+      this.agents.delete(scope)
       return null
     }
   }
@@ -926,9 +1026,19 @@ export class SearchService {
     agent: AgentHandle,
     acpSessionId: string,
   ): { type: "text"; text: string }[] {
-    const sourceContext = this.buildSourceRecallContext(query)
+    /**
+     * ★★ 这里**不再**预先塞一段 FTS 召回。
+     *
+     * 那段（`buildSourceRecallContext`）是"一个进程只能连一个 kl"这个约束下的
+     * 替代品：连不上多个图，就先用 FTS 各查一下再把结果喂给 agent。
+     * 现在档位与进程一一对应、每个进程直连它该查的 kl —— 那段就变成了
+     * **重复且更弱**的东西：只有 12 条 FTS 命中，而图谱的实体/事实/社群
+     * 一样都用不上，同时还占掉了 prompt 的开头位置。
+     *
+     * 降级路径（`recallOnly`）仍然用 FTS —— 那时确实没有别的可用。
+     */
     if (!agent.supervisor.needsContextReplay(acpSessionId)) {
-      return [sourceContext, { type: "text", text: query }]
+      return [{ type: "text", text: query }]
     }
     const sessions = this.requireSessions()
     const history = sessions
@@ -953,38 +1063,10 @@ ${history}
 </previous_conversation>
 以上是这个会话早前的记录，仅用于让你知道聊过什么。**不要复述它、不要重复回答里面的问题、不要提及这段记录的存在**。只回答下面这一个新问题：`,
       },
-      sourceContext,
       { type: "text", text: query },
     ]
   }
 
-  /**
-   * 先分别查每个物理库，再把带渠道边界的证据交给上层 Agent 汇总。
-   * Agent 只能看到结果副本，不能跨库执行 JOIN，也不能把一边写进另一边。
-   */
-  private buildSourceRecallContext(query: string): { type: "text"; text: string } {
-    const recalled = this.recallBySource(query, 12)
-    const sections = recalled.sources.map((source) => {
-      const label =
-        source.channelId === "dingtalk"
-          ? "钉钉"
-          : source.channelId === "feishu"
-            ? "飞书"
-            : source.channelId
-      const lines = source.hits.map((hit) => {
-        const when = new Date(hit.message.sentAt).toISOString().slice(0, 16).replace("T", " ")
-        return `- ${when} ${hit.message.senderDisplayName ?? "未知"}：${(hit.message.contentText ?? "").slice(0, 240)}`
-      })
-      return `<source channel="${source.channelId}" label="${label}">\n${lines.length > 0 ? lines.join("\n") : "（无命中）"}\n</source>`
-    })
-    return {
-      type: "text",
-      text: `<isolated_source_recall note="各渠道已分别查询，来源边界不可混淆">
-${sections.join("\n")}
-</isolated_source_recall>
-以上证据来自彼此物理隔离的渠道库。请综合回答用户的新问题；涉及事实时明确区分钉钉与飞书来源，不要把一边的记录归到另一边。`,
-    }
-  }
   /**
    * 本轮降级的人类可读原因（走了召回时用）。
    *
@@ -1022,7 +1104,7 @@ ${sections.join("\n")}
    * 一个 message（按相关性排序的原文摘要）。
    * 形状与 agent 路径一致，所以 UI 不用分支。
    */
-  private recallOnly(sessionId: string, query: string): ChatItem[] {
+  private recallOnly(sessionId: string, query: string, scope?: string): ChatItem[] {
     const sessions = this.requireSessions()
     const startedAt = this.options.clock.now()
 
@@ -1034,7 +1116,7 @@ ${sections.join("\n")}
      * 这里刻意不再复制一份逻辑：两份实现早晚不一致，而"两处检索口径不同"
      * 这种 bug 极难发现（两边都返回结果，只是不是同一批）。
      */
-    const recalled = this.recallBySource(query, FALLBACK_RECALL_LIMIT)
+    const recalled = this.recallBySource(query, FALLBACK_RECALL_LIMIT, scope)
     const lines = recalled.sources
       .flatMap((source) => {
         const label =
@@ -1095,9 +1177,19 @@ ${sections.join("\n")}
     return [toolItem, answerItem]
   }
 
+  /**
+   * 逐库召回。
+   *
+   * ★ `scope` 决定查哪几个库：档位说"只钉钉"时，飞书的消息**不该**出现在
+   * 降级召回里 —— 那与 agent 路径的语义不一致，而用户看不出这一轮走的是
+   * 哪条路（两条路的结果长得一样）。
+   *
+   * `undefined` / `"all"` = 全部库（`recallOnly` 在拿不到会话记录时会这样调）。
+   */
   private recallBySource(
     query: string,
     perSourceLimit: number,
+    scope?: string,
   ): {
     relaxed: boolean
     sources: Array<{
@@ -1105,13 +1197,18 @@ ${sections.join("\n")}
       hits: ReturnType<typeof recallMessages>["hits"]
     }>
   } {
-    const databases: Array<{ channelId: string; db: SqliteDatabase }> = [
-      { channelId: "dingtalk", db: this.requireDb() },
+    const primaryId = this.options.primaryChannelId
+    const all: Array<{ channelId: string; db: SqliteDatabase }> = [
+      { channelId: primaryId, db: this.requireDb() },
       ...[...this.sourceDbs.entries()].map(([channelId, sourceDb]) => ({
         channelId,
         db: sourceDb,
       })),
     ]
+    const databases =
+      scope === undefined || scope === "all"
+        ? all
+        : all.filter((entry) => entry.channelId === scope)
     let relaxed = false
     const sources = databases.map(({ channelId, db }) => {
       try {
@@ -1148,27 +1245,39 @@ ${sections.join("\n")}
    * app 退出/登出：dispose 所有 session（撤 token）+ kill opencode（无孤儿）。
    */
   async shutdown(): Promise<void> {
-    const agent = this.agent
-    this.agent = null
+    const agents = [...this.agents.values()]
+    this.agents.clear()
     this.reducers.clear()
-    if (agent === null) return
-    // 逐 session 撤 token（dispose 自己会 revoke）。
+    if (agents.length === 0) return
+    /**
+     * 逐 session 撤 token（dispose 自己会 revoke），再逐进程 close。
+     *
+     * ★ 每个档位一个进程，所以两层循环都要走完 —— 漏一个就是一个孤儿
+     * opencode 继续占着它的 HOME 与端口（退出应用后仍在跑）。
+     *
+     * 撤 token 时在**所有**进程上试：会话是哪个档位建的这件事这里不查库
+     * （库可能已经关了），而 dispose 一个不存在的 session 是无害的。
+     */
     if (this.sessions !== null) {
       for (const row of this.sessions.listActive()) {
         if (row.acpSessionId === null) continue
-        await agent.supervisor
-          .dispose({
-            id: row.id,
-            acpSessionId: row.acpSessionId,
-            cwd: row.acpCwd,
-            kind: "search",
-            scopeId: row.id,
-          })
-          .catch(() => {})
+        for (const agent of agents) {
+          await agent.supervisor
+            .dispose({
+              id: row.id,
+              acpSessionId: row.acpSessionId,
+              cwd: row.acpCwd,
+              kind: "search",
+              scopeId: row.id,
+            })
+            .catch(() => {})
+        }
       }
     }
-    agent.client.close()
-    await agent.transport.close().catch(() => {})
+    for (const agent of agents) {
+      agent.client.close()
+      await agent.transport.close().catch(() => {})
+    }
   }
 
   private requireSessions(): SearchSessionRepository {
@@ -1247,6 +1356,7 @@ function toSummary(row: {
   lastActiveAt: number
   createdAt: number
   state: "idle" | "streaming" | "error"
+  graphScope?: string
 }): SearchSessionSummary {
   return {
     id: row.id,
@@ -1255,6 +1365,8 @@ function toSummary(row: {
     messageCount: row.messageCount,
     lastActiveAt: row.lastActiveAt,
     createdAt: row.createdAt,
+    // 侧栏要显示"这个会话搜的是哪些渠道"
+    ...(row.graphScope === undefined ? {} : { graphScope: row.graphScope }),
     state: row.state,
   }
 }

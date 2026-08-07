@@ -9,6 +9,7 @@ import { useMemo, useState } from "react"
 import type { ChatItem } from "@mycontext/agent-runtime"
 import {
   useCancelSearch,
+  useChannels,
   useCreateSearchSession,
   useSearchPrompt,
   useSearchSessionDetail,
@@ -18,6 +19,14 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { toChatItems } from "../agent-stream/to-chat-items.js"
 import { SearchView } from "./search-view.js"
 import { SessionView } from "./session-view.js"
+
+/**
+ * 主渠道 id —— 档位列表里它排第一（SearchView 缺省选第一项）。
+ *
+ * ★ 渲染层写死这个常量是可接受的：它只影响**排序**。真正的判据在主进程
+ * （`SearchServiceOptions.primaryChannelId`），而那边不给缺省。
+ */
+const PRIMARY_CHANNEL_ID = "dingtalk"
 
 export interface SearchModuleProps {
   userName: string
@@ -34,6 +43,33 @@ export function SearchModule({ userName, activeSessionId, onSessionCreated }: Se
   const cancel = useCancelSearch()
   const [pendingQuery, setPendingQuery] = useState<string | null>(null)
   const stream = useSearchStream(activeSessionId)
+  const channels = useChannels()
+
+  /**
+   * 可选的检索档位 —— **只列已授权的渠道**。
+   *
+   * ★ 档位与 kl 启动是解耦的（起哪些 kl 看连了哪些渠道），所以给出一个
+   * "没连那个渠道"的档位，结果是那个端口上没有 kl → 连接失败 → 静默降级。
+   *
+   * ★ 主渠道排**第一**：SearchView 缺省选第一项，于是"不动这个控件"
+   * 就是现有行为（零迁移的另一半，另一半在 `agentHomeFor`）。
+   *
+   * ★ 只有一个渠道时**返回空数组** —— 那时"混合"没有意义，
+   * 而 SearchView 少于两项就不渲染选择器。
+   */
+  const scopes = useMemo(() => {
+    const authorized = (channels.data ?? []).filter(
+      (channel) => channel.available && channel.status.state === "authorized",
+    )
+    if (authorized.length < 2) return []
+    const primaryFirst = [...authorized].sort((a, b) =>
+      a.id === PRIMARY_CHANNEL_ID ? -1 : b.id === PRIMARY_CHANNEL_ID ? 1 : 0,
+    )
+    return [
+      ...primaryFirst.map((channel) => ({ id: channel.id, label: t(channel.labelKey) })),
+      { id: "all", label: t("scope.all") },
+    ]
+  }, [channels.data, t])
 
   /**
    * 降级提示。
@@ -53,16 +89,22 @@ export function SearchModule({ userName, activeSessionId, onSessionCreated }: Se
     [detail.data],
   )
 
-  /** 首屏提交：先建会话，再把第一条查询发出去。 */
-  const submitFromHome = (query: string): void => {
+  /** 首屏提交：先建会话（带上档位），再把第一条查询发出去。 */
+  const submitFromHome = (query: string, scope: string): void => {
     setPendingQuery(query)
-    createSession.mutate(query, {
-      onSuccess: (session) => {
-        onSessionCreated(session.id)
-        prompt.mutate({ sessionId: session.id, query }, { onSettled: () => setPendingQuery(null) })
+    createSession.mutate(
+      { query, ...(scope === "" ? {} : { scope }) },
+      {
+        onSuccess: (session) => {
+          onSessionCreated(session.id)
+          prompt.mutate(
+            { sessionId: session.id, query },
+            { onSettled: () => setPendingQuery(null) },
+          )
+        },
+        onError: () => setPendingQuery(null),
       },
-      onError: () => setPendingQuery(null),
-    })
+    )
   }
 
   if (activeSessionId === null) {
@@ -72,6 +114,7 @@ export function SearchModule({ userName, activeSessionId, onSessionCreated }: Se
         onSubmit={submitFromHome}
         disabled={createSession.isPending || pendingQuery !== null}
         degradedNotice={degradedNotice}
+        scopes={scopes}
       />
     )
   }

@@ -10,14 +10,33 @@ import { Composer, GreetingName, WelcomeHeader, greetingKeyForHour } from "@myco
 import { useMemo, useState } from "react"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
+/** 一个可选的检索档位。`id` 是 `graph_scope` 存的值。 */
+export interface SearchScopeOption {
+  id: string
+  label: string
+}
+
 export interface SearchViewProps {
   /** 展示用的用户名（当前是 email 前缀） */
   userName: string
-  /** 提交一个新查询：由上层建会话并切到会话视图 */
-  onSubmit: (query: string) => void
+  /** 提交一个新查询：由上层建会话并切到会话视图。`scope` = 选中的档位 */
+  onSubmit: (query: string, scope: string) => void
   disabled?: boolean
   /** Agent 运行时缺失时的降级提示（不静默降质） */
   degradedNotice?: string | null
+  /**
+   * 可选的检索档位。
+   *
+   * ## ★ 只列**已授权**的渠道
+   *
+   * 档位与 kl 启动是解耦的（起哪些 kl 看连了哪些渠道），所以让用户选一个
+   * "没连那个渠道"的档位，结果是那个端口上没有 kl → 连接失败 → 静默降级
+   * 到本地召回。选项本身就不该出现。
+   *
+   * 少于两项时**不渲染选择器**：只有一个档位可选时那个控件是纯噪音
+   * （而且会让用户以为还有别的选择）。
+   */
+  scopes?: readonly SearchScopeOption[]
 }
 
 export function SearchView({
@@ -25,9 +44,16 @@ export function SearchView({
   onSubmit,
   disabled = false,
   degradedNotice,
+  scopes = [],
 }: SearchViewProps) {
   const { t } = useDynamicTranslation("search")
   const [draft, setDraft] = useState("")
+  /**
+   * 选中的档位。缺省取**第一项** —— 上层把主渠道排在最前，
+   * 于是"不动这个控件"就是现有行为。
+   */
+  const [scope, setScope] = useState<string | null>(null)
+  const activeScope = scope ?? scopes[0]?.id ?? ""
 
   // 问候语按小时分段。用 useMemo 只是为了避免每次渲染都取一次系统时间 ——
   // 跨过整点不会自动刷新，而那不值得为它加一个定时器。
@@ -36,7 +62,7 @@ export function SearchView({
   const submit = (): void => {
     const query = draft.trim()
     if (query === "") return
-    onSubmit(query)
+    onSubmit(query, activeScope)
     setDraft("")
   }
 
@@ -48,6 +74,30 @@ export function SearchView({
       >
         <GreetingName name={userName} />
       </WelcomeHeader>
+
+      {scopes.length > 1 && (
+        <div className="flex items-center gap-2" role="radiogroup" aria-label={t("scope.label")}>
+          <span className="typography-body-small-400 text-[var(--text-base-tertiary)]">
+            {t("scope.label")}
+          </span>
+          {scopes.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="radio"
+              aria-checked={option.id === activeScope}
+              onClick={() => setScope(option.id)}
+              className={
+                option.id === activeScope
+                  ? "typography-body-small-400 rounded-full bg-[var(--bg-base-secondary)] px-3 py-1 text-[var(--text-base-primary)]"
+                  : "typography-body-small-400 rounded-full px-3 py-1 text-[var(--text-base-tertiary)] hover:text-[var(--text-base-primary)]"
+              }
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <Composer
         variant="hero"

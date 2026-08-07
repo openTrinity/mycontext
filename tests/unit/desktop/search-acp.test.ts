@@ -125,15 +125,24 @@ function fakeOpencode(
     onLine?.(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }))
   }
 
+  /**
+   * spawn 时收到的 env。★ 档位的全部可观测面都在这里
+   * （`KL_SERVER_PORT` / `KL_GRAPHS_JSON` / XDG 三兄弟都是 spawn 那一刻定的）。
+   */
+  let spawnedEnv: Record<string, string> | undefined
   return {
     transport,
     written,
+    get spawnedEnv() {
+      return spawnedEnv
+    },
     /** 主动推一条 session/update（测"取消后迟到的事件"用）。 */
     emit: (update: unknown) => {
       onLine?.(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: update }))
     },
     bind: (spec: DuplexSpec) => {
       onLine = spec.onLine
+      spawnedEnv = spec.env as Record<string, string> | undefined
     },
   }
 }
@@ -146,7 +155,11 @@ function messageChunk(text: string): unknown {
   }
 }
 
-function makeService(options: { hasOpencode: boolean; fake?: ReturnType<typeof fakeOpencode> }) {
+function makeService(options: {
+  hasOpencode: boolean
+  fake?: ReturnType<typeof fakeOpencode>
+  klPortOf?: (channelId: string) => number | undefined
+}) {
   const handle = openVaultDb()
   const resolved: ResolvedBinary = {
     name: "opencode",
@@ -193,6 +206,8 @@ function makeService(options: { hasOpencode: boolean; fake?: ReturnType<typeof f
     processes,
     klRoot: "/fake/kl-graph",
     klPort: 8200,
+    primaryChannelId: "dingtalk",
+    ...(options.klPortOf === undefined ? {} : { klPortOf: options.klPortOf }),
     getWindow: () => fakeWindow,
   })
   // agent 目录按 vault（attach 时给）；npm 缓存应用级一份 —— 见 AgentDirs
@@ -356,7 +371,15 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     return (last?.params?.prompt ?? []) as { type: string; text: string }[]
   }
 
-  it("resume 成功（未重建）→ 不回灌历史，但仍带独立渠道召回块", async () => {
+  /**
+   * ★ 这条原来断言 prompt 里带一段预先塞的 FTS 召回块。那段已经删了 ——
+   * 它是"一个进程只能连一个 kl"约束下的替代品，而档位与进程一一对应之后
+   * 它变成重复且更弱的东西（只有 12 条 FTS，图谱的实体/事实/社群都用不上），
+   * 还占掉 prompt 的开头位置。见 `buildPromptBlocks` 的注释。
+   *
+   * 现在断言的是**只有问题**这一个块 —— 那正是"没有多余上下文"的证据。
+   */
+  it("resume 成功（未重建）→ 不回灌历史，prompt 里只有这一个问题", async () => {
     const fake = fakeOpencode({ turnUpdates: [[messageChunk("答案一")], [messageChunk("答案二")]] })
     const ctx = makeService({ hasOpencode: true, fake })
     const session = ctx.service.create("问题")
@@ -364,11 +387,11 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     await ctx.service.prompt(session.id, "第二个问题")
 
     const blocks = lastPromptBlocks(fake.written)
-    expect(blocks).toHaveLength(2)
-    expect(blocks[0]?.text).toContain("<isolated_source_recall")
-    expect(blocks[0]?.text).toContain('channel="dingtalk"')
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]?.text).toBe("第二个问题")
+    // ★ 既没有回灌块（resume 成功），也没有预塞的召回块（已删）
     expect(blocks[0]?.text).not.toContain("<previous_conversation")
-    expect(blocks[1]?.text).toBe("第二个问题")
+    expect(blocks[0]?.text).not.toContain("<isolated_source_recall")
     ctx.close()
   })
 
@@ -384,8 +407,8 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     await ctx.service.prompt(session.id, "第二个问题")
 
     const blocks = lastPromptBlocks(fake.written)
-    // 回灌块 + 隔离渠道召回块 + 问题块。
-    expect(blocks).toHaveLength(3)
+    // 回灌块 + 问题块（预塞的召回块已删，见上一条测试的注释）
+    expect(blocks).toHaveLength(2)
     const replay = blocks[0]?.text ?? ""
     // ① 有边界：裸文本没有边界，模型分不清"给你看的"与"要你写的"
     expect(replay).toContain("<previous_conversation")
@@ -396,9 +419,14 @@ describe("SearchService · 上下文回灌（降级重建后）", () => {
     expect(replay).toContain("不要提及这段记录的存在")
     // ③ 历史确实带上了（回灌的本意：别让它忘了聊过什么）
     expect(replay).toContain("第一个问题")
-    // ④ 新问题独立成块、且不在回灌块里
-    expect(blocks[1]?.text).toContain("<isolated_source_recall")
-    expect(blocks[2]?.text).toBe("第二个问题")
+    /**
+     * ④ 新问题**独立成块**。
+     *
+     * ★ 不断言"回灌块里没有它"：这一轮的用户消息在 prompt 之前就已经落库了，
+     * 所以历史里本来就有它。要紧的是它**另有一个独立的块**在最后 ——
+     * 那才是模型被要求回答的东西（回灌块的开头明写"仅供了解背景"）。
+     */
+    expect(blocks[1]?.text).toBe("第二个问题")
     ctx.close()
   })
 
@@ -732,6 +760,80 @@ describe("SearchService · 降级原因分档", () => {
     expect(reason).toContain("本轮未能完成")
     // 配置是好的，别让用户去改 .env
     expect(reason).not.toContain("MYCONTEXT_LLM_BASE_URL")
+    ctx.close()
+  })
+})
+
+/**
+ * ★★ 挂载窗口期与档位的降级行为。
+ *
+ * 管线挂载是 fire-and-forget 的（登录不等它），所以登录后有一段短窗口
+ * 那个渠道的 kl 端口还查不到。这一组锁的是**那时不能抛** ——
+ * "刚登录就搜索会报错"是一个用户一定会撞到的形态。
+ */
+describe("★★ 检索档位：管线还没挂上时降级而不抛", () => {
+  it("★ 档位对应的渠道还没挂管线 → 退回主渠道端口，仍能正常跑完一轮", async () => {
+    const fake = fakeOpencode({ updatesOnPrompt: [messageChunk("答案")] })
+    // klPortOf 恒返回 undefined = 那个渠道的管线还没挂上
+    const ctx = makeService({ hasOpencode: true, fake, klPortOf: () => undefined })
+    const session = ctx.service.create("问题", "feishu")
+    await ctx.service.prompt(session.id, "查一下")
+
+    // 不抛、走完 agent 一轮、且没有降级横幅
+    expect(ctx.lastDegradedReason()).toBeNull()
+    const spawned = fake.spawnedEnv?.["KL_SERVER_PORT"]
+    // ★ 退回主渠道端口 —— 那时查不到飞书的图，但**仍能查到主渠道的**，
+    // 比整个搜索起不来好（而且管线挂上后下一个会话就对了）
+    expect(spawned).toBe("8200")
+    ctx.close()
+  })
+
+  it("★ 单渠道档位连它自己的 kl（连错端口会查到另一个渠道的知识，不报错）", async () => {
+    const fake = fakeOpencode({ updatesOnPrompt: [messageChunk("答案")] })
+    const ctx = makeService({
+      hasOpencode: true,
+      fake,
+      klPortOf: (id) => (id === "feishu" ? 8201 : undefined),
+    })
+    const session = ctx.service.create("问题", "feishu")
+    await ctx.service.prompt(session.id, "查一下")
+    expect(fake.spawnedEnv?.["KL_SERVER_PORT"]).toBe("8201")
+    // 单渠道档位**不**注入 KL_GRAPHS_JSON（只有 all 档要逐个问）
+    expect(fake.spawnedEnv?.["KL_GRAPHS_JSON"]).toBeUndefined()
+    ctx.close()
+  })
+
+  /**
+   * ★★ 默认档位（= 存量会话）必须走主渠道端口且**不开** isolateData。
+   *
+   * 这一条与 `search-graph-scope.test.ts` 里那组是两个层面：那边验 spawn 层的
+   * env 形状，这边验 SearchService 真的按会话档位选了默认那一档。
+   */
+  it("★★ 不给档位 → 主渠道端口，且 XDG_DATA_HOME 仍指向真实 HOME（resume 靠它）", async () => {
+    const fake = fakeOpencode({ updatesOnPrompt: [messageChunk("答案")] })
+    const ctx = makeService({ hasOpencode: true, fake })
+    const session = ctx.service.create("问题")
+    await ctx.service.prompt(session.id, "查一下")
+    expect(fake.spawnedEnv?.["KL_SERVER_PORT"]).toBe("8200")
+    // ★ 没被指进 agentHome —— 那是零迁移的证据
+    expect(fake.spawnedEnv?.["XDG_DATA_HOME"]).not.toContain("agent-home")
+    expect(fake.spawnedEnv?.["XDG_STATE_HOME"]).toBeUndefined()
+    ctx.close()
+  })
+
+  it("★ all 档注入 KL_GRAPHS_JSON（否则混合检索静默退化成单图）", async () => {
+    const fake = fakeOpencode({ updatesOnPrompt: [messageChunk("答案")] })
+    const ctx = makeService({
+      hasOpencode: true,
+      fake,
+      klPortOf: (id) => (id === "feishu" ? 8201 : undefined),
+    })
+    const session = ctx.service.create("问题", "all")
+    await ctx.service.prompt(session.id, "查一下")
+    // all 档连主渠道端口，但要知道全部图在哪
+    expect(fake.spawnedEnv?.["KL_SERVER_PORT"]).toBe("8200")
+    const graphs = JSON.parse(fake.spawnedEnv?.["KL_GRAPHS_JSON"] ?? "{}") as Record<string, number>
+    expect(graphs["dingtalk"]).toBe(8200)
     ctx.close()
   })
 })

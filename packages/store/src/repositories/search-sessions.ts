@@ -24,6 +24,17 @@ export interface SearchSessionRow {
   lastActiveAt: number
   createdAt: number
   archivedAt: number | null
+  /**
+   * 检索档位：这个会话去问哪几个渠道的图谱。
+   *
+   * ★ 按**会话**存而不是全局设置：同一个人上一分钟查工作群的技术决策
+   * （只钉钉）、下一分钟查文档（只飞书）。存成全局的话切档位会把已有会话
+   * 的语义一起改掉，而那些会话的历史回答是按旧档位得出的。
+   *
+   * 存量行回填 `"dingtalk"`（迁移 v24 的 DEFAULT）—— 那是**现有行为**。
+   * 填 `"all"` 会让旧会话恢复后突然开始检索飞书，一次静默的行为回归。
+   */
+  graphScope: string
 }
 
 export interface CreateSearchSessionInput {
@@ -33,6 +44,8 @@ export interface CreateSearchSessionInput {
   harnessId?: string
   modelRole?: string
   createdAt: number
+  /** 检索档位。不给 = `"dingtalk"`（与迁移的 DEFAULT 一致，见 `SearchSessionRow`）。 */
+  graphScope?: string
 }
 
 export interface SearchMessageRow {
@@ -78,6 +91,7 @@ interface SessionDbRow {
   last_active_at: number
   created_at: number
   archived_at: number | null
+  graph_scope: string
 }
 
 function toSession(row: SessionDbRow): SearchSessionRow {
@@ -95,6 +109,12 @@ function toSession(row: SessionDbRow): SearchSessionRow {
     lastActiveAt: row.last_active_at,
     createdAt: row.created_at,
     archivedAt: row.archived_at,
+    /**
+     * ★ `?? "dingtalk"` 兜底而不是信任 NOT NULL：升级路径上会出现
+     * **新代码 + 旧库**（迁移还没跑完就有人读，或开发态热更）。
+     * 那时这一列不存在 → undefined → 下游按它挑 kl 端口会拿到 undefined。
+     */
+    graphScope: row.graph_scope ?? "dingtalk",
   }
 }
 
@@ -135,8 +155,8 @@ export class SearchSessionRepository {
     this.db
       .prepare(
         `INSERT INTO search_chat_sessions
-           (id, title, acp_cwd, harness_id, model_role, last_active_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, title, acp_cwd, harness_id, model_role, last_active_at, created_at, graph_scope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -146,6 +166,8 @@ export class SearchSessionRepository {
         input.modelRole ?? "harness.search",
         input.createdAt,
         input.createdAt,
+        // ★ 缺省与迁移的 DEFAULT 一致 —— 两处都必须是 dingtalk（见 SearchSessionRow）
+        input.graphScope ?? "dingtalk",
       )
     const created = this.findById(input.id)
     if (created === null) throw new Error("创建会话后读不回该行")
