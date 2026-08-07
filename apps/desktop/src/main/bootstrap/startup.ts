@@ -530,6 +530,16 @@ export function bootstrapApp(mainDir: string): AppContext {
     logger: logger.child("DistillSource"),
     plugin: dingtalk,
     /**
+     * ★★ 其余渠道的插件 —— 会话列表要覆盖**全部**已挂渠道。
+     *
+     * 少了这个的后果：另一个渠道的会话在引导页/设置页里**一个都选不到**，
+     * 于是 `save()` 里那套"按渠道各存一份白名单"永远收到空值，
+     * 而用户以为自己已经配好了范围。
+     *
+     * ★ 函数：管线是登录后才挂的（见 `ChannelPipelineManager`）。
+     */
+    sourcePlugins: () => pipelines.all().map((item) => registry.get(item.channelId)),
+    /**
      * ★★ 用户改了采集范围 → 立刻把三层派生物对齐到新范围。
      *
      * 这条链是「勾选实时生效」的全部实现，四步的顺序都有理由：
@@ -1428,24 +1438,16 @@ export function bootstrapApp(mainDir: string): AppContext {
     sourceChannelId: dingtalk.meta.id,
   })
 
-  /**
-   * 仪表盘的时序 + 漏斗。
-   *
-   * ★ 与 `graphQuery` 一样取**函数**而不是值（vault 跟着登录挂），
-   * 且刻意不并进 `IngestService.snapshot()` —— 那是每批采集都发的热路径，
-   * 而按天分桶实测 108ms（完整推理见该服务的文件头注释）。
-   */
+  const appGraphQuery = new MultiGraphQueryService(graphQuery, dingtalk.meta.id, () =>
   const dashboardTrends = new DashboardTrendsService({
-    logger: logger.child("DashboardTrends"),
-    clock: systemClock,
-    db: () => vaultDb(),
-    klDataDir: () => vaultPaths?.klRoot ?? "",
-  })
-
-  const appGraphQuery = new MultiGraphQueryService(graphQuery, () =>
     pipelines.all().map((item) => ({
       channelId: item.channelId,
       facts: (input) => item.parts.graphQuery.facts(input),
+      /**
+       * ★ 那个渠道自己的 ego 图 —— 界面上是**切换**而不是合并
+       * （同一个人在两个渠道没有安全的 id 映射，见 MultiGraphQueryService.ego）。
+       */
+      ego: () => item.parts.graphQuery.ego(),
     })),
   )
 

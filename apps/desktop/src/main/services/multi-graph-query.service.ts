@@ -16,18 +16,42 @@ export class MultiGraphQueryService {
      * ★ 函数而非数组：非主渠道的图库由 `ChannelPipelineManager` 在登录后
      * 现造（见 `MultiKlServerService` 里同一条注释）。
      */
+    /** 主渠道 id（`channelId` 指到它时直接走 primary）。 */
+    private readonly primaryChannelId: string,
     private readonly getSources: () => readonly {
       channelId: string
       facts(input: KlGraphFactsInput): KlGraphFacts
+      /** 那个渠道自己的 ego 图（切换到它时用）。 */
+      ego?: () => KlGraphEgo
     }[],
   ) {}
 
-  private get sources(): readonly { channelId: string; facts(i: KlGraphFactsInput): KlGraphFacts }[] {
+  private get sources(): readonly {
+    channelId: string
+    facts(i: KlGraphFactsInput): KlGraphFacts
+    ego?: () => KlGraphEgo
+  }[] {
     return this.getSources()
   }
 
-  ego(): KlGraphEgo {
-    return this.primary.ego()
+  /**
+   * ego 图 —— **只能落在一个渠道上**，不合并。
+   *
+   * ## ★★ 为什么不合并（这不是偷懒）
+   *
+   * 同一个人在两个渠道是两个不同的 external_id（钉钉是 openDingTalkId、
+   * 飞书是 open_id），而两者**没有安全的映射** —— 靠显示名对齐不行
+   * （同名同姓实测 6 个）。合并显示等于凭猜测把两个人的关系连起来，
+   * 而那是"不报错、只是答错"里最坏的一种：用户会据此认为某两个人有往来。
+   *
+   * 所以界面上给的是**切换**而不是筛选：一次看一个渠道的关系图。
+   *
+   * `channelId` 不给或就是主渠道 → 主渠道（存量行为）。
+   */
+  ego(channelId?: string): KlGraphEgo {
+    if (channelId === undefined) return this.primary.ego()
+    const source = this.sources.find((item) => item.channelId === channelId)
+    return source?.ego === undefined ? this.primary.ego() : source.ego()
   }
 
   /**
@@ -46,6 +70,33 @@ export class MultiGraphQueryService {
     const requested = input.offset + input.limit
     const perSourceInput = { ...input, offset: 0, limit: requested }
     const failedSources: { channelId: string; reason: string }[] = []
+    /**
+     * ★ 指定了渠道就**只查它**（仪表盘展示走这条：与 ego 图同一个取值范围）。
+     * 不指定则合并（搜索走这条 —— 每条带 channelId 徽章，来源不会混）。
+     */
+    const only = input.channelId
+    if (only !== undefined && only !== this.primaryChannelId) {
+      const source = this.sources.find((item) => item.channelId === only)
+      // 那个渠道没挂管线（没连 / 还在挂载中）→ 落回主渠道：它是唯一能查的
+      if (source !== undefined) {
+        try {
+          return source.facts(input)
+        } catch (error) {
+          /**
+           * ★ 抛错要**说出来**而不是静默落回主渠道 —— 后者会让用户以为
+           * 自己在看飞书的事实，而看到的是钉钉的。
+           */
+          return {
+            available: false,
+            reason: error instanceof Error ? error.message : String(error),
+            total: 0,
+            facts: [],
+            failedSources: [{ channelId: only, reason: "查询失败" }],
+          }
+        }
+      }
+    }
+    if (only === this.primaryChannelId) return this.primary.facts(input)
     const results = [
       this.primary.facts(perSourceInput),
       ...this.sources.flatMap((source) => {

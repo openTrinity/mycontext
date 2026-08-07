@@ -9,11 +9,10 @@
  * 双图标 + 中间状态连线、填充块承载账号信息（带状态圆点）、
  * 未连接时用图标 + 标题 + 说明的信息块讲清授权范围。
  */
-import { Avatar, Button, DingTalkIcon, Panel, Tooltip, cn } from "@mycontext/design"
+import { Avatar, Button, Panel, Tooltip, cn } from "@mycontext/design"
 import { REFRESH_EXPIRY_WARNING_DAYS } from "@mycontext/ipc-contract"
 import type { AuthProgress, AuthStatus, ChannelSummary } from "@mycontext/ipc-contract"
 import { useEffect, useState } from "react"
-import type { ComponentType } from "react"
 import { Trans } from "react-i18next"
 import {
   useAdoptSession,
@@ -28,24 +27,14 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { StepSection } from "../onboarding/step-section.js"
 import { DwsSourceDisclosure } from "./dws-source-disclosure.js"
-import { DINGTALK_BRAND, KeyIcon, ShieldIcon, SpinnerIcon, ToolsIcon } from "./channel-icons.js"
-
-/**
- * 渠道 id → 官方标识组件。
- *
- * 放在这里而不是渠道插件里：插件跑在主进程，不能引 React 组件。
- * 没有官方标识的渠道不在表里，由 ChannelBadge 走字母兜底。
- */
-const BRAND_ICONS: Record<string, ComponentType<{ className?: string }> | undefined> = {
-  dingtalk: DingTalkIcon,
-  feishu: FeishuBrandIcon,
-}
-
-const FEISHU_BRAND_LOGO_URL = new URL("./assets/channel-source-logo.png", import.meta.url).href
-
-function FeishuBrandIcon({ className }: { className?: string }) {
-  return <img alt="" className={cn("object-contain", className)} src={FEISHU_BRAND_LOGO_URL} />
-}
+import {
+  CHANNEL_BRAND_ICONS,
+  DINGTALK_BRAND,
+  KeyIcon,
+  ShieldIcon,
+  SpinnerIcon,
+  ToolsIcon,
+} from "./channel-icons.js"
 
 function formatTime(iso: string | null): string {
   if (iso === null) return "—"
@@ -589,7 +578,7 @@ function ChannelBadge({
   const { t } = useDynamicTranslation("channels")
   const box =
     size === "lg" ? "size-12 radius-xl" : size === "sm" ? "size-5 radius-md" : "size-10 radius-lg"
-  const official = BRAND_ICONS[channelId]
+  const official = CHANNEL_BRAND_ICONS[channelId]
 
   if (official !== undefined) {
     const Icon = official

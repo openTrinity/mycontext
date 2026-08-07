@@ -338,7 +338,7 @@ export function AppShell({ session }: AppShellProps) {
           {active === undefined ? null : !active.available ? (
             <ComingSoonPanel module={active} />
           ) : active.id === "dashboard" ? (
-            <DashboardModule />
+            <DashboardModule activeChannelId={activeChannel} />
           ) : active.id === "persona" ? (
             <HeaderSlotProvider value={headerSlotValue}>
               <PersonaModule />

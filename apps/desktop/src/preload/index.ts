@@ -172,7 +172,7 @@ const api: MyContextApi = {
     graphBuild: (fresh?: boolean) => ipcRenderer.invoke(IPC_CHANNELS.klGraphBuild, fresh ?? false),
     graphOverview: () => ipcRenderer.invoke(IPC_CHANNELS.klGraphOverview),
     graphOptimize: () => ipcRenderer.invoke(IPC_CHANNELS.klGraphOptimize),
-    graphEgo: () => ipcRenderer.invoke(IPC_CHANNELS.klGraphEgo),
+    graphEgo: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphEgo, input ?? {}),
     graphFacts: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphFacts, input),
     onStatus: (listener) => {
       const handler = (_event: unknown, payload: KlServerStatus) => listener(payload)

@@ -39,7 +39,7 @@
  * 配色是**验证过的**（见 `../graph/palette.ts` 文件头记的那两组
  * `ALL CHECKS PASS`），不是挑好看的。
  */
-import { lazy, Suspense, useEffect, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { Avatar, Button, IconButton, Panel, PanelHeader, cn } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"
@@ -52,6 +52,7 @@ import {
   useFeedInfo,
   useIngestSnapshot,
   useKlGraphBuild,
+  useChannels,
   useKlGraphEgo,
   useKlGraphOverview,
   useKlServerStatus,
@@ -99,7 +100,20 @@ function ProblemLine({ text, tone }: { text: string; tone: "warn" | "bad" }) {
   )
 }
 
-export function DashboardModule() {
+export interface DashboardModuleProps {
+  /**
+   * 页头那枚取值范围筹码选中的渠道（见 `ScopeChip`）。
+   *
+   * ★★ 这一页的**每一个数字**都跟着它走：六个清点数、关系图、事实列表。
+   * 那正是它必须由 shell 提供而不是本组件自己 state 的理由 ——
+   * 控件在页头（与页面标题同级），而它管的是整页。
+   *
+   * `null` = 还没读到渠道列表 → 退回"第一个已授权的渠道"（见 `graphChannel`）。
+   */
+  activeChannelId?: string | null
+}
+
+export function DashboardModule({ activeChannelId = null }: DashboardModuleProps = {}) {
   const ingest = useIngestSnapshot(true)
   const distill = useDistillProgress(true)
   const persona = usePersonaSnapshot(true)
@@ -107,7 +121,40 @@ export function DashboardModule() {
   const kl = useKlServerStatus()
   const buildGraph = useKlGraphBuild()
   const building = kl?.building === true
-  const ego = useKlGraphEgo(building)
+  /**
+   * ★★ 图谱看**哪个渠道** —— 这是切换，不是筛选。
+   *
+   * 同一个人在两个渠道是两个 external_id（钉钉 openDingTalkId / 飞书 open_id），
+   * 而两者没有安全的映射（靠显示名对齐不行，同名同姓实测 6 个）。合并展示
+   * 等于凭猜测把两个人的关系连起来 —— 不报错，只是答错。
+   *
+   * `null` = 还没选过 → 取"当前连着的那个"（只连一个时就是它，见 `graphChannel`）。
+   */
+  const channels = useChannels()
+  /** 已授权的渠道（切换器只列它们 —— 没连的渠道图库是空的）。 */
+  const authorizedChannels = useMemo(
+    () =>
+      (channels.data ?? [])
+        .filter((c: { available: boolean; status: { state: string } }) => c.available && c.status.state === "authorized")
+        .map((c: { id: string }) => c.id),
+    [channels.data],
+  )
+  /**
+   * 生效的渠道：用户选过就用它，否则取**第一个已授权**的。
+   *
+   * ★ 于是"只连了飞书"时默认就展示飞书的图，不是空的钉钉图。
+   * 而没有任何"混合"档 —— 那正是上面那条 id 映射问题的结论。
+   */
+  /**
+   * 生效的渠道：页头选了就用它，否则取**第一个已授权**的。
+   *
+   * ★ 于是"只连了飞书"时整页默认展示飞书的数据，而不是一个空的钉钉视图。
+   * 图谱这一侧**没有"混合"档** —— 同一个人在两个渠道是两个 external_id，
+   * 没有安全的映射（同名同姓实测 6 个），合并会凭猜测把两个人连起来。
+   * （搜索那边保留混合档：事实带来源徽章，不会混。）
+   */
+  const graphChannel = activeChannelId ?? authorizedChannels[0] ?? undefined
+  const ego = useKlGraphEgo(building, graphChannel)
   const overview = useKlGraphOverview(building)
   const { resolved: mode } = useTheme()
   /** 实体类型名要翻译 —— 与 ego 图的图例共用 `graph` 那一份 key。 */
@@ -120,6 +167,7 @@ export function DashboardModule() {
    * 分成两页时这个动作要用户自己抄一遍名字。
    */
   const [entityFocus, setEntityFocus] = useState<string | null>(null)
+
 
   /**
    * 「刷新状态」按钮的加载态 + 失效入口。
@@ -215,7 +263,36 @@ export function DashboardModule() {
   const dingtalkState = channels.data?.find((item) => item.id === "dingtalk")?.status.state
   const channelConnected = dingtalkState === undefined ? null : dingtalkState === "authorized"
 
-  const ing = readIngest(ingest.data ?? null, channelConnected)
+  /**
+   * ★★ 采集数字按**选中的渠道**取。
+   *
+   * 顶层快照来自主进程的 `snapshotIngest()`，它返回**主渠道**那一份。
+   * 直接用它的话切到飞书之后那六个数一动不动 —— 而用户以为自己在看
+   * 飞书的数据。
+   *
+   * `perChannel` 里有那个渠道就用它的数；没有（单渠道 / 还没挂上）就用顶层。
+   */
+  const scopedSnapshot = (() => {
+    const snap = ingest.data ?? null
+    if (snap === null || graphChannel === undefined) return snap
+    const row = (snap.perChannel ?? []).find((item) => item.channelId === graphChannel)
+    if (row === undefined) return snap
+    return {
+      ...snap,
+      messages: row.messages,
+      conversations: row.conversations,
+      running: row.running,
+      lastError: row.lastError,
+      blockedReason: row.blockedReason,
+    }
+  })()
+  /**
+   * ★ 两个判据叠加：**按渠道取的**快照 + 渠道连接状态。
+   *
+   * 前者决定"显示谁的数字"，后者决定"要不要说这些是历史数据"——
+   * 两件独立的事，rebase 时双方各加了一个，都要保留。
+   */
+  const ing = readIngest(scopedSnapshot, channelConnected)
   const per = readPersona(persona.data ?? null)
   const processing = readProcessing({ feed: feed.data ?? null, distill: distill.data ?? null })
   const klView = describeKl(kl)
@@ -461,6 +538,37 @@ export function DashboardModule() {
             <MiniStat label={item.label} value={item.value} />
           </div>
         ))}
+
+        {/*
+          ★★ 逐渠道的消息/会话数。
+
+          上面那六个数只是**其中一个渠道**的：顶层快照来自主进程的
+          `snapshotIngest()`，它挑一个渠道返回（主渠道活跃就只返回主渠道）。
+          于是飞书采了多少条在界面上完全看不出来 —— 而那正是"接了飞书却
+          看不见它"的直接表现。
+
+          ★ 只在多渠道时出现（单渠道时与上面说的是同一件事）。
+        */}
+        {(ingest.data?.perChannel ?? []).length > 1 && (
+          <div className="col-span-12 flex flex-wrap items-center gap-x-4 gap-y-1">
+            {(ingest.data?.perChannel ?? []).map((row) => (
+              <span
+                key={row.channelId}
+                className="typography-caption-400 text-[var(--text-base-tertiary)]"
+              >
+                {tg(`channel.${row.channelId}`, { defaultValue: row.channelId })}
+                {"　"}
+                {formatCount(row.messages)} 条消息 · {formatCount(row.conversations)} 个会话
+                {row.blockedReason === null ? null : (
+                  <span className="text-[var(--status-warning)]">（已暂停）</span>
+                )}
+                {row.lastError === null ? null : (
+                  <span className="text-[var(--status-error)]">（有错误）</span>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
 
         {/*
           ── 段 3：它现在怎么样（数字分身） ────────────────
@@ -729,6 +837,7 @@ export function DashboardModule() {
         */}
         <FactsExplorer
           typeCounts={graph?.factTypes ?? []}
+          channelId={graphChannel}
           entityFocus={entityFocus}
           onEntityFocusChange={setEntityFocus}
           onTotalChange={setFocusCount}

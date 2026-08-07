@@ -75,6 +75,11 @@ export interface DistillSourceServiceOptions {
   logger: Logger
   plugin: ChannelPlugin
   /**
+   * 其余渠道的插件（会话列举用）。★ **函数**：它们由
+   * `ChannelPipelineManager` 在登录后才挂上，装配这一刻还不知道有哪些。
+   */
+  sourcePlugins?: () => readonly ChannelPlugin[]
+  /**
    * 用户改了采集范围之后的回调（清越界语料 + 重建图谱，装配处注入）。
    *
    * ★ 为什么是回调而不是在这里做：清语料要碰 `DataPlaneService`、
@@ -168,7 +173,7 @@ export class DistillSourceService {
      * 其余渠道各自的会话白名单（`channelId → externalIds`）。
      * 某个渠道缺席 = 那个渠道不限会话（见上面关于 undefined 与 [] 的段落）。
      */
-    perChannelConversationIds?: Readonly<Record<string, readonly string[]>>
+    perChannelConversationIds?: Readonly<Record<string, readonly string[]>> | undefined
   }): true {
     const db = this.requireDb()
     const repo = new DistillSourceRepository(db)
@@ -290,44 +295,88 @@ export class DistillSourceService {
    * 渠道调用失败时**降级**到只用表里的数据（并标 truncated）——
    * 没网时仍能选已采过的会话，比整个选择页打不开好。
    */
+  /**
+   * 会话列表 —— **全部已挂渠道**，每一项带 `channelId`。
+   *
+   * ## ★★ 为什么必须覆盖所有渠道
+   *
+   * 这个列表是用户选采集范围的唯一入口。只给主渠道的话，另一个渠道的会话
+   * **一个都选不到** —— 于是 `save()` 里那套"按渠道各存一份白名单"永远收到
+   * 空值，而用户以为自己已经配好了范围。
+   *
+   * ## 每个渠道各自合并「远端 + 本地」
+   *
+   * 远端（渠道 CLI）给"能看到的全部会话"，本地表给"已经采过的那些"。
+   * 两者都要：只用远端会丢掉那些列不出来但确实采过的（钉钉的单聊分页有硬
+   * 限制），只用本地会丢掉还没采过的群 —— 而那可能正是用户想选的。
+   *
+   * ★ 单个渠道失败**不影响其余** —— 那时它退化成"只有本地已采的部分"并
+   * 标 `truncated`。整个列表打不开比少一个渠道的远端结果糟得多。
+   */
   async conversations(): Promise<ChannelConversationListView> {
-    const db = this.requireDb()
-    const local = this.localConversations(db)
+    /**
+     * ★ `meta` 可能不存在：这一层的一些测试用的是只带 `conversations` 的
+     * 能力桩（那是合理的 —— 它们验的是合并逻辑，与渠道身份无关）。
+     * 取不到时用一个中性占位：`channelId` 只用于**分组显示与回存分流**，
+     * 而单渠道时那两件事都退化成"就这一个"。
+     */
+    const primaryId = this.options.plugin.meta?.id ?? "primary"
+    const targets: { channelId: string; db: SqliteDatabase; plugin: ChannelPlugin }[] = [
+      { channelId: primaryId, db: this.requireDb(), plugin: this.options.plugin },
+      ...[...this.sourceDbs.entries()].flatMap(([channelId, db]) => {
+        const plugin = this.options.sourcePlugins?.().find((p) => p.meta.id === channelId)
+        return plugin === undefined ? [] : [{ channelId, db, plugin }]
+      }),
+    ]
 
-    const conversations = this.options.plugin.conversations
-    // 渠道无此能力：只有本地表，那必然是"已采过的那部分"，所以是截断的。
-    if (conversations === undefined) return { items: local, truncated: true }
-
-    try {
-      const remote = await conversations.list()
-      const byId = new Map(local.map((row) => [row.externalId, row]))
-      for (const item of remote.items) {
-        const existing = byId.get(item.externalId)
-        byId.set(item.externalId, {
-          externalId: item.externalId,
-          title: item.title ?? existing?.title ?? null,
-          kind: item.kind,
-          memberCount: item.memberCount ?? existing?.memberCount ?? null,
-          // 本地的最后消息时间更可信（它来自真实落库的消息）
-          lastMessageAt: existing?.lastMessageAt ?? item.lastMessageAt ?? null,
-        })
+    const items: ChannelConversationView[] = []
+    let truncated = false
+    for (const target of targets) {
+      const local = this.localConversations(target.db).map((row) => ({
+        ...row,
+        channelId: target.channelId,
+      }))
+      const list = target.plugin.conversations
+      if (list === undefined) {
+        // 渠道没有列举能力 → 只有本地已采的那部分，必然是截断的
+        items.push(...local)
+        truncated = true
+        continue
       }
-      const items = [...byId.values()].sort(
-        (a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0),
-      )
-      this.options.logger.info("conversation list merged", {
-        remote: remote.items.length,
-        local: local.length,
-        merged: items.length,
-        truncated: remote.truncated,
-      })
-      return { items, truncated: remote.truncated }
-    } catch (error) {
-      this.options.logger.warn("channel conversation list failed; using local only", {
-        detail: error instanceof Error ? error.message : String(error),
-      })
-      return { items: local, truncated: true }
+      try {
+        const remote = await list.list()
+        const byId = new Map(local.map((row) => [row.externalId, row]))
+        for (const item of remote.items) {
+          const existing = byId.get(item.externalId)
+          byId.set(item.externalId, {
+            externalId: item.externalId,
+            title: item.title ?? existing?.title ?? null,
+            kind: item.kind,
+            memberCount: item.memberCount ?? existing?.memberCount ?? null,
+            // 本地的最后消息时间更可信（它来自真实落库的消息）
+            lastMessageAt: existing?.lastMessageAt ?? item.lastMessageAt ?? null,
+            channelId: target.channelId,
+          })
+        }
+        items.push(...byId.values())
+        truncated ||= remote.truncated
+        this.options.logger.info("conversation list merged", {
+          channelId: target.channelId,
+          remote: remote.items.length,
+          local: local.length,
+        })
+      } catch (error) {
+        this.options.logger.warn("channel conversation list failed; using local only", {
+          channelId: target.channelId,
+          detail: error instanceof Error ? error.message : String(error),
+        })
+        items.push(...local)
+        truncated = true
+      }
     }
+
+    items.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))
+    return { items, truncated }
   }
 
   private localConversations(db: SqliteDatabase): ChannelConversationView[] {

@@ -34,6 +34,7 @@ import {
   useChannels,
   useCompleteOnboarding,
   useCompleteStep,
+  useChannelConversations,
   useDistillSources,
   useIngestSnapshot,
   useOnboardingSteps,
@@ -151,6 +152,15 @@ function readSources(row: OnboardingStepView | undefined): SourcesDraft {
   }
 }
 
+/**
+ * 主渠道 id —— 它的白名单走 `scope.conversationIds`（存量形状），
+ * 其余渠道走 `perChannelConversationIds`。
+ *
+ * ★ 渲染层写死可接受：它只决定"哪一份走老字段"。真正的判据在主进程
+ * （`DistillSourceService` 用 `plugin.meta.id`）。
+ */
+const PRIMARY_CHANNEL_ID = "dingtalk"
+
 export function OnboardingView() {
   const { t } = useDynamicTranslation("onboarding")
   const { t: tc } = useDynamicTranslation()
@@ -165,6 +175,11 @@ export function OnboardingView() {
   const channels = useChannels()
   const steps = useOnboardingSteps()
   const distillSources = useDistillSources()
+  /**
+   * 会话列表 —— 这里只用它做「external_id → channelId」的反查（分桶用）。
+   * `SourcesStep` 自己也拉一份；两处共用同一个 queryKey，所以不会多发请求。
+   */
+  const conversationList = useChannelConversations(true)
   const completeStep = useCompleteStep()
   const skipStep = useSkipStep()
   const saveSource = useSaveDistillSource()
@@ -327,17 +342,45 @@ export function OnboardingView() {
             ? undefined
             : Date.now() - sources.rangeDays * 86_400_000
       const until = custom === null ? undefined : new Date(`${custom.to}T23:59:59.999`).getTime()
+      /**
+       * ★★ 会话白名单要**按渠道分桶**。
+       *
+       * 勾选列表是混着两个渠道的（每项带 `channelId`），而白名单存的是
+       * external_id —— 各渠道的 id 体系完全不同。整批塞给每个渠道等于让
+       * 它按一批不存在的 id 过滤，**结果恒为零**且不报错。
+       *
+       * 主渠道那份走 `scope.conversationIds`（存量形状不动），
+       * 其余渠道走 `perChannelConversationIds`。
+       */
+      const conversationItems = conversationList.data?.items ?? []
+      const channelOf = new Map(conversationItems.map((item) => [item.externalId, item.channelId]))
+      const buckets = new Map<string, string[]>()
+      const primaryIds: string[] = []
+      for (const id of sources.conversationIds) {
+        const channelId = channelOf.get(id)
+        /**
+         * ★ 查不到渠道 → 归给主渠道。那是存量数据的形状（旧的引导记录里
+         * 没有 channelId），归错的代价是"主渠道多了一个不存在的 id"
+         * （过滤时无害），而丢掉它会让用户的选择静默消失。
+         */
+        if (channelId === undefined || channelId === PRIMARY_CHANNEL_ID) primaryIds.push(id)
+        else buckets.set(channelId, [...(buckets.get(channelId) ?? []), id])
+      }
       for (const source of distillSources.data ?? []) {
         saveSource.mutate({
           kind: source.kind,
           enabled: sources.enabledSources.includes(source.kind),
+          // 只有 chat 源有会话白名单（其余源不按会话切）
+          ...(source.kind === "chat" && buckets.size > 0
+            ? { perChannelConversationIds: Object.fromEntries(buckets) }
+            : {}),
           scope:
             source.kind === "chat"
               ? {
                   ...(since === undefined ? {} : { since }),
                   ...(until === undefined ? {} : { until }),
                   chatKinds: sources.chatKinds,
-                  conversationIds: sources.conversationIds,
+                  conversationIds: primaryIds,
                 }
               : {
                   ...(since === undefined ? {} : { since }),

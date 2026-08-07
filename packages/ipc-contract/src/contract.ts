@@ -549,6 +549,20 @@ export const distillSourceSaveInputSchema = z.object({
   kind: distillSourceKindSchema,
   enabled: z.boolean(),
   scope: distillScopeSchema,
+  /**
+   * 其余渠道各自的会话白名单（`channelId → externalIds`）。**可选**。
+   *
+   * ## ★★ 为什么不能只有一份 `scope.conversationIds`
+   *
+   * 那里面装的是**某个渠道的** external_id，而两个渠道的 id 体系完全不同。
+   * 把主渠道那批复制到另一个渠道的库里，等于让它按一批不存在的 id 过滤
+   * —— **结果恒为零**（一条都不采），而日志里一个错都没有。
+   *
+   * ★ 某个渠道**缺席** = 那个渠道不限会话（`undefined`），不是"选了零个"
+   * （`[]`）。两者当前行为相同但语义不同，判据一改就分道扬镳 ——
+   * 而那时 `[]` 会变成"一个都不采"。见 `DistillSourceService.save`。
+   */
+  perChannelConversationIds: z.record(z.string(), z.array(z.string())).optional(),
 })
 
 export const distillSourceResetInputSchema = z.object({ kind: distillSourceKindSchema })
@@ -595,6 +609,18 @@ export const channelConversationSchema = z.object({
   kind: z.enum(["direct", "group"]),
   memberCount: z.number().nullable(),
   lastMessageAt: z.number().nullable(),
+  /**
+   * 这个会话属于哪个渠道。**可选**（旧客户端不带）。
+   *
+   * ## ★★ 为什么必须带上
+   *
+   * 会话白名单存的是 `external_id`，而那是**渠道内**唯一的 —— 两个渠道的
+   * id 体系完全不同。不带渠道的话：
+   * · UI 上两个渠道的会话混成一个列表，用户分不清哪个是哪个；
+   * · 存回去时也分不出该写进哪个渠道的库 —— 而写错的后果是那个渠道按一批
+   *   不存在的 id 过滤，**结果恒为零**（见 `DistillSourceService.save`）。
+   */
+  channelId: z.string().optional(),
 })
 
 export type ChannelConversationView = z.infer<typeof channelConversationSchema>
@@ -1799,7 +1825,12 @@ export const ingestSnapshotSchema = z.object({
         messages: z.number(),
         conversations: z.number(),
         lastError: z.string().nullable(),
-        blockedReason: z.string().nullable(),
+        /**
+         * ★ 与顶层同一个枚举，不是裸 string：它们是**同一个字段**
+         * （逐渠道 vs 挑一个渠道），两处类型不一样会让消费方各写一套
+         * 文案映射，而其中一套迟早漏掉一个取值。
+         */
+        blockedReason: z.enum(["session_expired", "permission_required"]).nullable(),
       }),
     )
     .optional(),
@@ -2587,6 +2618,19 @@ export const klGraphFactsInputSchema = z.object({
   keyword: z.string().max(200),
   limit: z.number().int().positive().max(100),
   offset: z.number().int().nonnegative(),
+  /**
+   * 只看这一个渠道的事实。**可选**，不给 = 全部渠道合并。
+   *
+   * ## ★ 为什么"可选"这件事本身有意义
+   *
+   * 两个消费者要的语义**不同**，而这个字段正是区分它们的开关：
+   * · **仪表盘展示** → 传它。那一页是"看某个渠道的图谱"，与 ego 图同一个
+   *   取值范围（页头那枚筹码管整页）。混着显示会让用户以为两边的事实
+   *   在同一条线索上，而它们的 external_id 体系不同。
+   * · **搜索** → 不传。那里保留混合检索（每条带 channelId 徽章，来源清楚，
+   *   而且"跨渠道找一件事"正是搜索的价值）。
+   */
+  channelId: z.string().min(1).optional(),
 })
 
 export type KlGraphFactsInput = z.infer<typeof klGraphFactsInputSchema>

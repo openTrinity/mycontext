@@ -1523,11 +1523,27 @@ export function useKlGraphOverview(building: boolean) {
  *
  * 建图中每 5s 重取一次：那时用户正等着看图长出来。
  */
-export function useKlGraphEgo(building: boolean) {
+/**
+ * @param channelId 看**哪个渠道**的关系图。
+ *
+ * ★ 图谱是**切换**而不是混合：同一个人在两个渠道是两个 external_id，
+ * 没有安全的映射（靠显示名对齐不行，同名同姓实测 6 个）。合并会凭猜测把
+ * 两个人的关系连起来 —— 不报错，只是答错。见 `MultiGraphQueryService.ego`。
+ *
+ * ★ `channelId` 进 queryKey：不进的话切换渠道命中同一份缓存，
+ * 界面上表现为"点了没反应"。
+ */
+export function useKlGraphEgo(building: boolean, channelId?: string) {
   return useQuery({
-    queryKey: ["kl", "graph-ego"],
+    /**
+     * ★ `channelId` 进 key —— 少了它切渠道会命中同一份缓存，于是飞书那栏
+     * 显示的是钉钉的关系图（实测过：切过去数字一条都不变）。
+     */
+    queryKey: ["kl", "graph-ego", channelId ?? "primary"],
     queryFn: async () => {
-      const view = unwrap(await window.mycontext.kl.graphEgo())
+      const view = unwrap(
+        await window.mycontext.kl.graphEgo(channelId === undefined ? undefined : { channelId }),
+      )
       /**
        * ★★★ 「图谱服务还没起来」要当成**失败**抛出去，让 react-query 重试。
        *

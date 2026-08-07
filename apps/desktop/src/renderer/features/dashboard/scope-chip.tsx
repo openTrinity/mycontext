@@ -12,20 +12,29 @@
  * 那是"我在看什么范围的数据"该待的位置（与很多工具的
  * workspace / project 选择器同一个位置，读者不用学）。
  *
- * ## ★ 只有一个渠道时不做下拉
+ * ## ★ 多渠道是**分段切换**而不是下拉
  *
- * 实测飞书 `available: false`（`plugins/feishu/index.ts:25`），也就是当前
- * 只有钉钉真的可用。给一个只有一项的下拉是**假的可配置性** ——
- * 与 `facts-explorer.tsx` 里那条注释同一个判断：「一个空的下拉框是噪声」。
+ * 原来是原生 `<select>`（那时只有一个取值，下拉是占位）。第二个渠道接上
+ * 之后它成了一个真正会被点的控件，而这里的取值域**只有两三个** ——
+ * 分段控件把全部选项摊开，一眼看到"有哪些"且一次点击就切完；
+ * 下拉要两次点击，还藏起了"我能看什么"这个信息。
  *
- * 判据（哪些算已连接、要不要给切换器）走 `readIdentityBar` ——
- * 与身份卡共用同一个纯函数，那样"算不算已连接"不会两处判得不一样。
+ * ★ 带官方品牌图标（走 `CHANNEL_BRAND_ICONS`，与设置页共用一张表）：
+ * 「钉钉/飞书」这两个词在扫视时很像，图标才是真正被认出来的东西。
+ *
+ * ## ★★ 切换会改整页的每一个数字
+ *
+ * 那六个清点数、那张关系图、下面的事实列表 —— 全都跟着这个值走
+ * （见 `DashboardModule` 的 `activeChannelId`）。这也是它必须在**页头**、
+ * 与页面标题同级的理由：一个作用于整页的取值范围画在页面内部，
+ * 读起来像"只影响这一小块"。
  *
  * `onChange` 的接口现在就留好，第二个渠道接上时**不需要改这个组件**。
  */
 import { cn } from "@mycontext/design"
 import type { ChannelSummary } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
+import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
 import { ChannelBadge } from "../persona/channel-badge.js"
 import { readIdentityBar } from "./dashboard-data.js"
 
@@ -69,22 +78,48 @@ export function ScopeChip({ channels, activeChannelId, onChannelChange }: ScopeC
    * `dingtalk` 这种内部 id 出现在用户界面上是"漏出实现"的典型形态，
    * 而 `channels` 那份 i18n 里本来就有 `<id>.label`（`ChannelBadge` 在用）。
    */
+  /**
+   * 多渠道：**分段切换**。
+   *
+   * ★ `role="radiogroup"` + `role="radio"`：这是"从 N 个里选一个"的语义。
+   * 用 button 而不是原生 radio 是为了能放品牌图标并控制视觉，
+   * 但 ARIA 角色必须补上 —— 否则读屏器会把它读成一排普通按钮，
+   * 用户不知道它们是互斥的。
+   */
+  const active = activeChannelId ?? connected[0].id
   return (
-    <select
-      value={activeChannelId ?? connected[0].id}
-      onChange={(event) => onChannelChange(event.target.value)}
+    <div
+      role="radiogroup"
       aria-label={t("switcherLabel", { defaultValue: "选择渠道" })}
       className={cn(
-        "typography-caption-400 rounded-[var(--radius-sm)] px-1.5 py-0.5",
+        "inline-flex items-center gap-0.5 rounded-[var(--radius-md)] p-0.5",
         "border border-[var(--border-divider-light)] bg-[var(--bg-card-z0)]",
-        "text-[var(--text-base-secondary)]",
       )}
     >
-      {connected.map((item) => (
-        <option key={item.id} value={item.id}>
-          {t(`${item.id}.label`, { defaultValue: item.id })}
-        </option>
-      ))}
-    </select>
+      {connected.map((item) => {
+        const Icon = CHANNEL_BRAND_ICONS[item.id]
+        const selected = item.id === active
+        return (
+          <button
+            key={item.id}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChannelChange(item.id)}
+            className={cn(
+              "typography-caption-400 inline-flex items-center gap-1.5 rounded-[var(--radius-sm)]",
+              "px-2 py-1 transition-colors",
+              selected
+                ? "bg-[var(--bg-base-primary)] text-[var(--text-base-primary)] shadow-sm"
+                : "text-[var(--text-base-tertiary)] hover:text-[var(--text-base-secondary)]",
+            )}
+          >
+            {/* 品牌图标保留官方色 —— 不套 currentColor（见 ChannelBadge 的注释） */}
+            {Icon === undefined ? null : <Icon className="size-3.5 rounded-[3px]" />}
+            {t(`${item.id}.label`, { defaultValue: item.id })}
+          </button>
+        )
+      })}
+    </div>
   )
 }

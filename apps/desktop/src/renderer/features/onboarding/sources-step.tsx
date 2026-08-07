@@ -33,6 +33,7 @@ import { useMemo, useState } from "react"
 import { Button, Checkbox, Input, cn } from "@mycontext/design"
 import type { ChannelConversationView, DistillSourceId } from "@mycontext/ipc-contract"
 import { useChannelConversations } from "../../lib/queries.js"
+import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { StepSection, SubGroup } from "./step-section.js"
@@ -613,6 +614,22 @@ function ConversationGroup({
                   onChange={() => onToggle(item.externalId)}
                   label={
                     <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                      {/*
+                        ★★ 渠道图标 —— 两个渠道的会话混在同一个列表里。
+
+                        少了它用户分不清哪个群是哪个渠道的（群名可能重复，
+                        而 external_id 不上屏）。而这个选择直接决定采什么，
+                        选错了是"采了不该采的会话"——一个隐私问题。
+
+                        只在**真有渠道信息**时显示（旧记录没有 channelId）。
+                      */}
+                      {(() => {
+                        if (item.channelId === undefined) return null
+                        const Icon = CHANNEL_BRAND_ICONS[item.channelId]
+                        return Icon === undefined ? null : (
+                          <Icon className="size-3.5 shrink-0 rounded-[3px]" />
+                        )
+                      })()}
                       <span className="typography-body-small-400 truncate text-[var(--text-base-primary)]">
                         {item.title ?? item.externalId}
                       </span>

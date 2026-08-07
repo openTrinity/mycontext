@@ -49,6 +49,13 @@ const RANGES: ReadonlyArray<{ days: number | null; key: string }> = [
 import { FACT_TYPES as TYPE_ORDER, factColor } from "./palette.js"
 
 export interface FactsExplorerProps {
+  /**
+   * 只看这一个渠道的事实（页头那枚取值范围筹码选中的）。
+   *
+   * ★ 与 ego 图同一个取值范围：仪表盘是"看某个渠道的图谱"。
+   * `undefined` = 合并全部（搜索那条路的语义，见 `klGraphFactsInputSchema`）。
+   */
+  channelId?: string | undefined
   /** 类型分布（来自 graphOverview，用于分布条与"共几条"） */
   typeCounts: ReadonlyArray<{ type: string; count: number }>
   /**
@@ -79,6 +86,7 @@ export function FactsExplorer({
   entityFocus = null,
   onEntityFocusChange,
   onTotalChange,
+  channelId,
 }: FactsExplorerProps) {
   const { t } = useDynamicTranslation("graph")
   /**
@@ -139,8 +147,10 @@ export function FactsExplorer({
       keyword,
       limit: PAGE,
       offset: page * PAGE,
+      // ★ 不给时不传这个键（`exactOptionalPropertyTypes`），语义 = 合并全部
+      ...(channelId === undefined ? {} : { channelId }),
     }),
-    [days, types, entityName, keyword, page],
+    [days, types, entityName, keyword, page, channelId],
   )
   const query = useKlGraphFacts(input)
   const data: KlGraphFacts | undefined = query.data

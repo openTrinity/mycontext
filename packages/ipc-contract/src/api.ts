@@ -184,6 +184,13 @@ export interface MyContextApi {
       kind: DistillSourceId
       enabled: boolean
       scope: DistillScopeInput
+      /**
+       * 其余渠道各自的会话白名单。`scope.conversationIds` 是**主渠道**那份。
+       *
+       * ★ 必须分开：白名单存的是 external_id，而各渠道的 id 体系不同 ——
+       * 复制过去等于按一批不存在的 id 过滤，结果恒为零（见契约里的注释）。
+       */
+      perChannelConversationIds?: Record<string, string[]>
     }): Promise<Result<true>>
     /** 清某个源的蒸馏水位 —— 下一轮从头再蒸（facet 幂等合并，不删已有结论） */
     sourceReset(input: { kind: DistillSourceId }): Promise<Result<true>>
@@ -494,7 +501,7 @@ export interface MyContextApi {
      * 而"我周围"才是这一页要回答的问题。关系由**同一条 fact 里共现**
      * 推导（图里几乎没有 entity↔entity 边）。
      */
-    graphEgo(): Promise<Result<KlGraphEgo>>
+    graphEgo(input?: { channelId?: string }): Promise<Result<KlGraphEgo>>
     /**
      * 带过滤的事实检索（时间范围 / 类型 / 实体 / 关键词）。
      *

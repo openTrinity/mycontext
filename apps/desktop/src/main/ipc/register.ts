@@ -99,8 +99,24 @@ export interface IpcDependencies {
   preferences: PreferencesService
   dataPlane: DataPlaneService
   search: SearchService
-  klServer: KlServerService
-  graphQuery: GraphQueryService
+  klServer: Pick<
+    KlServerService,
+    "status" | "ensureReady" | "stop" | "rebuildGraph" | "optimizeGraph" | "graphOverview"
+  >
+  /**
+   * 图谱只读查询。
+   *
+   * ★ `ego` 的签名比 `GraphQueryService` 的宽一个可选参数（渠道 id）——
+   * 装配层传进来的是 `MultiGraphQueryService`，它按 id 路由到对应的图库。
+   * 界面上图谱是**切换**而不是混合：同一个人在两个渠道是两个 external_id，
+   * 没有安全的映射（见 `MultiGraphQueryService.ego`）。
+   *
+   * 用结构类型而不是那个具体类：这一层只需要这两个方法。
+   */
+  graphQuery: {
+    ego(channelId?: string): ReturnType<GraphQueryService["ego"]>
+    facts(input: Parameters<GraphQueryService["facts"]>[0]): ReturnType<GraphQueryService["facts"]>
+  }
   /** 仪表盘的时序 + 消化漏斗（独立通道，见该服务的文件头） */
   dashboardTrends: DashboardTrendsService
   advancedAi: AdvancedAiService
@@ -771,7 +787,25 @@ export function registerIpc(deps: IpcDependencies): void {
    * SQLite 的 `edges` 表在默认后端（ladybug）下按设计恒空，
    * 完整推理见 `GraphQueryOptions.factsOfEntity` 的注释。
    */
-  ipcMain.handle(IPC_CHANNELS.klGraphEgo, () => attempt(() => graphQuery.ego()))
+  /**
+   * ★ ego 图带渠道：一次看**一个**渠道的关系图（不合并 —— 同一个人在两个
+   * 渠道是两个 external_id，没有安全映射，见 MultiGraphQueryService.ego）。
+   */
+  ipcMain.handle(IPC_CHANNELS.klGraphEgo, (_event, payload: unknown) =>
+    attempt(() =>
+      /**
+       * ★ `channelId` 可缺省（不给 = 主渠道）。所以这里不能直接 parse 一个
+       * 必填 schema —— 手工取值并校验形状：非字符串一律当"没给"。
+       */
+      Promise.resolve(
+        graphQuery.ego(
+          typeof (payload as { channelId?: unknown } | null)?.channelId === "string"
+            ? (payload as { channelId: string }).channelId
+            : undefined,
+        ),
+      ),
+    ),
+  )
 
   /**
    * 带过滤的事实检索（时间范围 / 类型 / 实体 / 关键词）。

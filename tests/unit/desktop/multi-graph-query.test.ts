@@ -36,9 +36,11 @@ describe("MultiGraphQueryService", () => {
   it("分别查询每个物理图库，再按时间汇总", () => {
     const dingtalkFacts = vi.fn(() => result("dingtalk", 10))
     const feishuFacts = vi.fn(() => result("feishu", 20))
-    const service = new MultiGraphQueryService({ ego: () => ego, facts: dingtalkFacts }, () => [
-      { facts: feishuFacts },
-    ])
+    const service = new MultiGraphQueryService(
+      { ego: () => ego, facts: dingtalkFacts },
+      "dingtalk",
+      () => [{ channelId: "feishu", facts: feishuFacts }],
+    )
 
     const merged = service.facts(INPUT)
 
@@ -51,7 +53,8 @@ describe("MultiGraphQueryService", () => {
   it("ego 保持钉钉口径，不把飞书做成数字分身", () => {
     const service = new MultiGraphQueryService(
       { ego: () => ego, facts: () => result("dingtalk", 10) },
-      [{ facts: () => result("feishu", 20) }],
+      "dingtalk",
+      () => [{ channelId: "feishu", facts: () => result("feishu", 20) }],
     )
     expect(service.ego()).toBe(ego)
   })

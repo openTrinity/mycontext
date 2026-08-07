@@ -7,6 +7,8 @@
  * `packages/design/src/assets/brands/`，由 `pnpm sync:brand-icons` 生成组件，
  * 并保留官方品牌色。自己描摹品牌标识既不准确也是商标风险。
  */
+import type { ComponentType } from "react"
+import { DingTalkIcon, cn } from "@mycontext/design"
 
 /**
  * 钉钉品牌识别色。
@@ -120,4 +122,32 @@ export function ToolsIcon({ className }: { className?: string }) {
       />
     </svg>
   )
+}
+
+/**
+ * 渠道 id → 官方标识组件。
+ *
+ * ★ 放这里而不是各用一份：`channel-auth-panel`（设置页）与 `scope-chip`
+ * （页头取值范围）都要它，各抄一份的结局是加第三个渠道时漏掉一处 ——
+ * 而表现是那个渠道在某一页没有图标，只有名字。
+ *
+ * 插件里不能放：它们跑在主进程，引不了 React 组件。
+ *
+ * ★ 未知渠道**必须**能查不到（`| undefined`）：渠道 id 是从库里读出来的
+ * 字符串，不是编译期常量。收窄成 Record<ChannelId,…> 时一个老库里的拼写
+ * 会让 `ICONS[id]` 是 undefined 而 TS 不报，渲染 undefined 作为组件
+ * 会让整棵 React 树抛错 —— 表现是**整页白屏**。
+ */
+export const CHANNEL_BRAND_ICONS: Record<
+  string,
+  ComponentType<{ className?: string }> | undefined
+> = {
+  dingtalk: DingTalkIcon,
+  feishu: FeishuBrandIcon,
+}
+
+const FEISHU_BRAND_LOGO_URL = new URL("./assets/channel-source-logo.png", import.meta.url).href
+
+function FeishuBrandIcon({ className }: { className?: string }) {
+  return <img alt="" className={cn("object-contain", className)} src={FEISHU_BRAND_LOGO_URL} />
 }
