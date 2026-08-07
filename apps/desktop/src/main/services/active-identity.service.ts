@@ -47,9 +47,39 @@ import { identityKeyString, parseIdentityKeyString } from "@mycontext/store"
  */
 const ACTIVE_IDENTITY_KEY = "active_channel_identity"
 
-/** 渠道 CLI 认的身份寻址形态。上游 `--help` 推荐 `corpId:userId`，实测唯一稳定可用的写法。 */
+/**
+ * 渠道 CLI 认的身份寻址形态。
+ *
+ * ## ★★ 是**裸 corpId**，不是 `corpId:userId` —— 后者实测不可用
+ *
+ * 上游 `--help` 写的是「组织 profile 名或 corpId」，而我先前照它推荐的
+ * `corpId:userId` 写，并在注释里记成"实测唯一稳定可用的写法"。
+ * 那句话是错的。重新实测（三次一致，且在**全新 seed** 的临时目录上复现）：
+ *
+ * ```
+ * --profile <corpId>:<userId>  → authenticated=false「未登录」
+ * --profile <corpId>           → authenticated=true，正常返回
+ * ```
+ *
+ * 换一条真业务命令（`contact user get-self`）结论相同：带冒号那种直接
+ * `code=2 category=auth`「未登录」，裸 corpId 正常返回员工信息。
+ *
+ * ## ★ 为什么这个错**看起来像别的问题**
+ *
+ * 带冒号那种被上游归类成 `auth` 类错误 —— 也就是界面上会显示
+ * 「授权已失效，请重新扫码」。而真实原因是我们把 profile 拼错了，
+ * 重新扫码一百次也不会好。这正是本项目最怕的那类：症状指向一个
+ * 完全无关的方向（去查授权、去查 token），而根因在一行字符串拼接里。
+ *
+ * ## ★ 那 `userId` 去哪了
+ *
+ * 不需要它：一个 `corpId` 在这个配置目录里**只对应一条 profile**
+ * （`seedChannelProfile` 保证只 seed 当前身份那一条，见它的 `matchesSeed`），
+ * 所以组织本身就唯一定位了身份。`userId` 仍留在隔离键里 ——
+ * 那是**我们**区分身份用的，与 CLI 的寻址无关。
+ */
 export function toChannelProfile(identity: { corpId: string; userId: string }): string {
-  return `${identity.corpId}:${identity.userId}`
+  return identity.corpId
 }
 
 export interface ActiveIdentityServiceOptions {

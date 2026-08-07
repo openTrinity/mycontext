@@ -84,13 +84,37 @@ afterEach(() => {
 
 describe("钉给渠道命令的 profile", () => {
   /**
-   * ★ `corpId:userId` 是渠道侧多账号体系的**主键形态**。
+   * ★★ 形态是**裸 corpId** —— 而这条断言原来锁的是 `corpId:userId`，是错的。
    *
-   * `userId` 只在企业内唯一（同一个人在两家企业下是两个不同的 userId），
-   * 所以单独拿它寻址会在多组织下撞车 —— 必须带 corpId。
+   * 原来的理由写着"`userId` 只在企业内唯一，单独拿 corpId 寻址会撞车"，
+   * 听起来成立，但**没对着 CLI 验过**。重新实测（三次一致，且在全新 seed
+   * 的临时目录上复现）：
+   *
+   * ```
+   * --profile <corpId>:<userId>  → authenticated=false「未登录」
+   * --profile <corpId>           → authenticated=true，正常返回
+   * ```
+   *
+   * 换真业务命令（`contact user get-self`）结论相同：带冒号那种直接
+   * `code=2 category=auth`，裸 corpId 正常返回员工信息。
+   *
+   * ★ 不会撞车的原因是**配置目录本身已经是隔离边界**：
+   * `seedChannelProfile` 保证一个 vault 的 dws-home 里只有当前身份那一条
+   * profile（它的 `matchesSeed` 要求 `entries.length === 1`），
+   * 所以 corpId 在这个目录里唯一定位一条。`userId` 仍在隔离键里 ——
+   * 那是我们区分身份用的，与 CLI 寻址是两件事。
+   *
+   * ★★ 这个错为什么值得一条断言：带冒号那种被上游归类成 `auth` 错误，
+   * 于是界面显示「授权已失效，请重新扫码」—— 而真因是一行字符串拼接。
+   * 症状把人指向完全无关的方向（查授权、查 token），扫一百次码也不会好。
    */
-  it("形态是 corpId:userId", () => {
-    expect(toChannelProfile({ corpId: CORP_A, userId: USER_A })).toBe(`${CORP_A}:${USER_A}`)
+  it("★★ 形态是裸 corpId（带 userId 的冒号形态实测「未登录」）", () => {
+    expect(toChannelProfile({ corpId: CORP_A, userId: USER_A })).toBe(CORP_A)
+  })
+
+  /** ★ 反面：绝不能出现冒号 —— 那正是那个 bug 的形状。 */
+  it("★ 不含冒号", () => {
+    expect(toChannelProfile({ corpId: CORP_A, userId: USER_A })).not.toContain(":")
   })
 
   it("未绑身份时给 undefined（不钉，退回 CLI 全局 profile）", () => {
@@ -101,7 +125,7 @@ describe("钉给渠道命令的 profile", () => {
     bind(CORP_A, USER_A, "vault-a")
     const service = makeService()
     service.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })
-    expect(service.currentProfile()).toBe(`${CORP_A}:${USER_A}`)
+    expect(service.currentProfile()).toBe(CORP_A)
   })
 })
 
@@ -177,7 +201,7 @@ describe("切身份", () => {
 
     await service.switchTo(keyOf(CORP_B, USER_B))
     expect(mounted).toEqual(["vault-b"])
-    expect(service.currentProfile()).toBe(`${CORP_B}:${USER_B}`)
+    expect(service.currentProfile()).toBe(CORP_B)
   })
 
   /**
@@ -206,9 +230,9 @@ describe("切身份", () => {
     service.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })
 
     await service.switchTo(keyOf(CORP_B, USER_B))
-    expect(seenDuringMount).toBe(`${CORP_A}:${USER_A}`)
+    expect(seenDuringMount).toBe(CORP_A)
     // 切完才是新的
-    expect(service.currentProfile()).toBe(`${CORP_B}:${USER_B}`)
+    expect(service.currentProfile()).toBe(CORP_B)
   })
 
   /**
