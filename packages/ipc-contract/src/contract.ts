@@ -44,6 +44,14 @@ export const IPC_CHANNELS = {
   distillProgress: "mycontext:distill/progress",
   distillStart: "mycontext:distill/start",
   distillReset: "mycontext:distill/reset",
+  /**
+   * 清空当前渠道的数据（不可逆）。
+   *
+   * 替换掉了设置里那个「重置蒸馏水位」—— 后者不删任何数据，回答不了
+   * 「这个渠道的数据脏了，我要从零重来」。见
+   * `ChannelDataWipeService` 的文件头（清什么、留什么、为什么要停服务）。
+   */
+  channelDataWipe: "mycontext:channel/data-wipe",
   /** 数字人：状态 / 会话配置 / 草稿 / 运行日志 / kill switch */
   personaSnapshot: "mycontext:persona/snapshot",
   personaConversations: "mycontext:persona/conversations",
@@ -517,6 +525,30 @@ export const distillSourceSaveInputSchema = z.object({
 })
 
 export const distillSourceResetInputSchema = z.object({ kind: distillSourceKindSchema })
+
+/**
+ * 清空当前渠道数据的入参与结果。
+ *
+ * `dryRun` 默认 **true** —— 这个动作不可逆，契约层就该偏向安全的那一侧：
+ * 漏传参数的后果是"只报了个数"，而不是"删掉了几万条真实聊天记录"。
+ */
+export const channelDataWipeInputSchema = z.object({
+  dryRun: z.boolean().default(true),
+  /** 连用户自己手打的搜索提问历史一起清。默认不清（那不是采集来的数据） */
+  dropSearch: z.boolean().default(false),
+})
+
+export const channelDataWipeResultSchema = z.object({
+  rows: z.number(),
+  byTable: z.array(z.object({ table: z.string(), rows: z.number() })),
+  removedPaths: z.number(),
+  dryRun: z.boolean(),
+  /** null = 库里没有 FTS 表，跳过了自检（如实区分"验过"与"没验"） */
+  ftsIntegrityOk: z.boolean().nullable(),
+})
+
+export type ChannelDataWipeInput = z.infer<typeof channelDataWipeInputSchema>
+export type ChannelDataWipeResult = z.infer<typeof channelDataWipeResultSchema>
 
 /** 会话列表项（蒸馏源选择用）。 */
 export const channelConversationSchema = z.object({

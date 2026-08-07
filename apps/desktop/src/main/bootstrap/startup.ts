@@ -43,6 +43,7 @@ import { resolveAppPaths, type AppPaths } from "./paths.js"
 import { applyPostAuthIdentity, routeAuthorizedIdentity } from "./post-auth-identity.js"
 import { teardownVault } from "./vault-teardown.js"
 import { DwsSourceService } from "../services/dws-source.service.js"
+import { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
 import { runShutdownStep } from "./shutdown.js"
 import { AuthService } from "../services/auth.service.js"
 import { ChannelService } from "../services/channel.service.js"
@@ -313,6 +314,15 @@ export function bootstrapApp(mainDir: string): AppContext {
    */
   let mountedVault: SqliteDatabase | null = null
   const vaultDb = (): SqliteDatabase | null => mountedVault
+  /**
+   * 当前挂载的 vaultId。null = 没登录。
+   *
+   * ★ 为什么要单独记：「清空当前渠道数据」要 **卸载 → 清 → 重挂同一个**，
+   * 而 `unmountVault()` 会把 `activeIdentity` 也清掉（那是它的正确行为，
+   * 见 `releaseVault` 的注释）—— 清完之后就没人知道刚才挂的是哪一个了。
+   * 从 `activeIdentity` 现读会拿到 null，于是重挂不回去。
+   */
+  let mountedVaultId: string | null = null
 
   const feed = new FeedService({
     clock: systemClock,
@@ -1024,6 +1034,16 @@ export function bootstrapApp(mainDir: string): AppContext {
         vaultPaths = null
         activeIdentity.clear()
         vaults.closeAll()
+        /**
+         * ★ 刻意**不清** `mountedVaultId`。
+         *
+         * 「清空渠道数据」要卸载后重挂**同一个** vault，而这个回调正是卸载
+         * 的最后一步 —— 清了它就没人知道刚才挂的是哪一个了。
+         *
+         * 登出后它是过期值，但那是无害的：唯一的读者（`channelDataWipe`）
+         * 会先经 `currentVault()` 判断有没有登录，而那个读的是 `vaultPaths`
+         * （这里已置 null）。也就是过期的 id 到不了任何真实动作。
+         */
       },
       logger,
     })
@@ -1046,6 +1066,8 @@ export function bootstrapApp(mainDir: string): AppContext {
     // ego 图的两个注入回调与 RuntimeEnv 的 dwsConfigDir getter 都读它
     mountedVault = handle.db
     vaultPaths = vp
+    // ★ 记住挂的是哪一个：「清空渠道数据」要卸载后重挂同一个（见声明处）
+    mountedVaultId = vaultId
 
     /**
      * ★★ 把渠道 CLI 的配置目录钉死在这个身份上 —— 身份隔离的**主防线**。
@@ -1169,6 +1191,37 @@ export function bootstrapApp(mainDir: string): AppContext {
         })
       })
   }
+
+  /**
+   * 「清空当前渠道的数据」。
+   *
+   * ★ 复用 `unmountVault` / `mountVault` 这两个**已有**编排，而不是自己
+   * 停一遍服务：那两个函数里每一步都对应一个实测过的坑（await 采集收尾、
+   * 先停 kl 再换 dataDir、退订要用旧身份的 profile…），见
+   * `vault-teardown.ts` 的文件头。自己写一遍必然漏掉其中几条，
+   * 而漏掉的表现是"清完之后某一块仍按旧数据工作"。
+   *
+   * 装配位置必须在 `mountVault` **之后**（它是 const 箭头，有 TDZ）。
+   */
+  const channelDataWipe = new ChannelDataWipeService({
+    clock: systemClock,
+    logger: logger.child("DataWipe"),
+    currentVault: () => {
+      const vp = vaultPaths
+      // 判据用 vaultPaths 而不是 mountedVaultId：后者在登出后是过期值（见 releaseVault）
+      return vp === null ? null : { root: vp.root, database: vp.database }
+    },
+    unmount: () => unmountVault(),
+    remount: async () => {
+      const vaultId = mountedVaultId
+      if (vaultId === null) {
+        // 没有可重挂的目标（理论上到不了这里：wipe 已经判过登录态）
+        logger.warn("channel data wipe: nothing to remount", {})
+        return
+      }
+      await mountVault(vaultId)
+    },
+  })
 
   /**
    * 身份切换器。它只管"当前是谁"，真正的挂载动作由上面那个 `mountVault`
@@ -1318,6 +1371,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     advancedAi,
     runtimeConfig,
     dwsSource,
+    channelDataWipe,
     logger: logger.child("Ipc"),
   })
 

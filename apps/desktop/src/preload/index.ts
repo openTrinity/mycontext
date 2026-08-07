@@ -59,6 +59,7 @@ const api: MyContextApi = {
     identityList: () => ipcRenderer.invoke(IPC_CHANNELS.channelIdentityList),
     identitySwitch: (input) => ipcRenderer.invoke(IPC_CHANNELS.channelIdentitySwitch, input),
     conversations: () => ipcRenderer.invoke(IPC_CHANNELS.channelConversations),
+    dataWipe: (input) => ipcRenderer.invoke(IPC_CHANNELS.channelDataWipe, input ?? {}),
   },
   onboarding: {
     complete: () => ipcRenderer.invoke(IPC_CHANNELS.onboardingComplete),

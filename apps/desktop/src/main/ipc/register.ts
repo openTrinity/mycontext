@@ -16,6 +16,7 @@ import {
   createSearchSessionInputSchema,
   credentialsSchema,
   distillSourceResetInputSchema,
+  channelDataWipeInputSchema,
   distillSourceSaveInputSchema,
   distillStartInputSchema,
   personaConfigSaveInputSchema,
@@ -72,6 +73,7 @@ import type { KlServerService } from "../services/kl-server.service.js"
 import type { GraphQueryService } from "../services/graph-query.service.js"
 import type { AdvancedAiService } from "../services/advanced-ai.service.js"
 import type { DwsSourceService } from "../services/dws-source.service.js"
+import type { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
 import type { RuntimeConfigService } from "../services/runtime-config.service.js"
 
 export interface IpcDependencies {
@@ -93,6 +95,8 @@ export interface IpcDependencies {
   advancedAi: AdvancedAiService
   dwsSource: DwsSourceService
   runtimeConfig: RuntimeConfigService
+  /** 清空当前渠道数据（不可逆，默认只预演）。见那个服务的文件头 */
+  channelDataWipe: ChannelDataWipeService
   logger: Logger
 }
 
@@ -132,6 +136,7 @@ export function registerIpc(deps: IpcDependencies): void {
     advancedAi,
     dwsSource,
     runtimeConfig,
+    channelDataWipe,
     logger,
   } = deps
 
@@ -304,6 +309,14 @@ export function registerIpc(deps: IpcDependencies): void {
   // 走子进程拿全量会话（约 5s，三路合并）。失败会降级成本地列表而不是报错。
   ipcMain.handle(IPC_CHANNELS.channelConversations, () =>
     attempt(() => distillSources.conversations()),
+  )
+
+  /**
+   * 清空当前渠道的数据。**不可逆**，所以 schema 里 `dryRun` 默认 true ——
+   * 漏传参数的后果是"只报了个数"而不是"删掉几万条真实聊天记录"。
+   */
+  ipcMain.handle(IPC_CHANNELS.channelDataWipe, (_event, payload: unknown) =>
+    attempt(() => channelDataWipe.wipe(parse(channelDataWipeInputSchema, payload))),
   )
 
   // ---------------- 蒸馏执行 ----------------

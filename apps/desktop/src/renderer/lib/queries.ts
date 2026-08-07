@@ -342,6 +342,30 @@ export function useResetDistillSource() {
 }
 
 /**
+ * 清空当前渠道的数据（**不可逆**）。
+ *
+ * 用法是两步：先 `mutate({ dryRun: true })` 拿到条数给用户看，确认后再
+ * `mutate({ dryRun: false })`。默认 `dryRun: true` 由契约层保证 ——
+ * 这里也显式传，让调用点读起来没有歧义。
+ *
+ * 清完后**把全部缓存作废**（不只是 distillSources）：库刚被清空，
+ * 消息数、图谱概览、数字人待处理、蒸馏进度全都变了。只失效一个 key 的话
+ * 界面上会留着一堆清空前的数字，而那与"没生效"看起来一样。
+ */
+export function useWipeChannelData() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { dryRun: boolean; dropSearch?: boolean }) =>
+      unwrap(await window.mycontext.channels.dataWipe(input)),
+    onSuccess: (_result, variables) => {
+      // 预演不改库 —— 那时作废缓存只会白刷一遍（snapshot 有全表 COUNT）
+      if (variables.dryRun) return
+      void queryClient.invalidateQueries()
+    },
+  })
+}
+
+/**
  * 会话列表（选蒸馏范围用）。
  *
  * `staleTime` 给得长：它要 spawn 三次 DWS 子进程（实测约 4.8s），

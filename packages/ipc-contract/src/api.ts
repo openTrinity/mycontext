@@ -10,6 +10,7 @@ import type {
   BootstrapState,
   ChannelAuthProgressEvent,
   ChannelConversationListView,
+  ChannelDataWipeResult,
   DistillProgressView,
   PersonaConversationView,
   PersonaDraftView,
@@ -149,6 +150,23 @@ export interface MyContextApi {
      * 只读本地表会漏掉"还没采过的群"，而那可能正是用户想蒸馏的。
      */
     conversations(): Promise<Result<ChannelConversationListView>>
+    /**
+     * 清空当前渠道的数据（**不可逆**）。
+     *
+     * 清 vault 库里的语料/索引/Outbox/数字人痕迹 + 这个身份的派生产物
+     * （forge 派生库、kl 图库、四件套导出、下载的媒体）。
+     *
+     * **保留**渠道凭据、本人身份、用户勾的会话范围、引导进度 ——
+     * 也就是"清数据，不清你是谁和你选了什么"。完整的清单与理由见主进程
+     * `ChannelDataWipeService` 的文件头。
+     *
+     * ★ `dryRun` 默认 **true**：这个动作删的是真实聊天记录，
+     * 契约层就偏向安全的那一侧。UI 应当先预演、把数字给用户看、再确认。
+     */
+    dataWipe(input?: {
+      dryRun?: boolean
+      dropSearch?: boolean
+    }): Promise<Result<ChannelDataWipeResult>>
   }
   onboarding: {
     complete(): Promise<Result<true>>

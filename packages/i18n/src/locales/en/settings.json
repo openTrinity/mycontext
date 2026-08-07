@@ -205,10 +205,20 @@
     "avatarSourceRemote": "Using a remote image",
     "avatarAdvanced": "Enter an image URL manually"
   },
+  "dataWipe": {
+    "action": "Clear this channel's data",
+    "hint": "Deletes all messages, indexes, graph data and downloaded files collected for this channel. Keeps your login, your identity and the conversations you picked. Not reversible.",
+    "confirmTitle": "Clear this channel's data?",
+    "confirmDetail": "The messages, search index, knowledge graph, persona output and downloaded images collected for this channel will be permanently deleted. This cannot be undone.",
+    "counting": "Counting what will be deleted…",
+    "countFailed": "Could not count — you can still proceed, but without a total.",
+    "willDelete": "Will delete {{rows}} rows (messages, indexes and run traces)",
+    "keeps": "Kept: your login, your identity, the conversations and time range you picked, onboarding progress, and your own search history. The app will collect again from scratch.",
+    "confirmAction": "Delete permanently",
+    "cancel": "Cancel"
+  },
   "onboarding": {
     "title": "Setup flow",
-    "resetDistill": "Reset distillation progress",
-    "resetDistillHint": "Re-distills enabled sources from the beginning. Existing conclusions are kept (merging is idempotent) and nothing is duplicated.",
     "description": "Where you are in setup, and how to run it again.",
     "needsLogin": "Sign in to see setup progress."
   },

@@ -47,6 +47,17 @@ export type { CollectionScope } from "./collection-scope.js"
 export { purgeOutOfScopeMessages } from "./purge-scope.js"
 export type { PurgeReport } from "./purge-scope.js"
 
+/**
+ * 把一个 vault 清回「刚登录完、还没采过」的状态。
+ *
+ * 同样放在 store：设置页那个「清空当前渠道的数据」与 `scripts/reset-vault.mjs`
+ * 走**同一份**判据 —— 那里面有三条硬约束（FTS 虚表必须先删、changelog 序列
+ * 与消费者游标必须一起清零、外键要显式打开），抄第二份必然漂，
+ * 而漂的后果全是静默的数据损坏。见 wipe-vault.ts 文件头。
+ */
+export { wipeVaultData, VAULT_DATA_TABLES, VAULT_SEARCH_TABLES } from "./wipe-vault.js"
+export type { WipeVaultReport, WipeVaultOptions } from "./wipe-vault.js"
+
 export { RawRecordRepository } from "./repositories/raw-records.js"
 export type { RawInsertResult } from "./repositories/raw-records.js"
 
