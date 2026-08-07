@@ -300,15 +300,31 @@ function prepareLarkCli() {
     process.platform === "win32" ? "lark-cli.exe" : "lark-cli",
   )
   const target = join(binDir, binaryFileName("lark-cli"))
+  /**
+   * ★★ 缺失时**降级而不是 exit 1**。
+   *
+   * 飞书是一个**可选**渠道：没有它钉钉那条路应该照常能跑。原来这里一票否决，
+   * 于是「@larksuite/cli 的 postinstall 没跑」这一件事会让 `pnpm dev` 在
+   * prepare:bin 这步就退出 —— **整个开发环境起不来**，而报错只说"没找到
+   * 二进制"，看不出根因在 pnpm-workspace.yaml 的 onlyBuiltDependencies 白名单里。
+   *
+   * 与 forge 的 python 同一条口径：缺失不是错误，是降级 —— 应用侧
+   * `resolve("lark-cli")` 会抛 RUNTIME_BINARY_MISSING，UI 显示"飞书暂不可用"。
+   *
+   * ★ 但必须**大声**说出来（warn + 可照做的修法），否则用户点授权时才发现，
+   * 而那时的表现是一个退出码。
+   */
   if (!existsSync(source)) {
-    console.error(
+    console.warn(
       [
-        "未找到官方 lark-cli 平台二进制。",
-        "请确认 pnpm install 没有跳过 @larksuite/cli 的 postinstall。",
-        `期望位置：${source}`,
+        "⚠ 未找到官方 lark-cli 平台二进制 —— **飞书渠道将不可用**（钉钉不受影响）。",
+        "  根因通常是 pnpm 跳过了 @larksuite/cli 的 postinstall（它从远端下载二进制）。",
+        "  修法：确认 pnpm-workspace.yaml 的 onlyBuiltDependencies 里有 @larksuite/cli，",
+        "        然后 `pnpm install`（或 `pnpm rebuild @larksuite/cli`）。",
+        `  期望位置：${source}`,
       ].join("\n"),
     )
-    process.exit(1)
+    return
   }
   /**
    * ★ 走 `installExecutable` 而不是自己 copy+chmod。

@@ -339,6 +339,24 @@ export function FactsExplorer({
           </p>
         )}
 
+        {/*
+          ★★ 部分来源查询失败 —— **必须说出来**。
+
+          多图查询的判据是"任一图有结果就算成功"。那对降级是对的（一个渠道的
+          图坏了不该让整个检索失败），但它同时把失败**吞掉**了：用户看到一个
+          正常的结果列表，只是少了一半来源，而没有任何痕迹。
+
+          与本仓库的硬规则同源：**不可读必须与「0 条」可区分**。
+          用 warning 而不是 error 色：结果本身是可用的，只是不完整。
+        */}
+        {(data?.failedSources ?? []).length === 0 ? null : (
+          <p className="typography-caption-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--status-warning)]">
+            {t("partialSources", {
+              sources: (data?.failedSources ?? []).map((s) => s.channelId).join("、"),
+            })}
+          </p>
+        )}
+
         <ul className="flex flex-col gap-1.5">
           {(data?.facts ?? []).map((fact) => (
             <Panel as="li" pad="ms" key={fact.id} className="flex flex-col gap-1.5">

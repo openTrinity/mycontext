@@ -41,5 +41,6 @@
   "closeDetail": "关闭",
   "resetView": "回到初始视图",
   "neighborsTitle": "直接关联（{{count}}）",
-  "factsAbout": "关于「{{name}}」的 {{count}} 条事实"
+  "factsAbout": "关于「{{name}}」的 {{count}} 条事实",
+  "partialSources": "以下来源查询失败，结果不完整：{{sources}}"
 }

@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest"
 import {
   assertAllowedLarkCommand,
+  createFeishuDocuments,
   createFeishuIngest,
   FeishuAuth,
   LARK_AUTH_SCOPES,
   LarkCli,
   parseLarkAuthStatus,
-  parseLarkDrivePage,
   parseLarkMessagePage,
 } from "@mycontext/channels"
 import type { Logger } from "@mycontext/kernel"
@@ -222,35 +222,93 @@ describe("Feishu auth and ingest parsing", () => {
     })
   })
 
-  it("stores Drive search results as durable knowledge-source records", () => {
-    const page = parseLarkDrivePage(
-      {
-        results: [
-          { token: "doc_1", title: "路线图", summary: "八月发布", edit_time: 1_785_207_229 },
-        ],
-      },
-      0,
-    )
-    expect(page.conversations[0]?.externalId).toBe("feishu:drive")
-    expect(page.messages[0]).toMatchObject({
-      externalId: "drive:doc_1",
-      contentText: "路线图\n八月发布",
+  /**
+   * ★★ 云文档进 `documents`，**不再**变成一个假群的消息。
+   *
+   * 改动前它走消息那条路：合成会话 `feishu:drive`（`type:"group"`）+ 每篇
+   * 文档一条 message。四处污染且都不报错 —— 其中最严重的是**消息水位被
+   * 文档的编辑时间推进**（文档比消息新时，那段时间的真实消息会被当成已采过）。
+   *
+   * 所以这一组的核心断言是**否定式**的：`conversations` 里没有那个假群。
+   */
+  it("★★ 云文档进 documents 契约，且不产出任何会话/消息", async () => {
+    const documents = createFeishuDocuments({
+      json: <T,>(): Promise<T> =>
+        Promise.resolve({
+          results: [
+            {
+              token: "doc_1",
+              title: "路线图",
+              summary: "八月发布",
+              edit_time: 1_785_207_229,
+              url: "https://example.invalid/doc_1",
+            },
+          ],
+        } as T),
     })
+    const page = await documents.list({})
+    expect(page.items).toHaveLength(1)
+    expect(page.items[0]).toMatchObject({
+      externalId: "doc_1",
+      origin: "drive",
+      title: "路线图",
+      url: "https://example.invalid/doc_1",
+    })
+    // ★ 正文取不到 → null（而不是把摘要片段当全文，那会让残缺看不出来）
+    expect(page.items[0]?.contentText).toBeNull()
+    // ★ 时间解析出来了（取不到才该是 null）
+    expect(page.items[0]?.updatedAt).toBeGreaterThan(0)
   })
 
-  it("hydrates message-id searches and carries Drive pagination in the channel cursor", async () => {
+  it("★ 没有稳定 id 的条目跳过（下标兜底会让同一篇文档反复入库）", async () => {
+    const documents = createFeishuDocuments({
+      json: <T,>(): Promise<T> =>
+        Promise.resolve({ results: [{ title: "没有 token 的东西", summary: "x" }] } as T),
+    })
+    await expect(documents.list({})).resolves.toMatchObject({ items: [] })
+  })
+
+  it("★ body() 恒返回 null 且不抛（某一篇取不到是常态而非错误）", async () => {
+    const documents = createFeishuDocuments({ json: <T,>(): Promise<T> => Promise.resolve({} as T) })
+    await expect(documents.body({ externalId: "doc_1", extension: null })).resolves.toEqual({
+      contentText: null,
+      rawPayload: null,
+    })
+    // ★ 空数组 = 一篇都读不到。采集侧据此不把它们排进正文队列（不白占配额）
+    expect(documents.readableExtensions).toEqual([])
+  })
+
+  it("撞分页上限时报 truncated（否则下游把「只列了 20 页」当成「一共这么多」）", async () => {
+    const documents = createFeishuDocuments({
+      // 恒返回 next token → 一定会撞上限
+      json: <T,>(): Promise<T> =>
+        Promise.resolve({ results: [{ token: "d" }], next_page_token: "more" } as T),
+    })
+    let last = await documents.list({})
+    for (let i = 0; i < 25 && last.hasMore; i += 1) {
+      last = await documents.list({ cursor: last.nextToken })
+    }
+    expect(last.truncated).toBe(true)
+    expect(last.hasMore).toBe(false)
+    expect(last.nextToken).toBeNull()
+  })
+
+  /**
+   * ★★ 采集只剩消息一路 —— 而它的分页现在**自己记游标**。
+   *
+   * 改动前 IM 那路写死 `--page-limit 5` 且不返回游标，于是每个时间窗恒只取
+   * 前 5 页；而 drive 抽干时报 `hasMore=false`，上层据此推进水位 ——
+   * 剩下的消息永久丢失且日志无错。
+   */
+  it("★★ 消息搜索补正文，且分页位置记进游标（不再恒取前几页）", async () => {
     const calls: string[][] = []
     const ingest = createFeishuIngest({
       async json<T>(args: string[]): Promise<T> {
         calls.push(args)
-        if (args[0] === "drive") {
+        if (args[1] === "+messages-search") {
           const next = args.includes("--page-token") ? null : "page-2"
-          return {
-            results: [{ token: next === null ? "doc_2" : "doc_1", title: "文档", summary: "正文" }],
-            next_page_token: next,
-          } as T
+          return { message_ids: ["om_1"], next_page_token: next } as T
         }
-        if (args[1] === "+messages-search") return { message_ids: ["om_1"] } as T
         return {
           items: [
             {
@@ -268,6 +326,10 @@ describe("Feishu auth and ingest parsing", () => {
     expect(first.hasMore).toBe(true)
     expect(first.messages.some((message) => message.contentText === "hydrate 后的正文")).toBe(true)
     expect(calls.some((args) => args[1] === "+messages-mget")).toBe(true)
+    // ★ 采集不再产出任何"云文档"会话 —— 那个假群没了
+    expect(first.conversations.some((c) => c.externalId === "feishu:drive")).toBe(false)
+    // ★ 也不再调 drive（文档走 documents 契约）
+    expect(calls.some((args) => args[0] === "drive")).toBe(false)
 
     const second = await ingest.pull({
       start: 0,
@@ -276,6 +338,36 @@ describe("Feishu auth and ingest parsing", () => {
       cursor: first.nextCursor,
     })
     expect(second.hasMore).toBe(false)
-    expect(calls.at(-1)).toContain("--page-token")
+    /**
+     * ★ 断言落在**搜索**那条命令上，不是 `calls.at(-1)` ——
+     * 最后一条是补正文的 `+messages-mget`（它不翻页）。
+     * 取最后一次 `+messages-search`：那才是应该带上游标的那条。
+     */
+    const searches = calls.filter((args) => args[1] === "+messages-search")
+    expect(searches.at(-1)).toContain("--page-token")
+    expect(searches.at(-1)).toContain("page-2")
+  })
+
+  /**
+   * ★★ 隐私：`--edited-since` / 时间窗必须来自用户选的范围。
+   *
+   * 改动前 drive 那路写死 `365d` —— 用户选 7 天而我们实际采一年。
+   * 现在 drive 走 documents（有自己的保守默认），而消息这路直接传 start/end。
+   */
+  it("★★ 消息搜索的时间窗来自 spec（不是写死的范围）", async () => {
+    const calls: string[][] = []
+    const ingest = createFeishuIngest({
+      async json<T>(args: string[]): Promise<T> {
+        calls.push(args)
+        return { items: [] } as T
+      },
+    })
+    const end = 1_785_207_229_000
+    const start = end - 7 * 86_400_000
+    await ingest.pull({ start, end, limit: 50, cursor: null })
+    const search = calls.find((args) => args[1] === "+messages-search") ?? []
+    const startArg = search[search.indexOf("--start") + 1] ?? ""
+    // 传的是 spec.start 那一天，而不是某个写死的下界
+    expect(startArg.startsWith(new Date(start).toISOString().slice(0, 10))).toBe(true)
   })
 })

@@ -41,5 +41,6 @@
   "closeDetail": "Close",
   "resetView": "Reset view",
   "neighborsTitle": "Direct links ({{count}})",
-  "factsAbout": "{{count}} facts about \"{{name}}\""
+  "factsAbout": "{{count}} facts about \"{{name}}\"",
+  "partialSources": "These sources failed; results are incomplete: {{sources}}"
 }

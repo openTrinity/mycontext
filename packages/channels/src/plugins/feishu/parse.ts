@@ -2,6 +2,7 @@ import type {
   AuthStatus,
   ChannelPullPage,
   ParsedConversationLike,
+  ParsedDocumentLike,
   ParsedMessageLike,
 } from "../../types.js"
 import { normalizeUnix } from "../dingtalk/time.js"
@@ -188,6 +189,25 @@ function timestamp(value: unknown, fallback: number): number {
   return fallback
 }
 
+/**
+ * 时间戳，**取不到就 null**（与上面那个带 fallback 的分开）。
+ *
+ * ★ 文档的时间必须能是 null：猜一个 now 会让下游按时间窗过滤时把一篇老
+ * 文档当成刚改过的排到队首，或反过来漏掉它（见 `ParsedDocumentLike.updatedAt`）。
+ * 消息那条路可以用 fallback（一条消息总有发送时间，取不到是解析问题），
+ * 文档不行（搜索结果里确实可能没有这个字段）。
+ */
+function optionalTimestamp(value: unknown): number | null {
+  if (typeof value === "number") return normalizeUnix(value)
+  if (typeof value === "string") {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric) && numeric > 0) return normalizeUnix(numeric)
+    const parsed = Date.parse(value)
+    if (!Number.isNaN(parsed)) return parsed
+  }
+  return null
+}
+
 function itemsOf(payload: unknown): unknown[] {
   const data = record(payload)
   for (const key of ["items", "messages", "results", "files"]) {
@@ -261,40 +281,63 @@ export function parseLarkMessagePage(payload: unknown, fetchedAt: number): Chann
  * 删掉它等于飞书的文档一条都不采 —— 而"错地方的数据"至少还能被迁移，
  * "没采到的数据"要重新采一遍。
  */
-export function parseLarkDrivePage(payload: unknown, fetchedAt: number): ChannelPullPage {
-  const conversationId = "feishu:drive"
-  const messages: ParsedMessageLike[] = []
+/**
+ * 云文档搜索结果 → **渠道无关的文档形态**（`documents` 表）。
+ *
+ * ## ★★ 这个函数替换掉的 `parseLarkDrivePage` 是一个正在污染数据的错形状
+ *
+ * 那个把每篇文档当一条 message、塞进一个合成的假群 `feishu:drive`
+ * （`type:"group"`）。四处污染且**都不报错**：会话列表多出一个不存在的群、
+ * FTS 把文档正文当聊天正文、**消息水位被文档的编辑时间推进**（文档比消息新
+ * 时那段时间的真实消息会被当成已采过）、图谱里生出假群的会话边。
+ *
+ * ## `contentText` 恒为 null 是刻意的
+ *
+ * 搜索只返回**摘要片段**，不是正文。把片段写进 `contentText` 的话下游会把它
+ * 当全文处理 —— 一篇长文档在图谱里只留几句话，而**看不出是残缺的**。
+ * `null` = "有这篇文档但没取到内容"，与钉钉的表格同口径。见 `documents.ts`。
+ *
+ * 摘要没有被丢掉：它进 `title`（标题为空时的兜底），检索仍能命中这篇文档。
+ */
+export function parseLarkDriveDocuments(payload: unknown): ParsedDocumentLike[] {
+  const out: ParsedDocumentLike[] = []
   for (const [index, raw] of itemsOf(payload).entries()) {
     const item = record(raw)
-    const title = stringifyLarkContent(item["title"] ?? item["name"]).trim() || "飞书文档"
-    const body = stringifyLarkContent(
-      item["summary_highlighted"] ?? item["summary"] ?? item["snippet"] ?? item["content"] ?? title,
+    const title = stringifyLarkContent(item["title"] ?? item["name"]).trim()
+    const snippet = stringifyLarkContent(
+      item["summary_highlighted"] ?? item["summary"] ?? item["snippet"],
     ).trim()
-    if (body === "") continue
-    const externalId =
-      str(item["token"], item["document_id"], item["file_token"], item["url"]) ??
-      `drive:${String(index)}:${title}`
-    messages.push({
-      externalId: `drive:${externalId}`,
-      conversationExternalId: conversationId,
-      senderExternalId: str(item["owner_open_id"], item["creator_open_id"]),
-      senderDisplayName: str(item["owner_name"], item["creator_name"]),
-      contentText: `${title}\n${body}`,
-      contentJson: JSON.stringify(item),
-      quotedExternalId: null,
-      sentAt: timestamp(item["edit_time_iso"] ?? item["edit_time"], fetchedAt),
-      mentions: [],
-      hasMedia: false,
+    const externalId = str(item["token"], item["document_id"], item["file_token"], item["url"])
+    /**
+     * ★ 没有稳定 id 的条目**跳过**，不再用下标兜底。
+     *
+     * 下标（`drive:3:标题`）不稳定：下一轮搜索的排序一变，同一篇文档就换了
+     * id —— 于是它会被当成新文档反复入库，而旧的那条永远不会被更新。
+     * 那是一个只在"文档多到分页"时才显形的静默重复。
+     */
+    if (externalId === null) continue
+    out.push({
+      externalId,
+      /** 来源子域。飞书这条路只有云文档搜索一个入口。 */
+      origin: "drive",
+      // 标题缺失时退回摘要片段（截短）—— 总比在列表里显示空白好
+      title: title !== "" ? title : snippet.slice(0, 60) || null,
+      docType: str(item["type"], item["obj_type"], item["docs_type"]),
+      extension: str(item["extension"], item["file_extension"]),
+      url: str(item["url"], item["link"]),
+      workspaceId: str(item["space_id"], item["wiki_space_id"]),
+      /**
+       * ★ 取不到时间就 `null`，**不猜一个 now**。
+       *
+       * 猜的后果是下游按时间窗过滤会漏掉它（或反过来，把一篇老文档
+       * 当成刚改过的排到队首）。见 `ParsedDocumentLike.updatedAt` 的注释。
+       */
+      updatedAt: optionalTimestamp(item["edit_time_iso"] ?? item["edit_time"]),
+      createdAt: optionalTimestamp(item["create_time_iso"] ?? item["create_time"]),
+      // 正文要另一条命令（本机验不了，见 documents.ts 的 body()）
+      contentText: null,
     })
+    void index
   }
-  return {
-    conversations: [
-      { externalId: conversationId, title: "飞书云文档", type: "group", memberCount: null },
-    ],
-    messages,
-    nextCursor: null,
-    hasMore: false,
-    itemCount: messages.length,
-    rawPayload: JSON.stringify(payload),
-  }
+  return out
 }

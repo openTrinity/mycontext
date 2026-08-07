@@ -24,3 +24,13 @@ onlyBuiltDependencies:
   - better-sqlite3
   - electron
   - esbuild
+  # 飞书官方 CLI：二进制**不在** npm 包里（与 dws/opencode 不同 —— 那两个
+  # 的平台包里带 tar.gz，所以我们能绕过启动器自己解）。它的 postinstall 从
+  # GitHub/npmmirror 下载，然后按**包内** checksums.txt 验 sha256
+  # （install.js:242 的 verifyChecksum）—— 与我们对那两个的要求同口径，
+  # 所以放行它是安全的，而不放行的结果是 bin/ 目录压根不存在。
+  #
+  # ★ 不放行时的表现值得记下：`pnpm dev` 在 prepare:bin 那步就退出 1
+  # （"未找到官方 lark-cli 平台二进制"），也就是**整个开发环境起不来** ——
+  # 而根因是这个白名单里少一行，与飞书代码本身无关。
+  - "@larksuite/cli"

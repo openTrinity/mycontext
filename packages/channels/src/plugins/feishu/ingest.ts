@@ -28,7 +28,6 @@ import type {
 import type { LarkCli } from "./cli.js"
 import {
   parseLarkAuthStatus,
-  parseLarkDrivePage,
   parseLarkIdentity,
   parseLarkMessagePage,
 } from "./parse.js"
@@ -100,7 +99,6 @@ interface BranchCursor {
  */
 interface FeishuCursor {
   kind: "feishu"
-  drive: BranchCursor | null
   im: BranchCursor | null
 }
 
@@ -138,65 +136,18 @@ function parseCursor(value: string | null): FeishuCursor | null {
         : null
     }
     if (row["kind"] !== "feishu") return null
-    return { kind: "feishu", drive: branch("drive"), im: branch("im") }
+    return { kind: "feishu", im: branch("im") }
   } catch {
     return null
   }
 }
 
-/**
- * 按用户选定的窗口算 `--edited-since` 的天数。
- *
- * ★ 这是隐私边界：写死 `365d` 时用户选 7 天而我们实际采 365 天。
- * 向上取整 + 至少 1 天：CLI 只接受整天，而取整到 0 会让窗口变成"什么都不采"。
- */
-function editedSinceDays(spec: ChannelPullSpec): number {
-  return Math.max(1, Math.ceil((spec.end - spec.start) / 86_400_000))
-}
 
 /** 一路的采集结果：这一页的内容 + 下一页位置（null = 抽干）+ 是否撞了上限。 */
 interface BranchResult {
   page: ChannelPullPage
   next: BranchCursor | null
   truncated: boolean
-}
-
-async function pullDrive(
-  cli: Pick<LarkCli, "json">,
-  spec: ChannelPullSpec,
-  cursor: BranchCursor | null,
-): Promise<BranchResult> {
-  const args = [
-    "drive",
-    "+search",
-    "--query",
-    "",
-    // ★ 天数来自用户选的窗口，不是写死的 365d（见 editedSinceDays）
-    "--edited-since",
-    `${String(editedSinceDays(spec))}d`,
-    "--sort",
-    "edit_time",
-    "--page-size",
-    String(Math.min(spec.limit, 50)),
-    "--format",
-    "json",
-    "--as",
-    "user",
-  ]
-  if (cursor !== null) args.push("--page-token", cursor.token)
-  const payload = await cli.json<unknown>(
-    args,
-    spec.signal === undefined ? {} : { signal: spec.signal },
-  )
-  const token = nextPageToken(payload)
-  const page = cursor?.page ?? 1
-  // 撞上限：服务端还说有下一页，但我们不再翻 —— 这件事必须能被上报
-  const truncated = token !== null && page >= PAGE_LIMIT
-  return {
-    page: parseLarkDrivePage(payload, spec.end),
-    next: token === null || truncated ? null : { page: page + 1, token },
-    truncated,
-  }
 }
 
 /**
@@ -284,82 +235,28 @@ export function createFeishuIngest(cli: Pick<LarkCli, "json">): ChannelIngest {
   return {
     probe: () => Promise.resolve(null),
     /**
-     * 拉一页：两路各推进一页，游标同时记住两路的位置。
+     * 拉一页聊天消息。
      *
-     * ## ★★ 任一路失败就抛（而不是"两路全失败才抛"）
+     * ## ★ 云文档**不在**这条路上（改动前在）
      *
-     * 改动前是后者，后果是：IM 失败 + drive 成功 → 本轮算成功 → **水位推进**
-     * → 那个时间窗的聊天消息永久丢失，而日志里一个错都没有。
-     * 这正是本仓库最贵的那类 bug（静默数据缺失）。
+     * 它现在走 `ChannelDocuments`（见 `documents.ts`）。改动前两者混在这里，
+     * 而文档被伪装成一个假群的消息 —— 其中最严重的一条是**消息水位被文档的
+     * 编辑时间推进**：文档比消息新时，那段时间的真实消息会被当成已经采过。
      *
-     * 整轮重试的代价只是重复几次 CLI 调用（落库那边 `payload_hash` 幂等），
-     * 而少一批消息是不可恢复的 —— 两者不对称，所以宁可重试。
+     * 分开之后这条路只有一个分支，`hasMore` 就是它自己的分页信号，
+     * 不会再被另一路的状态掩盖。
      */
     async pull(spec: ChannelPullSpec): Promise<ChannelPullPage> {
       const cursor = parseCursor(spec.cursor)
-      /**
-       * 首页（无游标）时两路都要拉；有游标时**只拉还没抽干的那一路**。
-       * 已经 null 的那一路不该再发请求 —— 那既浪费一次 CLI 调用，
-       * 也会把已经抽干的一路重新变成"从头开始"。
-       */
-      const first = cursor === null
-      const wantDrive = first || cursor.drive !== null
-      const wantIm = first || cursor.im !== null
-
-      const [drive, im] = await Promise.allSettled([
-        wantDrive
-          ? pullDrive(cli, spec, cursor?.drive ?? null)
-          : Promise.resolve<BranchResult | null>(null),
-        wantIm
-          ? pullMessages(cli, spec, cursor?.im ?? null)
-          : Promise.resolve<BranchResult | null>(null),
-      ])
-
-      const failures: string[] = []
-      for (const [name, result] of [
-        ["drive", drive],
-        ["im", im],
-      ] as const) {
-        if (result.status === "rejected") {
-          const reason =
-            result.reason instanceof Error ? result.reason.message : String(result.reason)
-          failures.push(`${name}: ${reason}`)
-        }
-      }
-      if (failures.length > 0) {
-        throw new AppError("PROCESS_FAILED", `飞书数据读取失败：${failures.join("；")}`, {
-          retryable: true,
-          context: {
-            driveOk: drive.status === "fulfilled",
-            imOk: im.status === "fulfilled",
-          },
-        })
-      }
-
-      const driveResult = drive.status === "fulfilled" ? drive.value : null
-      const imResult = im.status === "fulfilled" ? im.value : null
-      const pages = [driveResult?.page, imResult?.page].filter(
-        (page): page is ChannelPullPage => page !== null && page !== undefined,
-      )
-      const nextCursor: FeishuCursor = {
-        kind: "feishu",
-        drive: driveResult?.next ?? null,
-        im: imResult?.next ?? null,
-      }
-      /**
-       * ★ `hasMore` 是**两路的或**。只看 drive 的话它抽干时就报"采完了"，
-       * 而 IM 那边可能还剩十几页 —— 那正是改动前丢消息的入口。
-       */
-      const hasMore = nextCursor.drive !== null || nextCursor.im !== null
+      const result = await pullMessages(cli, spec, cursor?.im ?? null)
+      const nextCursor: FeishuCursor = { kind: "feishu", im: result.next }
+      const hasMore = result.next !== null
       return {
-        ...mergePages(pages, {
-          nextCursor: hasMore ? encodeCursor(nextCursor) : null,
-          hasMore,
-        }),
-        // 任一路撞上限 → 这一轮是被截断的，上层据此提示而不是当成"采完了"
-        ...(driveResult?.truncated === true || imResult?.truncated === true
-          ? { truncated: true }
-          : {}),
+        ...result.page,
+        nextCursor: hasMore ? encodeCursor(nextCursor) : null,
+        hasMore,
+        // 撞分页上限 → 这一轮是被截断的，不是"采完了"（见 PAGE_LIMIT）
+        ...(result.truncated ? { truncated: true } : {}),
       }
     },
   }

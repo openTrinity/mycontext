@@ -114,7 +114,13 @@
         "retry": "已处理，恢复采集"
       },
       "ftsCovered": "其中 {{indexed}} 条已能被搜到",
-      "eventCoverage": "事件覆盖面：当前 {{active}} 个订阅（{{global}} 个覆盖全部群的「@我」，{{perConversation}} 类需逐会话订阅）。没被订阅的会话由轮询保证，不会漏消息。"
+      "eventCoverage": "事件覆盖面：当前 {{active}} 个订阅（{{global}} 个覆盖全部群的「@我」，{{perConversation}} 类需逐会话订阅）。没被订阅的会话由轮询保证，不会漏消息。",
+      "running": "采集中",
+      "idle": "未采集",
+      "channel": {
+        "dingtalk": "钉钉",
+        "feishu": "飞书"
+      }
     },
     "kl": {
       "serverTitle": "图谱服务",
@@ -139,7 +145,12 @@
       "buildFailed": "建图失败：{{reason}}",
       "rebuild": "重建",
       "rebuildHint": "删除现有图谱与抽取缓存后全量重抽，耗时与开销都高于增量建图。★ 缩小了采集范围时需要它：增量建图只增不减，取消勾选的会话，其实体与关系仍留在图里。",
-      "buildProgress": "建图中 {{percent}}%"
+      "buildProgress": "建图中 {{percent}}%",
+      "channelIdle": "未启动（暂无语料）",
+      "channel": {
+        "dingtalk": "钉钉",
+        "feishu": "飞书"
+      }
     }
   },
   "advancedAi": {

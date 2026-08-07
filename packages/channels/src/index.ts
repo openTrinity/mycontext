@@ -87,10 +87,11 @@ export {
   extractLarkJson,
   createFeishuIngest,
   createFeishuIdentity,
+  createFeishuDocuments,
   LARK_AUTH_SCOPES,
   parseLarkAuthStatus,
   parseLarkDeviceGrant,
-  parseLarkDrivePage,
+  parseLarkDriveDocuments,
   parseLarkMessagePage,
 } from "./plugins/feishu/index.js"
 export type { FeishuPluginOptions } from "./plugins/feishu/index.js"

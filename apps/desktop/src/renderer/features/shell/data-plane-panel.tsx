@@ -168,6 +168,51 @@ export function DataPlanePanel({ enabled }: { enabled: boolean }) {
       )}
 
       {/*
+        ★★ 逐渠道的采集数字 —— 上面那一份**只是其中一个渠道**。
+
+        顶层快照来自 `snapshotIngest()`，它挑**一个**渠道返回（主渠道活跃就
+        只返回主渠道）。于是另一个渠道采集彻底停了、blocked 了、或一条都没采到，
+        界面上完全看不出来：显示的数字看起来很正常，只是它不是那个渠道的。
+
+        ★ 只在真有多个渠道时渲染（单渠道时与上面说的是同一件事）。
+      */}
+      {(data.perChannel ?? []).length > 1 && (
+        <div className="flex flex-col gap-1">
+          {(data.perChannel ?? []).map((row) => (
+            <div key={row.channelId} className="flex flex-wrap items-center gap-2">
+              <span className="typography-caption-400 min-w-16 text-[var(--text-base-tertiary)]">
+                {t(`status.dataPlane.channel.${row.channelId}`, { defaultValue: row.channelId })}
+              </span>
+              <span
+                className={`typography-caption-400 ${
+                  row.running ? "text-[var(--status-success)]" : "text-[var(--text-base-tertiary)]"
+                }`}
+              >
+                {t(row.running ? "status.dataPlane.running" : "status.dataPlane.idle")}
+              </span>
+              <span className="typography-caption-400 font-mono-token text-[var(--text-base-tertiary)]">
+                {t("status.dataPlane.messages")} {row.messages.toLocaleString()} ·{" "}
+                {t("status.dataPlane.conversations")} {row.conversations.toLocaleString()}
+              </span>
+              {/* ★ blocked / lastError 逐渠道给 —— 顶层那份只是一个渠道的 */}
+              {row.blockedReason !== null && (
+                <span className="typography-caption-400 text-[var(--status-warning)]">
+                  {t(`status.dataPlane.blocked.${row.blockedReason}`, {
+                    defaultValue: row.blockedReason,
+                  })}
+                </span>
+              )}
+              {row.lastError !== null && (
+                <span className="typography-caption-400 break-all text-[var(--status-error)]">
+                  {row.lastError}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/*
         「接通但零投递」的告警：ready 且从没收到过事件。实测这个账号会稳定
         停在这里（记忆 dws-event-consume-connects-but-delivers-nothing）——
         必须说清"正在靠轮询兜底"，否则用户会以为实时通路在工作。

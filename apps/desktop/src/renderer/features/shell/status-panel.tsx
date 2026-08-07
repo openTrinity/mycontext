@@ -368,6 +368,51 @@ function KlPanel() {
             <p className="typography-body-small-400 text-[var(--status-error)]">{status.reason}</p>
           )}
 
+          {/*
+            ★★ 逐渠道摊开 —— 顶层那个徽章会**隐藏单渠道的失败**。
+
+            顶层 `state` 取的是主渠道。于是另一个渠道的 kl 彻底 failed 时，
+            这里仍然显示「运行中」——那一路整个坏掉而界面说一切正常，
+            只能靠翻日志发现。而那正是本仓库最贵的那类 bug 的形状。
+
+            ★ 只在**真有多个渠道**时渲染：单渠道时这一行与上面的徽章说的是
+            同一件事，多显示一遍只是噪音。
+          */}
+          {(status?.perChannel ?? []).length > 1 && (
+            <div className="flex flex-col gap-1">
+              {(status?.perChannel ?? []).map((row) => (
+                <div key={row.channelId} className="flex items-center gap-2">
+                  <span className="typography-caption-400 min-w-16 text-[var(--text-base-tertiary)]">
+                    {t(`status.kl.channel.${row.channelId}`, { defaultValue: row.channelId })}
+                  </span>
+                  <span
+                    className={`typography-caption-400 inline-flex items-center radius-sm px-2 py-0.5 ${
+                      /**
+                       * ★ `idle`（还没采到消息 → 我们刻意没起它）用**中性**样式，
+                       * 不是错误色。合成一个的话一次正常的降级看起来像故障，
+                       * 而用户会去点「重试」—— 那什么也修不了。
+                       */
+                      row.idle ? KL_STATE_STYLE.stopped : KL_STATE_STYLE[row.state]
+                    }`}
+                  >
+                    {row.idle ? t("status.kl.channelIdle") : t(klServiceStateKey(row.state))}
+                  </span>
+                  {row.port !== null && (
+                    <span className="typography-caption-400 font-mono-token text-[var(--text-base-tertiary)]">
+                      {row.port}
+                    </span>
+                  )}
+                  {/* ★ 失败原因逐渠道给 —— 顶层那个 reason 只是主渠道的 */}
+                  {row.state === "failed" && row.reason !== null && (
+                    <span className="typography-caption-400 text-[var(--status-error)]">
+                      {row.reason}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             {/*
               ★ 建图期间**照常**给服务操作 —— 服务没停（in-server ingest），

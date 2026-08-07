@@ -2,6 +2,7 @@
 import type { ChannelPlugin } from "../../types.js"
 import { FeishuAuth, type FeishuPluginOptions } from "./auth.js"
 import { LarkCli } from "./cli.js"
+import { createFeishuDocuments } from "./documents.js"
 import { createFeishuIdentity, createFeishuIngest } from "./ingest.js"
 
 export function createFeishuPlugin(options: FeishuPluginOptions): ChannelPlugin {
@@ -25,6 +26,14 @@ export function createFeishuPlugin(options: FeishuPluginOptions): ChannelPlugin 
     ingest: createFeishuIngest(cli),
     identity: createFeishuIdentity(cli),
     /**
+     * ★ 云文档走 `documents` 契约，**不再**伪装成聊天消息。
+     *
+     * 改动前它走消息那条路（一个合成的假群 `feishu:drive`），四处污染且
+     * 都不报错：会话列表多出不存在的群、FTS 把文档当聊天、**消息水位被
+     * 文档的编辑时间推进**、图谱生出假群的边。见 `documents.ts` 的文件头。
+     */
+    documents: createFeishuDocuments(cli),
+    /**
      * ★★ 必须给，否则飞书的语料会被打上**钉钉的** workspace id
      * （导出层的缺省），于是两个渠道的会话挂在同一个 workspace 下 ——
      * "这条事实来自哪个渠道"在图里就丢了，而且不报错。
@@ -45,10 +54,11 @@ export { FeishuAuth } from "./auth.js"
 export type { FeishuPluginOptions } from "./auth.js"
 export { LarkCli, assertAllowedLarkCommand, extractLarkJson } from "./cli.js"
 export { createFeishuIngest, createFeishuIdentity } from "./ingest.js"
+export { createFeishuDocuments } from "./documents.js"
 export {
   LARK_AUTH_SCOPES,
   parseLarkAuthStatus,
   parseLarkDeviceGrant,
-  parseLarkDrivePage,
+  parseLarkDriveDocuments,
   parseLarkMessagePage,
 } from "./parse.js"

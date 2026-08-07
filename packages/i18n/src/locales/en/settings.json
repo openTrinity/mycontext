@@ -114,7 +114,13 @@
         "retry": "Done, resume"
       },
       "ftsCovered": "{{indexed}} of them searchable",
-      "eventCoverage": "Event coverage: {{active}} active subscription(s) ({{global}} covering @-mentions across all groups, {{perConversation}} kind(s) needing per-conversation subscriptions). Conversations without a subscription are covered by polling — no messages are lost."
+      "eventCoverage": "Event coverage: {{active}} active subscription(s) ({{global}} covering @-mentions across all groups, {{perConversation}} kind(s) needing per-conversation subscriptions). Conversations without a subscription are covered by polling — no messages are lost.",
+      "running": "Collecting",
+      "idle": "Idle",
+      "channel": {
+        "dingtalk": "DingTalk",
+        "feishu": "Feishu"
+      }
     },
     "kl": {
       "serverTitle": "Graph service",
@@ -139,7 +145,12 @@
       "buildFailed": "Build failed: {{reason}}",
       "rebuild": "Rebuild",
       "rebuildHint": "Deletes the current graph and extraction cache, then re-extracts everything. Slower and more expensive than incremental. Needed after you narrow the capture scope: incremental builds only add, so entities and relations from unchecked conversations stay in the graph.",
-      "buildProgress": "Building graph {{percent}}%"
+      "buildProgress": "Building graph {{percent}}%",
+      "channelIdle": "Not started (no corpus yet)",
+      "channel": {
+        "dingtalk": "DingTalk",
+        "feishu": "Feishu"
+      }
     }
   },
   "advancedAi": {
