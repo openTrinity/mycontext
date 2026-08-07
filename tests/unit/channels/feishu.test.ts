@@ -150,23 +150,40 @@ describe("Feishu auth and ingest parsing", () => {
    * ★★ 不许索要**没有调用点**的权限。
    *
    * 多要一个不是"以后可能有用"，而是现在就让用户授出了我们并不读的数据面
-   * （CLAUDE.md 第 5 节）。这条门禁盯住几类曾经在列表里、而实现里
-   * 一次都没调过的：会议全文、媒体导出、联系人反查、reaction、pins、表格。
+   * （CLAUDE.md 第 5 节）。
    *
-   * 要加回其中任何一项：**先有调用点**，再从这个名单里去掉它。
+   * ## ★★ 判据是「CLI 让不让我们调这条命令」，不是「我们用不用这份数据」
+   *
+   * 这个区别是真机验证逼出来的。`im:message.reactions:read` 曾经在这个
+   * 名单里 —— 理由是"实现显式传了 `--no-reactions`，所以用不到 reactions"。
+   * 那个推理错了：CLI 把这个 scope 声明在**命令**上并在 **pre-flight 阶段**
+   * 校验（它自己的文档：`already declared in each shortcut's UserScopes …
+   * pre-flight check surfaces a missing_scope error before the request is
+   * sent`）。而 `--no-reactions` 只影响请求发出**之后**的行为。
+   *
+   * 删掉它的实测表现：授权能过，但每次拉消息都
+   * `missing required scope(s): im:message.reactions:read` —— **一条都采不到**。
+   *
+   * 所以这个名单里只留**命令本身不需要**的那些。要动它：先真机跑一次
+   * 那条命令，不能只读我们自己的代码。
    */
-  it("★★ 不索要没有调用点的权限（会议 / 媒体 / 联系人反查 / reaction）", () => {
+  it("★★ 不索要没有调用点的权限（会议 / 媒体 / 联系人反查 / pins / 表格）", () => {
     const forbidden = [
+      // 插件没有 minutes 能力（index.ts 里没挂），四项一次都没调过
       "minutes:minutes.search:read",
       "minutes:minutes.basic:read",
       "minutes:minutes.artifacts:read",
       "minutes:minutes.media:export",
+      // 没有媒体下载能力
       "docs:document.media:download",
+      // 表格取不到正文（readableExtensions 里就没有它）
       "sheets:spreadsheet:read",
+      // ★ 按名字**反查人**是一个明显更大的读取面（CLAUDE.md 第 5 节点名了这类）
       "contact:user:search",
       "contact:user.basic_profile:readonly",
-      "im:message.reactions:read",
+      // pins 从来没读过，且不像 reactions 那样是命令的必需 scope（实测）
       "im:message.pins:read",
+      // wiki 枚举没有调用点（云文档走 drive +search）
       "wiki:space:retrieve",
       "wiki:node:retrieve",
     ]

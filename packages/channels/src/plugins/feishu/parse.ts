@@ -39,6 +39,26 @@ export const LARK_AUTH_SCOPES = [
   "im:chat:read",
   /** 只读消息正文（`+messages-mget` 补正文走这条）。 */
   "im:message:readonly",
+  /**
+   * ★★ 表情回复的读权限 —— **必须要，即使我们显式传了 `--no-reactions`**。
+   *
+   * ## 这条是真机验证逼出来的（一次错误收窄的记录）
+   *
+   * 收窄权限时我按"实现传了 `--no-reactions`，所以用不到 reactions"把它删了。
+   * 那个推理是错的：CLI 把这个 scope 声明在**命令**上，在
+   * **pre-flight 阶段**就校验（它自己的文档原文：
+   * "already declared in each shortcut's `UserScopes` … so the framework's
+   * pre-flight check surfaces a `missing_scope` error **before the request
+   * is sent**"）。而 `--no-reactions` 只影响请求发出**之后**要不要额外查
+   * reactions —— 管不到那道检查。
+   *
+   * 删掉它的表现：授权能过，但每次拉消息都
+   * `missing required scope(s): im:message.reactions:read`，**一条数据都采不到**。
+   *
+   * ★ 所以判据不是"我们用不用这个数据"，而是"CLI 让不让我们调这条命令"。
+   * 下次再收窄权限：**必须真机跑一次每条命令**，不能只读我们自己的代码。
+   */
+  "im:message.reactions:read",
 
   // 人：把消息里的 sender id 解析成可显示的名字。
   /**
