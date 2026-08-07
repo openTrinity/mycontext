@@ -7,7 +7,8 @@ each returned entry back to the right message slot:
   1. In-order responses map trivially (msg_index == position).
   2. Reordered responses still land correctly, keyed by msg_index.
   3. Responses without msg_index fall back to positional order.
-  4. A missing slot yields an empty result and does NOT shift later messages.
+  4. A missing slot yields a marked, uncached failure (A4) and does NOT shift
+     later messages.
   5. Extra / out-of-range / duplicate msg_index values don't corrupt real slots.
   6. bool msg_index (bool subclasses int) is rejected.
 
@@ -35,9 +36,6 @@ def check(cond, msg):
         # Raise so pytest actually fails on a bad check (the bare accumulator
         # pattern used elsewhere in tests/ is invisible to pytest).
         raise AssertionError(msg)
-
-
-_EMPTY = {"entities": [], "facts": []}
 
 
 def _align(n, batch_results):
@@ -77,12 +75,24 @@ def test_positional_fallback_when_no_index():
     )
 
 
+def _is_missing(slot):
+    """A dropped/trailing slot is now a marked, uncached failure (A4), not a
+    bare empty dict — but it must still carry no entities/facts and must not be
+    a shifted neighbour's result."""
+    return (
+        isinstance(slot, dict)
+        and slot.get("_error") == "missing from batch response"
+        and slot.get("entities") == []
+        and slot.get("facts") == []
+    )
+
+
 def test_dropped_message_does_not_shift():
     # Model omitted the entry for message 1 entirely.
     br = [{"msg_index": 0, "facts": ["a"]}, {"msg_index": 2, "facts": ["c"]}]
     out = _align(3, br)
     check(out[0]["facts"] == ["a"], "slot 0 kept")
-    check(out[1] == _EMPTY, "dropped slot 1 is empty, not shifted")
+    check(_is_missing(out[1]), "dropped slot 1 is a marked failure, not shifted")
     check(out[2]["facts"] == ["c"], "slot 2 stays attributed to message 2")
 
 
@@ -90,9 +100,10 @@ def test_out_of_range_index_ignored():
     br = [{"msg_index": 0, "facts": ["a"]}, {"msg_index": 9, "facts": ["oob"]}]
     out = _align(2, br)
     check(out[0]["facts"] == ["a"], "valid slot 0 kept")
-    # slot 1 has no valid entry; positional fallback would look at index 1,
-    # which is the out-of-range entry -> tolerated, but must not crash.
-    check(isinstance(out[1], dict), "out-of-range index does not crash slot 1")
+    # by_index is populated (0 and 9), so slot 1 has no claimed entry and
+    # resolves to a marked missing-slot failure — the out-of-range entry must
+    # NOT be positionally shifted into slot 1.
+    check(_is_missing(out[1]), "out-of-range index -> slot 1 is a marked failure")
 
 
 def test_duplicate_index_keeps_first():
@@ -120,7 +131,10 @@ def test_short_batch_trailing_empty():
     br = [{"msg_index": 0, "facts": ["a"]}]
     out = _align(3, br)
     check(out[0]["facts"] == ["a"], "slot 0 filled")
-    check(out[1] == _EMPTY and out[2] == _EMPTY, "missing tail slots are empty")
+    check(
+        _is_missing(out[1]) and _is_missing(out[2]),
+        "missing tail slots are marked failures",
+    )
 
 
 def test_non_dict_entries_ignored():

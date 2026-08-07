@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
-from typing import Optional
 
 import jieba
 
@@ -24,7 +23,7 @@ ACRONYM_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]{1,}(?:\s*[A-Z0-9]+)*)\b")
 class EntityExtractor:
     """Dictionary + pattern-based entity extraction (zero LLM)."""
 
-    def __init__(self, entity_dict: Optional[dict[str, EntityType]] = None):
+    def __init__(self, entity_dict: dict[str, EntityType] | None = None):
         """
         Args:
             entity_dict: {entity_name: EntityType} mapping for dictionary-based extraction.
@@ -49,7 +48,7 @@ class EntityExtractor:
             jieba.add_word(name, freq=1000)
 
     @classmethod
-    def from_dict_file(cls, dict_path: Path) -> "EntityExtractor":
+    def from_dict_file(cls, dict_path: Path) -> EntityExtractor:
         """Load from a tab/space-separated file: name type."""
         entity_dict = {}
         if dict_path.exists():
@@ -74,7 +73,7 @@ class EntityExtractor:
         return cls(entity_dict)
 
     @classmethod
-    def from_name_type_pairs(cls, pairs: list[tuple[str, str]]) -> "EntityExtractor":
+    def from_name_type_pairs(cls, pairs: list[tuple[str, str]]) -> EntityExtractor:
         """Create from a list of (name, type_string) tuples."""
         entity_dict = {}
         for name, etype_str in pairs:
@@ -100,7 +99,7 @@ class EntityExtractor:
         # 1. Dictionary matching via jieba segmentation
         words = jieba.cut(text)
         for word in words:
-            if word in self.entity_dict:
+            if word in self.entity_dict:  # noqa: SIM102
                 if word not in found:
                     found[word] = Entity(
                         id=self.get_or_create_id(word),
@@ -151,8 +150,7 @@ class EntityExtractor:
     def save_dict(self, path: Path):
         """Save current entity dictionary to file."""
         with open(path, "w", encoding="utf-8") as f:
-            for name, etype in sorted(self.entity_dict.items()):
-                f.write(f"{name}\t{etype.value}\n")
+            f.writelines(f"{name}\t{etype.value}\n" for name, etype in sorted(self.entity_dict.items()))
 
     @property
     def dict_size(self) -> int:

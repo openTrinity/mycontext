@@ -63,6 +63,7 @@ def load_wiki(wiki_dir: Path) -> list[Chunk]:
                 timestamp=0,
                 source_ref=url,
                 metadata={
+                    "unit_id": node_id,
                     "node_id": node_id,
                     "title": title,
                     "seg_idx": i,

@@ -1,4 +1,4 @@
-"""Build SIMILAR_TO edges between entities using hybrid metrics.
+"""Build ENTITY_SIMILAR edges between entities using hybrid metrics.
 
 Combines:
   1. Embedding similarity (name embeddings)
@@ -11,14 +11,12 @@ of individual ANN queries.
 
 from __future__ import annotations
 
-from collections import defaultdict
-
 import numpy as np
 from tqdm import tqdm
 
 from kl_graph.models.types import Edge, EdgeType
+from kl_graph.storage.base import KnowledgeStore
 from kl_graph.storage.qdrant_store import QdrantStore
-from kl_graph.storage.sqlite_store import SQLiteStore
 
 
 def jaccard(set_a: set, set_b: set) -> float:
@@ -41,7 +39,7 @@ def overlap_coefficient(set_a: set, set_b: set) -> float:
 
 def build_entity_similarity_edges(
     qdrant: QdrantStore,
-    sqlite: SQLiteStore,
+    store: KnowledgeStore,
     embedding_threshold: float = 0.65,
     hybrid_threshold: float = 0.45,
     max_candidates: int = 20,
@@ -50,14 +48,14 @@ def build_entity_similarity_edges(
     weight_facts: float = 0.3,
     chunk_size: int = 200,
 ) -> int:
-    """Build entity SIMILAR_TO edges using hybrid metrics.
+    """Build entity ENTITY_SIMILAR edges using hybrid metrics.
 
     Optimized: batch cosine similarity for pre-filter, then hybrid scoring
     on candidates above embedding_threshold.
 
     Args:
         qdrant: Qdrant store with "entities" collection
-        sqlite: SQLite store with entities, edges tables
+        store: KnowledgeStore with entities, edges tables
         embedding_threshold: Minimum embedding score for pre-filter
         hybrid_threshold: Minimum hybrid score for final edge creation
         max_candidates: Number of candidates per entity (top-K from embeddings)
@@ -67,7 +65,7 @@ def build_entity_similarity_edges(
         chunk_size: Rows per chunk for matrix multiply
 
     Returns:
-        Number of SIMILAR_TO edges created
+        Number of ENTITY_SIMILAR edges created
     """
     print("  Loading entity vectors from Qdrant...")
     entities_count = qdrant.count("entities")
@@ -109,25 +107,19 @@ def build_entity_similarity_edges(
     msg_sets: dict[str, set] = {}
     fact_sets: dict[str, set] = {}
 
-    # Batch load: entity → messages (via MENTIONS/SENT_BY edges)
-    mention_rows = sqlite.conn.execute(
-        """SELECT target_id, source_id FROM edges
-           WHERE target_type = 'entity'
-             AND edge_type IN ('MENTIONS', 'SENT_BY')
-             AND source_type = 'message'"""
-    ).fetchall()
-    for row in mention_rows:
-        msg_sets.setdefault(row[0], set()).add(row[1])
+    # Batch load: entity → chunks (via MENTIONS/AUTHORED_BY edges), through the
+    # backend-agnostic edge API so this works on SQLite and LadybugDB alike.
+    # MENTIONS/AUTHORED_BY are chunk→entity: source=chunk, target=entity.
+    for chunk_id, entity_id, _props in store.scan_edges_by_type(
+        ["MENTIONS", "AUTHORED_BY"], source_type="chunk", target_type="entity"
+    ):
+        msg_sets.setdefault(entity_id, set()).add(chunk_id)
 
-    # Batch load: entity → facts (via ABOUT edges)
-    about_rows = sqlite.conn.execute(
-        """SELECT target_id, source_id FROM edges
-           WHERE target_type = 'entity'
-             AND edge_type = 'ABOUT'
-             AND source_type = 'fact'"""
-    ).fetchall()
-    for row in about_rows:
-        fact_sets.setdefault(row[0], set()).add(row[1])
+    # Batch load: entity → facts (via ABOUT edges); ABOUT is fact→entity.
+    for fact_id, entity_id, _props in store.scan_edges_by_type(
+        ["ABOUT"], source_type="fact", target_type="entity"
+    ):
+        fact_sets.setdefault(entity_id, set()).add(fact_id)
 
     print(f"  Entities with messages: {len(msg_sets)}, with facts: {len(fact_sets)}")
 
@@ -138,8 +130,8 @@ def build_entity_similarity_edges(
 
     print(f"  Computing hybrid similarity in chunks of {chunk_size}...")
 
-    for i in tqdm(range(0, n, chunk_size), desc="  Entity SIMILAR_TO"):
-        chunk = vectors_norm[i:i + chunk_size]
+    for i in tqdm(range(0, n, chunk_size), desc="  Entity ENTITY_SIMILAR"):
+        chunk = vectors_norm[i : i + chunk_size]
 
         # Compute similarities: chunk × all^T
         sims = chunk @ vectors_norm.T
@@ -188,33 +180,39 @@ def build_entity_similarity_edges(
                 struct_score = jaccard(src_msgs, tgt_msgs)
                 fact_score = overlap_coefficient(src_facts, tgt_facts)
 
-                hybrid = (weight_embedding * float(emb_score) +
-                          weight_structural * struct_score +
-                          weight_facts * fact_score)
+                hybrid = (
+                    weight_embedding * float(emb_score)
+                    + weight_structural * struct_score
+                    + weight_facts * fact_score
+                )
 
                 if hybrid >= hybrid_threshold:
                     seen_pairs.add(pair_key)
-                    new_edges.append(Edge(
-                        source_type="entity",
-                        source_id=src_id,
-                        target_type="entity",
-                        target_id=tgt_id,
-                        edge_type=EdgeType.SIMILAR_TO,
-                        properties={
-                            "embedding_score": round(float(emb_score), 4),
-                            "structural_score": round(struct_score, 4),
-                            "fact_score": round(fact_score, 4),
-                            "hybrid_score": round(hybrid, 4),
-                        },
-                    ))
+                    new_edges.append(
+                        Edge(
+                            source_type="entity",
+                            source_id=src_id,
+                            target_type="entity",
+                            target_id=tgt_id,
+                            edge_type=EdgeType.ENTITY_SIMILAR,
+                            properties={
+                                "embedding_score": round(float(emb_score), 4),
+                                "structural_score": round(struct_score, 4),
+                                "fact_score": round(fact_score, 4),
+                                "hybrid_score": round(hybrid, 4),
+                            },
+                        )
+                    )
 
     # Bulk insert
     if new_edges:
-        print(f"  Inserting {len(new_edges)} entity SIMILAR_TO edges...")
+        print(f"  Inserting {len(new_edges)} entity ENTITY_SIMILAR edges...")
         batch_size = 5000
         for i in range(0, len(new_edges), batch_size):
-            sqlite.insert_edges(new_edges[i:i + batch_size])
+            store.insert_edges(new_edges[i : i + batch_size])
 
-    print(f"  Done: {len(new_edges)} entity SIMILAR_TO edges created")
-    print(f"  (embedding_threshold={embedding_threshold}, hybrid_threshold={hybrid_threshold})")
+    print(f"  Done: {len(new_edges)} entity ENTITY_SIMILAR edges created")
+    print(
+        f"  (embedding_threshold={embedding_threshold}, hybrid_threshold={hybrid_threshold})"
+    )
     return len(new_edges)

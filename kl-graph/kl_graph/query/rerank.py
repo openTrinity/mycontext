@@ -26,14 +26,15 @@ import logging
 
 import httpx
 
-from kl_graph.config import (
-    RERANK_API_KEY,
-    RERANK_BASE_URL,
-    RERANK_MODEL,
-    RERANK_TOP_K,
-)
+from kl_graph.config import cfg
 
 logger = logging.getLogger(__name__)
+
+# Derived constants from OmegaConf config
+RERANK_API_KEY = cfg.services.reranker.api_key or ""
+RERANK_BASE_URL = cfg.services.reranker.base_url or ""
+RERANK_MODEL = cfg.services.reranker.model or ""
+RERANK_TOP_K = int(cfg.pipelines.query.reranking.top_k)
 
 
 class Reranker:
@@ -56,11 +57,9 @@ class Reranker:
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
-        # Enabled only when both endpoint and model are set (RAGFlow parity:
-        # empty rerank_id => default no-model path).
         self.enabled = bool(self.base_url and self.model)
         if self.enabled:
-            logger.info(f"Reranker enabled: {self.model} @ {self.base_url}")
+            logger.info("Reranker enabled: model=%s @ %s", self.model, self.base_url)
 
     def rerank(
         self, query: str, items: list[dict], top_k: int = RERANK_TOP_K
@@ -88,7 +87,7 @@ class Reranker:
         documents = [it.get("content", "") or "" for it in items]
         try:
             scores = self._score(query, documents)
-        except Exception as e:  # network / API / parse — degrade gracefully
+        except Exception as e:  # noqa: BLE001  # network / API / parse — degrade gracefully
             logger.warning(f"Rerank failed, falling back to RRF order: {e}")
             return items[:top_k]
 

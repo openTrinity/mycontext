@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .models import Citation
 
@@ -75,7 +76,9 @@ class EvidenceResolver:
             if not source_id or source_id in seen_sources:
                 continue
             row = self.conn.execute(
-                "SELECT conversation_id FROM messages WHERE id = ?", (source_id,)
+                "SELECT json_extract(metadata, '$.conversation_id') AS conversation_id "
+                "FROM chunks WHERE id = ?",
+                (source_id,),
             ).fetchone()
             if row is None:
                 continue
@@ -100,10 +103,10 @@ class EvidenceResolver:
         if value.startswith("fact:"):
             value = value.split(":", 1)[1]
         row = self.conn.execute(
-            "SELECT source_message_id FROM facts WHERE id = ? OR id LIKE ? LIMIT 1",
+            "SELECT source_chunk_id FROM facts WHERE id = ? OR id LIKE ? LIMIT 1",
             (value, f"{value}%"),
         ).fetchone()
-        return str(row["source_message_id"]) if row else None
+        return str(row["source_chunk_id"]) if row else None
 
 
 def _parse_json_output(output: str) -> Any | None:
@@ -142,11 +145,14 @@ def _references_from_value(value: Any, parent_key: str | None = None) -> list[Ev
     candidate_id = value.get("id")
     item_type = str(value.get("type") or "").lower()
     if isinstance(candidate_id, str):
-        if candidate_id.startswith("msg:") or item_type == "message":
+        # ``cnk:`` is the current chunk node prefix; ``msg:`` is the retired one
+        # kept so previously captured transcripts still resolve.
+        if candidate_id.startswith(("cnk:", "msg:")) or item_type in {
+            "chunk",
+            "message",
+        }:
             found.append(EvidenceReference("message", candidate_id))
-        elif candidate_id.startswith("fact:") or item_type == "fact":
-            found.append(EvidenceReference("fact", candidate_id))
-        elif parent_key == "facts" or {"text", "confidence"}.issubset(value):
+        elif candidate_id.startswith("fact:") or item_type == "fact" or parent_key == "facts" or {"text", "confidence"}.issubset(value):
             found.append(EvidenceReference("fact", candidate_id))
 
     fact_id = value.get("fact_id")

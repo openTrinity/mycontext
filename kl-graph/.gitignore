@@ -18,13 +18,27 @@ __pycache__/
 # OS
 .DS_Store
 
-# Claude (keep skills, ignore session data)
-.claude/*
-!.claude/skills/
+# Survey / research notes (local only)
+survey/
+
+# Experiments and evaluation datasets (local only)
+experiments/
+locomo/
+*.zip
+
+# AgentKit runtime state (session-specific)
+.agentkit/
+
+# AI assistant local files (not tracked)
+CLAUDE.md
+.claude/
 
 # Local runtime config with secrets — never commit
 .env
+config.yaml
+scripts/live_env.sh
 
 # DWS CLI binary and auth/config (proprietary, org-specific)
 tools/dws.exe
 tools/.dws/
+.venv

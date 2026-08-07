@@ -1,14 +1,14 @@
 """Entity disambiguation pipeline.
 
 Resolves entity duplicates that share different surface names but refer to
-the same real-world entity. Produces SIMILAR_TO edges with confidence scores
+the same real-world entity. Produces ENTITY_SIMILAR edges with confidence scores
 rather than hard merges — resolution happens at query time.
 
 Pipeline:
 1. Candidate generation (blocking): pinyin, char overlap, embedding ANN, structural
 2. Hybrid scoring: weighted combination of 5 signals
 3. Decision: auto-link (≥0.7), auto-reject (<0.3), LLM judge (0.3-0.7)
-4. Edge creation: SIMILAR_TO with confidence + source metadata
+4. Edge creation: ENTITY_SIMILAR with confidence + source metadata
 
 This avoids O(n²) pairwise comparison by using cheap blocking first.
 """
@@ -16,23 +16,25 @@ This avoids O(n²) pairwise comparison by using cheap blocking first.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
-import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-import litellm
 import numpy as np
 
-from kl_graph.config import LLM_BASE_URL, LLM_MODEL
+from kl_graph.config import cfg
+from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
+from kl_graph.models.types import Edge, EdgeType
+from kl_graph.storage.base import KnowledgeStore
 from kl_graph.storage.qdrant_store import QdrantStore
-from kl_graph.storage.sqlite_store import SQLiteStore
 
 
 @dataclass
 class EntityInfo:
     """Lightweight entity info for disambiguation."""
+
     id: str
     name: str
     entity_type: str
@@ -47,6 +49,7 @@ class EntityInfo:
 @dataclass
 class CandidatePair:
     """A candidate pair with scoring details."""
+
     entity_a: EntityInfo
     entity_b: EntityInfo
     # Scores
@@ -67,7 +70,8 @@ class CandidatePair:
 def get_pinyin(text: str) -> tuple[str, str]:
     """Get full pinyin and initials for a text string."""
     try:
-        from pypinyin import lazy_pinyin, Style
+        from pypinyin import Style, lazy_pinyin
+
         full = lazy_pinyin(text, style=Style.NORMAL)
         initials = lazy_pinyin(text, style=Style.FIRST_LETTER)
         return "".join(full), "".join(initials)
@@ -94,10 +98,10 @@ def pinyin_similarity(py_a: str, py_b: str) -> float:
         dp[0] = i
         for j in range(1, n + 1):
             temp = dp[j]
-            if py_a[i-1] == py_b[j-1]:
+            if py_a[i - 1] == py_b[j - 1]:
                 dp[j] = prev
             else:
-                dp[j] = 1 + min(prev, dp[j], dp[j-1])
+                dp[j] = 1 + min(prev, dp[j], dp[j - 1])
             prev = temp
 
     max_len = max(m, n)
@@ -151,18 +155,18 @@ def differs_only_by_punctuation(name_a: str, name_b: str) -> bool:
     "陈明（小陈）" / "陈明(小陈)" → True
     """
     # Normalize: remove all punctuation (including CJK punctuation) and spaces, lowercase
-    norm = re.compile(r'[-_.\s（）()【】\[\]{}「」《》<>]+')
-    a_norm = norm.sub('', name_a).lower()
-    b_norm = norm.sub('', name_b).lower()
+    norm = re.compile(r"[-_.\s（）()【】\[\]{}「」《》<>]+")
+    a_norm = norm.sub("", name_a).lower()
+    b_norm = norm.sub("", name_b).lower()
     return a_norm == b_norm and name_a != name_b
 
 
-def load_entity_info(sqlite: SQLiteStore) -> dict[str, EntityInfo]:
+def load_entity_info(store: KnowledgeStore) -> dict[str, EntityInfo]:
     """Load all entities with their context for disambiguation."""
     print("  Loading entity info...")
 
     # Basic entity data
-    rows = sqlite.conn.execute(
+    rows = store.sql_conn.execute(
         "SELECT id, name, entity_type, mention_count FROM entities"
     ).fetchall()
 
@@ -180,21 +184,20 @@ def load_entity_info(sqlite: SQLiteStore) -> dict[str, EntityInfo]:
             pinyin_initials=pinyin_init,
         )
 
-    # Load message associations (via MENTIONS/SENT_BY edges)
-    mention_rows = sqlite.conn.execute(
-        """SELECT target_id, source_id FROM edges
-           WHERE target_type = 'entity'
-             AND edge_type IN ('MENTIONS', 'SENT_BY')
-             AND source_type = 'message'"""
-    ).fetchall()
-    for row in mention_rows:
-        if row[0] in entities:
-            entities[row[0]].message_ids.add(row[1])
+    # Load chunk associations (via MENTIONS/AUTHORED_BY edges), through the
+    # backend-agnostic edge API. MENTIONS/AUTHORED_BY are chunk→entity.
+    for chunk_id, entity_id, _props in store.scan_edges_by_type(
+        ["MENTIONS", "AUTHORED_BY"], source_type="chunk", target_type="entity"
+    ):
+        if entity_id in entities:
+            entities[entity_id].message_ids.add(chunk_id)
 
-    # Load conversation IDs for each entity's messages
+    # Load conversation IDs for each entity's chat chunks. The per-message
+    # detail table is gone: ``conversation_id`` lives in the chunk metadata JSON.
     msg_to_conv = {}
-    conv_rows = sqlite.conn.execute(
-        "SELECT id, conversation_id FROM messages"
+    conv_rows = store.sql_conn.execute(
+        """SELECT id, json_extract(metadata, '$.conversation_id') FROM chunks
+           WHERE source_type = 'message'"""
     ).fetchall()
     for r in conv_rows:
         msg_to_conv[r[0]] = r[1]
@@ -205,26 +208,25 @@ def load_entity_info(sqlite: SQLiteStore) -> dict[str, EntityInfo]:
                 ent.conversation_ids.add(msg_to_conv[mid])
 
     # Load connected entities (for context in LLM judge)
-    about_rows = sqlite.conn.execute(
-        """SELECT source_id, target_id FROM edges
-           WHERE edge_type = 'ABOUT'
-             AND source_type = 'fact' AND target_type = 'entity'"""
-    ).fetchall()
     entity_cooccur = defaultdict(lambda: defaultdict(int))
     fact_entities = defaultdict(set)
-    for r in about_rows:
-        fact_entities[r[0]].add(r[1])
-    for fact_id, ent_set in fact_entities.items():
+    for fact_id, entity_id, _props in store.scan_edges_by_type(
+        ["ABOUT"], source_type="fact", target_type="entity"
+    ):
+        fact_entities[fact_id].add(entity_id)
+    for fact_id, ent_set in fact_entities.items():  # noqa: PERF102
         ent_list = list(ent_set)
         for i in range(len(ent_list)):
-            for j in range(i+1, len(ent_list)):
+            for j in range(i + 1, len(ent_list)):
                 entity_cooccur[ent_list[i]][ent_list[j]] += 1
                 entity_cooccur[ent_list[j]][ent_list[i]] += 1
 
     for eid, ent in entities.items():
         if eid in entity_cooccur:
             # Top-5 most connected entities
-            sorted_neighbors = sorted(entity_cooccur[eid].items(), key=lambda x: -x[1])[:5]
+            sorted_neighbors = sorted(entity_cooccur[eid].items(), key=lambda x: -x[1])[
+                :5
+            ]
             ent.connected_entities = [
                 entities[nid].name for nid, _ in sorted_neighbors if nid in entities
             ]
@@ -257,10 +259,10 @@ def generate_candidates(
             pinyin_groups[ent.pinyin].append(ent.id)
 
     pinyin_exact_pairs = 0
-    for py, eids in pinyin_groups.items():
+    for py, eids in pinyin_groups.items():  # noqa: PERF102
         if len(eids) > 1 and len(eids) <= 20:  # Skip huge groups
             for i in range(len(eids)):
-                for j in range(i+1, len(eids)):
+                for j in range(i + 1, len(eids)):
                     candidates.add(tuple(sorted([eids[i], eids[j]])))
                     pinyin_exact_pairs += 1
     print(f"    Pinyin exact: {pinyin_exact_pairs} pairs")
@@ -272,10 +274,10 @@ def generate_candidates(
             initial_groups[ent.pinyin_initials].append(ent.id)
 
     pinyin_initial_pairs = 0
-    for initials, eids in initial_groups.items():
+    for initials, eids in initial_groups.items():  # noqa: PERF102
         if len(eids) > 1 and len(eids) <= 10:
             for i in range(len(eids)):
-                for j in range(i+1, len(eids)):
+                for j in range(i + 1, len(eids)):
                     pair = tuple(sorted([eids[i], eids[j]]))
                     if pair not in candidates:
                         candidates.add(pair)
@@ -286,7 +288,7 @@ def generate_candidates(
     char_pairs = 0
     short_entities = [e for e in ent_list if 1 < len(e.name) <= 5]
     for i in range(len(short_entities)):
-        for j in range(i+1, len(short_entities)):
+        for j in range(i + 1, len(short_entities)):
             a, b = short_entities[i], short_entities[j]
             shared = set(a.name) & set(b.name)
             if shared and char_jaccard(a.name, b.name) >= char_overlap_threshold:
@@ -300,7 +302,9 @@ def generate_candidates(
     if embedding_vectors:
         eids_with_emb = [eid for eid in entities if eid in embedding_vectors]
         if eids_with_emb:
-            vecs = np.array([embedding_vectors[eid] for eid in eids_with_emb], dtype=np.float32)
+            vecs = np.array(
+                [embedding_vectors[eid] for eid in eids_with_emb], dtype=np.float32
+            )
             norms = np.linalg.norm(vecs, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             vecs_norm = vecs / norms
@@ -309,7 +313,7 @@ def generate_candidates(
             emb_pairs = 0
             chunk_size = 200
             for i in range(0, len(eids_with_emb), chunk_size):
-                chunk = vecs_norm[i:i+chunk_size]
+                chunk = vecs_norm[i : i + chunk_size]
                 sims = chunk @ vecs_norm.T
                 for local_idx in range(len(chunk)):
                     global_idx = i + local_idx
@@ -318,7 +322,9 @@ def generate_candidates(
                     above = np.where(row >= embedding_threshold)[0]
                     for j in above:
                         if j > global_idx:  # only one direction
-                            pair = tuple(sorted([eids_with_emb[global_idx], eids_with_emb[j]]))
+                            pair = tuple(
+                                sorted([eids_with_emb[global_idx], eids_with_emb[j]])
+                            )
                             if pair not in candidates:
                                 candidates.add(pair)
                                 emb_pairs += 1
@@ -331,7 +337,7 @@ def generate_candidates(
     active_ents = active_ents[:500]  # Cap at top 500 by activity
 
     for i in range(len(active_ents)):
-        for j in range(i+1, len(active_ents)):
+        for j in range(i + 1, len(active_ents)):
             a, b = active_ents[i], active_ents[j]
             sj = structural_jaccard(a.message_ids, b.message_ids)
             if sj >= structural_threshold:
@@ -386,11 +392,13 @@ def score_candidates(
         co = conversation_cooccurrence(ent_a.conversation_ids, ent_b.conversation_ids)
 
         # Hybrid score
-        hybrid = (weight_pinyin * py_sim +
-                  weight_char * cj +
-                  weight_embedding * emb_sim +
-                  weight_structural * sj +
-                  weight_cooccurrence * co)
+        hybrid = (
+            weight_pinyin * py_sim
+            + weight_char * cj
+            + weight_embedding * emb_sim
+            + weight_structural * sj
+            + weight_cooccurrence * co
+        )
 
         pair = CandidatePair(
             entity_a=ent_a,
@@ -426,14 +434,34 @@ def score_candidates(
     n_link = sum(1 for p in scored if p.decision == "link")
     n_judge = sum(1 for p in scored if p.decision == "judge")
     n_reject = sum(1 for p in scored if p.decision == "reject")
-    print(f"  Decisions: {n_link} auto-link, {n_judge} need LLM judge, {n_reject} auto-reject")
+    print(
+        f"  Decisions: {n_link} auto-link, {n_judge} need LLM judge, {n_reject} auto-reject"
+    )
 
     return scored
 
 
+def _run_coro_sync(coro):
+    """Run *coro* to completion from sync code, with or without a running loop.
+
+    ``scripts/improve.py`` calls the periodic path with no event loop, but
+    ``scripts/ingest.py`` runs ``run_full`` inside ``asyncio.run(main())`` —
+    where ``asyncio.run`` cannot nest. In that case the coroutine runs on a
+    dedicated thread with its own loop. Callers must ensure the coroutine
+    performs no thread-bound IO (e.g. SQLite handles created on the main
+    thread); the judge coroutines are LLM-only after prompt pre-build.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def run_llm_judge(
     pairs_to_judge: list[CandidatePair],
-    sqlite: SQLiteStore,
+    store: KnowledgeStore,
     batch_size: int = 5,
     max_budget: int = 500,
     concurrency: int = 20,
@@ -445,7 +473,7 @@ def run_llm_judge(
 
     Args:
         pairs_to_judge: Pairs with decision="judge"
-        sqlite: SQLite store for fetching example messages
+        store: KnowledgeStore for fetching example messages
         batch_size: Pairs per LLM call
         max_budget: Maximum total LLM calls
         concurrency: Max concurrent LLM calls in flight
@@ -453,54 +481,61 @@ def run_llm_judge(
     if not pairs_to_judge:
         return pairs_to_judge
 
-    api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    if not api_key:
-        print("  WARNING: No ANTHROPIC_AUTH_TOKEN — skipping LLM judge, treating all as reject")
+    provider = cfg.services.llm_flash.provider
+    api_key = provider_api_key(provider)
+    if provider == "anthropic" and not api_key:
+        print(
+            "  WARNING: No ANTHROPIC_AUTH_TOKEN — skipping LLM judge, treating all as reject"
+        )
         for p in pairs_to_judge:
             p.decision = "reject"
             p.confidence = 0.0
         return pairs_to_judge
 
     # Cap budget
-    pairs_to_judge = pairs_to_judge[:max_budget * batch_size]
-    print(f"  Running LLM judge on {len(pairs_to_judge)} pairs (batch_size={batch_size})...")
+    pairs_to_judge = pairs_to_judge[: max_budget * batch_size]
+    print(
+        f"  Running LLM judge on {len(pairs_to_judge)} pairs (batch_size={batch_size})..."
+    )
 
     batches = [
-        pairs_to_judge[start:start + batch_size]
+        pairs_to_judge[start : start + batch_size]
         for start in range(0, len(pairs_to_judge), batch_size)
     ]
+    # Build prompts (the only store reads) synchronously on the caller's thread
+    # so the async judge coroutines are LLM-only — that keeps them safe to run
+    # on a side thread when we are already inside an event loop
+    # (scripts/ingest.py run_full; see _run_coro_sync).
+    prompts = [_build_judge_prompt(batch, store) for batch in batches]
 
     async def _run_all() -> int:
         semaphore = asyncio.Semaphore(concurrency)
         results = await asyncio.gather(
-            *(_judge_batch(batch, sqlite, api_key, semaphore) for batch in batches)
+            *(
+                _judge_batch(batch, prompt, api_key, semaphore)
+                for batch, prompt in zip(batches, prompts)
+            )
         )
         return sum(results)
 
-    judged = asyncio.run(_run_all())
+    judged = _run_coro_sync(_run_all())
 
     print(f"  LLM judged {judged} pairs")
     return pairs_to_judge
 
 
-async def _judge_batch(
-    batch: list[CandidatePair],
-    sqlite: SQLiteStore,
-    api_key: str,
-    semaphore: asyncio.Semaphore,
-) -> int:
-    """Judge a single batch of pairs with one LLM call. Returns count judged.
+def _build_judge_prompt(batch: list[CandidatePair], store: KnowledgeStore) -> str:
+    """Build the judge prompt for one batch, reading sample context from the store.
 
-    Mutates each pair's decision/confidence/llm_verdict in place. On error,
-    any still-undecided pairs in the batch are marked reject.
+    Runs synchronously on the caller's thread so the async judge coroutines
+    perform no store IO (see :func:`_run_coro_sync`).
     """
-    # Build prompt with context
     pair_descriptions = []
     for i, pair in enumerate(batch):
-        sample_msgs_a = _get_sample_messages(sqlite, pair.entity_a, limit=2)
-        sample_msgs_b = _get_sample_messages(sqlite, pair.entity_b, limit=2)
+        sample_msgs_a = _get_sample_messages(store, pair.entity_a, limit=2)
+        sample_msgs_b = _get_sample_messages(store, pair.entity_b, limit=2)
 
-        desc = f"""Pair {i+1}:
+        desc = f"""Pair {i + 1}:
   Entity A: "{pair.entity_a.name}" (type={pair.entity_a.entity_type}, mentions={pair.entity_a.mention_count})
     Connected to: {pair.entity_a.connected_entities[:3]}
     Sample context: {sample_msgs_a}
@@ -510,7 +545,7 @@ async def _judge_batch(
   Signals: pinyin={pair.pinyin_score:.2f}, char_jaccard={pair.char_jaccard:.2f}, embedding={pair.embedding_score:.2f}, structural={pair.structural_score:.2f}, cooccurrence={pair.cooccurrence_score:.2f}"""
         pair_descriptions.append(desc)
 
-    prompt = f"""You are an entity resolution expert. For each pair below, determine if both names refer to the SAME real-world entity (person, system, place, etc.).
+    return f"""You are an entity resolution expert. For each pair below, determine if both names refer to the SAME real-world entity (person, system, place, etc.).
 
 Consider:
 - Chinese name variants (nicknames, surname only, full name)
@@ -524,13 +559,30 @@ Respond with a JSON array of objects, one per pair:
 
 Only output the JSON array, nothing else."""
 
+
+async def _judge_batch(
+    batch: list[CandidatePair],
+    prompt: str,
+    api_key: str | None,
+    semaphore: asyncio.Semaphore,
+) -> int:
+    """Judge a single batch of pairs with one LLM call. Returns count judged.
+
+    Mutates each pair's decision/confidence/llm_verdict in place. On error,
+    any still-undecided pairs in the batch are marked reject. The prompt is
+    pre-built by :func:`_build_judge_prompt` — this coroutine performs no
+    store IO, so it is safe on any thread/loop.
+    """
     judged = 0
     try:
         async with semaphore:
             resp = await litellm.acompletion(
-                model=f"anthropic/{LLM_MODEL}",
+                model=provider_model(
+                    cfg.services.llm_flash.provider,
+                    cfg.services.llm_flash.model,
+                ),
                 messages=[{"role": "user", "content": prompt}],
-                api_base=LLM_BASE_URL,
+                api_base=cfg.services.llm_flash.base_url or "",
                 api_key=api_key,
                 temperature=0.1,
                 max_tokens=1024,
@@ -559,7 +611,7 @@ Only output the JSON array, nothing else."""
                     pair.confidence = 0.0
                 judged += 1
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"  LLM judge error: {e}")
         # Mark remaining as reject on error
         for pair in batch:
@@ -570,16 +622,18 @@ Only output the JSON array, nothing else."""
     return judged
 
 
-def _get_sample_messages(sqlite: SQLiteStore, entity: EntityInfo, limit: int = 2) -> list[str]:
+def _get_sample_messages(
+    store: KnowledgeStore, entity: EntityInfo, limit: int = 2
+) -> list[str]:
     """Get sample message snippets for an entity."""
     if not entity.message_ids:
         return []
 
-    sample_ids = list(entity.message_ids)[:limit * 3]
+    sample_ids = list(entity.message_ids)[: limit * 3]
     placeholders = ",".join("?" * len(sample_ids))
-    rows = sqlite.conn.execute(
-        f"SELECT content FROM messages WHERE id IN ({placeholders}) LIMIT ?",
-        sample_ids + [limit]
+    rows = store.sql_conn.execute(
+        f"SELECT content FROM chunks WHERE id IN ({placeholders}) LIMIT ?",
+        sample_ids + [limit],
     ).fetchall()
 
     snippets = []
@@ -591,11 +645,11 @@ def _get_sample_messages(sqlite: SQLiteStore, entity: EntityInfo, limit: int = 2
 
 def create_disambiguation_edges(
     pairs: list[CandidatePair],
-    sqlite: SQLiteStore,
+    store: KnowledgeStore,
 ) -> int:
-    """Create SIMILAR_TO edges for linked entity pairs.
+    """Create ENTITY_SIMILAR edges for linked entity pairs.
 
-    Instead of merging entities, we create weighted SIMILAR_TO edges with
+    Instead of merging entities, we create weighted ENTITY_SIMILAR edges with
     confidence scores and source metadata. Resolution happens at query time.
 
     Returns: number of edges created
@@ -605,23 +659,34 @@ def create_disambiguation_edges(
         print("  No pairs to link.")
         return 0
 
-    print(f"  Creating {len(link_pairs)} disambiguation SIMILAR_TO edges...")
+    print(f"  Creating {len(link_pairs)} disambiguation ENTITY_SIMILAR edges...")
 
-    # Remove any existing disambiguation edges first (for idempotent re-runs)
-    sqlite.conn.execute(
-        """DELETE FROM edges
-           WHERE edge_type = 'SIMILAR_TO'
-             AND source_type = 'entity' AND target_type = 'entity'
-             AND properties LIKE '%"source": "disambiguation"%'"""
+    # Rewrite disambiguation edges through the backend-agnostic edge API so this
+    # works on both SQLite and LadybugDB. First drop the previous run's
+    # disambiguation edges (matched by their ``source`` property), then upsert:
+    # if entity_similarity already emitted an ENTITY_SIMILAR edge for the pair we
+    # replace it (delete + insert) so the richer disambiguation properties win.
+    store.delete_edges(
+        edge_type=EdgeType.ENTITY_SIMILAR.value,
+        where_properties={"source": "disambiguation"},
     )
 
-    # Insert new edges
+    # Existing ENTITY_SIMILAR endpoint pairs (any source), so we can replace an
+    # edge emitted by the similarity phase instead of duplicating it.
+    existing_pairs = {
+        (src, tgt)
+        for src, tgt, _props in store.scan_edges_by_type(
+            [EdgeType.ENTITY_SIMILAR.value],
+            source_type="entity",
+            target_type="entity",
+        )
+    }
+
     edges_created = 0
     for pair in link_pairs:
         # Consistent ordering: alphabetical by ID
         id_a, id_b = sorted([pair.entity_a.id, pair.entity_b.id])
-
-        properties = json.dumps({
+        properties = {
             "source": "disambiguation",
             "confidence": round(pair.confidence, 3),
             "hybrid_score": round(pair.hybrid_score, 3),
@@ -631,44 +696,42 @@ def create_disambiguation_edges(
             "structural_score": round(pair.structural_score, 3),
             "cooccurrence_score": round(pair.cooccurrence_score, 3),
             "llm_judged": bool(pair.llm_verdict),
-        })
-
-        # Insert edge (skip if already exists from entity_similarity phase)
-        existing = sqlite.conn.execute(
-            """SELECT 1 FROM edges
-               WHERE source_type='entity' AND source_id=?
-                 AND target_type='entity' AND target_id=?
-                 AND edge_type='SIMILAR_TO'""",
-            (id_a, id_b)
-        ).fetchone()
-
-        if existing:
-            # Update existing edge with disambiguation info
-            sqlite.conn.execute(
-                """UPDATE edges SET properties = ?
-                   WHERE source_type='entity' AND source_id=?
-                     AND target_type='entity' AND target_id=?
-                     AND edge_type='SIMILAR_TO'""",
-                (properties, id_a, id_b)
+        }
+        # Replace an existing same-pair edge so disambiguation properties win
+        # (delete-then-insert is the upsert the KnowledgeStore API exposes).
+        if (id_a, id_b) in existing_pairs:
+            store.delete_edges(
+                source_id=id_a,
+                target_id=id_b,
+                edge_type=EdgeType.ENTITY_SIMILAR.value,
             )
-        else:
-            sqlite.conn.execute(
-                """INSERT INTO edges (source_type, source_id, target_type, target_id, edge_type, properties)
-                   VALUES ('entity', ?, 'entity', ?, 'SIMILAR_TO', ?)""",
-                (id_a, id_b, properties)
-            )
+        store.insert_edges(
+            [
+                Edge(
+                    source_type="entity",
+                    source_id=id_a,
+                    target_type="entity",
+                    target_id=id_b,
+                    edge_type=EdgeType.ENTITY_SIMILAR,
+                    properties=properties,
+                )
+            ]
+        )
         edges_created += 1
 
-    sqlite.conn.commit()
     print(f"  Created/updated {edges_created} disambiguation edges")
 
     # Print top pairs
     link_pairs.sort(key=lambda p: -p.confidence)
     print("  Top disambiguation links:")
     for p in link_pairs[:15]:
-        source = "LLM" if p.llm_verdict else ("punct" if p.confidence >= 0.99 else "auto")
-        print(f"    \"{p.entity_a.name}\" ↔ \"{p.entity_b.name}\" "
-              f"(conf={p.confidence:.3f}, source={source})")
+        source = (
+            "LLM" if p.llm_verdict else ("punct" if p.confidence >= 0.99 else "auto")
+        )
+        print(
+            f'    "{p.entity_a.name}" ↔ "{p.entity_b.name}" '
+            f"(conf={p.confidence:.3f}, source={source})"
+        )
 
     return edges_created
 
@@ -702,7 +765,7 @@ def load_embedding_vectors(qdrant: QdrantStore) -> dict[str, np.ndarray]:
 
 
 def run_entity_disambiguation(
-    sqlite: SQLiteStore,
+    store: KnowledgeStore,
     qdrant: QdrantStore,
     # Blocking thresholds
     pinyin_threshold: float = 0.8,
@@ -726,24 +789,25 @@ def run_entity_disambiguation(
 ) -> int:
     """Run the full entity disambiguation pipeline.
 
-    Produces SIMILAR_TO edges with confidence scores between likely-same entities.
+    Produces ENTITY_SIMILAR edges with confidence scores between likely-same entities.
     NO hard merges — resolution happens at query time via edge traversal.
 
-    Returns: number of SIMILAR_TO edges created.
+    Returns: number of ENTITY_SIMILAR edges created.
     """
     print("\n" + "=" * 60)
     print("ENTITY DISAMBIGUATION")
     print("=" * 60)
 
     # Step 1: Load entity info
-    entities = load_entity_info(sqlite)
+    entities = load_entity_info(store)
 
     # Step 2: Load embeddings
     embedding_vectors = load_embedding_vectors(qdrant)
 
     # Step 3: Generate candidates
     candidates = generate_candidates(
-        entities, embedding_vectors,
+        entities,
+        embedding_vectors,
         pinyin_threshold=pinyin_threshold,
         char_overlap_threshold=char_overlap_threshold,
         embedding_threshold=embedding_threshold,
@@ -756,7 +820,9 @@ def run_entity_disambiguation(
 
     # Step 4: Score candidates
     scored = score_candidates(
-        candidates, entities, embedding_vectors,
+        candidates,
+        entities,
+        embedding_vectors,
         weight_pinyin=weight_pinyin,
         weight_char=weight_char,
         weight_embedding=weight_embedding,
@@ -789,15 +855,18 @@ def run_entity_disambiguation(
     if link_pairs:
         print("  Top auto-link pairs:")
         for p in link_pairs[:10]:
-            print(f"    \"{p.entity_a.name}\" ↔ \"{p.entity_b.name}\" "
-                  f"(conf={p.confidence:.3f}, py={p.pinyin_score:.2f}, "
-                  f"struct={p.structural_score:.2f})")
+            print(
+                f'    "{p.entity_a.name}" ↔ "{p.entity_b.name}" '
+                f"(conf={p.confidence:.3f}, py={p.pinyin_score:.2f}, "
+                f"struct={p.structural_score:.2f})"
+            )
 
     # Step 5: LLM judge for ambiguous pairs
     judge_pairs = [p for p in scored if p.decision == "judge"]
     if judge_pairs and not skip_llm:
         judge_pairs = run_llm_judge(
-            judge_pairs, sqlite,
+            judge_pairs,
+            store,
             batch_size=llm_batch_size,
             max_budget=llm_max_budget,
         )
@@ -811,18 +880,20 @@ def run_entity_disambiguation(
             print("  LLM-approved links:")
             for p in judge_pairs:
                 if p.decision == "link":
-                    print(f"    \"{p.entity_a.name}\" ↔ \"{p.entity_b.name}\" "
-                          f"(conf={p.confidence:.3f})")
+                    print(
+                        f'    "{p.entity_a.name}" ↔ "{p.entity_b.name}" '
+                        f"(conf={p.confidence:.3f})"
+                    )
     elif judge_pairs and skip_llm:
         print(f"  Skipping LLM judge ({len(judge_pairs)} pairs) — skip_llm=True")
         for p in judge_pairs:
             p.decision = "reject"
             p.confidence = 0.0
 
-    # Step 6: Create SIMILAR_TO edges (NOT merges)
-    n_edges = create_disambiguation_edges(scored, sqlite)
+    # Step 6: Create ENTITY_SIMILAR edges (NOT merges)
+    n_edges = create_disambiguation_edges(scored, store)
 
-    print(f"\n  Disambiguation complete: {n_edges} SIMILAR_TO edges created")
+    print(f"\n  Disambiguation complete: {n_edges} ENTITY_SIMILAR edges created")
     print("=" * 60)
 
     return n_edges

@@ -38,17 +38,18 @@ except ModuleNotFoundError:  # allow the __main__ runner to work without pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from kl_graph.ingest.llm_extractor import LLMExtractor, needs_extraction
-from kl_graph.models.types import Message
+from kl_graph.models.types import Chunk
 
 # ─── Opt-in gate ──────────────────────────────────────────────────────────
 
 _HAS_CREDS = bool(
-    os.environ.get("KL_LLM_BASE_URL") and os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    (os.environ.get("KL_LLM_FLASH_BASE_URL") or os.environ.get("KL_LLM_BASE_URL"))
+    and os.environ.get("ANTHROPIC_AUTH_TOKEN")
 )
 _ENABLED = os.environ.get("KL_RUN_LLM_TESTS") == "1" and _HAS_CREDS
 _SKIP_REASON = (
     "live LLM test disabled; set KL_RUN_LLM_TESTS=1 and source .env "
-    "(KL_LLM_BASE_URL + ANTHROPIC_AUTH_TOKEN) to enable"
+    "(KL_LLM_FLASH_BASE_URL + ANTHROPIC_AUTH_TOKEN) to enable"
 )
 
 pytestmark = (
@@ -101,16 +102,20 @@ _MSGS = [
 _ALL_MARKERS = [m for _, _, _, mk, _ in _MSGS for m in mk]
 
 
-def _build_messages() -> list[Message]:
+def _build_messages() -> list[Chunk]:
+    """Chat chunks: ``source_type="message"``, chat fields in ``metadata``."""
     msgs = []
     for i, (mid, sender, content, _mk, _triv) in enumerate(_MSGS):
         msgs.append(
-            Message(
+            Chunk(
                 id=mid,
                 content=content,
-                conversation_id="conv_live_test",
-                sender=sender,
+                source_type="message",
                 timestamp=1_700_000_000_000 + i * 60_000,
+                metadata={
+                    "conversation_id": "conv_live_test",
+                    "sender": sender,
+                },
             )
         )
     return msgs
@@ -128,9 +133,9 @@ def _result_text(result: dict) -> str:
     return " ".join(parts)
 
 
-def _make_extractor(cache_dir: Path) -> LLMExtractor:
-    # Defaults read KL_LLM_BASE_URL / KL_LLM_MODEL / ANTHROPIC_AUTH_TOKEN.
-    return LLMExtractor(cache_dir=cache_dir, max_concurrent=4)
+def _make_extractor(cache_db: Path) -> LLMExtractor:
+    # Defaults read KL_LLM_FLASH_* / ANTHROPIC_AUTH_TOKEN.
+    return LLMExtractor(cache_db=cache_db, max_concurrent=4)
 
 
 # ─── Tests ──────────────────────────────────────────────────────────────
@@ -218,13 +223,24 @@ def test_extract_one_with_context_live():
         messages = _build_messages()
         target_idx = 0  # the Alphapay message
 
-        result = asyncio.run(ext.extract_one(messages[target_idx], messages, target_idx))
+        result = asyncio.run(
+            ext.extract_one(messages[target_idx], messages, target_idx)
+        )
 
-        check("entities" in result and "facts" in result, "result has entities+facts keys")
-        check(result.get("_msg_id") == messages[target_idx].id, "extract_one stamps _msg_id")
+        check(
+            "entities" in result and "facts" in result, "result has entities+facts keys"
+        )
+        check(
+            result.get("_msg_id") == messages[target_idx].id,
+            "extract_one stamps _msg_id",
+        )
         text = _result_text(result)
-        check("Alphapay" in text or "张三" in text, "extract_one surfaces target entities")
-        print(f"  extract_one entities={len(result['entities'])} facts={len(result['facts'])}")
+        check(
+            "Alphapay" in text or "张三" in text, "extract_one surfaces target entities"
+        )
+        print(
+            f"  extract_one entities={len(result['entities'])} facts={len(result['facts'])}"
+        )
 
 
 def test_needs_extraction_matches_live_skips():
@@ -255,7 +271,7 @@ if __name__ == "__main__":
             t()
         except AssertionError:
             pass  # recorded in _failures; keep running
-        except Exception as e:  # network/model errors shouldn't masquerade as pass
+        except Exception as e:  # noqa: BLE001  # network/model errors shouldn't masquerade as pass
             print(f"  ERROR: {e!r}")
             _failures.append(f"{t.__name__}: {e!r}")
 

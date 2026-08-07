@@ -15,7 +15,6 @@ from kl_graph.data.locomo import json_lines
 
 from .artifacts import atomic_write_json, atomic_write_jsonl
 
-
 CATEGORY_NAMES = {
     1: "Multi Hop",
     2: "Temporal",

@@ -10,21 +10,20 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "litellm>=1.0",
     "jieba>=0.42",
+    "ladybug>=0.18.0",
     "numpy>=2.0",
     "pydantic>=2.0",
+    "omegaconf>=2.3",
     "tqdm>=4.60",
     "click>=8.0",
     "httpx>=0.27",
-]
-
-[project.optional-dependencies]
-# Persistent retrieval server (kl_server.py)
-server = [
+    # Windows has no system timezone database; required by ZoneInfo in
+    # export_attendance.py and other scripts that use timezone-aware datetimes.
+    "tzdata; platform_system == 'Windows'",
+    # Retrieval server (kl_server.py)
     "fastapi>=0.110",
     "uvicorn>=0.29",
-]
-# Periodic improvement: communities, disambiguation, topical clustering
-periodic = [
+    # Graph improvement: community detection, disambiguation, clustering
     "leidenalg>=0.10",
     "python-igraph>=0.11",
     "scikit-learn>=1.4",

@@ -1,21 +1,26 @@
-"""Embedding client (DashScope text-embedding-v4 via litellm)."""
+"""Embedding client (text-embedding-v4 via litellm)."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import litellm
 from tqdm import tqdm
 
-from kl_graph.config import (
-    EMBED_API_KEY,
-    EMBED_BASE_URL,
-    EMBED_BATCH_SIZE,
-    EMBED_CONCURRENCY,
-    EMBED_MODEL,
-    EMBED_SEND_DIMENSIONS,
-    EMBEDDING_DIM,
-)
+from kl_graph.config import cfg
+from kl_graph.utils.litellm_config import litellm
+
+# Service-level constants (endpoint identity, not behavioral params)
+EMBED_API_KEY = cfg.services.embedding.api_key or ""
+EMBED_BASE_URL = cfg.services.embedding.base_url or ""
+EMBED_MODEL = cfg.services.embedding.model
+EMBED_SEND_DIMENSIONS = bool(cfg.services.embedding.send_dimensions)
+EMBEDDING_DIM = int(cfg.services.embedding.dim)
+
+logger = logging.getLogger(__name__)
 
 
 class Embedder:
@@ -33,9 +38,11 @@ class Embedder:
         self,
         base_url: str = EMBED_BASE_URL,
         model: str = EMBED_MODEL,
-        batch_size: int = EMBED_BATCH_SIZE,
+        batch_size: int = 10,
         dimensions: int = EMBEDDING_DIM,
-        concurrency: int = EMBED_CONCURRENCY,
+        concurrency: int = 10,
+        max_retries: int = 3,
+        timeout: float = 60.0,
     ):
         # litellm selects the OpenAI-compatible transport from the provider
         # prefix; the bare model name is sent on the wire via api_base.
@@ -45,6 +52,8 @@ class Embedder:
         self.batch_size = batch_size
         self.dimensions = dimensions
         self.concurrency = max(1, concurrency)
+        self.max_retries = max_retries
+        self.timeout = timeout
         # Embedding token tracking
         self.usage = {
             "prompt_tokens": 0,
@@ -52,23 +61,27 @@ class Embedder:
             "api_calls": 0,
         }
 
-    def _embed(self, texts: list[str]) -> list[list[float]]:
+    def _embed_kwargs(self, texts: list[str]) -> dict:
+        """Build the litellm (a)embedding kwargs shared by sync + async paths."""
         # ``dimensions`` is only sent when the server supports matryoshka
-        # truncation (DashScope text-embedding-v4). The self-hosted
+        # truncation (text-embedding-v4). The self-hosted
         # Qwen3-Embedding-8B (vLLM) rejects it with a 400, so it is omitted by
         # default (see EMBED_SEND_DIMENSIONS). encoding_format=float keeps strict
         # servers happy.
-        kwargs = dict(
+        kwargs = dict(  # noqa: C408
             model=self.model,
             input=texts,
             api_base=self.base_url,
             api_key=self.api_key,
             encoding_format="float",
+            timeout=self.timeout,
         )
         if EMBED_SEND_DIMENSIONS:
             kwargs["extra_body"] = {"dimensions": self.dimensions}
-        resp = litellm.embedding(**kwargs)
-        # Track embedding token usage
+        return kwargs
+
+    def _track_usage(self, resp) -> None:
+        """Fold one embedding response's token usage into ``self.usage``."""
         try:
             usage = getattr(resp, "usage", None)
             if usage:
@@ -77,13 +90,116 @@ class Embedder:
                 self.usage["prompt_tokens"] += pt
                 self.usage["total_tokens"] += tt
             self.usage["api_calls"] += 1
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        resp = self._embed_with_retry(self._embed_kwargs(texts))
+        self._track_usage(resp)
         return [d["embedding"] for d in resp.data]
+
+    def _embed_with_retry(self, kwargs: dict):
+        """Call ``litellm.embedding`` with bounded exponential backoff.
+
+        A bulk embed of tens of thousands of chunks *will* hit transient
+        rate-limits (HTTP 429) on a shared gateway; without a retry a single 429
+        propagates out of the thread pool and aborts the whole run, wasting every
+        embedding paid for so far. Retry rate-limit / transient errors with
+        exponential backoff + jitter, honoring a ``Retry-After`` hint when the
+        provider sends one. Non-transient errors (e.g. 400 bad dimensions) raise
+        immediately — retrying them is pointless.
+        """
+        attempt = 0
+        while True:
+            try:
+                return litellm.embedding(**kwargs)
+            except Exception as exc:
+                if not self._is_transient(exc) or attempt >= self.max_retries:
+                    raise
+                delay = self._retry_after(exc)
+                if delay is None:
+                    delay = min(2.0 * (2 ** attempt), 30.0) + random.uniform(0, 1)
+                attempt += 1
+                logger.warning(
+                    "embedding retry %d/%d after %.1fs (%s)",
+                    attempt, self.max_retries, delay, type(exc).__name__,
+                )
+                time.sleep(delay)
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        """True for errors worth retrying (rate limit / timeout / 5xx)."""
+        status = getattr(exc, "status_code", None)
+        if status in (408, 409, 429, 500, 502, 503, 504):
+            return True
+        name = type(exc).__name__
+        if name in ("RateLimitError", "Timeout", "TimeoutError", "APITimeoutError",
+                    "APIConnectionError",
+                    "ServiceUnavailableError", "InternalServerError"):
+            return True
+        msg = str(exc).lower()
+        # ``insufficient_quota`` is a hard stop, not a transient rate-limit — do
+        # not spin on it.
+        if "insufficient_quota" in msg:
+            return False
+        return "rate limit" in msg or "timeout" in msg or " 429" in msg
+
+    @staticmethod
+    def _retry_after(exc: Exception) -> float | None:
+        """Extract a ``Retry-After`` seconds hint from the exception, if any."""
+        for attr in ("retry_after", "retry_after_seconds"):
+            val = getattr(exc, attr, None)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        headers = getattr(exc, "headers", None) or {}
+        try:
+            ra = headers.get("retry-after") or headers.get("Retry-After")
+            if ra is not None:
+                return float(ra)
+        except (TypeError, ValueError):
+            pass
+        return None
 
     def embed_one(self, text: str) -> list[float]:
         """Embed a single text."""
         return self._embed([text])[0]
+
+    async def _aembed(self, texts: list[str]) -> list[list[float]]:
+        """Async single-request embed with the same retry policy as ``_embed``.
+
+        Uses ``litellm.aembedding`` so the caller (the async query engine) can
+        ``await`` the network round-trip and free the event loop while the
+        embedding endpoint works. The bounded exponential backoff mirrors
+        ``_embed_with_retry`` but ``await``s ``asyncio.sleep`` instead of
+        blocking. Only the query path uses this; bulk ingestion keeps the
+        synchronous thread-pool path (``_embed_all``).
+        """
+        import litellm
+
+        kwargs = self._embed_kwargs(texts)
+        attempt = 0
+        while True:
+            try:
+                resp = await litellm.aembedding(**kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001 - inspect + selectively retry
+                if not self._is_transient(exc) or attempt >= self.max_retries:
+                    raise
+                delay = self._retry_after(exc)
+                if delay is None:
+                    delay = min(2.0 * (2 ** attempt), 30.0) + random.uniform(0, 1)
+                attempt += 1
+                logger.warning(
+                    "async embedding retry %d/%d after %.1fs (%s)",
+                    attempt, self.max_retries, delay, type(exc).__name__,
+                )
+                await asyncio.sleep(delay)
+        self._track_usage(resp)
+        return [d["embedding"] for d in resp.data]
+
+    async def aembed_one(self, text: str) -> list[float]:
+        """Async embed of a single text (query path)."""
+        return (await self._aembed([text]))[0]
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts (respects batch_size + concurrency)."""

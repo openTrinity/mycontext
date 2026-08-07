@@ -1,0 +1,122 @@
+# kl-graph default configuration
+#
+# This is the complete, deployable default configuration, not an example file.
+# Override values with config.yaml, a CLI-supplied YAML, or KL_* environment
+# variables. The typed schema in kl_graph/config.py validates the final result.
+
+application:
+  data_dir: ${oc.env:KL_DATA_DIR,""}
+  dws_export_dir: ${oc.env:KL_DWS_EXPORT_DIR,""}
+
+server:
+  port: ${oc.env:KL_SERVER_PORT,8200}
+
+# Shared external/model services used by more than one pipeline.
+services:
+  embedding:
+    base_url: ${oc.env:KL_EMBED_BASE_URL,""}
+    model: ${oc.env:KL_EMBED_MODEL,text-embedding-v4}
+    api_key: ${oc.env:KL_EMBED_API_KEY,""}
+    dim: ${oc.env:KL_EMBEDDING_DIM,1024}
+    send_dimensions: ${oc.env:KL_EMBED_SEND_DIMENSIONS,0}
+
+  llm_flash:
+    provider: ${oc.env:KL_LLM_FLASH_PROVIDER,${oc.env:KL_LLM_PROVIDER,anthropic}}
+    base_url: ${oc.env:KL_LLM_FLASH_BASE_URL,${oc.env:KL_LLM_BASE_URL,""}}
+    model: ${oc.env:KL_LLM_FLASH_MODEL,${oc.env:KL_LLM_MODEL,qwen3.7-flash}}
+    max_retries: ${oc.env:KL_LLM_FLASH_MAX_RETRIES,${oc.env:KL_LLM_MAX_RETRIES,2}}
+    timeout: ${oc.env:KL_LLM_FLASH_TIMEOUT,${oc.env:KL_LLM_TIMEOUT,120}}
+
+  reranker:
+    base_url: ${oc.env:KL_RERANK_BASE_URL,""}
+    model: ${oc.env:KL_RERANK_MODEL,"gte-reranker-v2"}
+    api_key: ${oc.env:KL_RERANK_API_KEY,""}
+
+# Backend-neutral store roles. Backend-specific options stay below the selected
+# implementation so another graph/vector implementation can be added cleanly.
+storage:
+  graph:
+    backend: ${oc.env:KL_GRAPH_BACKEND,ladybug}
+    ladybug:
+      # Engine options forwarded to ladybug.Database(). 0/False = Kuzu auto.
+      read_only: ${oc.env:KL_LADYBUG_READ_ONLY,0}
+      buffer_pool_size: ${oc.env:KL_LADYBUG_BUFFER_POOL_SIZE,0}
+      max_num_threads: ${oc.env:KL_LADYBUG_MAX_NUM_THREADS,0}
+    falkordb:
+      host: ${oc.env:KL_FALKOR_HOST,localhost}
+      port: ${oc.env:KL_FALKOR_PORT,6379}
+      graph: ${oc.env:KL_FALKOR_GRAPH,kl_graph}
+
+  vector:
+    backend: qdrant
+    qdrant:
+      exact_search: false
+
+pipelines:
+  ingestion:
+    keep_extraction_cache: ${oc.env:KL_KEEP_EXTRACTION_CACHE,1}
+    v1_entities_path: ${oc.env:KL_V1_ENTITIES_PATH,""}
+    generic_sources:
+      - work
+      - contacts
+      - attendance
+      - calendar
+      - drive
+
+    embedding:
+      flush_every: ${oc.env:KL_EMBED_FLUSH_EVERY,2000}
+      batch_size: ${oc.env:KL_EMBED_BATCH_SIZE,10}
+      concurrency: ${oc.env:KL_EMBED_CONCURRENCY,10}
+      max_retries: ${oc.env:KL_EMBED_MAX_RETRIES,6}
+      timeout: ${oc.env:KL_EMBED_TIMEOUT,60}
+
+    extraction:
+      batch_size: ${oc.env:KL_LLM_BATCH_SIZE,10}
+      batch_timeout: ${oc.env:KL_LLM_BATCH_TIMEOUT,300}
+
+    entity_description:
+      summarize: ${oc.env:KL_ENTITY_DESCRIPTION_SUMMARIZE,1}
+      concurrency: ${oc.env:KL_ENTITY_DESCRIPTION_CONCURRENCY,8}
+
+    incremental:
+      full_rebuild_every: ${oc.env:KL_FULL_REBUILD_EVERY,10}
+      community_summary_threshold: ${oc.env:KL_INCR_COMMUNITY_SUMMARY_THRESHOLD,0.1}
+      similarity_strategy: ${oc.env:KL_INCR_SIMILARITY_STRATEGY,ann_intra_batch}
+      community_strategy: ${oc.env:KL_INCR_COMMUNITY_STRATEGY,dynamic_frontier_leiden}
+
+    similarity:
+      threshold: 0.85  # retained from the former thresholds.similar_to setting
+
+  query:
+    embedding:
+      max_retries: ${oc.env:KL_QUERY_EMBED_MAX_RETRIES,2}
+      timeout: ${oc.env:KL_QUERY_EMBED_TIMEOUT,30}
+
+    phase1_message_limit: 20
+    phase1_fact_limit: 10
+    phase1_entity_expand_limit: 20
+    phase2_context_limit: 50
+    max_concurrency: ${oc.env:KL_QUERY_MAX_CONCURRENCY,50}
+    dedup_enabled: ${oc.env:KL_QUERY_DEDUP,1}
+
+    confidence:
+      high: 0.7
+      low: 0.3
+
+    fusion:
+      rrf_k: 60
+
+    reranking:
+      window: 64
+      top_k: 30
+
+    global_search:
+      current_user: ${oc.env:KL_CURRENT_USER,""}
+      levels: "${oc.env:KL_GLOBAL_SEARCH_LEVELS,\"L0,L1,L2,L3\"}"
+      map_budget: ${oc.env:KL_GLOBAL_SEARCH_MAP_BUDGET,4000}
+      reduce_budget: ${oc.env:KL_GLOBAL_SEARCH_REDUCE_BUDGET,4000}
+      map_max_tokens: ${oc.env:KL_GLOBAL_SEARCH_MAP_MAX_TOKENS,1024}
+      reduce_max_tokens: ${oc.env:KL_GLOBAL_SEARCH_REDUCE_MAX_TOKENS,1500}
+      max_communities: ${oc.env:KL_GLOBAL_SEARCH_MAX_COMMUNITIES,16}
+      map_concurrency: ${oc.env:KL_GLOBAL_SEARCH_MAP_CONCURRENCY,4}
+      shuffle_seed: ${oc.env:KL_GLOBAL_SEARCH_SHUFFLE_SEED,86}

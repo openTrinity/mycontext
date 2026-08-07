@@ -5,25 +5,45 @@ This module is the structural core of the interactive GraphRAG retrieval mode
 so the walk and the mermaid renderer can be unit-tested with a synthetic
 adjacency, exactly like the Phase-0 PageRank test.
 
-The walk hops **entity ↔ fact** over the two walkable edge types
-(``ABOUT``/``INVOLVES``); messages/chunks and ``SIMILAR_TO`` are never traversed
-(they are filtered by the ``WALKABLE`` allowlist). Scoring is a path-aware
-multiplicative decay — a node's score is the best (least-penalized) product of
-its seed relevance and the per-hop ``edge_weight × λ`` along any discovered path,
-so further-away nodes are monotonically penalized and best-path wins.
+The walk hops over every edge type **whose both endpoints are valid nodes**
+(entity / fact / chunk / community) — the ``WALKABLE`` set (see below). This
+includes ``ABOUT`` (fact↔entity), ``MENTIONS``/``AUTHORED_BY`` (chunk↔entity),
+``TEMPORAL``/``REPLY_TO`` (chunk↔chunk), ``STATES`` (fact→chunk),
+``ENTITY_SIMILAR``/``FACT_SIMILAR``/``ENTAILS``/``CONTRADICTS`` (entity↔entity /
+fact↔fact), and ``COMM_MEMBER`` (entity/fact↔community, walkable both
+directions). The node-type guard in :func:`graph_walk` is the real gate: any
+neighbour whose ``related_type`` is not one of entity/fact/chunk/community is
+skipped, so an edge to a non-node (e.g. a bare conversation id) can never be
+walked even if present. Scoring is a path-aware multiplicative
+decay — a node's score is the best (least-penalized) product of its seed
+relevance and the per-hop ``edge_weight × λ`` along any discovered path, so
+further-away nodes are monotonically penalized and best-path wins.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
-# The only edge types the walk ever traverses. Both are fact↔entity, so a walk
-# can never land on a message. SIMILAR_TO is intentionally excluded for now.
-WALKABLE = {"ABOUT", "INVOLVES"}
+from kl_graph.models.types import EdgeType
 
-# related_type -> node-id prefix. Messages are namespaced too (they can appear
-# as provenance attachments elsewhere) but are never hop targets.
-_PREFIX = {"entity": "ent", "fact": "fact", "message": "msg"}
+# Edge types the walk traverses: every ``EdgeType`` whose both endpoints are
+# valid nodes (entity / fact / chunk / community). ``COMM_MEMBER`` is included
+# now that Community is a reified node — memberships are materialized from the
+# authoritative ``community_L0..L3`` columns, so node→community and
+# community→members are both real hops. Derived from the enum so new
+# node-connecting edge types are walkable by construction; the node-type guard in
+# :func:`graph_walk` enforces the valid-node rule regardless of this set's
+# contents.
+_NON_NODE_EDGE_TYPES: set[str] = set()
+WALKABLE = {e.value for e in EdgeType} - _NON_NODE_EDGE_TYPES
+
+# Node types the walk models (and will hop onto). related_type -> node-id prefix.
+_PREFIX = {
+    "entity": "ent",
+    "fact": "fact",
+    "chunk": "cnk",
+    "community": "comm",
+}
 
 
 def namespaced(raw_id: str, node_type: str) -> str:
@@ -31,10 +51,11 @@ def namespaced(raw_id: str, node_type: str) -> str:
 
     Args:
         raw_id: The bare UUID string as stored in SQLite.
-        node_type: One of ``entity`` / ``fact`` / ``message``.
+        node_type: One of ``entity`` / ``fact`` / ``chunk`` / ``community``.
 
     Returns:
-        A namespaced id like ``ent:<uuid>`` / ``fact:<uuid>`` / ``msg:<uuid>``.
+        A namespaced id like ``ent:<uuid>`` / ``fact:<uuid>`` / ``cnk:<uuid>`` /
+        ``comm:<uuid>``.
     """
     return f"{_PREFIX.get(node_type, node_type)}:{raw_id}"
 
@@ -53,12 +74,12 @@ def node_type_of(node_id: str) -> str:
     return prefix
 
 
-def edge_weight(edge_type: str, properties: Optional[dict] = None) -> float:
+def edge_weight(edge_type: str, properties: dict | None = None) -> float:
     """Per-edge multiplicative weight used in the decay.
 
-    Only ``ABOUT``/``INVOLVES`` are walked and both carry weight ``1.0``, so the
-    per-hop factor is currently a flat ``λ``. The term is kept so that
-    re-introducing ``SIMILAR_TO`` later (with its stored
+    Every walkable edge type currently carries a flat weight ``1.0``, so the
+    per-hop factor is just ``λ``. The term is kept so that a future per-type or
+    ``ENTITY_SIMILAR``-confidence weighting (using stored
     ``confidence``/``hybrid_score``) needs no change to the scoring model.
     """
     return 1.0
@@ -91,8 +112,8 @@ def graph_walk(
     max_nodes: int = 50,
     lambda_: float = 0.6,
     mini_threshold: float = 0.2,
-    importance_fn: Optional[Callable[[str], float]] = None,
-    initial_best: Optional[dict[str, float]] = None,
+    importance_fn: Callable[[str], float] | None = None,
+    initial_best: dict[str, float] | None = None,
 ) -> tuple[list[dict], list[dict], dict[str, float]]:
     """BFS with best-score relaxation over the walkable subgraph.
 
@@ -119,7 +140,7 @@ def graph_walk(
         ``visited`` is the full ``id -> best score`` map to echo in the cursor.
     """
     if importance_fn is None:
-        importance_fn = lambda _nid: 0.0  # noqa: E731
+        importance_fn = lambda _nid: 0.0
 
     # best carries every prior score (cursor) plus this walk's discoveries, so
     # relaxation is correct across stateless calls. hop_of tracks display depth.
@@ -147,8 +168,13 @@ def graph_walk(
             neighbors = [n for n in neighbors if n[0] in WALKABLE]
             neighbors = _rank_and_cap(neighbors, max_fanout, importance_fn)
             for etype, rel_id, rel_type, _dir in neighbors:
-                # Only entities/facts are hop targets; never messages.
-                if rel_type not in ("entity", "fact"):
+                # Valid-node rule: only entity/fact/chunk/community are hop
+                # targets. Any other related_type is not a modeled node and is
+                # skipped here, so it can never be walked even if such an edge is
+                # present. ``community`` is included so a walk can both leave a
+                # node onto its community and land back on that community's
+                # members via ``COMM_MEMBER``.
+                if rel_type not in ("entity", "fact", "chunk", "community"):
                     continue
                 cand = namespaced(rel_id, rel_type)
                 if cand in path:
@@ -215,8 +241,9 @@ def _mm_label(text: str, limit: int = 40) -> str:
 def to_mermaid(nodes: list[dict], edges: list[dict]) -> str:
     """Render a walk subgraph as a mermaid ``graph TD`` flowchart.
 
-    Entities are ``[...]`` boxes, facts are ``(...)`` rounded nodes, and each
-    edge is labelled with its type. Scores are shown in the node label. The
+    Entities are ``[...]`` boxes, facts are ``(...)`` rounded nodes, chunks are
+    ``[/.../]`` parallelograms, and communities are ``{{...}}`` hexagons.  Each
+    edge is labelled with its type.  Scores are shown in the node label.  The
     output is mermaid *source* (agents parse it; humans paste into a renderer).
     """
     lines = ["graph TD"]
@@ -230,6 +257,10 @@ def to_mermaid(nodes: list[dict], edges: list[dict]) -> str:
             lines.append(f'    {mm}["👤 {label}<br/>{score:.2f}"]')
         elif ntype == "fact":
             lines.append(f'    {mm}("📄 {label}<br/>{score:.2f}")')
+        elif ntype == "chunk":
+            lines.append(f'    {mm}[/"📦 {label}<br/>{score:.2f}"/]')
+        elif ntype == "community":
+            lines.append(f'    {mm}{{"🏘️ {label}<br/>{score:.2f}"}}')
         else:
             lines.append(f'    {mm}["{label}"]')
     for e in edges:

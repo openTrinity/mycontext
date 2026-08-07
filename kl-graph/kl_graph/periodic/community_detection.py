@@ -1,14 +1,17 @@
 """Multi-resolution community detection for entities and facts.
 
 Entity communities: Leiden algorithm on the projected entity graph.
-  - Edges: SIMILAR_TO + co-mention (entities appearing in same message)
+  - Edges: ENTITY_SIMILAR + co-mention (entities appearing in same message)
   - 4 resolution levels for hierarchical drill-down (L0-L3)
 
 Fact communities: Two methods available:
   1. HDBSCAN on fact embeddings (topical clusters)
-  2. Multi-resolution Leiden on fact SIMILAR_TO graph augmented with shared-entity projections
+  2. Multi-resolution Leiden on fact FACT_SIMILAR graph augmented with shared-entity projections
 
-All levels are stored as community_L{0,1,2,3} columns in SQLite.
+All levels are stored as community_L{0,1,2,3} columns in SQLite. Those columns
+are the authoritative assignment storage; :func:`project_community_membership_edges`
+derives reified Community rows + ``COMM_MEMBER`` edges from them (never the
+reverse).
 """
 
 from __future__ import annotations
@@ -17,12 +20,10 @@ import json
 from collections import defaultdict
 
 import numpy as np
-from tqdm import tqdm
 
-from kl_graph.models.types import EdgeType
+from kl_graph.models.types import Community, Edge, EdgeType, community_id_from
 from kl_graph.storage.qdrant_store import QdrantStore
 from kl_graph.storage.sqlite_store import SQLiteStore
-
 
 # 4-level resolution hierarchy
 RESOLUTIONS = {
@@ -34,7 +35,7 @@ RESOLUTIONS = {
 
 
 def _build_entity_graph(sqlite: SQLiteStore):
-    """Build the entity graph from SIMILAR_TO + co-mention edges.
+    """Build the entity graph from ENTITY_SIMILAR + co-mention edges.
 
     Returns:
         (igraph.Graph, entity_ids list, entity_names dict)
@@ -42,7 +43,7 @@ def _build_entity_graph(sqlite: SQLiteStore):
     import igraph as ig
 
     # Get all entities
-    rows = sqlite.conn.execute("SELECT id, name FROM entities").fetchall()
+    rows = sqlite.sql_conn.execute("SELECT id, name FROM entities").fetchall()
     entity_ids = [r[0] for r in rows]
     entity_names = {r[0]: r[1] for r in rows}
     id_to_idx = {eid: i for i, eid in enumerate(entity_ids)}
@@ -52,31 +53,25 @@ def _build_entity_graph(sqlite: SQLiteStore):
     edge_list = []
     weights = []
 
-    # Add SIMILAR_TO edges
-    similar_edges = sqlite.conn.execute(
-        """SELECT source_id, target_id, properties FROM edges
-           WHERE edge_type = 'SIMILAR_TO'
-             AND source_type = 'entity' AND target_type = 'entity'"""
-    ).fetchall()
-
-    for row in similar_edges:
-        src_idx = id_to_idx.get(row[0])
-        tgt_idx = id_to_idx.get(row[1])
+    # Add ENTITY_SIMILAR edges (through the backend-agnostic edge API so this
+    # works on both the SQLite and LadybugDB backends).
+    for src_id, tgt_id, props in sqlite.scan_edges_by_type(
+        ["ENTITY_SIMILAR"], source_type="entity", target_type="entity"
+    ):
+        src_idx = id_to_idx.get(src_id)
+        tgt_idx = id_to_idx.get(tgt_id)
         if src_idx is not None and tgt_idx is not None:
             edge_list.append((src_idx, tgt_idx))
-            props = json.loads(row[2]) if row[2] else {}
             weights.append(props.get("hybrid_score", props.get("confidence", 0.5)))
 
-    # Add co-mention edges (entities appearing in same message)
+    # Add co-mention edges (entities appearing in the same chunk)
     print("  Computing co-mention edges...")
     entity_messages = defaultdict(set)
-    mention_rows = sqlite.conn.execute(
-        """SELECT target_id, source_id FROM edges
-           WHERE edge_type IN ('MENTIONS', 'SENT_BY')
-             AND source_type = 'message' AND target_type = 'entity'"""
-    ).fetchall()
-    for row in mention_rows:
-        entity_messages[row[0]].add(row[1])
+    for tgt_id, src_id, _props in sqlite.scan_edges_by_type(
+        ["MENTIONS", "AUTHORED_BY"], source_type="chunk", target_type="entity"
+    ):
+        # (chunk=source, entity=target); index by entity → set of chunks
+        entity_messages[tgt_id].add(src_id)
 
     # Build message → entities mapping (inverse)
     message_entities = defaultdict(set)
@@ -126,7 +121,7 @@ def detect_entity_communities_multi(
     """
     import leidenalg
 
-    g, entity_ids, entity_names = _build_entity_graph(sqlite)
+    g, entity_ids, entity_names = _build_entity_graph(sqlite)  # noqa: RUF059
     if g is None:
         return {level: {} for level in RESOLUTIONS}
 
@@ -169,14 +164,14 @@ def detect_entity_communities_multi(
 
 
 def _build_fact_graph(sqlite: SQLiteStore):
-    """Build the fact graph from SIMILAR_TO + shared-entity projection.
+    """Build the fact graph from FACT_SIMILAR + shared-entity projection.
 
     Returns:
         (igraph.Graph, fact_ids list, fact_texts dict)
     """
     import igraph as ig
 
-    rows = sqlite.conn.execute("SELECT id, text FROM facts").fetchall()
+    rows = sqlite.sql_conn.execute("SELECT id, text FROM facts").fetchall()
     fact_ids = [r[0] for r in rows]
     fact_texts = {r[0]: r[1] for r in rows}
     id_to_idx = {fid: i for i, fid in enumerate(fact_ids)}
@@ -186,40 +181,33 @@ def _build_fact_graph(sqlite: SQLiteStore):
     edge_list = []
     weights = []
 
-    # Add SIMILAR_TO edges between facts
-    similar_edges = sqlite.conn.execute(
-        """SELECT source_id, target_id, properties FROM edges
-           WHERE edge_type = 'SIMILAR_TO'
-             AND source_type = 'fact' AND target_type = 'fact'"""
-    ).fetchall()
-
-    for row in similar_edges:
-        src_idx = id_to_idx.get(row[0])
-        tgt_idx = id_to_idx.get(row[1])
+    # Add FACT_SIMILAR edges between facts (backend-agnostic edge API)
+    for src_id, tgt_id, props in sqlite.scan_edges_by_type(
+        ["FACT_SIMILAR"], source_type="fact", target_type="fact"
+    ):
+        src_idx = id_to_idx.get(src_id)
+        tgt_idx = id_to_idx.get(tgt_id)
         if src_idx is not None and tgt_idx is not None:
             edge_list.append((src_idx, tgt_idx))
-            props = json.loads(row[2]) if row[2] else {}
             weights.append(props.get("score", 0.5))
 
     # Add shared-entity projection edges
     print("  Computing shared-entity projection...")
     entity_to_facts = defaultdict(set)
     fact_to_entities = defaultdict(set)
-    about_rows = sqlite.conn.execute(
-        """SELECT source_id, target_id FROM edges
-           WHERE edge_type = 'ABOUT'
-             AND source_type = 'fact' AND target_type = 'entity'"""
-    ).fetchall()
-    for row in about_rows:
-        entity_to_facts[row[1]].add(row[0])
-        fact_to_entities[row[0]].add(row[1])
+    for src_id, tgt_id, _props in sqlite.scan_edges_by_type(
+        ["ABOUT"], source_type="fact", target_type="entity"
+    ):
+        # ABOUT is fact→entity: source=fact, target=entity
+        entity_to_facts[tgt_id].add(src_id)
+        fact_to_entities[src_id].add(tgt_id)
 
     max_facts_per_entity = 200
     projection_edge_counts = defaultdict(int)
 
     projected_entities = 0
     skipped_entities = 0
-    for entity_id, facts in entity_to_facts.items():
+    for entity_id, facts in entity_to_facts.items():  # noqa: PERF102
         fact_list = [f for f in facts if f in id_to_idx]
         if len(fact_list) > max_facts_per_entity:
             skipped_entities += 1
@@ -289,7 +277,7 @@ def detect_fact_communities_multi(
     """
     import leidenalg
 
-    g, fact_ids, fact_texts = _build_fact_graph(sqlite)
+    g, fact_ids, fact_texts = _build_fact_graph(sqlite)  # noqa: RUF059
     if g is None:
         return {level: {} for level in RESOLUTIONS}
 
@@ -458,7 +446,7 @@ def detect_fact_communities_hdbscan(
             communities[fact_id] = int(label)
             n_clusters = max(n_clusters, label + 1)
 
-    noise_count = sum(1 for l in labels if l == -1)
+    noise_count = sum(1 for lbl in labels if lbl == -1)
     print(f"  Found {n_clusters} fact clusters")
     print(f"  Facts in clusters: {len(communities)}, noise: {noise_count}")
 
@@ -473,7 +461,7 @@ def detect_fact_communities_leiden(
     """Single-resolution fact community detection (legacy wrapper)."""
     import leidenalg
 
-    g, fact_ids, fact_texts = _build_fact_graph(sqlite)
+    g, fact_ids, fact_texts = _build_fact_graph(sqlite)  # noqa: RUF059
     if g is None:
         return {}
 
@@ -511,27 +499,27 @@ def store_community_assignments(
     _ensure_legacy_columns(sqlite)
 
     if entity_communities:
-        sqlite.conn.executemany(
+        sqlite.sql_conn.executemany(
             "UPDATE entities SET community_id = ? WHERE id = ?",
             [(cid, eid) for eid, cid in entity_communities.items()]
         )
-        sqlite.conn.commit()
+        sqlite.sql_conn.commit()
         print(f"  Stored {len(entity_communities)} entity community assignments")
 
     if fact_topic_clusters:
-        sqlite.conn.executemany(
+        sqlite.sql_conn.executemany(
             "UPDATE facts SET topic_cluster_id = ? WHERE id = ?",
             [(cid, fid) for fid, cid in fact_topic_clusters.items()]
         )
-        sqlite.conn.commit()
+        sqlite.sql_conn.commit()
         print(f"  Stored {len(fact_topic_clusters)} fact topic cluster assignments")
 
     if fact_leiden_communities:
-        sqlite.conn.executemany(
+        sqlite.sql_conn.executemany(
             "UPDATE facts SET similarity_cluster_id = ? WHERE id = ?",
             [(cid, fid) for fid, cid in fact_leiden_communities.items()]
         )
-        sqlite.conn.commit()
+        sqlite.sql_conn.commit()
         print(f"  Stored {len(fact_leiden_communities)} fact similarity cluster assignments")
 
 
@@ -552,36 +540,36 @@ def store_multi_resolution_communities(
     for level in RESOLUTIONS:
         col = f"community_{level}"
         try:
-            sqlite.conn.execute(f"ALTER TABLE entities ADD COLUMN {col} INTEGER")
-        except Exception:
+            sqlite.sql_conn.execute(f"ALTER TABLE entities ADD COLUMN {col} INTEGER")
+        except Exception:  # noqa: BLE001, S110
             pass
         try:
-            sqlite.conn.execute(f"ALTER TABLE facts ADD COLUMN {col} INTEGER")
-        except Exception:
+            sqlite.sql_conn.execute(f"ALTER TABLE facts ADD COLUMN {col} INTEGER")
+        except Exception:  # noqa: BLE001, S110
             pass
 
     # Legacy columns too (backwards compat)
     _ensure_legacy_columns(sqlite)
-    sqlite.conn.commit()
+    sqlite.sql_conn.commit()
 
     # Clear existing multi-resolution values
     for level in RESOLUTIONS:
         col = f"community_{level}"
-        sqlite.conn.execute(f"UPDATE entities SET {col} = NULL")
-        sqlite.conn.execute(f"UPDATE facts SET {col} = NULL")
-    sqlite.conn.commit()
+        sqlite.sql_conn.execute(f"UPDATE entities SET {col} = NULL")
+        sqlite.sql_conn.execute(f"UPDATE facts SET {col} = NULL")
+    sqlite.sql_conn.commit()
 
     # Store entity communities at each level
     total_entity = 0
     for level, mapping in entity_communities.items():
         if mapping:
             col = f"community_{level}"
-            sqlite.conn.executemany(
+            sqlite.sql_conn.executemany(
                 f"UPDATE entities SET {col} = ? WHERE id = ?",
                 [(cid, eid) for eid, cid in mapping.items()]
             )
             total_entity += len(mapping)
-    sqlite.conn.commit()
+    sqlite.sql_conn.commit()
     print(f"  Stored entity community assignments across 4 levels ({total_entity} total)")
 
     # Store fact communities at each level
@@ -589,52 +577,228 @@ def store_multi_resolution_communities(
     for level, mapping in fact_communities.items():
         if mapping:
             col = f"community_{level}"
-            sqlite.conn.executemany(
+            sqlite.sql_conn.executemany(
                 f"UPDATE facts SET {col} = ? WHERE id = ?",
                 [(cid, fid) for fid, cid in mapping.items()]
             )
             total_fact += len(mapping)
-    sqlite.conn.commit()
+    sqlite.sql_conn.commit()
     print(f"  Stored fact community assignments across 4 levels ({total_fact} total)")
 
     # Also store L1 as the legacy community_id / similarity_cluster_id
-    if "L1" in entity_communities and entity_communities["L1"]:
-        sqlite.conn.executemany(
+    if entity_communities.get("L1"):
+        sqlite.sql_conn.executemany(
             "UPDATE entities SET community_id = ? WHERE id = ?",
             [(cid, eid) for eid, cid in entity_communities["L1"].items()]
         )
-        sqlite.conn.commit()
+        sqlite.sql_conn.commit()
 
-    if "L1" in fact_communities and fact_communities["L1"]:
-        sqlite.conn.executemany(
+    if fact_communities.get("L1"):
+        sqlite.sql_conn.executemany(
             "UPDATE facts SET similarity_cluster_id = ? WHERE id = ?",
             [(cid, fid) for fid, cid in fact_communities["L1"].items()]
         )
-        sqlite.conn.commit()
+        sqlite.sql_conn.commit()
 
     # Store HDBSCAN topic clusters
     if fact_topic_clusters:
-        sqlite.conn.execute("UPDATE facts SET topic_cluster_id = NULL")
-        sqlite.conn.executemany(
+        sqlite.sql_conn.execute("UPDATE facts SET topic_cluster_id = NULL")
+        sqlite.sql_conn.executemany(
             "UPDATE facts SET topic_cluster_id = ? WHERE id = ?",
             [(cid, fid) for fid, cid in fact_topic_clusters.items()]
         )
-        sqlite.conn.commit()
+        sqlite.sql_conn.commit()
         print(f"  Stored {len(fact_topic_clusters)} fact topic cluster assignments (HDBSCAN)")
+
+
+def _existing_community_columns(sqlite, table: str) -> list[str]:
+    """Levels whose ``community_{level}`` column exists on ``table``.
+
+    Args:
+        sqlite: Store exposing ``sql_conn``.
+        table: ``"entities"`` or ``"facts"``.
+
+    Returns:
+        Level names (subset of :data:`RESOLUTIONS`) present as columns, in
+        L0..L3 order.
+    """
+    cols = {
+        r[1] for r in sqlite.sql_conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    return [lvl for lvl in RESOLUTIONS if f"community_{lvl}" in cols]
+
+
+def _summary_lookup(sqlite) -> dict[tuple[str, str, int], tuple[str, list[str]]]:
+    """Best-effort (node_type, level, cluster_id) -> (summary, tags) map.
+
+    Reconciles the pre-existing ``community_summaries`` table onto the reified
+    Community rows so a summarization run that already happened is not lost when
+    the projection rewrites them. Missing/garbled rows are skipped rather than
+    failing the projection: summaries are enrichment, memberships are not. That
+    includes the row's *identity* — a NULL/non-integer ``community_id`` cannot be
+    matched to any assignment cell, so it is dropped instead of aborting the whole
+    Community upsert + ``COMM_MEMBER`` rebuild.
+    """
+    out: dict[tuple[str, str, int], tuple[str, list[str]]] = {}
+    rows = sqlite.sql_conn.execute(
+        "SELECT node_type, level, community_id, summary, tags FROM community_summaries"
+    ).fetchall()
+    for r in rows:
+        try:
+            key = (r[0], r[1], int(r[2]))
+        except (TypeError, ValueError):
+            continue  # unusable identity: skip this enrichment row
+        try:
+            tags = json.loads(r[4]) if r[4] else []
+        except (TypeError, ValueError):
+            tags = []
+        out[key] = (
+            r[3] or "",
+            tags if isinstance(tags, list) else [],
+        )
+    return out
+
+
+def project_community_membership_edges(sqlite, *, batch_size: int = 5000):
+    """Derive Community rows + ``COMM_MEMBER`` edges from the assignment columns.
+
+    The ``community_L0..L3`` columns on entities/facts stay the source of truth;
+    this is their projection into the graph, so node→community traversal has real
+    nodes and edges to walk. Runs right after
+    :func:`store_multi_resolution_communities`.
+
+    Because re-clustering reshuffles memberships wholesale, the ``COMM_MEMBER``
+    edge set is **deleted and rebuilt** (no row-level diffing) scoped to
+    ``edge_type = 'COMM_MEMBER'``, so a run never leaves a mix of stale and fresh
+    membership and no other edge type is touched. One edge per (node, level)
+    assignment carries its level in ``properties["level"]``. On SQLite the rebuild
+    is one transaction; on other backends it is best-effort — see
+    :func:`_rebuild_comm_member_edges`.
+
+    Args:
+        sqlite: Store to read assignments from and write the projection to.
+        batch_size: Edge rows per executemany/insert batch.
+
+    Returns:
+        ``(n_communities, n_edges)`` actually projected.
+    """
+    member_counts: dict[tuple[str, str, int], int] = defaultdict(int)
+    edges: list[Edge] = []
+
+    for node_type, table in (("entity", "entities"), ("fact", "facts")):
+        for level in _existing_community_columns(sqlite, table):
+            col = f"community_{level}"
+            rows = sqlite.sql_conn.execute(
+                f"SELECT id, {col} FROM {table} WHERE {col} IS NOT NULL"
+            ).fetchall()
+            for node_id, cid in rows:
+                cid = int(cid)
+                member_counts[(node_type, level, cid)] += 1
+                edges.append(
+                    Edge(
+                        source_type=node_type,
+                        source_id=node_id,
+                        target_type="community",
+                        target_id=community_id_from(node_type, level, cid),
+                        edge_type=EdgeType.COMM_MEMBER,
+                        properties={"level": level},
+                    )
+                )
+
+    summaries = _summary_lookup(sqlite)
+    communities = [
+        Community(
+            id=community_id_from(node_type, level, cid),
+            level=level,
+            node_type=node_type,
+            summary=summaries.get((node_type, level, cid), ("", []))[0],
+            tags=summaries.get((node_type, level, cid), ("", []))[1],
+            member_count=count,
+        )
+        for (node_type, level, cid), count in member_counts.items()
+    ]
+    sqlite.insert_communities(communities)
+
+    _rebuild_comm_member_edges(sqlite, edges, batch_size=batch_size)
+    print(
+        f"  Projected {len(communities)} communities and "
+        f"{len(edges)} COMM_MEMBER edges from the assignment columns"
+    )
+    return len(communities), len(edges)
+
+
+def _rebuild_comm_member_edges(sqlite, edges: list[Edge], *, batch_size: int) -> None:
+    """Delete every ``COMM_MEMBER`` edge and re-insert ``edges``.
+
+    For the SQLite backend the whole delete+rebuild runs as one transaction on the
+    raw connection: the store's own ``delete_edges``/``insert_edges`` commit per
+    call, which would expose a window with no memberships at all. Other backends
+    (LadybugDB keeps edges in the graph, not the ``edges`` table) go through the
+    normal dual-write ABC path, which is the only way to reach their edge store.
+
+    Atomicity therefore differs by backend:
+
+    - ``SQLiteStore``: atomic. Delete + all insert batches commit or roll back
+      together, so a reader never sees a partial membership projection.
+    - generic ABC fallback: **best-effort, not atomic.** ``delete_edges`` commits
+      before the inserts, so a crash/failure mid-rebuild can leave the
+      ``COMM_MEMBER`` projection empty or partial. It is derived state, so the
+      repair is to re-run periodic improvement (rebuild, never migrate). Insert
+      failures are deliberately **not** swallowed here: they propagate so the
+      operator sees a loud failure instead of a silently half-empty projection.
+
+    Args:
+        sqlite: Store to rewrite the projection in.
+        edges: The full fresh ``COMM_MEMBER`` edge set.
+        batch_size: Rows per batch.
+
+    Raises:
+        Exception: Whatever the backend raises on delete/insert, re-raised as-is
+            (fallback path) so a partial rebuild is never reported as success.
+    """
+    if isinstance(sqlite, SQLiteStore):
+        conn = sqlite.sql_conn
+        with conn:  # single transaction: no window without memberships
+            conn.execute("DELETE FROM edges WHERE edge_type = ?", ("COMM_MEMBER",))
+            for i in range(0, len(edges), batch_size):
+                conn.executemany(
+                    """INSERT OR IGNORE INTO edges
+                       (source_type, source_id, target_type, target_id, edge_type, properties)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            e.source_type,
+                            e.source_id,
+                            e.target_type,
+                            e.target_id,
+                            e.edge_type.value,
+                            json.dumps(e.properties) if e.properties else None,
+                        )
+                        for e in edges[i : i + batch_size]
+                    ],
+                )
+        return
+
+    # Non-atomic fallback: the delete is already committed once we get here, so an
+    # insert failure leaves a partial projection. Let it propagate — a loud error
+    # plus a re-run of improve is safer than pretending the rebuild succeeded.
+    sqlite.delete_edges(edge_type=EdgeType.COMM_MEMBER.value)
+    for i in range(0, len(edges), batch_size):
+        sqlite.insert_edges(edges[i : i + batch_size])
 
 
 def _ensure_legacy_columns(sqlite: SQLiteStore):
     """Ensure legacy single-resolution columns exist."""
     try:
-        sqlite.conn.execute("ALTER TABLE entities ADD COLUMN community_id INTEGER")
-    except Exception:
+        sqlite.sql_conn.execute("ALTER TABLE entities ADD COLUMN community_id INTEGER")
+    except Exception:  # noqa: BLE001, S110
         pass
     try:
-        sqlite.conn.execute("ALTER TABLE facts ADD COLUMN topic_cluster_id INTEGER")
-    except Exception:
+        sqlite.sql_conn.execute("ALTER TABLE facts ADD COLUMN topic_cluster_id INTEGER")
+    except Exception:  # noqa: BLE001, S110
         pass
     try:
-        sqlite.conn.execute("ALTER TABLE facts ADD COLUMN similarity_cluster_id INTEGER")
-    except Exception:
+        sqlite.sql_conn.execute("ALTER TABLE facts ADD COLUMN similarity_cluster_id INTEGER")
+    except Exception:  # noqa: BLE001, S110
         pass
-    sqlite.conn.commit()
+    sqlite.sql_conn.commit()

@@ -3,7 +3,7 @@
 A practical guide to querying the DingTalk spatio-temporal knowledge graph via
 the `kl` command-line interface (and the underlying `kl-server` HTTP API).
 
-Examples below use the **aliding-export** graph (Alibaba/Qwen team work chats:
+Examples below use the **aliding-export** graph (ExampleCorp/Qwen team work chats:
 onboarding, sandbox/e2b, InkFlow, model evals, OKR, travel platform, security).
 
 ---
@@ -70,8 +70,8 @@ queries (`ask`/`hop`/`expand`) immediately see the new data.
 # --- environment ---
 export KL_DWS_EXPORT_DIR=/path/to/export      # chat under chat/messages/ or chats/
 export KL_DATA_DIR=/path/to/data              # where knowledge.db + qdrant land
-export ANTHROPIC_AUTH_TOKEN=sk-...            # LLM key (DashScope anthropic mode)
-export KL_EMBED_API_KEY=sk-...                # embedding key (DashScope)
+export ANTHROPIC_AUTH_TOKEN=sk-...            # LLM key (the API, anthropic mode)
+export KL_EMBED_API_KEY=sk-...                # embedding key (the API)
 
 # --- build ---
 python -m scripts.ingest --fresh-db                # Phase A (chunk+embed) + Phase B (extract+graph)
@@ -90,10 +90,11 @@ cache-replay sub-steps (they assume Phase A already ran). There is no
 “Phase B only” flag — a graph with no embedded chunks to ground it is not useful.
 
 Notes:
-- `--fresh-db` deletes `knowledge.db` **and** the Qdrant dir, but **not** the
-  extraction cache (`$KL_DATA_DIR/extraction_cache/`). To rebuild the graph
-  *without* re-billing the LLM, run `python -m scripts.ingest --build-only`
-  (replays the cache). To wipe everything, `rm -rf "$KL_DATA_DIR"` first.
+- `--fresh-db` deletes `knowledge.db` **and** the Qdrant dir. The extraction
+  cache now lives in the `extraction_cache` table **inside** `knowledge.db`, so
+  `--fresh-db` clears the cache too. To rebuild the graph *without* re-billing
+  the LLM (reusing the cache), run `python -m scripts.ingest --build-only`
+  **without** `--fresh-db`. To wipe everything, `rm -rf "$KL_DATA_DIR"` first.
 - Phase B is the only expensive/LLM-billed step; Phase A and everything else is
   cheap and replayable. Determinism: re-ingesting never duplicates
   entities/facts (ids are UUID5s of normalized content).
@@ -190,7 +191,7 @@ Options: `-k/--top-k N`, `--phase2` (force synthesis), `--pretty`, `--json`.
 ### 4.2 `search` — single-collection vector search
 
 ```bash
-kl search "沙箱 gRPC 网络"                    # facts (default)
+kl search "部署平台 gRPC 网络"                    # facts (default)
 kl search "孙亮" -c entities -k 5           # resolve a person/system by meaning
 kl search "新员工入职流程" -c communities -k 3  # find relevant community neighborhoods
 kl search "502 报错" -c chunks               # raw source content (messages; later pdf/doc)
@@ -222,7 +223,7 @@ Options: `-c/--collection [chunks|messages|facts|entities|communities]`, `-k/--t
 
 Use `search -c entities` whenever you are **unsure of the exact surface form**
 of a name — it matches semantically. On this dataset the LLM emits variants like
-`孙亮` vs `孙亮(小孙)`, or `sandbox` vs `dev沙箱`; `entity`/`timeline` need the
+`孙亮` vs `孙亮(小孙)`, or `sandbox` vs `dev部署平台`; `entity`/`timeline` need the
 exact stored name, so resolve it here first.
 
 ### 4.3 `entity` / `timeline` / `context`
@@ -310,7 +311,7 @@ a strong seed reaches depth 3. A deep/weak node eventually returns an empty hop
 
 **Factual question →** `ask`, then ground the best fact:
 ```bash
-kl ask "谁决定用 e2b 做沙箱？" -k 5 --pretty
+kl ask "谁决定用 e2b 做部署平台？" -k 5 --pretty
 kl context <best_fact_id_from_items>
 ```
 

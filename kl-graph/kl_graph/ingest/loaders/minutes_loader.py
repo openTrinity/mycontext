@@ -27,6 +27,7 @@ from pathlib import Path
 
 from kl_graph.ingest.chunker import chunk_text
 from kl_graph.ingest.loaders.base import (
+    format_ts,
     iter_records,
     load_scopes,
     scope_title,
@@ -149,14 +150,18 @@ def load_minutes(minutes_dir: Path) -> list[Chunk]:
         url = _meeting_url(scope)
         # Trailing scope-id segment is the meeting task uuid; use as stable key.
         mid = scope_id.split(":", 1)[-1] if ":" in scope_id else scope_id
-        base_meta = {"title": title, "meeting_id": mid}
+        base_meta = {"unit_id": mid, "title": title, "meeting_id": mid}
 
         # ── Summary chunk (fold in keywords + action items) ──────────────
         summary = summaries.get(scope_id, "")
         kws = keywords.get(scope_id, [])
         acts = todos.get(scope_id, [])
         if summary or kws or acts:
-            parts = [summary] if summary else [f"# {title}"]
+            # Stamp the meeting time into the header so it is embedded + seen by
+            # the extractor (a meeting header line above the summary body).
+            _ts = format_ts(ts)
+            head = f"# {title} · {_ts}" if _ts else f"# {title}"
+            parts = [head, summary] if summary else [head]
             if kws:
                 parts.append("**关键词**: " + "、".join(kws))
             if acts:
@@ -183,9 +188,11 @@ def load_minutes(minutes_dir: Path) -> list[Chunk]:
                 heading_aware=False,
             )
             for i, seg in enumerate(segments):
+                _ts = format_ts(ts)
+                _head = f"【{title} 转写 · {_ts}】" if _ts else f"【{title} 转写】"
                 chunks.append(Chunk(
                     id=f"minutes:{mid}:transcript:{i}",
-                    content=f"【{title} 转写】\n{seg}",
+                    content=f"{_head}\n{seg}",
                     source_type="minutes",
                     timestamp=ts,
                     source_ref=url,

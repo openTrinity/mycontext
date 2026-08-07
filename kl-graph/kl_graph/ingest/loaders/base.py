@@ -15,9 +15,10 @@ stay focused on mapping their product's ``data`` payload to :class:`Chunk`.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 
 def read_jsonl(path: Path) -> Iterator[dict]:
@@ -69,6 +70,45 @@ def scope_title(scope: dict | None) -> str:
     data = scope.get("data", {}) or {}
     node = data.get("node", {}) if isinstance(data.get("node"), dict) else {}
     return (data.get("title") or node.get("name") or data.get("name") or "").strip()
+
+
+def scope_chat_kind(scope: dict | None) -> str:
+    """Return a chat scope's ``chat_kind`` (``"direct"`` | ``"group"``).
+
+    Chat scopes in the DWS export carry ``data.chat_kind``. When it is absent we
+    fall back to inferring from ``data.groupType`` (``SINGLE_CHAT`` is a 1:1
+    chat, anything else is a group). Returns ``""`` when nothing is known, so
+    callers can decide how to render an unknown shape.
+    """
+    if not isinstance(scope, dict):
+        return ""
+    data = scope.get("data", {}) or {}
+    kind = (data.get("chat_kind") or "").strip().lower()
+    if kind:
+        return kind
+    group_type = (data.get("groupType") or "").strip().upper()
+    if group_type == "SINGLE_CHAT":
+        return "direct"
+    if group_type:
+        return "group"
+    return ""
+
+
+# ─── Chat session boundaries (consumed by the chat session chunker) ─────────
+
+# Idle gap that ends a chat "session": if a conversation goes quiet for this
+# long, the next message starts a new topical session. Named so it is easy to
+# tune (``loader-context-rendering.md`` R0 left the value to the implementer).
+SESSION_GAP_HOURS = 3
+SESSION_GAP_MS = SESSION_GAP_HOURS * 60 * 60 * 1000
+
+# Literal in-text hard-break marker emitted between two chat messages separated
+# by >= ``SESSION_GAP_MS``. This is option (b) from R0: RAGFlow's ``naive_merge``
+# hard-cuts on a backtick-wrapped custom delimiter, so the downstream chat
+# chunker passes ``SESSION_BREAK`` as a *custom* delimiter and the marker is
+# consumed/stripped during slicing (never stored, never embedded).
+# Keep in sync with ``kl_graph/ingest/chunker.py``'s delimiter grammar.
+SESSION_BREAK_MARKER = "SESSION_BREAK"
 
 
 # Keys worth surfacing as readable text when flattening an unknown record
@@ -194,9 +234,9 @@ def to_unix_ms(value: Any) -> int:
         iso = s.replace("Z", "+00:00")
         parsers = (
             lambda x: datetime.fromisoformat(x),
-            lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M:%S"),
-            lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M"),
-            lambda x: datetime.strptime(x, "%Y-%m-%d"),
+            lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M:%S"),  # noqa: DTZ007
+            lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M"),  # noqa: DTZ007
+            lambda x: datetime.strptime(x, "%Y-%m-%d"),  # noqa: DTZ007
         )
         for parse in parsers:
             try:
@@ -207,3 +247,17 @@ def to_unix_ms(value: Any) -> int:
             except (ValueError, TypeError):
                 continue
     return 0
+
+
+def format_ts(unix_ms: int) -> str:
+    """Render a unix-ms timestamp as a compact local ``YYYY-MM-DD HH:MM`` string.
+
+    Single source of truth for the human-readable time stamped into every
+    chunk's rendered header (chat/mail/minutes/generic), so retrieval and the
+    LLM extractor read time from the content itself rather than a separate
+    prompt field. Returns ``""`` for a missing/unparseable time (``<= 0``) so
+    callers can omit the time cleanly instead of printing a fake epoch.
+    """
+    if not unix_ms or unix_ms <= 0:
+        return ""
+    return datetime.fromtimestamp(unix_ms / 1000).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006

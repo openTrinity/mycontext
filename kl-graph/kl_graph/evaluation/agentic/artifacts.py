@@ -7,9 +7,10 @@ import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -76,7 +77,7 @@ class TranscriptWriter:
         self._handle.close()
         os.replace(self.partial_path, self.path)
 
-    def __enter__(self) -> "TranscriptWriter":
+    def __enter__(self) -> TranscriptWriter:  # noqa: PYI034
         return self
 
     def __exit__(self, _exc_type, _exc, _tb) -> None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from .models import AgentCase
 
-
 DEVELOPER_INSTRUCTIONS = """You are one isolated retrieval agent in a blind LoCoMo evaluation.
 
 Follow the attached KL skill and answer the single supplied question by using the KL CLI.

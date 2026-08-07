@@ -1,4 +1,4 @@
-"""Build SIMILAR_TO edges between facts using embedding cosine similarity.
+"""Build FACT_SIMILAR edges between facts using embedding cosine similarity.
 
 Optimized approach: load all fact vectors into memory, use numpy batch
 operations to find similar pairs. Much faster than individual ANN queries
@@ -14,13 +14,13 @@ import numpy as np
 from tqdm import tqdm
 
 from kl_graph.models.types import Edge, EdgeType
+from kl_graph.storage.base import KnowledgeStore
 from kl_graph.storage.qdrant_store import QdrantStore
-from kl_graph.storage.sqlite_store import SQLiteStore
 
 
 def build_fact_similarity_edges(
     qdrant: QdrantStore,
-    sqlite: SQLiteStore,
+    store: KnowledgeStore,
     threshold: float = 0.85,
     max_neighbors: int = 10,
     chunk_size: int = 500,
@@ -32,13 +32,13 @@ def build_fact_similarity_edges(
 
     Args:
         qdrant: Qdrant store with "facts" collection populated
-        sqlite: SQLite store with facts and edges tables
+        store: KnowledgeStore with facts and edges tables
         threshold: Minimum cosine similarity to create an edge
         max_neighbors: Max edges per fact (top-K)
         chunk_size: Rows per chunk for matrix multiply
 
     Returns:
-        Number of SIMILAR_TO edges created
+        Number of FACT_SIMILAR edges created
     """
     print("  Loading fact vectors from Qdrant...")
     facts_count = qdrant.count("facts")
@@ -85,8 +85,8 @@ def build_fact_similarity_edges(
     seen_pairs = set()
 
     # Process in chunks to avoid O(n²) memory
-    for i in tqdm(range(0, n, chunk_size), desc="  Fact SIMILAR_TO"):
-        chunk = vectors_norm[i:i + chunk_size]  # (chunk_size, dim)
+    for i in tqdm(range(0, n, chunk_size), desc="  Fact FACT_SIMILAR"):
+        chunk = vectors_norm[i : i + chunk_size]  # (chunk_size, dim)
 
         # Compute similarities: chunk × all^T → (chunk_size, n)
         sims = chunk @ vectors_norm.T
@@ -127,21 +127,25 @@ def build_fact_similarity_edges(
                     continue
                 seen_pairs.add(pair_key)
 
-                new_edges.append(Edge(
-                    source_type="fact",
-                    source_id=src_id,
-                    target_type="fact",
-                    target_id=tgt_id,
-                    edge_type=EdgeType.SIMILAR_TO,
-                    properties={"score": round(float(score), 4)},
-                ))
+                new_edges.append(
+                    Edge(
+                        source_type="fact",
+                        source_id=src_id,
+                        target_type="fact",
+                        target_id=tgt_id,
+                        edge_type=EdgeType.FACT_SIMILAR,
+                        properties={"score": round(float(score), 4)},
+                    )
+                )
 
     # Bulk insert
     if new_edges:
-        print(f"  Inserting {len(new_edges)} fact SIMILAR_TO edges...")
+        print(f"  Inserting {len(new_edges)} fact FACT_SIMILAR edges...")
         batch_size = 5000
         for i in range(0, len(new_edges), batch_size):
-            sqlite.insert_edges(new_edges[i:i + batch_size])
+            store.insert_edges(new_edges[i : i + batch_size])
 
-    print(f"  Done: {len(new_edges)} fact SIMILAR_TO edges created (threshold={threshold})")
+    print(
+        f"  Done: {len(new_edges)} fact FACT_SIMILAR edges created (threshold={threshold})"
+    )
     return len(new_edges)

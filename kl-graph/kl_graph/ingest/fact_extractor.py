@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Optional
 
-from kl_graph.models.types import Entity, Fact, FactType, Message
+from kl_graph.models.types import Chunk, Entity, Fact, FactType
 
 # Fact extraction patterns grouped by type
 FACT_PATTERNS: dict[FactType, list[re.Pattern]] = {
@@ -57,7 +56,7 @@ class FactExtractor:
         self.patterns = FACT_PATTERNS
 
     def extract(
-        self, message: Message, entities: list[Entity]
+        self, message: Chunk, entities: list[Entity]
     ) -> list[Fact]:
         """Extract facts from a message using pattern matching.
 
@@ -75,7 +74,7 @@ class FactExtractor:
             return []
 
         # Skip image/media messages
-        if content.startswith("[图片消息]") or content.startswith("[语音消息]"):
+        if content.startswith("[图片消息]") or content.startswith("[语音消息]"):  # noqa: PIE810
             return []
         if "[图片消息](mediaId=" in content and len(content.replace("[图片消息]", "").strip()) < 10:
             return []
@@ -95,7 +94,7 @@ class FactExtractor:
                         fact_type=fact_type,
                         timestamp=message.timestamp,
                         confidence=0.8,  # pattern-extracted, not LLM-confirmed
-                        source_message_id=message.id,
+                        source_chunk_id=message.id,
                     )
                     facts.append(fact)
                     break  # one fact type per pattern group per message
@@ -105,7 +104,7 @@ class FactExtractor:
         return facts
 
     def extract_batch(
-        self, messages: list[Message], entities_per_msg: dict[str, list[Entity]]
+        self, messages: list[Chunk], entities_per_msg: dict[str, list[Entity]]
     ) -> list[Fact]:
         """Extract facts from multiple messages.
 

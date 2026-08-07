@@ -23,21 +23,15 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-import litellm
-
-# Importing config applies the litellm httpx-transport fix (see config.py). Kept
-# as an explicit import here because this module is otherwise config-free and
-# may be imported standalone.
-from kl_graph import config as _config  # noqa: F401  (side-effect: transport fix)
-
+from kl_graph.utils.litellm_config import litellm
 from kl_graph.models.types import EntityType, FactType
 
 logger = logging.getLogger(__name__)
 
 # Number of example entity names / fact snippets shown per type in the pool.
-_POOL_SAMPLES_PER_TYPE = 5
+_POOL_SAMPLES_PER_TYPE = 10
 # Max entities the LLM is allowed to extract from a single query.
-_MAX_QUERY_ENTITIES = 5
+_MAX_QUERY_ENTITIES = 10
 
 _RE_ENG_ZH = re.compile(r"([A-Za-z0-9]+)([\u4e00-\u9fa5])")
 _RE_ZH_ENG = re.compile(r"([\u4e00-\u9fa5])([A-Za-z0-9]+)")
@@ -55,7 +49,7 @@ def normalize_query(txt: str) -> str:
        (full-width parens, alnum, etc.) match their ASCII counterparts.
     2. Case folding (lowercase).
     3. A space inserted at every English<->Chinese boundary, so glued tokens like
-       "沙箱security" split into "沙箱 security".
+       "部署平台security" split into "部署平台 security".
     4. Whitespace runs collapsed to a single space.
 
     Traditional->simplified conversion (RAGFlow's ``tradi2simp``) is
@@ -137,7 +131,7 @@ Fact type meanings:
 -Examples-
 ######################
 查询: "张伟最近在数据同步上做了什么决策？"
-实体类型池: {{"PERSON": ["张伟", "赵敏"], "SYSTEM": ["沙箱", "网关"], "PROJECT": ["权限重构"]}}
+实体类型池: {{"PERSON": ["张伟", "李娜"], "SYSTEM": ["部署平台", "网关"], "PROJECT": ["权限重构"]}}
 事实类型池: {{"DECISION": ["决定采用方案A"], "STATUS": ["功能已上线"]}}
 输出:
 {{
@@ -147,7 +141,7 @@ Fact type meanings:
 }}
 ######################
 查询: "审批系统现在上线了吗？"
-实体类型池: {{"PERSON": ["王强"], "SYSTEM": ["审批系统", "沙箱"], "PROJECT": ["大促"]}}
+实体类型池: {{"PERSON": ["王强"], "SYSTEM": ["审批系统", "部署平台"], "PROJECT": ["大促"]}}
 事实类型池: {{"DECISION": ["决定用方案A"], "STATUS": ["已灰度上线"]}}
 输出:
 {{
@@ -167,18 +161,23 @@ Max Number of Entities: {max_entities}
 """
 
 
-def build_type_pool(sqlite) -> dict[str, dict[str, list[str]]]:
+def build_type_pool(store) -> dict[str, dict[str, list[str]]]:
     """Build a corpus-derived type pool to inject into the rewrite prompt.
 
     Args:
-        sqlite: An open :class:`SQLiteStore` (uses its ``.conn``).
+        store: A :class:`KnowledgeStore` (SQLite or ladybug). Its content tables
+            are read through the backend-agnostic ``sql_conn`` property; a raw
+            ``sqlite3.Connection`` or legacy store exposing ``.conn`` also works.
 
     Returns:
         ``{"entity_pool": {EntityType: [top names]},
            "fact_pool": {FactType: [sample fact texts]}}``. Entity names are the
         most-mentioned per type; fact snippets are arbitrary short samples.
     """
-    conn = sqlite.conn
+    # Every KnowledgeStore exposes the shared content connection via ``sql_conn``
+    # (on ladybug the ``edges`` table is empty, but entities/facts live in
+    # SQLite). Fall back to ``.conn`` (raw SQLiteStore) or a bare connection.
+    conn = getattr(store, "sql_conn", None) or getattr(store, "conn", None) or store
 
     entity_pool: dict[str, list[str]] = {}
     for etype in EntityType:
@@ -232,6 +231,33 @@ def _parse_rewrite_json(raw: str) -> dict:
     raise ValueError(f"Unparseable rewrite output: {raw[:200]!r}")
 
 
+def _rewrite_messages(model: str, question: str, type_pool: dict) -> list[dict]:
+    """Build the (system, user) messages for the rewrite call (sync + async)."""
+    system_prompt = SYSTEM_PROMPT.format(max_entities=_MAX_QUERY_ENTITIES)
+    user_content = USER_PROMPT_TEMPLATE.format(
+        query=question,
+        entity_pool=json.dumps(type_pool.get("entity_pool", {}), ensure_ascii=False),
+        fact_pool=json.dumps(type_pool.get("fact_pool", {}), ensure_ascii=False),
+        max_entities=_MAX_QUERY_ENTITIES,
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def _rewrite_from_content(content: str) -> QueryRewrite:
+    """Parse a rewrite LLM response body into a :class:`QueryRewrite`."""
+    data = _parse_rewrite_json(content or "")
+    return QueryRewrite(
+        entities_from_query=[str(e) for e in data.get("entities_from_query", [])][
+            :_MAX_QUERY_ENTITIES
+        ],
+        entity_type_keywords=[str(t) for t in data.get("entity_type_keywords", [])][:3],
+        fact_type_keywords=[str(t) for t in data.get("fact_type_keywords", [])][:3],
+    )
+
+
 def rewrite_query(
     model: str, question: str, type_pool: dict, *, api_base: str, api_key: str
 ) -> QueryRewrite:
@@ -248,31 +274,32 @@ def rewrite_query(
         A :class:`QueryRewrite`. On any LLM/parse failure this raises, and the
         caller is expected to fall back to substring entity matching.
     """
-    system_prompt = SYSTEM_PROMPT.format(max_entities=_MAX_QUERY_ENTITIES)
-    user_content = USER_PROMPT_TEMPLATE.format(
-        query=question,
-        entity_pool=json.dumps(type_pool.get("entity_pool", {}), ensure_ascii=False),
-        fact_pool=json.dumps(type_pool.get("fact_pool", {}), ensure_ascii=False),
-        max_entities=_MAX_QUERY_ENTITIES,
-    )
     resp = litellm.completion(
         model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+        messages=_rewrite_messages(model, question, type_pool),
         api_base=api_base,
         api_key=api_key,
         response_format={"type": "json_object"},
         temperature=0.0,
     )
-    content = resp.choices[0].message.content or ""
-    data = _parse_rewrite_json(content)
+    return _rewrite_from_content(resp.choices[0].message.content)
 
-    return QueryRewrite(
-        entities_from_query=[str(e) for e in data.get("entities_from_query", [])][
-            :_MAX_QUERY_ENTITIES
-        ],
-        entity_type_keywords=[str(t) for t in data.get("entity_type_keywords", [])][:3],
-        fact_type_keywords=[str(t) for t in data.get("fact_type_keywords", [])][:3],
+
+async def arewrite_query(
+    model: str, question: str, type_pool: dict, *, api_base: str, api_key: str
+) -> QueryRewrite:
+    """Async twin of :func:`rewrite_query` (``litellm.acompletion``).
+
+    Same contract and failure semantics as the sync version; used by the async
+    query engine so the rewrite LLM call ``await``s instead of blocking the
+    event loop.
+    """
+    resp = await litellm.acompletion(
+        model=model,
+        messages=_rewrite_messages(model, question, type_pool),
+        api_base=api_base,
+        api_key=api_key,
+        response_format={"type": "json_object"},
+        temperature=0.0,
     )
+    return _rewrite_from_content(resp.choices[0].message.content)

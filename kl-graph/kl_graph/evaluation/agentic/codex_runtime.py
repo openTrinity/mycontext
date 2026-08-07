@@ -18,7 +18,13 @@ from .artifacts import (
     preserve_tool_log,
     remove_agent_workspace,
 )
-from .models import FINAL_OUTPUT_SCHEMA, AgentCase, AgentResult, artifact_stem, parse_agent_output
+from .models import (
+    FINAL_OUTPUT_SCHEMA,
+    AgentCase,
+    AgentResult,
+    artifact_stem,
+    parse_agent_output,
+)
 from .prompts import DEVELOPER_INSTRUCTIONS, case_prompt
 
 
@@ -79,7 +85,7 @@ class CodexRuntimePool:
         self.effective_model: str | None = options.model
         self._temporary_home: tempfile.TemporaryDirectory[str] | None = None
 
-    async def __aenter__(self) -> "CodexRuntimePool":
+    async def __aenter__(self) -> CodexRuntimePool:  # noqa: PYI034
         config_type = self.sdk["CodexConfig"]
         client_type = self.sdk["AsyncCodex"]
         try:
@@ -242,9 +248,9 @@ async def _run_case(
         if turn is not None:
             try:
                 await turn.interrupt()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         result.status = "failed"
         result.error = f"{type(exc).__name__}: {exc}"
     finally:

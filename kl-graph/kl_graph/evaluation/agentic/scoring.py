@@ -8,14 +8,13 @@ from typing import Any
 
 from kl_graph.data.locomo import load_dia_id_map, load_evaluation
 
+from .artifacts import atomic_write_json, atomic_write_jsonl
+from .evidence import EvidenceResolver, citation_references, transcript_references
 from .locomo_scoring import (
     CATEGORY_NAMES,
     evaluate_answers,
     retrieval_scores,
 )
-
-from .artifacts import atomic_write_json, atomic_write_jsonl
-from .evidence import EvidenceResolver, citation_references, transcript_references
 from .models import AgentResult
 
 
@@ -130,9 +129,9 @@ def evaluate_agentic_results(
 def _sqlite_path() -> Path:
     # Import at scoring time so CLI-loaded environment variables remain the
     # single configuration source for the graph runtime.
-    from kl_graph.config import SQLITE_PATH
+    from kl_graph.config import DATA_DIR
 
-    return SQLITE_PATH
+    return DATA_DIR / "knowledge.db"
 
 
 def _enrich_row(row: dict[str, Any], retrieval_k: int) -> dict[str, Any]:

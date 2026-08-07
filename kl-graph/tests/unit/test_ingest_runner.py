@@ -1,0 +1,121 @@
+"""The endpoint and CLI share the unit-incremental ingestion runner."""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from kl_graph.ingest.runner import IngestOptions, IngestResult, run_ingestion
+
+
+def test_runner_constructs_unit_incremental_pipeline(tmp_path) -> None:
+    pipeline = MagicMock()
+    pipeline._phase_a_complete.return_value = False
+    pipeline.units_discovered = 2
+    pipeline.units_skipped = 1
+    pipeline.workset_unit_count = 1
+    pipeline.workset_chunk_count = 1
+    pipeline.source_units = [object()]
+    pipeline.all_chunks.return_value = [object()]
+    pipeline.run_extraction = AsyncMock()
+    pipeline.run_graph_build = AsyncMock()
+    checkpoint = MagicMock()
+    checkpoint.is_done.return_value = False
+    checkpoint.batch_id = "batch-1"
+
+    with patch(
+        "kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline
+    ) as pipeline_class:
+        result = asyncio.run(
+            run_ingestion(
+                IngestOptions(
+                    input_dir=tmp_path,
+                    source_id="slack-prod",
+                    run_improve=False,
+                ),
+                checkpoint=checkpoint,
+            )
+        )
+
+    assert pipeline_class.call_args.kwargs["messages_dir"] == tmp_path / "chat"
+    assert pipeline_class.call_args.kwargs["source_id"] == "slack-prod"
+    assert pipeline_class.call_args.kwargs["incremental_units"] is True
+    assert result.units_processed == 1
+    pipeline.run_phase_a.assert_called_once()
+    pipeline.complete_workset.assert_called_once()
+    checkpoint.mark_done.assert_called_once_with(
+        "ingest.complete",
+        params={"workset_schema": 1, "batch_id": "batch-1"},
+    )
+    pipeline.close.assert_called_once()
+
+
+def test_runner_retains_workset_when_graph_build_fails(tmp_path) -> None:
+    pipeline = MagicMock()
+    pipeline._phase_a_complete.return_value = False
+    pipeline.run_extraction = AsyncMock()
+    pipeline.run_graph_build = AsyncMock(side_effect=RuntimeError("graph failed"))
+    checkpoint = MagicMock(batch_id="batch-failed")
+    checkpoint.is_done.return_value = False
+
+    with patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline):
+        try:
+            asyncio.run(
+                run_ingestion(
+                    IngestOptions(tmp_path, "slack-prod", run_improve=False),
+                    checkpoint=checkpoint,
+                )
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "graph failed"
+        else:
+            raise AssertionError("graph failure did not propagate")
+
+    pipeline.complete_workset.assert_not_called()
+    checkpoint.mark_done.assert_not_called()
+    pipeline.close.assert_called_once()
+
+
+def test_completed_checkpoint_only_retries_workset_cleanup(tmp_path) -> None:
+    pipeline = MagicMock()
+    checkpoint = MagicMock(batch_id="batch-complete")
+    checkpoint.is_done.side_effect = lambda step, **_: step == "ingest.complete"
+
+    with patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline):
+        result = asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod"), checkpoint=checkpoint
+            )
+        )
+
+    assert result == IngestResult(0, 0, 0, 0)
+    pipeline.complete_workset.assert_called_once()
+    pipeline.run_phase_a.assert_not_called()
+    pipeline.run_extraction.assert_not_called()
+    pipeline.run_graph_build.assert_not_called()
+
+
+def test_cli_default_path_delegates_to_shared_runner(tmp_path) -> None:
+    from scripts import ingest
+
+    checkpoint = MagicMock(source_hash="abc")
+    shared_run = AsyncMock()
+    argv = [
+        "scripts/ingest.py",
+        "--input-dir",
+        str(tmp_path),
+        "--source-id",
+        "teams-prod",
+        "--no-improve",
+    ]
+    with (
+        patch("sys.argv", argv),
+        patch.object(ingest, "make_checkpoint", return_value=checkpoint),
+        patch.object(ingest, "run_ingestion", shared_run),
+    ):
+        asyncio.run(ingest.main())
+
+    options = shared_run.await_args.args[0]
+    assert options.input_dir == tmp_path.resolve()
+    assert options.source_id == "teams-prod"
+    assert options.run_improve is False

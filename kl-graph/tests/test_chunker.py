@@ -12,12 +12,18 @@ Pure-logic, runs anywhere. Run: python3 tests/test_chunker.py
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from kl_graph.ingest.chunker import chunk_text
+from kl_graph.ingest.chunker import (
+    chunk_text,
+    get_delimiters,
+    naive_merge,
+    num_tokens_from_string,
+)
 
 _failures = []
 
@@ -69,6 +75,67 @@ def test_overlap():
     check(len(o1) >= len(o0), "overlap produces >= as many chunks (repeats context)")
 
 
+# ─── Token-budget path (RAGFlow ``naive_merge`` port) ──────────────────────
+
+
+def test_num_tokens():
+    check(num_tokens_from_string("") == 0, "empty string -> 0 tokens")
+    check(num_tokens_from_string("hello world") > 0, "non-empty -> >0 tokens")
+    # Chinese text tokenizes to a positive count under cl100k_base (or char/4 fallback).
+    check(num_tokens_from_string("数据同步测试") > 0, "cjk -> >0 tokens")
+
+
+def test_get_delimiters():
+    # Backtick-wrapped run is one multi-char delimiter; bare chars are individual.
+    pat = get_delimiters("\n。`SESSION_BREAK`")
+    check("SESSION_BREAK" in pat, "custom backtick delimiter kept as a unit")
+    # Longer delimiters sort first in the alternation (so they match greedily).
+    check(pat.index(re.escape("SESSION_BREAK")) < pat.index(re.escape("。")),
+          "longer delimiter ordered before shorter one")
+    check(get_delimiters("") == "", "empty spec -> empty pattern")
+
+
+def test_naive_merge_soft_budget():
+    # Many short sentences, soft delimiter only: pieces re-merge up to the budget.
+    sentences = "。".join([f"这是第{i}句话内容" for i in range(300)]) + "。"
+    out = naive_merge(sentences, chunk_token_num=64, delimiter="\n。；！？")
+    check(len(out) > 1, f"long input splits into multiple chunks (got {len(out)})")
+    check(all(num_tokens_from_string(c) <= 64 * 2 for c in out),
+          "soft-merged chunks stay near the token budget")
+    joined = "".join(out)
+    check("第0句" in joined and "第299句" in joined, "first/last sentences preserved")
+
+
+def test_naive_merge_hard_custom_delimiter():
+    # Custom (backtick) delimiter: each segment its own chunk, budget ignored.
+    text = "a" * 20 + "【SB】" + "b" * 20 + "【SB】" + "c" * 20
+    out = naive_merge(text, chunk_token_num=1, delimiter="`【SB】`")
+    check(len(out) == 3, f"hard delimiter -> one chunk per segment (got {len(out)})")
+    check("【SB】" not in "".join(out), "the delimiter itself is dropped")
+    check(all(x in "".join(out) for x in ("a" * 20, "b" * 20, "c" * 20)),
+          "segment bodies preserved across hard cuts")
+
+
+def test_naive_merge_hard_then_soft():
+    # The intended chat pattern: split on the hard session break first, then
+    # size-bound each session with a soft-delimiter call.
+    session_a = "。".join([f"会话A句{i}" for i in range(200)]) + "。"
+    session_b = "短会话B。"
+    doc = session_a + "【SESSION】" + session_b
+    sessions = naive_merge(doc, delimiter="`【SESSION】`")
+    check(len(sessions) == 2, f"hard split -> 2 sessions (got {len(sessions)})")
+    # The big session further splits under a soft budget; the short one stays whole.
+    big = naive_merge(sessions[0], chunk_token_num=64, delimiter="\n。；！？")
+    small = naive_merge(sessions[1], chunk_token_num=64, delimiter="\n。；！？")
+    check(len(big) > 1, "oversized session is size-bounded into multiple chunks")
+    check(len(small) == 1, "short session stays a single chunk")
+
+
+def test_naive_merge_empty():
+    check(naive_merge("") == [], "empty string -> no chunks")
+    check(naive_merge([]) == [], "empty list -> no chunks")
+
+
 if __name__ == "__main__":
     test_empty()
     test_short_passthrough()
@@ -76,6 +143,12 @@ if __name__ == "__main__":
     test_delimiter_split_and_merge()
     test_heading_aware()
     test_overlap()
+    test_num_tokens()
+    test_get_delimiters()
+    test_naive_merge_soft_budget()
+    test_naive_merge_hard_custom_delimiter()
+    test_naive_merge_hard_then_soft()
+    test_naive_merge_empty()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}):")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
 import re
@@ -14,14 +13,13 @@ from typing import Any
 
 import httpx
 
-from kl_graph.config import DATA_DIR, PROJECT_ROOT
+from kl_graph.config import DATA_DIR, PROJECT_ROOT, cfg
 
 from .artifacts import atomic_write_json
 from .codex_runtime import RuntimeOptions
 from .harness import HarnessOptions, run_agents
 from .locomo_scoring import CATEGORY_NAMES
 from .scoring import evaluate_agentic_results
-
 
 AGENTIC_DIR = Path(__file__).resolve().parent
 METRICS_PATH = DATA_DIR / "run_metrics.jsonl"
@@ -84,7 +82,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--skill-path", type=Path,
-        default=PROJECT_ROOT / ".claude" / "skills" / "kl" / "SKILL.md",
+        default=PROJECT_ROOT / "skills" / "kl" / "SKILL.md",
     )
     parser.add_argument("--codex-sdk-path", type=Path, default=_default_sdk_path())
     parser.add_argument("--codex-bin", type=Path, default=_default_codex_bin())
@@ -353,7 +351,7 @@ def _validate_paths(args: argparse.Namespace) -> None:
 
 
 def _check_kl_server() -> None:
-    port = int(os.environ.get("KL_SERVER_PORT", "8200"))
+    port = int(cfg.server.port)
     try:
         response = httpx.get(f"http://127.0.0.1:{port}/health", timeout=3)
         response.raise_for_status()

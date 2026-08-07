@@ -1,0 +1,138 @@
+"""Tests for the embedder's transient-error retry classification.
+
+The bulk-embed path retries transient failures (429 rate-limit, timeouts, 5xx)
+with backoff so one blip doesn't abort a long run, but must NOT spin forever on
+a genuine hard stop (bad request, real quota exhaustion). These tests pin that
+classification without any network I/O.
+
+Run: ``.venv/bin/python -m pytest tests/test_embedder_retry.py -q``
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from kl_graph.ingest.embedder import Embedder
+
+
+class _Exc(Exception):
+    """Exception carrying an arbitrary status_code / headers / retry_after."""
+
+    def __init__(self, msg="", *, status_code=None, headers=None, retry_after=None):
+        super().__init__(msg)
+        if status_code is not None:
+            self.status_code = status_code
+        if headers is not None:
+            self.headers = headers
+        if retry_after is not None:
+            self.retry_after = retry_after
+
+
+class RateLimitError(_Exc):
+    """Name-matched transient error (mirrors litellm's class name)."""
+
+
+def test_429_status_is_transient() -> None:
+    assert Embedder._is_transient(_Exc("slow down", status_code=429)) is True
+
+
+def test_5xx_and_timeout_status_are_transient() -> None:
+    for code in (500, 502, 503, 504, 408):
+        assert Embedder._is_transient(_Exc(status_code=code)) is True
+
+
+def test_rate_limit_error_by_class_name_is_transient() -> None:
+    # litellm raises RateLimitError even when status_code isn't set on the exc.
+    assert Embedder._is_transient(RateLimitError("rate limited")) is True
+
+
+def test_rate_limit_message_is_transient() -> None:
+    assert Embedder._is_transient(_Exc("Error code: 429 - rate limit exceeded")) is True
+
+
+def test_insufficient_quota_is_not_transient() -> None:
+    # A genuine quota exhaustion must NOT be retried (would spin uselessly).
+    exc = _Exc("You exceeded your current quota ... insufficient_quota")
+    assert Embedder._is_transient(exc) is False
+
+
+def test_bad_request_is_not_transient() -> None:
+    assert Embedder._is_transient(_Exc("bad dimensions", status_code=400)) is False
+
+
+def test_retry_after_attribute_is_read() -> None:
+    assert Embedder._retry_after(_Exc(retry_after=7)) == 7.0
+
+
+def test_retry_after_header_is_read() -> None:
+    assert Embedder._retry_after(_Exc(headers={"retry-after": "12"})) == 12.0
+
+
+def test_retry_after_absent_returns_none() -> None:
+    assert Embedder._retry_after(_Exc("no hint")) is None
+
+
+def test_embed_with_retry_recovers_then_succeeds(monkeypatch) -> None:
+    # Two transient 429s then success: _embed_with_retry must return the result
+    # without sleeping for real.
+    import kl_graph.ingest.embedder as emod
+
+    calls = {"n": 0}
+
+    def fake_embedding(**kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RateLimitError("Error code: 429 - too many requests")
+        return {"ok": True}
+
+    monkeypatch.setattr(emod.litellm, "embedding", fake_embedding)
+    monkeypatch.setattr(emod.time, "sleep", lambda *_a, **_k: None)  # no real waits
+    monkeypatch.setattr(emod, "EMBED_MAX_RETRIES", 5)
+
+    e = Embedder.__new__(Embedder)
+    out = e._embed_with_retry({"model": "x", "input": ["t"]})
+    assert out == {"ok": True}
+    assert calls["n"] == 3  # failed twice, succeeded on the third
+
+
+def test_embed_with_retry_gives_up_after_max(monkeypatch) -> None:
+    import kl_graph.ingest.embedder as emod
+
+    def always_429(**kwargs):
+        raise RateLimitError("Error code: 429 - too many requests")
+
+    monkeypatch.setattr(emod.litellm, "embedding", always_429)
+    monkeypatch.setattr(emod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(emod, "EMBED_MAX_RETRIES", 2)
+
+    e = Embedder.__new__(Embedder)
+    try:
+        e._embed_with_retry({"model": "x", "input": ["t"]})
+        raise AssertionError("should have raised after exhausting retries")
+    except RateLimitError:
+        pass
+
+
+def test_embed_with_retry_does_not_retry_hard_stop(monkeypatch) -> None:
+    import kl_graph.ingest.embedder as emod
+
+    calls = {"n": 0}
+
+    def quota(**kwargs):
+        calls["n"] += 1
+        raise _Exc("insufficient_quota: you exceeded your quota")
+
+    monkeypatch.setattr(emod.litellm, "embedding", quota)
+    monkeypatch.setattr(emod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(emod, "EMBED_MAX_RETRIES", 5)
+
+    e = Embedder.__new__(Embedder)
+    try:
+        e._embed_with_retry({"model": "x", "input": ["t"]})
+        raise AssertionError("hard stop should raise immediately")
+    except _Exc:
+        pass
+    assert calls["n"] == 1  # no retries on a hard stop

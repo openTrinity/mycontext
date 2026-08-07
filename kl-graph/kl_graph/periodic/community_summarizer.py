@@ -15,16 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 
-import litellm
-
-from kl_graph.config import LLM_BASE_URL, LLM_MODEL, SQLITE_PATH
+from kl_graph.config import cfg, DATA_DIR
+from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 from kl_graph.periodic.community_detection import RESOLUTIONS
 from kl_graph.storage.sqlite_store import SQLiteStore
+
+SQLITE_PATH = DATA_DIR / "knowledge.db"
 
 
 @dataclass
@@ -63,23 +63,23 @@ Each summary should be 1-2 sentences in Chinese. Each tags list should have 3-5 
 
 
 def _precompute_entity_degrees(sqlite: SQLiteStore) -> dict[str, int]:
-    """Pre-compute entity degree from MENTIONS edges (fast, single pass)."""
-    rows = sqlite.conn.execute("""
-        SELECT target_id, COUNT(*) as cnt FROM edges
-        WHERE edge_type = 'MENTIONS' AND target_type = 'entity'
-        GROUP BY target_id
-    """).fetchall()
-    return {r[0]: r[1] for r in rows}
+    """Pre-compute entity degree from MENTIONS edges (backend-agnostic)."""
+    degrees: dict[str, int] = defaultdict(int)
+    for _chunk_id, entity_id, _props in sqlite.scan_edges_by_type(
+        ["MENTIONS"], source_type="chunk", target_type="entity"
+    ):
+        degrees[entity_id] += 1
+    return dict(degrees)
 
 
 def _precompute_fact_degrees(sqlite: SQLiteStore) -> dict[str, int]:
-    """Pre-compute fact degree from ABOUT edges (fast, single pass)."""
-    rows = sqlite.conn.execute("""
-        SELECT source_id, COUNT(*) as cnt FROM edges
-        WHERE edge_type = 'ABOUT' AND source_type = 'fact'
-        GROUP BY source_id
-    """).fetchall()
-    return {r[0]: r[1] for r in rows}
+    """Pre-compute fact degree from ABOUT edges (backend-agnostic)."""
+    degrees: dict[str, int] = defaultdict(int)
+    for fact_id, _entity_id, _props in sqlite.scan_edges_by_type(
+        ["ABOUT"], source_type="fact", target_type="entity"
+    ):
+        degrees[fact_id] += 1
+    return dict(degrees)
 
 
 def _get_all_entity_communities(
@@ -91,7 +91,7 @@ def _get_all_entity_communities(
     Returns: {community_id: [(entity_id, name), ...]}
     """
     col = f"community_{level}"
-    rows = sqlite.conn.execute(f"""
+    rows = sqlite.sql_conn.execute(f"""
         SELECT id, name, {col} FROM entities WHERE {col} IS NOT NULL
     """).fetchall()
     result = defaultdict(list)
@@ -109,7 +109,7 @@ def _get_all_fact_communities(
     Returns: {community_id: [(fact_id, text), ...]}
     """
     col = f"community_{level}"
-    rows = sqlite.conn.execute(f"""
+    rows = sqlite.sql_conn.execute(f"""
         SELECT id, text, {col} FROM facts WHERE {col} IS NOT NULL
     """).fetchall()
     result = defaultdict(list)
@@ -126,7 +126,7 @@ def _get_community_ids(
     """Get all (community_id, member_count) pairs for a given level+type."""
     col = f"community_{level}"
     table = "entities" if node_type == "entity" else "facts"
-    rows = sqlite.conn.execute(f"""
+    rows = sqlite.sql_conn.execute(f"""
         SELECT {col}, COUNT(*) as cnt
         FROM {table}
         WHERE {col} IS NOT NULL
@@ -137,7 +137,7 @@ def _get_community_ids(
 
 
 async def _summarize_batch(
-    api_key: str,
+    api_key: str | None,
     communities: list[dict],
     semaphore: asyncio.Semaphore,
     stats: dict | None = None,
@@ -163,16 +163,20 @@ async def _summarize_batch(
         try:
             async with semaphore:
                 response = await litellm.acompletion(
-                    model=f"anthropic/{LLM_MODEL}",
+                    model=provider_model(
+                        cfg.services.llm_flash.provider,
+                        cfg.services.llm_flash.model,
+                    ),
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    api_base=LLM_BASE_URL,
+                    api_base=cfg.services.llm_flash.base_url or "",
                     api_key=api_key,
                     temperature=0.3,
                     max_tokens=2000,
                     response_format={"type": "json_object"},
+                    timeout=float(cfg.services.llm_flash.timeout),
                 )
             text = response.choices[0].message.content.strip()
 
@@ -188,13 +192,13 @@ async def _summarize_batch(
                         stats["prompt_tokens"] += pt
                         stats["completion_tokens"] += ct
                         stats["total_tokens"] += tt
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
                 try:
                     cost = litellm.completion_cost(response)
                     if cost is not None:
                         stats["estimated_cost_usd"] += cost
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
 
             # Parse JSON — might be wrapped in markdown
@@ -227,7 +231,7 @@ async def _summarize_batch(
 
             return results
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
@@ -252,7 +256,7 @@ async def generate_community_summaries(
     Returns:
         List of CommunitySummary objects
     """
-    api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    api_key = provider_api_key(cfg.services.llm_flash.provider)
     semaphore = asyncio.Semaphore(concurrency)
 
     # Pre-compute degrees (one pass each)
@@ -349,7 +353,7 @@ async def generate_community_summaries(
     n_with_summary = sum(1 for s in summaries if s.summary)
     print(f"  Generated {n_with_summary}/{len(summaries)} summaries in {elapsed:.1f}s")
     print(f"  LLM calls: {llm_stats['llm_calls']}")
-    print(f"  ── LLM Token Usage ──")
+    print("  ── LLM Token Usage ──")
     print(f"  Prompt tokens:     {llm_stats['prompt_tokens']:,}")
     print(f"  Completion tokens: {llm_stats['completion_tokens']:,}")
     print(f"  Total tokens:       {llm_stats['total_tokens']:,}")
@@ -367,7 +371,7 @@ def store_community_summaries(sqlite: SQLiteStore, summaries: list[CommunitySumm
 
     Creates/replaces the community_summaries table.
     """
-    sqlite.conn.execute("""
+    sqlite.sql_conn.execute("""
         CREATE TABLE IF NOT EXISTS community_summaries (
             level TEXT NOT NULL,
             community_id INTEGER NOT NULL,
@@ -379,8 +383,8 @@ def store_community_summaries(sqlite: SQLiteStore, summaries: list[CommunitySumm
             PRIMARY KEY (level, community_id, node_type)
         )
     """)
-    sqlite.conn.execute("DELETE FROM community_summaries")
-    sqlite.conn.commit()
+    sqlite.sql_conn.execute("DELETE FROM community_summaries")
+    sqlite.sql_conn.commit()
 
     rows = []
     for s in summaries:
@@ -395,13 +399,13 @@ def store_community_summaries(sqlite: SQLiteStore, summaries: list[CommunitySumm
                 json.dumps(s.top_members[:10], ensure_ascii=False),
             ))
 
-    sqlite.conn.executemany(
+    sqlite.sql_conn.executemany(
         """INSERT OR REPLACE INTO community_summaries
            (level, community_id, node_type, member_count, summary, tags, top_members)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
-    sqlite.conn.commit()
+    sqlite.sql_conn.commit()
     print(f"  Stored {len(rows)} community summaries")
 
     # Print stats per level
@@ -434,29 +438,16 @@ async def run_community_summarization(
         store_community_summaries(sqlite, summaries)
 
         elapsed = time.time() - t0
-        print(f"\n  ┌─ Community Summarization Cost Summary ──────┐")
+        print("\n  ┌─ Community Summarization Cost Summary ──────┐")
         print(f"  │  LLM calls:          {llm_stats['llm_calls']:,}")
         print(f"  │  Prompt tokens:      {llm_stats['prompt_tokens']:,}")
         print(f"  │  Completion tokens:  {llm_stats['completion_tokens']:,}")
         print(f"  │  Total tokens:        {llm_stats['total_tokens']:,}")
         print(f"  │  Estimated cost:     ${llm_stats['estimated_cost_usd']:.4f}")
         print(f"  │  Time:               {elapsed:.1f}s ({elapsed/60:.1f} min)")
-        print(f"  └────────────────────────────────────────────┘")
+        print("  └────────────────────────────────────────────┘")
     finally:
         sqlite.close()
 
 
-# CLI entry
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Generate community summaries")
-    parser.add_argument("--concurrency", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=10)
-    parser.add_argument("--min-members", type=int, default=3)
-    args = parser.parse_args()
 
-    asyncio.run(run_community_summarization(
-        concurrency=args.concurrency,
-        batch_size=args.batch_size,
-        min_members=args.min_members,
-    ))

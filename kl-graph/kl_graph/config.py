@@ -1,112 +1,331 @@
-"""Spatio-Temporal Knowledge Retrieval System configuration."""
+"""Spatio-Temporal Knowledge Retrieval System configuration.
+
+Configuration is loaded from (in priority order, later overrides earlier):
+  1. config.default.yaml  (shipped defaults, in repo root)
+  2. config.yaml          (user overrides, gitignored, in repo root)
+  3. A custom YAML passed via ``load_config(path)`` (CLI ``-c`` flag)
+  4. Environment variables (via OmegaConf ``oc.env`` resolver embedded in YAML)
+
+Access the validated config via the ``cfg`` DictConfig object::
+
+    from kl_graph.config import cfg
+
+    cfg.services.llm_flash.model       # str
+    cfg.services.embedding.dim         # int
+    cfg.application.data_dir            # empty means PROJECT_ROOT/data
+
+Call ``load_config(path)`` early (before other kl_graph imports) to merge an
+additional YAML layer on top of the defaults.  The module-level ``cfg`` and
+``DATA_DIR`` are updated in place so subsequent imports see the new values.
+"""
+
+from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
-import litellm
+from omegaconf import DictConfig, OmegaConf
+from pydantic import BaseModel, ConfigDict, Field
 
-# Force litellm onto its httpx transport instead of the default aiohttp one.
-# litellm's aiohttp transport crashes with ``UnicodeEncodeError: 'ascii' codec``
-# when an upstream returns a response header containing non-ASCII bytes (seen
-# with the llmapi.example.com gateway); the httpx transport handles it fine.
-# Setting the module flag here — imported before any acompletion/completion
-# call — fixes every call site at once. (The DISABLE_AIOHTTP_TRANSPORT env var
-# only accepts the string "True"/"False", not "1", so we set the flag directly.)
-litellm.disable_aiohttp_transport = True
+# ---------------------------------------------------------------------------
+# Load structured config
+# ---------------------------------------------------------------------------
 
-# Paths
 PROJECT_ROOT = Path(__file__).parent.parent
-DATA_DIR = Path(os.environ.get("KL_DATA_DIR", PROJECT_ROOT / "data"))
-DWS_EXPORT_DIR = Path(os.environ.get("KL_DWS_EXPORT_DIR", ""))
 
-# Unified DWS export: every product is a sibling source directory holding the
-# standard quartet (manifest.json + scopes/records/resources .jsonl). Chat has
-# a bespoke loader (feeds the messages detail table + chat-only edges); the
-# other folders are enumerated generically by the pipeline, so no per-source
-# path constants are needed here anymore. Loaders no-op when a dir is absent,
-# so a partial export (e.g. chat-only) still works.
-CHAT_DIR = DWS_EXPORT_DIR / "chat"
-# Structured sources with a bespoke loader (mapped by directory name).
-WIKI_DIR = DWS_EXPORT_DIR / "wiki"
-MAIL_DIR = DWS_EXPORT_DIR / "mail"
-MINUTES_DIR = DWS_EXPORT_DIR / "minutes"
-# Source directory names handled by the generic record→chunk loader (everything
-# except chat/wiki/mail/minutes). Absent dirs are skipped at load time.
-GENERIC_SOURCES = ("work", "contacts", "attendance", "calendar", "drive")
+_default_yaml = PROJECT_ROOT / "config.default.yaml"
+_user_yaml = PROJECT_ROOT / "config.yaml"
 
-# SQLite
-SQLITE_PATH = DATA_DIR / "knowledge.db"
 
-# Qdrant
-QDRANT_PATH = str(DATA_DIR / "qdrant_data")
-# Embedding dimension. Must match the embedding model in use: DashScope
-# text-embedding-v4 supports 1024/1536/2048; Qwen3-Embedding-8B emits 4096;
-# Qwen3-Embedding-0.6B emits 1024. Qdrant collections are created at this size,
-# so changing it requires dropping + re-embedding both vector stores. Override
-# per-deployment with KL_EMBEDDING_DIM to match your endpoint.
-EMBEDDING_DIM = int(os.environ.get("KL_EMBEDDING_DIM", "4096"))
+# ---------------------------------------------------------------------------
+# Authoritative typed schema
+# ---------------------------------------------------------------------------
 
-# Embedding server. Routed through litellm (OpenAI-compatible transport).
-# Targets a self-hosted Qwen3-Embedding-8B (4096-dim) by default model name;
-# the base URL and key are environment-only (no baked-in defaults). Base must
-# include ``/v1``. Set KL_EMBED_BASE_URL + KL_EMBED_API_KEY at launch.
-EMBED_BASE_URL = os.environ.get("KL_EMBED_BASE_URL", "")
-EMBED_MODEL = os.environ.get("KL_EMBED_MODEL", "Qwen3-Embedding-8B")
-EMBED_API_KEY = os.environ.get("KL_EMBED_API_KEY", "")
-# Whether to send the ``dimensions`` param on embedding requests. DashScope's
-# text-embedding-v4 honors it (matryoshka truncation); the self-hosted
-# Qwen3-Embedding-8B (vLLM) rejects it with a 400 (no matryoshka support), so
-# default off. Set KL_EMBED_SEND_DIMENSIONS=1 for DashScope-style servers.
-EMBED_SEND_DIMENSIONS = os.environ.get("KL_EMBED_SEND_DIMENSIONS", "0") == "1"
-# DashScope caps embedding batches at 10 inputs per request.
-EMBED_BATCH_SIZE = 10
-# Embedding calls are I/O-bound network round-trips; issue this many 10-input
-# requests in parallel (thread pool) to speed up bulk embedding. Lower it if the
-# provider returns 429s. Only affects bulk paths, not single-query embedding.
-EMBED_CONCURRENCY = int(os.environ.get("KL_EMBED_CONCURRENCY", "10"))
 
-# LLM (for extraction + Phase 2 query synthesis).
-# Routed through litellm in Anthropic mode: the endpoint speaks the Anthropic
-# /messages protocol, so LLM_MODEL carries the ``anthropic/`` provider prefix
-# and LLM_BASE_URL points at the Anthropic-compatible base. litellm auto-appends
-# ``/v1/messages`` to the base, so it must NOT already include ``/v1``. The API
-# key is read from ANTHROPIC_AUTH_TOKEN by the call sites. Base URL is
-# environment-only (no baked-in default); set KL_LLM_BASE_URL at launch.
-LLM_BASE_URL = os.environ.get("KL_LLM_BASE_URL", "")
-LLM_MODEL = os.environ.get("KL_LLM_MODEL", "qwen3.6-flash")
+class _ConfigModel(BaseModel):
+    """Strict base for every configuration section."""
 
-# Reranker (opt-in cross-encoder over fused candidates; disabled unless both
-# base URL and model are set). See kl_graph/query/rerank.py.
-RERANK_BASE_URL = os.environ.get("KL_RERANK_BASE_URL", "")
-RERANK_MODEL = os.environ.get("KL_RERANK_MODEL", "")
-RERANK_API_KEY = os.environ.get("KL_RERANK_API_KEY", "")
+    model_config = ConfigDict(extra="forbid")
 
-# Entity extraction
-ENTITY_DICT_PATH = DATA_DIR / "entity_dict.txt"
-V1_ENTITIES_PATH = Path(
-    os.environ.get("KL_V1_ENTITIES_PATH", "")
-)  # Legacy, for bootstrap only
 
-# Thresholds
-CONFIDENCE_HIGH = 0.7
-CONFIDENCE_LOW = 0.3
-SIMILAR_TO_THRESHOLD = 0.85
-RRF_K = 60
+class ApplicationConfig(_ConfigModel):
+    data_dir: str
+    dws_export_dir: str
 
-# Vector search mode. When True, Qdrant computes the exact cosine similarity
-# against every stored vector (brute force, 100%% recall) instead of the
-# approximate HNSW walk. Cheap and exact on small collections; O(N) at scale.
-# Hardcoded on for now.
-QDRANT_EXACT_SEARCH = False
 
-# Query limits
-PHASE1_MESSAGE_LIMIT = 20
-PHASE1_FACT_LIMIT = 10
-PHASE1_ENTITY_EXPAND_LIMIT = 20
-PHASE2_CONTEXT_LIMIT = 50
+class ServerConfig(_ConfigModel):
+    port: int = Field(ge=1, le=65535)
 
-# Rerank candidate window: how many top fused hits to (re)rank before the final
-# cut. Larger = the reranker can rescue good items RRF ranked lower, at more
-# rerank cost. Only used when the reranker is enabled.
-RERANK_WINDOW = 64
-RERANK_TOP_K = 30
+
+class EmbeddingServiceConfig(_ConfigModel):
+    base_url: str
+    model: str
+    api_key: str
+    dim: int
+    send_dimensions: bool
+
+
+class LLMFlashServiceConfig(_ConfigModel):
+    provider: str
+    base_url: str
+    model: str
+    max_retries: int
+    timeout: float
+
+
+class RerankerServiceConfig(_ConfigModel):
+    base_url: str
+    model: str
+    api_key: str
+
+
+class ServicesConfig(_ConfigModel):
+    embedding: EmbeddingServiceConfig
+    llm_flash: LLMFlashServiceConfig
+    reranker: RerankerServiceConfig
+
+
+class FalkorDBConfig(_ConfigModel):
+    host: str
+    port: int
+    graph: str
+
+
+class LadybugConfig(_ConfigModel):
+    # All default to 0/False to match Kuzu auto-detection. Override via
+    # config.yaml or KL_LADYBUG_* env vars when the defaults are too
+    # aggressive (e.g. buffer_pool_size=0 → ~80% of RAM).
+    read_only: bool
+    buffer_pool_size: int
+    max_num_threads: int
+
+
+class GraphStorageConfig(_ConfigModel):
+    backend: Literal["sqlite", "ladybug", "falkordb"]
+    ladybug: LadybugConfig
+    falkordb: FalkorDBConfig
+
+
+class QdrantConfig(_ConfigModel):
+    exact_search: bool
+
+
+class VectorStorageConfig(_ConfigModel):
+    # Qdrant is currently the sole implementation. This field makes the role
+    # extensible without pretending unsupported backends already work.
+    backend: Literal["qdrant"]
+    qdrant: QdrantConfig
+
+
+class StorageConfig(_ConfigModel):
+    graph: GraphStorageConfig
+    vector: VectorStorageConfig
+
+
+class EntityDescriptionConfig(_ConfigModel):
+    summarize: bool
+    concurrency: int
+
+
+class IngestionEmbeddingConfig(_ConfigModel):
+    flush_every: int
+    batch_size: int
+    concurrency: int
+    max_retries: int
+    timeout: float
+
+
+class ExtractionConfig(_ConfigModel):
+    batch_size: int
+    batch_timeout: int
+
+
+class IncrementalConfig(_ConfigModel):
+    full_rebuild_every: int
+    community_summary_threshold: float
+    similarity_strategy: str
+    community_strategy: str
+
+
+class SimilarityConfig(_ConfigModel):
+    threshold: float
+
+
+class IngestionPipelineConfig(_ConfigModel):
+    keep_extraction_cache: bool
+    v1_entities_path: str
+    generic_sources: list[str]
+    embedding: IngestionEmbeddingConfig
+    extraction: ExtractionConfig
+    entity_description: EntityDescriptionConfig
+    incremental: IncrementalConfig
+    similarity: SimilarityConfig
+
+
+class ConfidenceConfig(_ConfigModel):
+    high: float
+    low: float
+
+
+class FusionConfig(_ConfigModel):
+    rrf_k: int
+
+
+class RerankingConfig(_ConfigModel):
+    window: int
+    top_k: int
+
+
+class GlobalSearchConfig(_ConfigModel):
+    current_user: str
+    levels: str
+    map_budget: int
+    reduce_budget: int
+    map_max_tokens: int
+    reduce_max_tokens: int
+    max_communities: int
+    map_concurrency: int
+    shuffle_seed: int
+
+
+class QueryEmbeddingConfig(_ConfigModel):
+    max_retries: int
+    timeout: float
+
+
+class QueryPipelineConfig(_ConfigModel):
+    embedding: QueryEmbeddingConfig
+    phase1_message_limit: int
+    phase1_fact_limit: int
+    phase1_entity_expand_limit: int
+    phase2_context_limit: int
+    max_concurrency: int
+    dedup_enabled: bool
+    confidence: ConfidenceConfig
+    fusion: FusionConfig
+    reranking: RerankingConfig
+    global_search: GlobalSearchConfig
+
+
+class PipelinesConfig(_ConfigModel):
+    ingestion: IngestionPipelineConfig
+    query: QueryPipelineConfig
+
+
+class AppConfig(_ConfigModel):
+    """Complete application configuration contract."""
+
+    application: ApplicationConfig
+    server: ServerConfig
+    services: ServicesConfig
+    storage: StorageConfig
+    pipelines: PipelinesConfig
+
+
+def _build_config(extra_yaml: Path | None = None) -> DictConfig:
+    """Build the merged OmegaConf config from YAML layers + env overrides."""
+    # Base layer: shipped defaults
+    if _default_yaml.exists():
+        base = OmegaConf.load(_default_yaml)
+    else:
+        base = OmegaConf.create({})
+
+    # User layer: local overrides (gitignored)
+    if _user_yaml.exists():
+        user = OmegaConf.load(_user_yaml)
+    else:
+        user = OmegaConf.create({})
+
+    # Merge: user overrides base
+    merged: DictConfig = OmegaConf.merge(base, user)  # type: ignore[assignment]
+
+    # Extra layer: CLI-provided YAML (highest YAML priority, below env vars)
+    if extra_yaml is not None:
+        extra = OmegaConf.load(extra_yaml)
+        merged = OmegaConf.merge(merged, extra)  # type: ignore[assignment]
+
+    # Resolve interpolation, validate/coerce once, then retain DictConfig for the
+    # existing ergonomic attribute-access API. Missing and unknown fields fail
+    # fast here instead of surfacing later in a pipeline.
+    raw = OmegaConf.to_container(merged, resolve=True)
+    validated = AppConfig.model_validate(raw)
+    return OmegaConf.create(validated.model_dump(mode="python"))
+
+
+def _derive_data_dir(config: DictConfig) -> Path:
+    """Compute DATA_DIR from the resolved config."""
+    application = config.application
+    return Path(application.data_dir) if application.data_dir else PROJECT_ROOT / "data"
+
+
+#: Global structured config object.
+cfg: DictConfig = _build_config()
+
+# ---------------------------------------------------------------------------
+# Public API: reload config with an extra YAML file
+# ---------------------------------------------------------------------------
+
+
+def load_config(path: str | os.PathLike[str]) -> None:
+    """Merge an additional YAML config file and update the global ``cfg``.
+
+    Must be called **before** other kl_graph modules are imported, as they
+    read from ``cfg`` at import time.  Typical usage in an entry-point script::
+
+        if args.config:
+            from kl_graph.config import load_config
+            load_config(args.config)
+
+        # Now import the rest of kl_graph
+        from kl_graph.ingest.pipeline import run_pipeline
+    """
+    global cfg, DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS  # noqa: PLW0603
+
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Config file not found: {resolved}")
+
+    cfg = _build_config(extra_yaml=resolved)
+    DATA_DIR = _derive_data_dir(cfg)
+    GRAPH_DB_PATH = str(DATA_DIR / "graph.ladybug")
+    LADYBUG_OPTS = {
+        "read_only": bool(cfg.storage.graph.ladybug.read_only),
+        "buffer_pool_size": int(cfg.storage.graph.ladybug.buffer_pool_size),
+        "max_num_threads": int(cfg.storage.graph.ladybug.max_num_threads),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_FALSY = {"0", "false", "no", "off", ""}
+
+
+def _bool(val) -> bool:
+    """Coerce a config value to bool (empty / 0 / false / no / off → False)."""
+    return str(val).lower().strip() not in _FALSY
+
+
+def _path(val) -> Path:
+    """Coerce a config value to Path (empty string → Path(''))."""
+    return Path(str(val)) if val else Path("")
+
+
+# ---------------------------------------------------------------------------
+# Derived path helpers (computed once from cfg at import time)
+# ---------------------------------------------------------------------------
+
+DATA_DIR: Path = _derive_data_dir(cfg)
+
+#: LadybugDB graph store path. Always under DATA_DIR; not separately configurable.
+GRAPH_DB_PATH: str = str(DATA_DIR / "graph.ladybug")
+
+#: LadybugDB engine options forwarded to ladybug.Database(). All default to
+#: 0/False to match Kuzu auto-detection. Override via KL_LADYBUG_* env vars.
+LADYBUG_OPTS: dict[str, int | bool] = {
+    "read_only": bool(cfg.storage.graph.ladybug.read_only),
+    "buffer_pool_size": int(cfg.storage.graph.ladybug.buffer_pool_size),
+    "max_num_threads": int(cfg.storage.graph.ladybug.max_num_threads),
+}

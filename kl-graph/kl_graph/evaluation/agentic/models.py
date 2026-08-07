@@ -7,7 +7,6 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 FINAL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -78,15 +77,15 @@ def parse_agent_output(text: str | None) -> tuple[str, list[Citation]]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"Codex final response is not JSON: {exc}") from exc
     if not isinstance(value, dict):
-        raise ValueError("Codex final response must be a JSON object")
+        raise ValueError("Codex final response must be a JSON object")  # noqa: TRY004
     answer = value.get("answer")
     raw_citations = value.get("citations")
     if not isinstance(answer, str) or not isinstance(raw_citations, list):
-        raise ValueError("Codex final response does not match the answer schema")
+        raise ValueError("Codex final response does not match the answer schema")  # noqa: TRY004
     citations: list[Citation] = []
     for raw in raw_citations:
         if not isinstance(raw, dict):
-            raise ValueError("each citation must be an object")
+            raise ValueError("each citation must be an object")  # noqa: TRY004
         citation_type = raw.get("type")
         citation_id = raw.get("id")
         if citation_type not in {"fact", "message"} or not isinstance(citation_id, str):

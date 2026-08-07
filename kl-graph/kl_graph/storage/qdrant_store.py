@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import uuid
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -10,7 +10,6 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchAny,
-    MatchValue,
     PayloadSchemaType,
     PointStruct,
     Range,
@@ -18,7 +17,11 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from kl_graph.config import EMBEDDING_DIM, QDRANT_PATH, QDRANT_EXACT_SEARCH
+from kl_graph.config import cfg, DATA_DIR
+
+QDRANT_PATH = str(DATA_DIR / "qdrant_data")
+EMBEDDING_DIM = int(cfg.services.embedding.dim)
+QDRANT_EXACT_SEARCH = bool(cfg.storage.vector.qdrant.exact_search)
 
 
 class QdrantStore:
@@ -30,7 +33,7 @@ class QdrantStore:
     ``facts`` are graph-derived nodes and keep their own collections.
     """
 
-    COLLECTIONS = {
+    COLLECTIONS = {  # noqa: RUF012
         "chunks": {
             "payload_indexes": {
                 "source_type": PayloadSchemaType.KEYWORD,
@@ -54,7 +57,7 @@ class QdrantStore:
         },
     }
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path: str | None = None):
         self.path = path or QDRANT_PATH
         self.client = QdrantClient(path=self.path)
         self._ensure_collections()
@@ -93,8 +96,8 @@ class QdrantStore:
         collection: str,
         query_vector: list[float],
         limit: int = 20,
-        filter_conditions: Optional[Filter] = None,
-        score_threshold: Optional[float] = None,
+        filter_conditions: Filter | None = None,
+        score_threshold: float | None = None,
     ) -> list[dict]:
         """Search by vector similarity with optional filtering.
 
@@ -122,9 +125,9 @@ class QdrantStore:
         self,
         query_vector: list[float],
         limit: int = 20,
-        source_types: Optional[list[str]] = None,
-        min_timestamp: Optional[int] = None,
-        max_timestamp: Optional[int] = None,
+        source_types: list[str] | None = None,
+        min_timestamp: int | None = None,
+        max_timestamp: int | None = None,
     ) -> list[dict]:
         """Vector search over the unified ``chunks`` collection.
 
@@ -153,8 +156,8 @@ class QdrantStore:
         collection: str,
         query_vector: list[float],
         limit: int = 20,
-        min_timestamp: Optional[int] = None,
-        max_timestamp: Optional[int] = None,
+        min_timestamp: int | None = None,
+        max_timestamp: int | None = None,
     ) -> list[dict]:
         """Search with optional time range filter."""
         conditions = []
@@ -174,5 +177,41 @@ class QdrantStore:
         info = self.client.get_collection(collection)
         return info.points_count
 
+    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+        """Return the subset of ``ids`` that already have a point in ``collection``.
+
+        Used by the embedding step to skip work that a previous (crashed or
+        partial) run already flushed. ``client.retrieve`` returns only the
+        points that exist, so the returned set is exactly the already-embedded
+        ids. Vectors/payloads are not fetched (``with_payload=False``).
+        """
+        if not ids:
+            return set()
+        found: set[str] = set()
+        batch_size = 256
+        for i in range(0, len(ids), batch_size):
+            batch = ids[i : i + batch_size]
+            records = self.client.retrieve(
+                collection_name=collection,
+                ids=batch,
+                with_payload=False,
+                with_vectors=False,
+            )
+            found.update(str(r.id) for r in records)
+        return found
+
     def close(self):
         self.client.close()
+
+
+def point_id(stable_id: str) -> str:
+    """Deterministic Qdrant point id (UUID5) from a stable content id.
+
+    Qdrant point ids must be an unsigned int or a UUID string. Deriving the id
+    from the chunk/entity/fact's own stable id (``uuid5(NAMESPACE_DNS, id)``)
+    makes re-embedding the same item **overwrite the same point** instead of
+    appending a duplicate — idempotent across runs, and immune to list-order
+    changes (the old positional ``id=i`` scheme silently rebound point ``i`` to a
+    different item when the input order shifted).
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id))

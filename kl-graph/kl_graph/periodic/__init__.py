@@ -1,1 +1,1 @@
-"""Periodic improvement phase: SIMILAR_TO edges + community detection."""
+"""Periodic improvement phase: similarity edges + community detection."""

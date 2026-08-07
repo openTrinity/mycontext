@@ -5,7 +5,7 @@ holding ``manifest.json`` + ``scopes.jsonl`` + ``records.jsonl`` +
 ``resources.jsonl`` (see :mod:`kl_graph.ingest.loaders.base`). Structured
 sources get a bespoke mapper that understands their ``data`` payload:
 
-  - :func:`load_all_messages` — chat (``type: message``) → :class:`Message`
+  - :func:`load_all_messages` — chat (``type: message``) → chat :class:`Chunk`s
   - :func:`load_wiki` — wiki (``type: document_unit``) → doc-section chunks
   - :func:`load_mail` — mail (``type: email``) → subject+body chunks
   - :func:`load_minutes` — minutes (``meeting`` scopes) → summary + transcript
@@ -25,8 +25,8 @@ from kl_graph.ingest.loaders.wiki_loader import load_wiki
 
 __all__ = [
     "load_all_messages",
-    "load_wiki",
+    "load_generic",
     "load_mail",
     "load_minutes",
-    "load_generic",
+    "load_wiki",
 ]

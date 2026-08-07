@@ -75,7 +75,7 @@ def build_fts_index(conn: sqlite3.Connection) -> bool:
 
     try:
         _segment("探测")  # ensure jieba imports before we build anything
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"jieba unavailable, sparse channel disabled: {e}")
         return False
 

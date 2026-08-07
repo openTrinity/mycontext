@@ -23,8 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kl_graph.ingest.loaders import base
 from kl_graph.ingest.loaders.generic_loader import load_generic
 from kl_graph.ingest.loaders.mail_loader import load_mail
-from kl_graph.ingest.loaders.minutes_loader import load_minutes, _transcript_lines, _todos_text
 from kl_graph.ingest.loaders.message_loader import load_all_messages
+from kl_graph.ingest.loaders.minutes_loader import (
+    _todos_text,
+    _transcript_lines,
+    load_minutes,
+)
 from kl_graph.ingest.loaders.wiki_loader import _split_markdown, load_wiki
 from kl_graph.models.types import Chunk
 from kl_graph.storage.sqlite_store import SQLiteStore
@@ -125,7 +129,14 @@ def test_flatten_text():
 
 
 def test_message_loader_new_format():
-    """Chat loader reads records.jsonl, links scope titles, drops empty content."""
+    """Chat loader reads records.jsonl, links scope titles, drops empty content.
+
+    Also covers the rendering/grouping contract from
+    ``loader-context-rendering.md`` (R0/R1): ``content`` carries a direction
+    header, replies inline the quoted message, messages come back grouped per
+    conversation, and a long idle gap emits the session-break marker. Detailed
+    cases live in ``tests/test_loader_context_rendering.py``.
+    """
     print("test_message_loader_new_format")
     with tempfile.TemporaryDirectory() as td:
         d = _write_source(
@@ -137,18 +148,110 @@ def test_message_loader_new_format():
                 {"id": "msg:b", "scope_id": "chat:g", "type": "message",
                  "data": {"openMessageId": "b", "openConversationId": "c1", "sender": "S",
                           "content": "world", "createTime": "2026-05-11 15:08:03",
-                          "quotedMessage": {"openMessageId": "a"}}},
+                          "quotedMessage": {"openMessageId": "a", "sender": "S",
+                                            "content": "hello"}}},
                 {"id": "msg:c", "scope_id": "chat:g", "type": "message",
                  "data": {"openMessageId": "c", "content": "   "}},  # dropped (empty)
             ],
-            scopes=[{"id": "chat:g", "type": "chat", "data": {"title": "Group G"}}],
+            scopes=[{"id": "chat:g", "type": "chat",
+                     "data": {"title": "Group G", "chat_kind": "group"}}],
         )
         msgs = load_all_messages(d)
         check(len(msgs) == 2, f"2 non-empty messages (got {len(msgs)}); empty dropped")
         check(all(m.timestamp > 0 for m in msgs), "timestamps parsed")
         check(msgs[0].metadata.get("conversation_title") == "Group G", "scope title linked")
-        check(any(m.reply_to == "a" for m in msgs), "quotedMessage -> reply_to")
+        check(
+            any(m.metadata.get("reply_to") == "a" for m in msgs),
+            "quotedMessage -> reply_to",
+        )
+        # R1: rendered direction header + inlined quote.
+        by_id = {m.id: m for m in msgs}
+        check(
+            by_id["a"].content == f"[群聊: Group G] S · {base.format_ts(by_id['a'].timestamp)}\nhello",
+            "group header rendered into content",
+        )
+        check(
+            "↳ 回复 S：hello" in by_id["b"].content,
+            "quoted message inlined into content",
+        )
+        # R0: same conversation stays contiguous, time-ordered, no false break.
+        check(
+            [m.metadata["conversation_id"] for m in msgs] == ["c1", "c1"],
+            "grouped per conversation",
+        )
+        check(
+            [m.timestamp for m in msgs] == sorted(m.timestamp for m in msgs),
+            "time-sorted within conversation",
+        )
+        check(
+            all("session_start" not in m.metadata for m in msgs),
+            "1-minute gap emits no session break",
+        )
         _assert_valid_chunks(msgs, "message")
+
+
+def test_message_loader_session_break_and_grouping():
+    """R0: >=3h idle gap marks a session break; conversations stay contiguous."""
+    print("test_message_loader_session_break_and_grouping")
+    ts = 1_700_000_000_000
+    with tempfile.TemporaryDirectory() as td:
+        d = _write_source(
+            Path(td), "chat",
+            records=[
+                {"id": "m:1", "scope_id": "chat:g", "type": "message",
+                 "data": {"openMessageId": "1", "openConversationId": "c1", "sender": "A",
+                          "content": "topic one", "createTime": ts}},
+                {"id": "m:2", "scope_id": "chat:g", "type": "message",
+                 "data": {"openMessageId": "2", "openConversationId": "c1", "sender": "A",
+                          "content": "topic two", "createTime": ts + base.SESSION_GAP_MS}},
+                {"id": "m:3", "scope_id": "chat:g", "type": "message",
+                 "data": {"openMessageId": "3", "openConversationId": "c2", "sender": "B",
+                          "content": "other conv", "createTime": ts + 1000}},
+            ],
+            scopes=[{"id": "chat:g", "type": "chat",
+                     "data": {"title": "Group G", "chat_kind": "group"}}],
+        )
+        msgs = load_all_messages(d)
+        by_id = {m.id: m for m in msgs}
+        check(
+            by_id["2"].content.startswith(base.SESSION_BREAK_MARKER),
+            "session-break marker emitted after a >=3h gap",
+        )
+        check(by_id["2"].metadata.get("session_start") is True, "session_start flag set")
+        check(
+            base.SESSION_BREAK_MARKER not in by_id["3"].content,
+            "other conversation unaffected by the gap",
+        )
+        convs = [m.metadata["conversation_id"] for m in msgs]
+        check(
+            convs in (["c1", "c1", "c2"], ["c2", "c1", "c1"]),
+            f"conversations contiguous (got {convs})",
+        )
+
+
+def test_mail_loader_direction_header():
+    """R2: mail content is prefixed with a 发件人 → 收件人; 抄送 header."""
+    print("test_mail_loader_direction_header")
+    with tempfile.TemporaryDirectory() as td:
+        d = _write_source(
+            Path(td), "mail",
+            records=[{
+                "id": "mail:1", "scope_id": "t1", "type": "email",
+                "data": {"messageId": "m1", "body": {
+                    "subject": "周报", "markdownBody": "进展如下",
+                    "from": {"name": "A", "email": "a@x.com"},
+                    "toRecipients": [{"name": "B", "email": "b@x.com"}],
+                    "ccRecipients": [{"name": "C", "email": "c@x.com"}],
+                }},
+            }],
+        )
+        (c,) = load_mail(d)
+        head = c.content.split("\n")[0]
+        check(head.startswith("[邮件] 发件人 A <a@x.com>"), f"mail sender header (got {head!r})")
+        check("→ 收件人 B <b@x.com>" in head, "mail recipient rendered")
+        check("抄送 C <c@x.com>" in head, "mail cc rendered")
+        check("主题：周报" in c.content, "subject retained under header")
+        _assert_valid_chunks([c], "mail")
 
 
 def test_minutes_loader_new_format():
@@ -171,7 +274,7 @@ def test_minutes_loader_new_format():
                           "text": "[17480] \n[28130] ",  # broken flattened text
                           "segments": [
                               {"nickName": "陈丹", "paragraph": "我们取消早会。"},
-                              {"nickName": "王强", "paragraph": "好的。"},
+                              {"nickName": "李强", "paragraph": "好的。"},
                           ]}},
                 {"id": "gr:kw", "scope_id": mid, "type": "generic_record",
                  "data": {"kind": "minutes_keywords", "keywords": ["早会", "取消"]}},
@@ -287,6 +390,8 @@ if __name__ == "__main__":
     test_quartet_readers()
     test_flatten_text()
     test_message_loader_new_format()
+    test_message_loader_session_break_and_grouping()
+    test_mail_loader_direction_header()
     test_minutes_loader_new_format()
     test_minutes_helpers()
     test_wiki_split()
