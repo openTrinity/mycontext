@@ -36,7 +36,7 @@ describe("MultiGraphQueryService", () => {
   it("分别查询每个物理图库，再按时间汇总", () => {
     const dingtalkFacts = vi.fn(() => result("dingtalk", 10))
     const feishuFacts = vi.fn(() => result("feishu", 20))
-    const service = new MultiGraphQueryService({ ego: () => ego, facts: dingtalkFacts }, [
+    const service = new MultiGraphQueryService({ ego: () => ego, facts: dingtalkFacts }, () => [
       { facts: feishuFacts },
     ])
 

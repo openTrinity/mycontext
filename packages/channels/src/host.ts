@@ -132,6 +132,34 @@ export class ChannelHost {
     return false
   }
 
+  /**
+   * 已授权的渠道 id 列表。
+   *
+   * ## ★ 为什么不让 `hasAnyAuthorized` 复用它
+   *
+   * 那个有**短路**：只要有一个已授权就立刻返回，不再去查剩下的。而查一次授权态
+   * 是一次子进程调用（钉钉要 spawn dws、飞书要 spawn lark-cli，实测各 0.3-1s），
+   * 登录路径上每次渲染设置页都会走它 —— 改成"先收集全部再判断"等于把那条路
+   * 从「查一个」变成「查全部」。两个方法的判据相同但**代价模型不同**，
+   * 合并会让便宜的那条变贵。
+   *
+   * 失败当未授权（与 `hasAnyAuthorized` 同口径）：这个结果用来决定"挂几条采集
+   * 管线 / 起几个 kl"，把一个查不到状态的渠道算成已连，会挂出一条注定失败的管线。
+   */
+  async authorizedChannels(): Promise<string[]> {
+    const ids: string[] = []
+    for (const plugin of this.registry.list()) {
+      if (!plugin.meta.available) continue
+      try {
+        const status = await this.status(plugin.meta.id)
+        if (status.state === "authorized") ids.push(plugin.meta.id)
+      } catch {
+        // 与 hasAnyAuthorized 同口径：查不到就当未授权，不把启动流程卡住。
+      }
+    }
+    return ids
+  }
+
   isLoginInProgress(channelId: string): boolean {
     return this.running.has(channelId)
   }

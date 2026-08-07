@@ -189,6 +189,14 @@ export class ChannelService {
     return this.options.host.cancelLogin(channelId)
   }
 
+  /**
+   * 已授权的渠道 id 列表 —— 挂几条采集管线 / 起几个 kl 的判据。
+   * 与 `hasAnyAuthorized` 分开的理由见 `ChannelHost.authorizedChannels`。
+   */
+  authorizedChannels(): Promise<string[]> {
+    return this.options.host.authorizedChannels()
+  }
+
   hasAnyAuthorized(): Promise<boolean> {
     return this.options.host.hasAnyAuthorized()
   }

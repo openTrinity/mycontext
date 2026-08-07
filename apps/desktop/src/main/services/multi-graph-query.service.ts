@@ -12,10 +12,19 @@ export class MultiGraphQueryService {
       ego(): KlGraphEgo
       facts(input: KlGraphFactsInput): KlGraphFacts
     },
-    private readonly sources: readonly {
+    /**
+     * ★ 函数而非数组：非主渠道的图库由 `ChannelPipelineManager` 在登录后
+     * 现造（见 `MultiKlServerService` 里同一条注释）。
+     */
+    private readonly getSources: () => readonly {
+      channelId: string
       facts(input: KlGraphFactsInput): KlGraphFacts
     }[],
   ) {}
+
+  private get sources(): readonly { channelId: string; facts(i: KlGraphFactsInput): KlGraphFacts }[] {
+    return this.getSources()
+  }
 
   ego(): KlGraphEgo {
     return this.primary.ego()

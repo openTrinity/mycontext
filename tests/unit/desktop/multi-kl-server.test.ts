@@ -61,7 +61,7 @@ describe("MultiKlServerService", () => {
   it("渠道有数据时分别建图，统计只在上层合并", async () => {
     const dingtalk = server("钉钉", 2)
     const feishu = server("飞书", 3)
-    const service = new MultiKlServerService(dingtalk as unknown as KlServerService, [
+    const service = new MultiKlServerService(dingtalk as unknown as KlServerService, () => [
       { service: feishu as unknown as KlServerService, enabled: () => true },
     ])
 
@@ -79,7 +79,7 @@ describe("MultiKlServerService", () => {
   it("飞书还没有数据时不启动也不建空图", async () => {
     const dingtalk = server("钉钉", 2)
     const feishu = server("飞书", 3)
-    const service = new MultiKlServerService(dingtalk as unknown as KlServerService, [
+    const service = new MultiKlServerService(dingtalk as unknown as KlServerService, () => [
       { service: feishu as unknown as KlServerService, enabled: () => false },
     ])
 

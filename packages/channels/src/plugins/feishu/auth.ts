@@ -11,8 +11,11 @@ export interface FeishuPluginOptions {
   processes: ProcessRunner
   logger: Logger
   openExternal: (url: string) => Promise<void>
-  /** Isolated credential/config root under Electron userData. */
-  authRoot: string
+  /**
+   * 凭据/配置的隔离根目录 —— **函数**，见 `LarkCliOptions.authRoot`。
+   * 按 vault 分，而插件在登录前就装配好了，所以只能现读。
+   */
+  authRoot: () => string
   /** Tests and non-standard installations can point at an exact official CLI. */
   executable?: string
 }

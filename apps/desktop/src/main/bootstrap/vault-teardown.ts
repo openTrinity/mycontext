@@ -60,6 +60,16 @@ export interface VaultTeardownDeps {
    */
   klServer: { stop(): Promise<unknown> }
   /**
+   * 非主渠道的采集管线。
+   *
+   * ★ 在**关库之前**卸载：每条管线的 `dispose` 要 await 停自己的 kl
+   * （`KL_DATA_DIR` 指着这个 vault）并 detach 它的 FeedService，而后者写库。
+   * 顺序反了就是往已关闭的连接上写，而那条错误没人 catch。
+   *
+   * 可选：测试里的假依赖不必实现它。
+   */
+  channelPipelines?: { unmount(): Promise<void> }
+  /**
    * 数据面（采集 + 事件长连 + Feed）。
    *
    * `detach()` 会等在途的那一轮采集收尾（它可能正 await 一个 0.6s 的
@@ -122,7 +132,23 @@ export async function teardownVault(deps: VaultTeardownDeps): Promise<void> {
     deps.logger.error("data plane detach failed", { detail: describe(error) })
   })
 
-  // ⑤ 到这里才清：④ 里的退订要用**旧**身份的 profile（见 `releaseVault`）
+  /**
+   * ⑤ 非主渠道的管线（各自的 kl + feed）。
+   *
+   * 在 ④ 之后：`dataPlane.detach()` 会 stop 它们的 `IngestService`，
+   * 而那些采集轮次会往 source 库写 —— 先拆管线的话 feed 已经 detach 了，
+   * 但采集还在跑，于是那一轮的导出触发落到一个已 detach 的 FeedService 上。
+   *
+   * 在 ⑥ 之前：`vaults.closeAll()` 会关掉 source 库句柄，而管线的
+   * `dispose` 要 detach feed（写库）。
+   */
+  if (deps.channelPipelines !== undefined) {
+    await deps.channelPipelines.unmount().catch((error: unknown) => {
+      deps.logger.error("channel pipelines unmount failed", { detail: describe(error) })
+    })
+  }
+
+  // ⑥ 到这里才清：④ 里的退订要用**旧**身份的 profile（见 `releaseVault`）
   deps.releaseVault()
 }
 

@@ -66,6 +66,8 @@
     "FTS_QUERY_INVALID": "Couldn't process that search — try rewording it",
     "DISTILL_NO_EVIDENCE": "No source evidence for this conclusion; not written to the profile",
     "INTERNAL": "Something unexpected went wrong",
-    "CHANNEL_CLIENT_NOT_AUTHORIZED": "The current channel client is not authorized for this enterprise (not a login problem — re-scanning will not help). Switch clients in Settings: the bundled one and your own have different capabilities."
+    "CHANNEL_CLIENT_NOT_AUTHORIZED": "The current channel client is not authorized for this enterprise (not a login problem — re-scanning will not help). Switch clients in Settings: the bundled one and your own have different capabilities.",
+    "CHANNEL_NOT_READY": "Channel is not ready yet; sign in and try again",
+    "CHANNEL_PIPELINE_NO_PORT": "No free local port available to start the graph service"
   }
 }

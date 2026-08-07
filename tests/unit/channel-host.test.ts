@@ -187,6 +187,59 @@ describe("ChannelHost：Onboarding 判定", () => {
   })
 })
 
+/**
+ * `authorizedChannels()`：挂几条采集管线 / 起几个 kl 的判据。
+ *
+ * 与上面那组的区别是 `hasAnyAuthorized` 只要一个"是"，而这个要**全集**。
+ * 所以短路优化在这里是错的 —— 第一条测试就锁住"每个可用渠道都真查过"。
+ */
+describe("ChannelHost：已授权渠道列表", () => {
+  it("只返回已授权的，且失败的渠道当未授权（不挂一条注定失败的管线）", async () => {
+    const host = new ChannelHost(
+      createRegistry([
+        fakePlugin({ id: "dingtalk" }),
+        fakePlugin({ id: "feishu", status: () => Promise.reject(new Error("lark-cli missing")) }),
+      ]),
+    )
+    await expect(host.authorizedChannels()).resolves.toEqual(["dingtalk"])
+  })
+
+  it("未授权的不进列表", async () => {
+    const host = new ChannelHost(
+      createRegistry([
+        fakePlugin({ id: "dingtalk", status: () => Promise.resolve({ state: "unauthorized" }) }),
+        fakePlugin({ id: "feishu" }),
+      ]),
+    )
+    await expect(host.authorizedChannels()).resolves.toEqual(["feishu"])
+  })
+
+  it("★ 不短路：第一个已授权之后仍继续查（否则永远只挂一条管线）", async () => {
+    const second = vi.fn(() => Promise.resolve(AUTHORIZED))
+    const host = new ChannelHost(
+      createRegistry([fakePlugin({ id: "dingtalk" }), fakePlugin({ id: "feishu", status: second })]),
+    )
+    await expect(host.authorizedChannels()).resolves.toEqual(["dingtalk", "feishu"])
+    expect(second).toHaveBeenCalledTimes(1)
+  })
+
+  it("跳过未开放的渠道（与 hasAnyAuthorized 同口径）", async () => {
+    const status = vi.fn(() => Promise.resolve(AUTHORIZED))
+    const host = new ChannelHost(
+      createRegistry([fakePlugin({ id: "feishu", available: false, status })]),
+    )
+    await expect(host.authorizedChannels()).resolves.toEqual([])
+    expect(status).not.toHaveBeenCalled()
+  })
+
+  it("全都没连时返回空数组（而不是 null —— 调用方要能直接遍历）", async () => {
+    const host = new ChannelHost(
+      createRegistry([fakePlugin({ status: () => Promise.resolve({ state: "unauthorized" }) })]),
+    )
+    await expect(host.authorizedChannels()).resolves.toEqual([])
+  })
+})
+
 describe("RuntimeEnv：二进制解析", () => {
   const options = (binDir: string) => ({
     binDir,

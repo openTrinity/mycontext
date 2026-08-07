@@ -6,7 +6,8 @@ import type {
 } from "@mycontext/ipc-contract"
 import type { KlServerService } from "./kl-server.service.js"
 
-interface SourceKlServer {
+export interface SourceKlServer {
+  channelId: string
   service: KlServerService
   /** 没有采集数据的渠道不启动 Python/Qdrant，也不拖累主渠道建图。 */
   enabled: () => boolean
@@ -17,10 +18,20 @@ interface SourceKlServer {
  * 这里只顺序调度并在内存里合并统计，避免两套重任务同时把本机跑满。
  */
 export class MultiKlServerService {
+  /**
+   * ★ `sources` 是**函数**而不是数组：非主渠道的 kl 由
+   * `ChannelPipelineManager` 在**登录后**按"用户连了哪几个渠道"现造，
+   * 而这个门面在装配阶段就构造好了。传数组的话它永远是空的 ——
+   * 那正是改动前的形态（飞书那一路恒不可见，且完全静默）。
+   */
   constructor(
     private readonly primary: KlServerService,
-    private readonly sources: readonly SourceKlServer[],
+    private readonly getSources: () => readonly SourceKlServer[],
   ) {}
+
+  private get sources(): readonly SourceKlServer[] {
+    return this.getSources()
+  }
 
   status(): KlServerStatus {
     const primary = this.primary.status()

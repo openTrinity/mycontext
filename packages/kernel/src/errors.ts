@@ -40,6 +40,10 @@ export const ERROR_CODES = [
    */
   "CHANNEL_AUTH_LEGACY_TOKEN_SLOT",
   "CHANNEL_UNSUPPORTED",
+  /** 渠道的资源还没就绪（如凭据目录尚未随 vault 挂载）。接线漏了，不是用户错误。 */
+  "CHANNEL_NOT_READY",
+  /** 找不到可用的 kl 端口（本机端口被占满）。 */
+  "CHANNEL_PIPELINE_NO_PORT",
   // 数据面：解析与身份
   /** 本人身份无法唯一确定（同名多 ID）；宁可不蒸馏也不能把别人的消息当本人语料 */
   "SELF_IDENTITY_AMBIGUOUS",

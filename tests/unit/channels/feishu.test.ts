@@ -62,7 +62,7 @@ describe("Feishu CLI safety boundary", () => {
     const cli = new LarkCli({
       processes,
       logger: {} as Logger,
-      authRoot: "/tmp/inklings-feishu-test-auth",
+      authRoot: () => "/tmp/inklings-feishu-test-auth",
       executable: "/tmp/lark-cli",
       platform: "darwin",
     })
@@ -85,7 +85,7 @@ describe("Feishu CLI safety boundary", () => {
     const cli = new LarkCli({
       processes,
       logger: {} as Logger,
-      authRoot: "/tmp/inklings-feishu-test-auth-linux",
+      authRoot: () => "/tmp/inklings-feishu-test-auth-linux",
       executable: "/tmp/lark-cli",
       platform: "linux",
     })
@@ -135,7 +135,7 @@ describe("Feishu auth and ingest parsing", () => {
     const options = {
       processes,
       logger,
-      authRoot: "/tmp/inklings-feishu-reauth-order",
+      authRoot: () => "/tmp/inklings-feishu-reauth-order",
       executable: "/tmp/lark-cli",
       platform: "darwin" as const,
       openExternal: async () => {

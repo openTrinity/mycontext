@@ -418,7 +418,16 @@ export class KlServerService {
    * 配置变了要不要重起（`onGatewayChanged`）。
    */
   private gatewayPrint = ""
-  private readonly port: number
+  /**
+   * 当前监听端口。**可变** —— 与下面 `dataDir` 同一条理由，由 `rebind()` 换。
+   *
+   * ★ 为什么不能构造时定死：一个 vault 下每个**已连渠道**各起一个 kl，
+   * 而"连了哪几个"要到登录后才知道。装配层写 `klPort + N` 这种算式的话，
+   * 端口与渠道的对应关系被记在两个地方（装配层的算式、挂载层的渠道顺序），
+   * 一旦不一致就是"图谱查的是另一个渠道的库" —— 不报错，只是答错。
+   * 现在端口由 `ChannelPipelineManager` **真探测**后分配再 rebind 进来。
+   */
+  private port: number
   /**
    * 当前生效的数据目录与导出目录 —— **可变**，切身份时由 `rebind()` 换。
    *
@@ -460,9 +469,16 @@ export class KlServerService {
    * ★ 本方法不 `ensureReady()`：起不起由调用方决定（挂载分支自己会起），
    * 在这里顺手起会让"换目录"这个纯赋值动作带上一次 90s 的 warmup。
    */
-  rebind(next: { dataDir: string; exportDir: string }): void {
+  rebind(next: { dataDir: string; exportDir: string; port?: number }): void {
     this.dataDir = next.dataDir
     this.exportDir = next.exportDir
+    /**
+     * ★ 端口一起换（可选）。与 dataDir 同一个前置条件：**调用方必须先
+     * `await stop()`** —— 旧端口上的进程还活着时换端口，那个进程就变成了
+     * 无人认领的孤儿（pidfile 里记的是旧端口，`reclaimOrphan` 按新端口找
+     * 不到它），而它仍占着旧端口与旧图库。
+     */
+    if (next.port !== undefined) this.port = next.port
     // 换目录等于换了一份图 —— 上一个身份的失败原因不该留在界面上
     this.reason = null
     this.options.logger.info("kl data dir rebound", { dataDir: next.dataDir })

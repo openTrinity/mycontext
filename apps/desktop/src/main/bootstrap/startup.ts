@@ -45,6 +45,7 @@ import {
   routeAuthorizedIdentity,
   scopedChannelIdFor,
 } from "./post-auth-identity.js"
+import { ChannelPipelineManager } from "./channel-pipeline.js"
 import { teardownVault } from "./vault-teardown.js"
 import { DwsSourceService } from "../services/dws-source.service.js"
 import { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
@@ -364,10 +365,15 @@ export function bootstrapApp(mainDir: string): AppContext {
     logger: logger.child("Feishu"),
     openExternal: (url) => shell.openExternal(url),
     /**
-     * ★ 空串占位 —— 真实目录在**挂载时**按 vault 给（见 `VaultStore.paths()`
-     * 的 `feishuAuthRoot`）。凭据必须跟着身份走，与 `dwsHome` 同一条理由。
+     * ★★ **函数**而不是值 —— 真实目录按 vault 走（`VaultStore.paths()` 的
+     * `feishuAuthRoot`），而插件在登录前就装配好了。
+     *
+     * 改动前这里是空串占位，而 `LarkCli.env()` 会 `resolve("")` ——
+     * 那**就是 `process.cwd()`**，于是飞书的 token 与日志被建到进程工作
+     * 目录（开发态即仓库目录）里。凭据落盘位置错、且绕过 `.gitignore`。
+     * 现在没挂载时它返回空串，`env()` 明确抛 `CHANNEL_NOT_READY`。
      */
-    authRoot: "",
+    authRoot: () => vaultPaths?.feishuAuthRoot ?? "",
     executable: join(
       paths.binDir,
       process.platform === "win32"
@@ -520,30 +526,6 @@ export function bootstrapApp(mainDir: string): AppContext {
     },
   })
 
-  const feishuFeed = new FeedService({
-    clock: systemClock,
-    logger: logger.child("Pipeline:Feishu"),
-    embedding: () => ({
-      baseUrl: runtimeConfig.resolved().llmBaseUrl,
-      model: runtimeConfig.resolved().embedModel,
-      dim: 2048,
-    }),
-    localEmbedding: { model: runtimeConfig.resolved().embedModel, dim: 1024 },
-    llm: () => ({
-      baseUrl: runtimeConfig.resolved().klBaseUrl,
-      model: runtimeConfig.resolved().klModel,
-    }),
-    autoBuild: {
-      enabled: () => {
-        const r = runtimeConfig.resolved()
-        return r.klBaseUrl.trim() !== "" && r.klApiKey.trim() !== ""
-      },
-      ready: () => !feishuKlServer.status().building,
-      graphExists: () => feishuKlServer.graphOverview().available,
-      trigger: async () => (await feishuKlServer.rebuildGraph(false)).ok,
-    },
-  })
-
   const distillSources = new DistillSourceService({
     clock: systemClock,
     logger: logger.child("DistillSource"),
@@ -693,6 +675,9 @@ export function bootstrapApp(mainDir: string): AppContext {
   runtimeConfig.onChange(() => {
     reconfigureLlm()
     void klServerRef?.onGatewayChanged()
+    // ★ 各渠道的 kl 也要重起：它们的网关同样只在 spawn 那一刻定。
+    // 漏了的话飞书的图会一直用旧网关建（Phase B 连接错误，抽出 0 个实体）。
+    for (const item of pipelines.all()) void item.parts.klServer.onGatewayChanged()
     // 网关变了 → 通知渲染层刷新设置面板（并显示哪些要重启子进程）。
     if (window !== null && !window.isDestroyed()) {
       window.webContents.send(IPC_EVENTS.runtimeConfigChanged)
@@ -1162,56 +1147,205 @@ export function bootstrapApp(mainDir: string): AppContext {
   // 回填给上面那个 onChange —— 改网关后重起 kl（见那里的注释）。
   klServerRef = klServer
 
-  const feishuKlServer = new KlServerService({
-    clock: systemClock,
-    logger: logger.child("KlServer:Feishu"),
-    processes,
-    klRoot: paths.klRoot,
-    /** 与主渠道同理：空串占位，挂载时 `rebind()` 换成该 vault 下飞书那一份。 */
-    dataDir: "",
-    exportDir: "",
-    port: klPort + 1,
-    // The combined status UI is owned by the primary service; this source
-    // remains independently queryable without racing the same IPC event.
-    getWindow: () => null,
-    preparePython: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
-    gateway: () => {
-      const r = runtimeConfig.resolved()
-      const base =
-        r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
-      const key =
-        r.klApiKey.trim() !== ""
-          ? r.klApiKey
-          : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
+  /**
+   * 非主渠道的 kl / 图库 / 导出管线 —— **登录后**按"用户连了哪几个渠道"现造。
+   *
+   * ## ★★ 为什么必须是挂载时造，而不是装配时造
+   *
+   * 改动前飞书那三个服务（FeedService / KlServerService / GraphQueryService）
+   * 是在这里 `new` 出来的，路径全给空串占位、等挂载时 `rebind()`。
+   * 主渠道那样做成立（它只有一个、rebind 有人调），复制到第二个渠道就断了：
+   * **没有任何一处 rebind 飞书那三个** —— 于是 `KL_DATA_DIR` 是空的、
+   * 图库查询恒走"图不存在"降级、判断"要不要起飞书 kl"的那张 Map
+   * 一次都没被 `set` 过恒返回 false。三条一起构成一条**完全静默**的死链。
+   *
+   * 现在由 `ChannelPipelineManager` 承担：它在挂载时才知道 vaultId 与端口，
+   * 于是"路径"不再需要占位与 rebind —— 构造那一刻就是对的。
+   */
+  interface ChannelPipelineParts {
+    channelId: string
+    db: SqliteDatabase
+    dbPath: string
+    feed: FeedService
+    klServer: KlServerService
+    graphQuery: GraphQueryService
+    feedDirs: {
+      dataRoot: string
+      exportRoot: string
+      klRoot: string
+      handoffFile: string
+    }
+  }
+
+  /** 网关配置：主渠道与各渠道共用同一份推导（改一处两边都变）。 */
+  const klGateway = () => {
+    const r = runtimeConfig.resolved()
+    const base = r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
+    const key =
+      r.klApiKey.trim() !== ""
+        ? r.klApiKey
+        : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
+    return {
+      llmBaseUrl: base,
+      llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
+      embedBaseUrl: base === "" ? "" : `${base.replace(/\/$/, "")}/v1`,
+      embedModel: r.embedModel,
+      apiKey: key,
+      embeddingDim: 2048,
+      sendDimensions: true,
+    }
+  }
+
+  const pipelines = new ChannelPipelineManager<ChannelPipelineParts>({
+    logger: logger.child("ChannelPipeline"),
+    /**
+     * 从主渠道端口 **+1** 开始扫 —— 8200 由 `klServer` 固定持有。
+     * 把它包含进扫描范围的话，主渠道 kl 还在 warmup（还没 listen）时
+     * 会被判成空闲，于是第二个渠道分到 8200 并与主渠道抢同一个图库端口。
+     */
+    basePort: klPort + 1,
+    create: async (spec) => {
+      const vp = vaults.paths(spec.vaultId)
+      const handle = vaults.sourceHandle(spec.vaultId, spec.channelId)
+      /**
+       * ★ 每渠道自己的落点：图库与导出都在主 `klRoot` / `exportRoot` 下
+       * 各开一个以 channelId 命名的子目录。同一个 vault 内互不覆盖，
+       * 而删 vault 仍然是删一个目录（`VaultStore.paths()` 那条收益不变）。
+       */
+      const feedDirs = {
+        dataRoot: vp.root,
+        exportRoot: join(vp.exportRoot, spec.channelId),
+        klRoot: join(vp.klRoot, spec.channelId),
+        handoffFile: join(vp.root, `handoff.${spec.channelId}.json`),
+      }
+      // klServer 要在 feed 的 autoBuild 里被引用，而 feed 又是它的
+      // exportDir 来源 —— 与主渠道同款的后填引用（那里有完整推理）。
+      let klRef: KlServerService | null = null
+      const channelFeed = new FeedService({
+        clock: systemClock,
+        logger: logger.child(`Pipeline:${spec.channelId}`),
+        embedding: () => ({
+          baseUrl: runtimeConfig.resolved().llmBaseUrl,
+          model: runtimeConfig.resolved().embedModel,
+          dim: 2048,
+        }),
+        localEmbedding: { model: runtimeConfig.resolved().embedModel, dim: 1024 },
+        llm: () => ({
+          baseUrl: runtimeConfig.resolved().klBaseUrl,
+          model: runtimeConfig.resolved().klModel,
+        }),
+        autoBuild: {
+          enabled: () => {
+            const r = runtimeConfig.resolved()
+            return r.klBaseUrl.trim() !== "" && r.klApiKey.trim() !== ""
+          },
+          ready: () => klRef !== null && !klRef.status().building,
+          /**
+           * ★ 与主渠道同一条硬规则：必须是 `graphExists()` 而**不是**
+           * `graphOverview().available`。后者会取 buildSchedule，而那条链
+           * 回头调这里 —— 一个无限互递归（实测 1.7 GB 日志 / 主进程停摆）。
+           * 改动前飞书这里正是写的 `graphOverview().available`。
+           */
+          graphExists: () => klRef?.graphExists() ?? false,
+          trigger: async () => {
+            if (klRef === null) return false
+            const result = await klRef.rebuildGraph(false)
+            // 被我们自己打断（退出应用）不算失败 —— 否则下次启动进 30 分钟退避
+            if (result.cancelled === true) return "cancelled"
+            return result.ok
+          },
+        },
+      })
+      const channelKl = new KlServerService({
+        clock: systemClock,
+        logger: logger.child(`KlServer:${spec.channelId}`),
+        processes,
+        klRoot: paths.klRoot,
+        // ★ 构造这一刻路径就是对的（不再占位 + rebind）
+        dataDir: feedDirs.klRoot,
+        exportDir: feedDirs.exportRoot,
+        port: spec.klPort,
+        /**
+         * 状态推送由 `MultiKlServerService` 统一负责（它聚合出
+         * `perChannel`）。各渠道各推一次的话会互相覆盖同一个 IPC 事件，
+         * 而症状是状态页在两个渠道的状态之间闪。
+         */
+        getWindow: () => null,
+        preparePython: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
+        gateway: klGateway,
+        buildSchedule: (): KlGraphOverview["buildSchedule"] => channelFeed.graphBuildSchedule(),
+        resetBuildWatermark: (): boolean => channelFeed.resetGraphBuildWatermark(),
+      })
+      klRef = channelKl
+      const channelGraph = new GraphQueryService({
+        logger: logger.child(`GraphQuery:${spec.channelId}`),
+        dataDir: () => feedDirs.klRoot,
+        now: () => systemClock.now(),
+        sourceChannelId: spec.channelId,
+        /**
+         * ego 图只走主渠道（`MultiGraphQueryService.ego()` 也只问 primary）
+         * —— 「我是谁」的判据在主渠道的身份表里。给空数组是诚实的：
+         * 这个实例只提供 `facts`。
+         */
+        getSelfNames: () => [],
+        getChannelByConversation: () => {
+          try {
+            return new ConversationRepository(handle.db).channelByExternalId()
+          } catch {
+            return new Map<string, string>()
+          }
+        },
+      })
       return {
-        llmBaseUrl: base,
-        llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-        embedBaseUrl: base === "" ? "" : `${base.replace(/\/$/, "")}/v1`,
-        embedModel: r.embedModel,
-        apiKey: key,
-        embeddingDim: 2048,
-        sendDimensions: true,
+        parts: {
+          channelId: spec.channelId,
+          db: handle.db,
+          dbPath: vaults.sourcePath(spec.vaultId, spec.channelId),
+          feed: channelFeed,
+          klServer: channelKl,
+          graphQuery: channelGraph,
+          feedDirs,
+        },
+        /**
+         * 拆除顺序：**先 await 停 kl**（让出端口 + 写掉 pidfile），
+         * 再 detach feed。反过来的话下一个 vault 的同名渠道会探到旧进程
+         * 还在、按新端口找不到 pidfile，于是把它当"外部进程" adopt ——
+         * 而那个进程的 `KL_DATA_DIR` 指着**上一个身份的图库**。
+         * 完整推理见 `KlServerService.rebind()`。
+         *
+         * 库不在这里关：`vaults.close(vaultId)` 会连带关掉全部
+         * `<vaultId>:source:*` 句柄（见 `VaultStore.close`）。
+         * 这里再关一次等于双关，而第二次会抛。
+         */
+        dispose: async () => {
+          await channelKl.stop().catch(() => undefined)
+          await channelFeed.detach().catch(() => undefined)
+        },
       }
     },
   })
 
-  const appKlServer = new MultiKlServerService(klServer, [
-    {
-      service: feishuKlServer,
+  const appKlServer = new MultiKlServerService(klServer, () =>
+    pipelines.all().map((item) => ({
+      channelId: item.channelId,
+      service: item.parts.klServer,
+      /**
+       * 没采到任何消息的渠道不起 Python/Qdrant（一个 kl 冷启 ~90s + 几百 MB）。
+       * 授权了但还没采到第一批时这是对的降级：图谱本来就是空的。
+       */
       enabled: () => {
-        const db = mountedSourceVaults.get(feishu.meta.id)
-        if (db === undefined) return false
         try {
           return (
-            (db.prepare<[], { count: number }>("SELECT count(*) AS count FROM messages").get()
-              ?.count ?? 0) > 0
+            (item.parts.db
+              .prepare<[], { count: number }>("SELECT count(*) AS count FROM messages")
+              .get()?.count ?? 0) > 0
           )
         } catch {
           return false
         }
       },
-    },
-  ])
+    })),
+  )
 
   /**
    * 图谱的**只读查询**（ego 图 + 事实检索）。
@@ -1286,34 +1420,25 @@ export function bootstrapApp(mainDir: string): AppContext {
     klDataDir: () => vaultPaths?.klRoot ?? "",
   })
 
-  const feishuGraphQuery = new GraphQueryService({
-    logger: logger.child("GraphQuery:Feishu"),
-    /**
-     * 与主渠道同款：**函数**而非值 —— 挂载时才知道是哪个 vault。
-     * 飞书的图在主渠道 `klRoot` 下的子目录里（一个 vault 一份图谱根，
-     * 每渠道一个子目录），所以两个渠道的图天然不互相覆盖。
-     */
-    dataDir: () => (vaultPaths === null ? "" : join(vaultPaths.klRoot, feishu.meta.id)),
-    now: () => systemClock.now(),
-    sourceChannelId: feishu.meta.id,
-    getSelfNames: () => [],
-    getChannelByConversation: () => {
-      const db = mountedSourceVaults.get(feishu.meta.id)
-      if (db === undefined) return new Map<string, string>()
-      try {
-        return new ConversationRepository(db).channelByExternalId()
-      } catch {
-        return new Map<string, string>()
-      }
-    },
-  })
-  const appGraphQuery = new MultiGraphQueryService(graphQuery, [feishuGraphQuery])
+  const appGraphQuery = new MultiGraphQueryService(graphQuery, () =>
+    pipelines.all().map((item) => ({
+      channelId: item.channelId,
+      facts: (input) => item.parts.graphQuery.facts(input),
+    })),
+  )
 
   const dataPlane = new DataPlaneService({
     clock: systemClock,
     logger: logger.child("DataPlane"),
     plugin: dingtalk,
-    sources: [{ plugin: feishu, feed: feishuFeed }],
+    /**
+     * ★ 函数：非主渠道的 `FeedService` 由 pipeline 在登录后现造。
+     * 装配时取的话永远是"飞书没有 feed"，于是它的导出物一条都不生成。
+     */
+    sources: () =>
+      pipelines
+        .all()
+        .map((item) => ({ plugin: registry.get(item.channelId), feed: item.parts.feed })),
     feed,
     getWindow: () => window,
     /**
@@ -1398,6 +1523,44 @@ export function bootstrapApp(mainDir: string): AppContext {
    * 整个函数**不抛**：每一步失败都记日志并继续。卸载失败而不关库
    * 等于"登出后数据仍可读"，那比丢一条错误日志严重得多。
    */
+  /**
+   * 当前已挂管线的 `DataPlaneSourceAttachment` 列表。
+   *
+   * 由 pipeline 派生而不是自己存一份：多一个副本就多一个会过期的真源
+   * （改动前那张 `mountedSourceVaults` Map 就是这样 —— 它一次都没被 set 过）。
+   */
+  const sourceAttachments = () =>
+    pipelines.all().map((item) => ({
+      channelId: item.channelId,
+      db: item.parts.db,
+      dbPath: item.parts.dbPath,
+      feedDirs: item.parts.feedDirs,
+    }))
+
+  /**
+   * 管线变动后让数据面重认一次（新渠道要起自己的 `IngestService`）。
+   *
+   * 走 `attach` 而不是加一个 `addSource`：`attach` 内部会先 detach，
+   * 于是"重挂一次"与"启动时挂一次"走的是同一条路 —— 少一条只在
+   * 动态新增时才走的分支，也就少一处只在那种时序下才暴露的 bug。
+   */
+  const remountDataPlane = async (): Promise<void> => {
+    const db = mountedVault
+    const vp = vaultPaths
+    if (db === null || vp === null) return
+    await dataPlane.attach(
+      db,
+      vp.database,
+      {
+        dataRoot: vp.root,
+        exportRoot: vp.exportRoot,
+        klRoot: vp.klRoot,
+        handoffFile: vp.handoffFile,
+      },
+      sourceAttachments(),
+    )
+  }
+
   const unmountVault = (): Promise<void> =>
     teardownVault({
       onboarding,
@@ -1415,6 +1578,12 @@ export function bootstrapApp(mainDir: string): AppContext {
        * 要用身份 getter，先清就会退订错身份（而那条路径吞异常、无痕迹）。
        * 完整推理见 `VaultTeardownDeps.releaseVault` 的注释。
        */
+      /**
+       * ★ 非主渠道的管线在**关库之前**卸载：`dispose` 里要 `await` 停 kl
+       * （它的 `KL_DATA_DIR` 指着这个 vault）与 detach feed，而后者会写库。
+       * 顺序反了就是"往已关闭的连接上写"，那条错误没人 catch。
+       */
+      channelPipelines: pipelines,
       releaseVault: () => {
         mountedVault = null
         vaultPaths = null
@@ -1688,6 +1857,31 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 而那意味着新身份查到的是上一个人的知识（见 `rebind()` 的注释）。
      * `unmountVault` 已经 await 过 `stop()`，所以这里端口是干净的。
      */
+    /**
+     * ★★ 非主渠道的采集管线：按**已授权**的渠道挂，一条一个 kl。
+     *
+     * 判据前移到这里（而不是让 `feed.attach` / `ensureReady` 各自判断）
+     * 之后，"没连的渠道不该有任何东西在跑"这件事只有一个落点。
+     *
+     * ★ 不 await：一条管线要建 FeedService（会导出四件套）与探测端口，
+     * 而登录不该等它。失败只记日志 —— 那时主渠道照常可用。
+     */
+    void (async () => {
+      const authorized = await channels.authorizedChannels()
+      const others = authorized.filter((id: string) => id !== dingtalk.meta.id)
+      if (others.length === 0) {
+        await pipelines.mount(vaultId, [])
+        return
+      }
+      await pipelines.mount(vaultId, others)
+      // 管线建好之后再让数据面认识它们（IngestService 按 source 起）
+      await remountDataPlane()
+    })().catch((error: unknown) => {
+      logger.error("channel pipelines mount failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    })
+
     klServer.rebind({ dataDir: vp.klRoot, exportDir: vp.exportRoot })
     // kl-server 随登录懒启动（warmup ~90s，不阻塞登录）。fire-and-forget：
     // ensureReady 内部轮询健康、自己管状态机（starting→ready/failed）并经 IPC
@@ -1730,6 +1924,7 @@ export function bootstrapApp(mainDir: string): AppContext {
           klRoot: vp.klRoot,
           handoffFile: vp.handoffFile,
         },
+        sourceAttachments(),
         { pollingEnabled: dataFlowsAllowed },
       )
       .catch((error: unknown) => {
@@ -1989,6 +2184,31 @@ export function bootstrapApp(mainDir: string): AppContext {
         channelId: scopedChannelIdFor(channelId, dwsSource.path()),
         status,
       })
+      /**
+       * ★ 非主渠道刚授权 → 立刻挂它的管线并起 kl，不必重启应用。
+       *
+       * 主渠道不走这里：它的管线是 `mountVault` 里那一套固定服务
+       * （`klServer` / `feed` / `graphQuery`），已经随登录挂好了。
+       */
+      if (channelId !== dingtalk.meta.id) {
+        const mounted = await pipelines.mountOne(channelId).catch((error: unknown) => {
+          logger.error("channel pipeline mount on authorize failed", {
+            channelId,
+            detail: error instanceof Error ? error.message : String(error),
+          })
+          return null
+        })
+        if (mounted !== null) {
+          await remountDataPlane().catch((error: unknown) => {
+            logger.error("data plane remount after authorize failed", {
+              channelId,
+              detail: error instanceof Error ? error.message : String(error),
+            })
+          })
+          // fire-and-forget：warmup ~90s，不能让授权流程等它
+          void mounted.klServer.ensureReady().catch(() => undefined)
+        }
+      }
       await applyPostAuthIdentity(
         { dataPlane, media, auth, logger, toFileUrl: toLocalFileUrl },
         status,

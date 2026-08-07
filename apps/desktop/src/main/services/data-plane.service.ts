@@ -40,8 +40,15 @@ export interface DataPlaneOptions {
   clock: Clock
   logger: Logger
   plugin: ChannelPlugin
-  /** Additional sources. Each is attached to its own physical database. */
-  sources?: readonly { plugin: ChannelPlugin; feed: FeedService }[]
+  /**
+   * 其余渠道，各自一个物理库。
+   *
+   * ★ **函数**而不是数组：它们的 `FeedService` 由 `ChannelPipelineManager`
+   * 在**登录后**按"用户连了哪几个渠道"现造，而本服务在装配阶段就构造好了。
+   * 传数组的后果是它恒为空 —— 于是那些渠道的 `IngestService` 一个都不起、
+   * 导出物一条都不生成，且完全静默（这正是改动前飞书那一路的形态）。
+   */
+  sources?: () => readonly { plugin: ChannelPlugin; feed: FeedService }[]
   feed: FeedService
   getWindow: () => BrowserWindow | null
   /** 关闭自动定时器（测试用） */
@@ -228,6 +235,11 @@ export class DataPlaneService {
 
   constructor(private readonly options: DataPlaneOptions) {}
 
+  /** 当前的非主渠道配置（惰性取，见 `DataPlaneOptions.sources`）。 */
+  private sourceOptions(): readonly { plugin: ChannelPlugin; feed: FeedService }[] {
+    return this.options.sources?.() ?? []
+  }
+
   /**
    * vault 挂载。`dbPath` 用于统计 WAL 体积（状态页显示）。
    *
@@ -382,7 +394,7 @@ export class DataPlaneService {
      * 那三个天然跟着走；改成多库支持则要给每个消费者各加一次
      * "这条记录属于哪个渠道"的判据，而漏一处就是静默不处理。
      */
-    for (const sourceOption of this.options.sources ?? []) {
+    for (const sourceOption of this.sourceOptions()) {
       const plugin = sourceOption.plugin
       if (plugin.ingest === undefined) continue
       const attachment = sourceAttachments.find((item) => item.channelId === plugin.meta.id)
@@ -481,7 +493,7 @@ export class DataPlaneService {
     // `The database connection is not open`（实测 logout 时稳定复现）。
     await this.ingest?.stop()
     await Promise.all([...this.sourceIngest.values()].map((source) => source.stop()))
-    await Promise.all((this.options.sources ?? []).map((source) => source.feed.detach()))
+    await Promise.all(this.sourceOptions().map((source) => source.feed.detach()))
     this.sourceIngest.clear()
     this.sourceDatabases.clear()
     this.sourceAttachments = []
@@ -912,7 +924,7 @@ export class DataPlaneService {
 
   export(): ExportResultView {
     const primary = this.options.feed.export()
-    const results = [primary, ...(this.options.sources ?? []).map((source) => source.feed.export())]
+    const results = [primary, ...this.sourceOptions().map((source) => source.feed.export())]
     return {
       sourceCount: results.reduce((sum, item) => sum + item.sourceCount, 0),
       totalMessages: results.reduce((sum, item) => sum + item.totalMessages, 0),
@@ -925,7 +937,7 @@ export class DataPlaneService {
 
   private plugin(channelId: string): ChannelPlugin {
     if (this.options.plugin.meta.id === channelId) return this.options.plugin
-    const source = (this.options.sources ?? []).find((item) => item.plugin.meta.id === channelId)
+    const source = this.sourceOptions().find((item) => item.plugin.meta.id === channelId)
     if (source === undefined) throw new AppError("CHANNEL_UNSUPPORTED", `未知渠道：${channelId}`)
     return source.plugin
   }

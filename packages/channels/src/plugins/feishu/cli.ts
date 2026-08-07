@@ -110,7 +110,22 @@ export function resolveLarkExecutable(explicit?: string): string {
 export interface LarkCliOptions {
   processes: ProcessRunner
   logger: Logger
-  authRoot: string
+  /**
+   * 凭据/配置/日志的隔离根目录。
+   *
+   * ## ★★ 为什么是**函数**而不是值
+   *
+   * 它按 vault 分（凭据必须跟着身份走，与 `dwsHome` 同一条理由），
+   * 而插件是在**登录之前**装配的 —— 那一刻还不知道会挂哪个身份。
+   * 取值的话装配层只能传一个占位串，而那个占位串会一路走到
+   * `resolve()`：**空串 `resolve("")` 就是 `process.cwd()`**，
+   * 于是飞书的 token 与日志被建到进程工作目录（开发态就是仓库目录）里。
+   * 那既是一次凭据落盘位置错误，也会让 `.gitignore` 之外多出真实 token。
+   *
+   * 与 `RuntimeEnv.dwsProfile` / `GraphQueryOptions.dataDir` 同一个惰性模式：
+   * 每条命令**现读**，切完身份下一条命令就用新目录，不必重建插件。
+   */
+  authRoot: () => string
   executable?: string
   /** Test seam for the macOS-only credential storage migration. */
   platform?: NodeJS.Platform
@@ -124,7 +139,20 @@ export class LarkCli {
   }
 
   env(): Record<string, string> {
-    const authRoot = resolve(this.options.authRoot)
+    const root = this.options.authRoot()
+    /**
+     * ★ 空串是接线漏了，**必须抛**而不是 `resolve("")` 兜底成 cwd。
+     *
+     * 兜底的后果是凭据静默落进进程工作目录（见 `authRoot` 的注释）——
+     * 而那类错误的表现是"能用"，只在某天有人发现仓库里多了一个
+     * 装着 token 的目录时才暴露。
+     */
+    if (root.trim() === "") {
+      throw new AppError("CHANNEL_NOT_READY", "飞书凭据目录未就绪（尚未挂载身份）", {
+        messageKey: "errors:channel.notReady",
+      })
+    }
+    const authRoot = resolve(root)
     const cliHome = join(authRoot, "home")
     const configHome = join(cliHome, ".config")
     const configDir = join(authRoot, "config")
