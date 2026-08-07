@@ -89,15 +89,36 @@ export interface DistillSourceServiceOptions {
 
 export class DistillSourceService {
   private db: SqliteDatabase | null = null
+  /**
+   * 其余渠道各自的物理库（`channelId → db`）。
+   *
+   * ## ★★ 为什么范围必须写进**每一个**库
+   *
+   * `readCollectionScope(db)` 是**逐库**读的（采集闸在 `IngestService` 里，
+   * 每个渠道一个实例、各自一个库）。只写主库的后果是其余渠道那一路
+   * `distill_sources` 表里没有 chat 行 → `readCollectionScope` 判成
+   * "从没配过 → 不设限" → **它按全量采**，而用户明明选了 7 天与 10 个会话。
+   * 这是隐私问题，不是"多采点没坏处"。
+   */
+  private readonly sourceDbs = new Map<string, SqliteDatabase>()
 
   constructor(private readonly options: DistillSourceServiceOptions) {}
 
-  attach(db: SqliteDatabase): void {
+  /**
+   * 挂主库 +（可选）其余渠道各自的库。
+   *
+   * `sources` 每次 attach 都整个替换而不是累加：管线是按 vault 挂的，
+   * 留着上一个 vault 的句柄就是往已关闭的连接上写。
+   */
+  attach(db: SqliteDatabase, sources: readonly { channelId: string; db: SqliteDatabase }[] = []): void {
     this.db = db
+    this.sourceDbs.clear()
+    for (const source of sources) this.sourceDbs.set(source.channelId, source.db)
   }
 
   detach(): void {
     this.db = null
+    this.sourceDbs.clear()
   }
 
   list(): DistillSourceView[] {
@@ -125,7 +146,30 @@ export class DistillSourceService {
     }))
   }
 
-  save(input: { kind: DistillSourceKind; enabled: boolean; scope: DistillScopeInput }): true {
+  /**
+   * 存范围。写主库 **+ 每个渠道库各一份**（见 `sourceDbs` 的注释）。
+   *
+   * ## ★★ `conversationIds` 按渠道各存一份，其余字段共享
+   *
+   * `since` / `until` / `chatKinds` 是渠道无关的语义，全量复制是对的。
+   * 而 `conversationIds` 里装的是**某个渠道的** `external_id` —— 把钉钉那批
+   * 复制到飞书库，等于让飞书按一批不存在的 ID 过滤，**结果恒为零**：
+   * 采集一条都不进，而日志里一个错都没有。
+   *
+   * ★ 那个渠道没勾选过时给 **`undefined`** 而不是 `[]`。两者当前行为相同
+   * （都当"不限"），但语义不同：`[]` 是"明确选了零个"。判据一改就分道扬镳，
+   * 而那时 `[]` 会变成"一个都不采"—— 一个静默的全量数据缺失。
+   */
+  save(input: {
+    kind: DistillSourceKind
+    enabled: boolean
+    scope: DistillScopeInput
+    /**
+     * 其余渠道各自的会话白名单（`channelId → externalIds`）。
+     * 某个渠道缺席 = 那个渠道不限会话（见上面关于 undefined 与 [] 的段落）。
+     */
+    perChannelConversationIds?: Readonly<Record<string, readonly string[]>>
+  }): true {
     const db = this.requireDb()
     const repo = new DistillSourceRepository(db)
     /**
@@ -177,6 +221,34 @@ export class DistillSourceService {
      * 采集闸（`readCollectionScope`）只读 chat 那一行 —— 其余源的范围
      * 目前不参与采集，为它们清语料/重建图谱是纯浪费。
      */
+    /**
+     * 逐渠道库各写一份。★ 失败**不抛**：主库已经写成了，而抛出去会让 UI
+     * 显示"保存失败"，于是用户再点一次 —— 而主库那边每次都会触发一轮
+     * 清语料 + 重建图谱（分钟级）。这里记 error 就够：状态页看得见。
+     */
+    for (const [channelId, sourceDb] of this.sourceDbs) {
+      try {
+        const ids = input.perChannelConversationIds?.[channelId]
+        new DistillSourceRepository(sourceDb).upsert(
+          input.kind,
+          {
+            enabled: input.enabled,
+            scope: {
+              ...input.scope,
+              // ★ 那个渠道自己的白名单；没给就是"不限"（undefined，不是 []）
+              ...(ids === undefined ? { conversationIds: undefined } : { conversationIds: [...ids] }),
+            },
+          },
+          this.options.clock.now(),
+        )
+      } catch (error) {
+        this.options.logger.error("distill scope save failed for channel", {
+          channelId,
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
     if (input.kind === "chat" && scopeChanged(before, input)) {
       this.options.onScopeChanged?.()
     }

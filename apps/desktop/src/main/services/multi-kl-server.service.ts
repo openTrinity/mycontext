@@ -27,23 +27,61 @@ export class MultiKlServerService {
   constructor(
     private readonly primary: KlServerService,
     private readonly getSources: () => readonly SourceKlServer[],
+    /** 主渠道的 id（`perChannel` 里要标出它是哪个）。 */
+    private readonly primaryChannelId = "dingtalk",
   ) {}
 
   private get sources(): readonly SourceKlServer[] {
     return this.getSources()
   }
 
+  /**
+   * 合并状态 + **逐渠道**摊开。
+   *
+   * ## ★★ 为什么必须有 `perChannel`
+   *
+   * 顶层那几个字段是合并过的（`state` 取主渠道、`building`/`networkEgress`
+   * 是"任一"）。于是某个渠道的 kl 彻底 failed 时顶层仍显示 `ready`
+   * —— 那一路整个坏掉而 UI 说一切正常，只能靠翻日志发现。
+   *
+   * ★ `idle`（还没采到消息 → 刻意不起）与 `failed` 分开：合成一个会让一次
+   * 正常的降级看起来像故障，而用户会去点"重试"——那什么也修不了。
+   */
   status(): KlServerStatus {
     const primary = this.primary.status()
-    const active = this.sources
-      .filter((source) => source.enabled())
-      .map((source) => source.service.status())
-    const building = [primary, ...active].find((status) => status.building)
+    const sources = this.sources
+    const active = sources.filter((source) => source.enabled())
+    const activeStatuses = active.map((source) => source.service.status())
+    const building = [primary, ...activeStatuses].find((status) => status.building)
+    const perChannel = [
+      {
+        channelId: this.primaryChannelId,
+        state: primary.state,
+        reason: primary.reason,
+        port: primary.port,
+        building: primary.building,
+        idle: false,
+      },
+      ...sources.map((source) => {
+        const enabled = active.includes(source)
+        const status = source.service.status()
+        return {
+          channelId: source.channelId,
+          state: status.state,
+          reason: status.reason,
+          port: status.port,
+          building: status.building,
+          // 没采到消息 → 我们**刻意**没起它。不是故障。
+          idle: !enabled && status.state === "stopped",
+        }
+      }),
+    ]
     return {
       ...primary,
       building: building !== undefined,
       buildProgress: building?.buildProgress ?? primary.buildProgress,
-      networkEgress: [primary, ...active].some((status) => status.networkEgress),
+      networkEgress: [primary, ...activeStatuses].some((status) => status.networkEgress),
+      perChannel,
     }
   }
 

@@ -1559,6 +1559,11 @@ export function bootstrapApp(mainDir: string): AppContext {
       },
       sourceAttachments(),
     )
+    // ★ 范围也要补写进新挂上的渠道库（否则那个渠道按全量采）
+    distillSources.attach(
+      db,
+      pipelines.all().map((item) => ({ channelId: item.channelId, db: item.parts.db })),
+    )
   }
 
   const unmountVault = (): Promise<void> =>
@@ -1744,7 +1749,18 @@ export function bootstrapApp(mainDir: string): AppContext {
       new SettingsRepository(handle.db, "vault_settings"),
       new OnboardingRepository(handle.db),
     )
-    distillSources.attach(handle.db)
+    /**
+     * ★ 范围要写进**每一个**渠道库：`readCollectionScope` 是逐库读的，
+     * 只写主库的话其余渠道判成"从没配过 → 不设限"，于是按全量采
+     * （用户明明选了 7 天与 10 个会话）。见 `DistillSourceService.save`。
+     *
+     * 挂载这一刻管线可能还没建好（那是 fire-and-forget 的）——
+     * `remountDataPlane` 之后会补一次 attach。
+     */
+    distillSources.attach(
+      handle.db,
+      pipelines.all().map((item) => ({ channelId: item.channelId, db: item.parts.db })),
+    )
     /**
      * 跑 forge（测量型引擎），产出 skill 包。这是画像的**唯一**来源。
      *

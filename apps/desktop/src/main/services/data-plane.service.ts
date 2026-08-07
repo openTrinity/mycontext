@@ -618,6 +618,7 @@ export class DataPlaneService {
     const health = ingest === this.ingest ? this.eventStream?.health() : undefined
     return {
       ...ingest.snapshot(),
+      ...(this.perChannelSnapshot() ?? {}),
       eventStream:
         health === undefined
           ? null
@@ -968,6 +969,46 @@ export class DataPlaneService {
    */
   markGraphBuiltToExport(): boolean {
     return this.options.feed.markGraphBuiltToExport()
+  }
+
+  /**
+   * 逐渠道的采集快照（`IngestSnapshot.perChannel`）。
+   *
+   * ★ 只在**真有多个渠道**时给：单渠道时顶层那一份就是全部，多带一份
+   * 一样的数据只会让渲染层多一条要判空的分支。
+   *
+   * ★ 每个渠道各自 try/catch：一个渠道的库出问题不能让整份快照失败 ——
+   * 那会让状态页整体空白，而它正是用来诊断这类问题的地方。
+   */
+  private perChannelSnapshot(): { perChannel: NonNullable<IngestSnapshot["perChannel"]> } | null {
+    if (this.sourceIngest.size === 0) return null
+    const rows: NonNullable<IngestSnapshot["perChannel"]> = []
+    const primaryId = this.options.plugin.meta.id
+    const collect = (channelId: string, source: IngestService): void => {
+      try {
+        const snap = source.snapshot()
+        rows.push({
+          channelId,
+          running: this.activeChannels.has(channelId) && snap.running,
+          messages: snap.messages,
+          conversations: snap.conversations,
+          lastError: snap.lastError,
+          blockedReason: snap.blockedReason,
+        })
+      } catch (error) {
+        rows.push({
+          channelId,
+          running: false,
+          messages: 0,
+          conversations: 0,
+          lastError: error instanceof Error ? error.message : String(error),
+          blockedReason: null,
+        })
+      }
+    }
+    if (this.ingest !== null) collect(primaryId, this.ingest)
+    for (const [channelId, source] of this.sourceIngest) collect(channelId, source)
+    return { perChannel: rows }
   }
 
   /** 按候选 ID 数一下语料里有多少条本人消息：给用户一个可核对的数字。 */

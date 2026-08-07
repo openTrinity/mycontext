@@ -1779,6 +1779,30 @@ export const ingestSnapshotSchema = z.object({
         .nullable(),
     })
     .nullable(),
+  /**
+   * 逐渠道的采集快照。**可选**（单渠道时省略，旧渲染层不改也能跑）。
+   *
+   * ## ★★ 为什么顶层那一份不够
+   *
+   * 顶层快照来自 `snapshotIngest()` —— 它挑**一个**渠道返回（主渠道活跃就
+   * 只返回主渠道）。于是另一个渠道采集彻底停了、blocked 了、或一条都没采到，
+   * 界面上完全看不出来：显示的数字是主渠道的，而且看起来很正常。
+   *
+   * 与 `KlServerStatus.perChannel` 同一条理由（隐藏失败）。这里只带
+   * 用户真正要看的那几个数，不整份复制 —— 那会让 IPC 载荷翻倍。
+   */
+  perChannel: z
+    .array(
+      z.object({
+        channelId: z.string(),
+        running: z.boolean(),
+        messages: z.number(),
+        conversations: z.number(),
+        lastError: z.string().nullable(),
+        blockedReason: z.string().nullable(),
+      }),
+    )
+    .optional(),
 })
 
 export type IngestSnapshot = z.infer<typeof ingestSnapshotSchema>
@@ -2204,6 +2228,35 @@ export const klServerStatusSchema = z.object({
       startedAt: z.number().optional(),
     })
     .nullable(),
+  /**
+   * 逐渠道的状态。**可选** —— 单渠道时省略（旧渲染层不改也能跑）。
+   *
+   * ## ★★ 为什么顶层聚合不够，必须把每个渠道摊开
+   *
+   * 顶层那几个字段是**合并**过的：`state` 取主渠道、`building` 是"任一在建"、
+   * `networkEgress` 是"任一出网"。于是一个渠道的 kl 彻底起不来时，
+   * 顶层仍然显示 `ready`（主渠道好着）—— 那一路整个坏掉而 UI 说一切正常。
+   *
+   * 这正是本仓库最贵的那类 bug 的形状：不报错，只是少了一半数据。
+   * 摊开之后"哪个渠道坏了、坏在哪"变成可见的，而不是要去翻日志。
+   */
+  perChannel: z
+    .array(
+      z.object({
+        channelId: z.string(),
+        state: z.enum(["stopped", "starting", "ready", "failed"]),
+        reason: z.string().nullable(),
+        port: z.number().nullable(),
+        building: z.boolean(),
+        /**
+         * 这个渠道当前**没在跑**的原因（还没采到消息 → 不起 Python/Qdrant）。
+         * 与 `reason` 分开：那个是"失败"，这个是"刻意没起"，
+         * 混成一个会让一次正常的降级看起来像故障。
+         */
+        idle: z.boolean(),
+      }),
+    )
+    .optional(),
 })
 
 export type KlServerStatus = z.infer<typeof klServerStatusSchema>
@@ -2540,6 +2593,18 @@ export const klGraphFactsSchema = z.object({
       entities: z.array(z.string()),
     }),
   ),
+  /**
+   * 查询**失败**的渠道图库。**可选**（无失败时省略，旧渲染层不改也能跑）。
+   *
+   * ## ★★ 为什么必须能表达
+   *
+   * 多图库查询的判据是"任一图有结果就算成功"—— 那对**降级**是对的
+   * （一个渠道的图坏了不该让整个检索失败），但它同时把失败**吞掉**了：
+   * 用户看到的是一个正常的结果列表，只是少了一半来源，且没有任何痕迹。
+   *
+   * 这与本仓库的硬规则同源：**不可读必须与"0 条"可区分**。
+   */
+  failedSources: z.array(z.object({ channelId: z.string(), reason: z.string() })).optional(),
 })
 
 export type KlGraphFacts = z.infer<typeof klGraphFactsSchema>

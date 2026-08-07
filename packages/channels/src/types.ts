@@ -171,6 +171,19 @@ export interface ChannelPullPage {
    * 把不可读伪装成已采集，同时把「谁在这个保密群里」记了下来。
    */
   refusedConversations?: string[]
+  /**
+   * 本页是因为**防御性分页上限**而停下的（服务端还说有下一页）。
+   *
+   * ## ★ 为什么必须与 `hasMore` 分开
+   *
+   * `hasMore=false` 有两种完全不同的含义：「真的抽干了」与「我们不再翻了」。
+   * 合成一个的后果是上层把"只采了 20 页"记成"这个时间窗采完了"并推进水位
+   * —— 剩下的消息永久丢失，而日志里一个错都没有。
+   *
+   * 与 `ChannelConversationList.truncated` 同一个角色：拿不全是事实，
+   * 那就必须能表达出来。渠道没有这个语义时省略。
+   */
+  truncated?: boolean
 }
 
 /**
