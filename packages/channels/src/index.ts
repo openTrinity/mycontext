@@ -2,6 +2,7 @@ export type {
   ChannelId,
   ChannelMeta,
   ChannelCapabilities,
+  ChannelExportProfile,
   ChannelPlugin,
   ChannelAuth,
   AuthStatus,

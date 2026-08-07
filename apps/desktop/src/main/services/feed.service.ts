@@ -62,6 +62,16 @@ export interface FeedServiceOptions {
   clock: Clock
   logger: Logger
   /**
+   * 这个渠道的导出固定值（见 `ChannelExportProfile`）。
+   * 不给 = 钉钉缺省（兼容：主渠道自己不给也照旧对）。
+   */
+  exportProfile?: {
+    workspaceId: string
+    workspaceLabel: string
+    deepLinkScheme: string
+    senderIdField: string
+  }
+  /**
    * ★ 导出与 handoff 的落点已改为**在 attach 时给**（见 `FeedDirs`）：
    * 它们按 vault 分（导出物是语料的投影 = 聊天内容）。
    * 原来这里是 `sharedRoot: string`，一个应用级目录跨身份共用。
@@ -572,6 +582,14 @@ export class FeedService {
       // ★ 只把用户在引导里选的范围导进知识图谱（见 ExportOptions.scope）。
       // 不读的话就是全库全时段 —— "选了没用"里最实质的一条。
       scope: this.exportScope(db),
+      /**
+       * ★ 渠道特有的导出固定值（workspace id / deep link scheme / 发送者
+       * 字段名）。不给就是钉钉那一套 —— 而第二个渠道不给的话，它的语料会被
+       * 打上钉钉的 workspace id，两个渠道的会话挂在同一个 workspace 下。
+       */
+      ...(this.options.exportProfile === undefined
+        ? {}
+        : { profile: this.options.exportProfile }),
     }).run()
   }
 

@@ -6,42 +6,60 @@ import type {
 } from "../../types.js"
 import { normalizeUnix } from "../dingtalk/time.js"
 
+/**
+ * 向用户索要的 OAuth 权限。
+ *
+ * ## ★★ 只列**实现真正用到**的，一条都不多要
+ *
+ * 多要一个权限不是"以后可能有用"，而是现在就让用户授出了我们并不读的数据面
+ * —— 违反 CLAUDE.md 第 5 节（不许扩大读取面）。而且用户在授权页看到
+ * 「会议全文」「联系人搜索」这类条目时，我们其实一次都不会调。
+ *
+ * 收窄前这里有 26 项，其中会议（minutes 四项）、媒体导出、文档媒体下载、
+ * 联系人搜索、reaction、pins 全部**没有任何调用点**：
+ * · 插件没有 `minutes` / `media` / `documents` 能力（`index.ts` 里没挂）；
+ * · 消息命令显式传 `--no-reactions`；
+ * · pins 从来没读过。
+ *
+ * ## ★ 加回一项之前
+ *
+ * 先有调用点，再加权限 —— 反过来（先要权限占位）就是上面那个问题。
+ * 而且 `parseLarkAuthStatus` 会**逐项校验**：加了却没授出，
+ * 这个账号会被判成 `unauthorized`（见那里的 `hasScopes`）。
+ */
 export const LARK_AUTH_SCOPES = [
-  // Identity/session: keep historical imports running without repeated consent.
+  /** 长期有效的 refresh token —— 否则每次采集都要用户重新扫码。 */
   "offline_access",
 
-  // Messages and conversations: match DingTalk's conversation, member and
-  // hydrated-message coverage while remaining strictly read-only.
-  "search:docs:read",
+  // 消息与会话：`+messages-search` / `+messages-mget` 用到的最小集合。
+  /** 消息搜索（`im +messages-search`）。 */
   "search:message",
+  /** 会话元信息（群名、类型）—— 会话列表与消息归属都要它。 */
   "im:chat:read",
-  "im:chat.members:read",
+  /** 只读消息正文（`+messages-mget` 补正文走这条）。 */
   "im:message:readonly",
-  "im:message.group_msg:get_as_user",
-  "im:message.p2p_msg:get_as_user",
-  "im:message.pins:read",
-  "im:message.reactions:read",
 
-  // People: resolve message/member IDs to searchable user profiles.
+  // 人：把消息里的 sender id 解析成可显示的名字。
+  /**
+   * 用户基本信息（`contact:user.base:readonly`）。
+   *
+   * ★ 只要 base，不要 `basic_profile` 与 `user:search`：前者含更多档案字段、
+   * 后者是**按名字反查人**的能力，而我们只需要"这个 id 是谁"。
+   * 反查是一个明显更大的读取面（CLAUDE.md 第 5 节点名了这类命令）。
+   */
   "contact:user.base:readonly",
-  "contact:user.basic_profile:readonly",
-  "contact:user:search",
 
-  // Documents: enumerate Drive/Wiki and fetch real document contents instead
-  // of retaining search snippets only.
-  "space:document:retrieve",
+  // 云文档：`drive +search` 用到的两条。
+  /** 文档搜索（`search:docs:read`）。 */
+  "search:docs:read",
+  /**
+   * 取文档正文（`docx:document:readonly`）。
+   *
+   * ★ 保留它是因为采集侧确实要正文（现在只存了摘要片段，正文那一段
+   * 待接 `documents` 契约）。不要 `sheets` / `media:download` / `wiki:*`：
+   * 表格与媒体那两路没有实现，wiki 枚举也没有调用点。
+   */
   "docx:document:readonly",
-  "wiki:space:retrieve",
-  "wiki:node:retrieve",
-  "sheets:spreadsheet:read",
-  "docs:document.media:download",
-
-  // Meeting memory: match DingTalk Minutes metadata, AI artifacts/transcript
-  // and media export. These grant reads/exports only, never mutation.
-  "minutes:minutes.search:read",
-  "minutes:minutes.basic:read",
-  "minutes:minutes.artifacts:read",
-  "minutes:minutes.media:export",
 ] as const
 
 function record(value: unknown): Record<string, unknown> {
@@ -178,7 +196,12 @@ function itemsOf(payload: unknown): unknown[] {
   return Array.isArray(payload) ? payload : []
 }
 
-/** Convert hydrated/search IM results into the channel-neutral ingest shape. */
+/**
+ * 把 IM 搜索/补正文的结果转成**渠道无关**的中间形态。
+ *
+ * 这是渠道无关性的落点：时间格式、id 形态、@ 字段叫什么，全部在这里吸收 ——
+ * 规范化层往下看不出数据来自哪个渠道（见 `ParsedMessageLike` 的注释）。
+ */
 export function parseLarkMessagePage(payload: unknown, fetchedAt: number): ChannelPullPage {
   const conversations = new Map<string, ParsedConversationLike>()
   const messages: ParsedMessageLike[] = []
@@ -225,7 +248,19 @@ export function parseLarkMessagePage(payload: unknown, fetchedAt: number): Chann
   }
 }
 
-/** Treat each Drive search result as a durable source record in a synthetic Drive conversation. */
+/**
+ * 把云文档搜索结果转成消息形态，塞进一个**合成的**「Drive」会话里。
+ *
+ * ## ★★ 这是一个已知的错形状，待接 `ChannelDocuments` 契约后删除
+ *
+ * 云文档不是聊天。伪装成 `type:"group"` 的假会话之后，每篇文档变成一条
+ * message，于是它会污染四处：FTS 索引、会话列表（用户看到一个不存在的群）、
+ * **消息水位**（文档的时间会推进采集水位），以及图谱里的会话边。
+ *
+ * 正解是 `documents` 表（契约已存在，钉钉那侧在用）。这里保留是因为
+ * 删掉它等于飞书的文档一条都不采 —— 而"错地方的数据"至少还能被迁移，
+ * "没采到的数据"要重新采一遍。
+ */
 export function parseLarkDrivePage(payload: unknown, fetchedAt: number): ChannelPullPage {
   const conversationId = "feishu:drive"
   const messages: ParsedMessageLike[] = []

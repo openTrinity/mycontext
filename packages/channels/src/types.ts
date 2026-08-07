@@ -738,6 +738,45 @@ export interface ChannelAvatars {
 // 插件
 // ---------------------------------------------------------------
 
+/**
+ * 导出四件套时那些**渠道特有**的固定值。
+ *
+ * ## ★★ 为什么必须抽出来
+ *
+ * `export-materializer.ts` 里有四个写死的钉钉值：顶层 workspace 的 id
+ * (`workspace:ali-ding`) 与显示名、媒体 deep link 的 scheme
+ * (`dingtalk://…`)、以及消息里那个发送者字段名 (`senderOpenDingTalkId`)。
+ *
+ * 第二个渠道走同一条导出路径时，它的语料会被打上**钉钉的**工作区 id 与
+ * 一个跑不通的 deep link scheme。而这不报错 —— 下游只是把两个渠道的会话
+ * 挂在同一个 workspace 下，于是"这条事实来自哪个渠道"在图里就丢了。
+ *
+ * ## 范围刻意只有这四项
+ *
+ * 只抽**已确认冲突**的。把整个导出格式参数化是另一个量级的改动，
+ * 而第三个渠道进来之前我们并不知道还有哪些真的需要变 ——
+ * 现在多抽的每一项都是凭想象定的接口。
+ */
+export interface ChannelExportProfile {
+  /** 顶层 workspace scope 的 id。必须**每渠道唯一**（下游按它归属语料）。 */
+  workspaceId: string
+  /** 那个 workspace 的显示名（进 `data.name`，会被下游当标题用）。 */
+  workspaceLabel: string
+  /**
+   * 媒体 deep link 的 scheme（不含 `://`）。
+   * 下游用它拼 `<scheme>://<resourceKind>/<resourceId>` 让用户跳回原应用。
+   */
+  deepLinkScheme: string
+  /**
+   * 消息 payload 里放发送者 id 的**字段名**。
+   *
+   * ★ 为什么是字段名而不是固定成一个中性名：这个 payload 是**上游算法侧
+   * 直接读的**（他们的 `message_loader` 按名字取），改名要他们同步改代码。
+   * 所以钉钉那个 `senderOpenDingTalkId` 必须一字不动地留着。
+   */
+  senderIdField: string
+}
+
 export interface ChannelPlugin {
   meta: ChannelMeta
   capabilities: ChannelCapabilities
@@ -798,6 +837,13 @@ export interface ChannelPlugin {
    * 拿到它的人能跑的命令集合与我们自己完全一样，不多一条。
    */
   mediaRunner?: MediaRunner
+  /**
+   * 导出四件套时的渠道特有固定值。
+   *
+   * 不给 = 用导出层的钉钉缺省（兼容：钉钉自己不给也照旧对）。
+   * 但**第二个渠道必须给** —— 否则它的语料会被打上钉钉的 workspace id。
+   */
+  exportProfile?: ChannelExportProfile
 }
 
 /**

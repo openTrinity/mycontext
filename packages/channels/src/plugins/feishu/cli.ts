@@ -1,9 +1,8 @@
 /**
- * Official Lark/Feishu CLI adapter.
+ * 飞书官方 CLI 的适配层。
  *
- * The CLI owns OAuth and remote API details. This wrapper owns the application
- * boundary: an isolated HOME/config directory, a strict read-only allowlist,
- * bounded execution, and tolerant JSON envelope parsing.
+ * CLI 那侧负责 OAuth 与远端 API 的细节；这个包装层负责的是**应用边界**：
+ * 隔离的 HOME/配置目录、严格的只读白名单、有界执行、以及宽容的 JSON 信封解析。
  */
 import { chmodSync, existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
@@ -14,16 +13,67 @@ import type { ProcessRunner } from "@mycontext/runtime-env"
 const STATUS_TIMEOUT_MS = 30_000
 const QUERY_TIMEOUT_MS = 90_000
 
+/**
+ * 只读命令白名单。**这是安全边界，不是建议。**
+ *
+ * ## 判据是「完整命令」而不是前缀
+ *
+ * `exact()` 逐段全等比对 —— 前缀匹配会放行整棵子树（放行 `im` 就等于
+ * 放行 `im send`）。与钉钉那边同一条规则（见 dingtalk/cli.ts）。
+ *
+ * ## `+` 前缀是什么
+ *
+ * 官方 CLI 用 `+` 标记它的**聚合命令**（一条命令内部串起若干次 API 调用并
+ * 把结果合成一份，如"搜一页 → 逐条取正文 → 合并"）。裸命令（不带 `+`）
+ * 是单次 API 直调。两者是不同的命令名，所以白名单里必须写全 —— 放行
+ * `+messages-search` 不会顺带放行 `messages-search`，反之亦然。
+ *
+ * ## 加命令的规矩
+ *
+ * 逐条加、写清它做什么、为什么归 READ。**PII 类命令不进白名单**
+ * （花名册、手机号反查、离职名单、合同/银行卡/家庭信息）——
+ * 见 CLAUDE.md 第 5 节。
+ */
 const READ_COMMANDS: readonly string[][] = [
+  /** 读当前授权态与本人身份（`--verify` 时会真打一次远端校验）。纯读。 */
   ["auth", "status"],
+  /**
+   * 云文档搜索（按编辑时间排序）。返回文档元信息与摘要片段，不改动任何文档。
+   * 采集侧用它枚举"这段时间里我动过哪些文档"。
+   */
   ["drive", "+search"],
+  /**
+   * 聊天消息搜索（按时间窗）。只读自己可见的消息 —— 服务端按当前用户的
+   * 可见性裁剪，我们不传任何"以他人身份"的参数。
+   */
   ["im", "+messages-search"],
+  /**
+   * 按 message id 批量取正文。搜索有时只返回 id 不带正文，用它补齐。
+   * 归 READ：只接受 id 列表，不能用来枚举（拿不到 id 就取不到东西）。
+   */
   ["im", "+messages-mget"],
 ]
+
+/**
+ * 需要用户在终端/浏览器里交互的命令。
+ *
+ * ★ 与 READ 分开列而不是合成一个大白名单：这几条**会改本机状态**
+ * （写凭据、初始化配置、降级钥匙串存储），只该由授权流程调用。
+ * 混在一起的话"只读边界"这句话就不再成立，而它是这个渠道的核心承诺。
+ */
 const INTERACTIVE_COMMANDS: readonly string[][] = [
+  /** 设备码授权。会写入 token。 */
   ["auth", "login"],
+  /** 撤销本机凭据。 */
   ["auth", "logout"],
+  /** 首次初始化配置目录（我们指定的隔离目录）。 */
   ["config", "init"],
+  /**
+   * 把凭据存储从系统钥匙串降级到文件。
+   *
+   * ★ 必需：钥匙串是**按机器用户**的，而我们要的是**按身份**隔离
+   * （凭据必须跟着 vault 走，见 `authRoot`）。存进钥匙串就没法隔离了。
+   */
   ["config", "keychain-downgrade"],
 ]
 

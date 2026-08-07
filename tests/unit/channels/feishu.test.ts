@@ -3,6 +3,7 @@ import {
   assertAllowedLarkCommand,
   createFeishuIngest,
   FeishuAuth,
+  LARK_AUTH_SCOPES,
   LarkCli,
   parseLarkAuthStatus,
   parseLarkDrivePage,
@@ -11,31 +12,14 @@ import {
 import type { Logger } from "@mycontext/kernel"
 import type { ProcessRunner } from "@mycontext/runtime-env"
 
-const REQUIRED_SCOPES = [
-  "offline_access",
-  "search:docs:read",
-  "search:message",
-  "im:chat:read",
-  "im:chat.members:read",
-  "im:message:readonly",
-  "im:message.group_msg:get_as_user",
-  "im:message.p2p_msg:get_as_user",
-  "im:message.pins:read",
-  "im:message.reactions:read",
-  "contact:user.base:readonly",
-  "contact:user.basic_profile:readonly",
-  "contact:user:search",
-  "space:document:retrieve",
-  "docx:document:readonly",
-  "wiki:space:retrieve",
-  "wiki:node:retrieve",
-  "sheets:spreadsheet:read",
-  "docs:document.media:download",
-  "minutes:minutes.search:read",
-  "minutes:minutes.basic:read",
-  "minutes:minutes.artifacts:read",
-  "minutes:minutes.media:export",
-]
+/**
+ * 授权时真正要到的权限 —— 直接取源，**不在测试里再抄一份**。
+ *
+ * ★ 抄一份的话这两处会各自漂：收窄了实现而测试里那份没动，测试仍然绿
+ * （它验的是"这一大堆都在"，而 `hasScopes` 只做子集判断）。
+ * 那正是这次收窄时踩到的 —— 测试挡住了一个**正确**的改动。
+ */
+const REQUIRED_SCOPES = [...LARK_AUTH_SCOPES]
 
 describe("Feishu CLI safety boundary", () => {
   it("allows read/auth commands used by the plugin", () => {
@@ -160,6 +144,35 @@ describe("Feishu auth and ingest parsing", () => {
       "auth status --json --verify",
     ])
     expect(events.indexOf("open browser")).toBeLessThan(events.indexOf("config keychain-downgrade"))
+  })
+
+  /**
+   * ★★ 不许索要**没有调用点**的权限。
+   *
+   * 多要一个不是"以后可能有用"，而是现在就让用户授出了我们并不读的数据面
+   * （CLAUDE.md 第 5 节）。这条门禁盯住几类曾经在列表里、而实现里
+   * 一次都没调过的：会议全文、媒体导出、联系人反查、reaction、pins、表格。
+   *
+   * 要加回其中任何一项：**先有调用点**，再从这个名单里去掉它。
+   */
+  it("★★ 不索要没有调用点的权限（会议 / 媒体 / 联系人反查 / reaction）", () => {
+    const forbidden = [
+      "minutes:minutes.search:read",
+      "minutes:minutes.basic:read",
+      "minutes:minutes.artifacts:read",
+      "minutes:minutes.media:export",
+      "docs:document.media:download",
+      "sheets:spreadsheet:read",
+      "contact:user:search",
+      "contact:user.basic_profile:readonly",
+      "im:message.reactions:read",
+      "im:message.pins:read",
+      "wiki:space:retrieve",
+      "wiki:node:retrieve",
+    ]
+    for (const scope of forbidden) {
+      expect(REQUIRED_SCOPES, `${scope} 没有调用点，不该向用户索要`).not.toContain(scope)
+    }
   })
 
   it("requires the complete read-only scope set", () => {

@@ -93,6 +93,21 @@ export function createDingTalkPlugin(options: DingTalkAuthOptions): ChannelPlugi
     avatars: createDingTalkAvatars(cli),
     // 媒体下载：只透出跑命令的能力，落地路径由宿主决定（见 types.ts）
     mediaRunner: cli,
+    /**
+     * 导出四件套里那些渠道特有的固定值。
+     *
+     * ★ 这四个值原来是**写死在导出层**的（`export-materializer.ts`）。
+     * 值一个字不改地搬过来 —— 尤其 `senderIdField`：那个 payload 是上游
+     * 算法侧按名字直接读的，改名要他们同步改代码。
+     *
+     * `workspaceId` 与上游 `export_chat.py` 的 `WORKSPACE_ID` 同值。
+     */
+    exportProfile: {
+      workspaceId: "workspace:ali-ding",
+      workspaceLabel: "钉钉工作区",
+      deepLinkScheme: "dingtalk",
+      senderIdField: "senderOpenDingTalkId",
+    },
   }
 }
 

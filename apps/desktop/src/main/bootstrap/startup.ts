@@ -1224,6 +1224,15 @@ export function bootstrapApp(mainDir: string): AppContext {
       const channelFeed = new FeedService({
         clock: systemClock,
         logger: logger.child(`Pipeline:${spec.channelId}`),
+        /**
+         * ★ 这个渠道自己的导出固定值。不给的话它的语料会被打上钉钉的
+         * workspace id（导出层缺省），两个渠道的会话挂在同一个 workspace
+         * 下 —— "来自哪个渠道"在图里就丢了，而且不报错。
+         */
+        ...(() => {
+          const profile = registry.get(spec.channelId).exportProfile
+          return profile === undefined ? {} : { exportProfile: profile }
+        })(),
         embedding: () => ({
           baseUrl: runtimeConfig.resolved().llmBaseUrl,
           model: runtimeConfig.resolved().embedModel,

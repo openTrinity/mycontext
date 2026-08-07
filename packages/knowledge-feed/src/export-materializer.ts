@@ -53,8 +53,30 @@ import {
   type SqliteDatabase,
 } from "@mycontext/store"
 
-/** 顶层 workspace scope 的 id。与上游 `export_chat.py` 的 `WORKSPACE_ID` 同值。 */
-const WORKSPACE_ID = "workspace:ali-ding"
+/**
+ * 渠道特有的导出固定值的**缺省**（= 钉钉那一套）。
+ *
+ * ★ 保留缺省而不是强制每个渠道都给：这四个值原来写死在本文件里，
+ * 而钉钉那条路径必须**逐字节不变**（下游算法侧按 `senderOpenDingTalkId`
+ * 这个名字直接读 payload）。缺省 = 老行为，于是"钉钉不受影响"是结构性的，
+ * 不依赖"记得传对参数"。
+ *
+ * `workspaceId` 与上游 `export_chat.py` 的 `WORKSPACE_ID` 同值。
+ */
+const DEFAULT_EXPORT_PROFILE = {
+  workspaceId: "workspace:ali-ding",
+  workspaceLabel: "钉钉工作区",
+  deepLinkScheme: "dingtalk",
+  senderIdField: "senderOpenDingTalkId",
+} as const
+
+/** 见 `ChannelExportProfile`（定义在 channels 包，这里只重述形状避免横向依赖）。 */
+export interface ExportProfile {
+  workspaceId: string
+  workspaceLabel: string
+  deepLinkScheme: string
+  senderIdField: string
+}
 
 export interface ExportedMessage {
   openMessageId: string
@@ -71,7 +93,12 @@ export interface ExportedMessage {
   /** ★ 权威值：已归一的 unix ms。推荐读这个 */
   timestampMs: number
   sender: string
-  senderOpenDingTalkId: string | null
+  /**
+   * 发送者 id。★ **字段名按渠道变**（见 `ExportProfile.senderIdField`）——
+   * 钉钉是 `senderOpenDingTalkId`，别的渠道用自己的名字。
+   * 所以这里声明成索引签名而不是一个固定键。
+   */
+  [senderIdField: string]: unknown
   quotedMessage?: { openMessageId: string }
   /** 我们额外给的：本人标记，便于他们区分「我说的」与「别人说的」 */
   isSelf: boolean | null
@@ -107,6 +134,13 @@ export interface ExportOptions {
    * 传一个不带偏移的会让下游把时间当 UTC 解析 —— 见文件头。
    */
   formatTime: (ms: number) => string
+  /**
+   * 渠道特有的导出固定值。不给 = 钉钉那一套（见 `DEFAULT_EXPORT_PROFILE`）。
+   *
+   * ★ 第二个渠道**必须**给：不给的话它的语料会被打上钉钉的 workspace id，
+   * 两个渠道的会话挂在同一个 workspace 下，"来自哪个渠道"在图里就丢了。
+   */
+  profile?: ExportProfile
   logger?: Logger
   /** 每个会话最多导出多少条（防止单文件过大） */
   maxPerConversation?: number
@@ -280,6 +314,11 @@ function scopeIdFor(conversationExternalId: string): string {
 export class ExportMaterializer {
   constructor(private readonly options: ExportOptions) {}
 
+  /** 生效的渠道固定值（没给就用钉钉缺省 —— 那是老行为）。 */
+  private get profile(): ExportProfile {
+    return this.options.profile ?? DEFAULT_EXPORT_PROFILE
+  }
+
   /**
    * 全量物化。
    *
@@ -344,10 +383,10 @@ export class ExportMaterializer {
     const writer = new SourceWriter(dir, "chat")
     // 顶层 workspace scope：与上游 export_chat.py 一致，会话都挂在它下面。
     writer.scope({
-      id: WORKSPACE_ID,
+      id: this.profile.workspaceId,
       type: "workspace",
       parentId: null,
-      data: { name: "钉钉工作区", source: "mycontext" },
+      data: { name: this.profile.workspaceLabel, source: "mycontext" },
     })
 
     const allConversations = new ConversationRepository(this.options.db).listRecent(10_000)
@@ -378,7 +417,7 @@ export class ExportMaterializer {
       writer.scope({
         id: scopeId,
         type: "chat",
-        parentId: WORKSPACE_ID,
+        parentId: this.profile.workspaceId,
         data: {
           // `scope_title()` 读 data.title（其次 node.name / name）
           title: conversation.title,
@@ -399,7 +438,7 @@ export class ExportMaterializer {
           createTime: this.options.formatTime(row.sent_at),
           timestampMs: row.sent_at,
           sender: row.sender_display_name ?? "unknown",
-          senderOpenDingTalkId: row.sender_external_id,
+          [this.profile.senderIdField]: row.sender_external_id,
           isSelf: row.is_self === null ? null : row.is_self === 1,
         }
         if (row.quoted_external_id !== null) {
@@ -416,7 +455,7 @@ export class ExportMaterializer {
             id: `media:${asset.id}`,
             kind: asset.kind,
             // 平台侧标识；没有可直接解析的 URL（要走 CLI 下载）
-            uri: `dingtalk://${asset.resourceKind}/${asset.resourceId}`,
+            uri: `${this.profile.deepLinkScheme}://${asset.resourceKind}/${asset.resourceId}`,
             // ★ null = 未下载字节。让"有资源但没取到"与"没有资源"可区分
             localPath: asset.path,
             refs: [{ type: "record", id: recordId }],

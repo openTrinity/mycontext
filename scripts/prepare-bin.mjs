@@ -310,10 +310,20 @@ function prepareLarkCli() {
     )
     process.exit(1)
   }
-  mkdirSync(binDir, { recursive: true })
-  copyFileSync(source, target)
-  chmodSync(target, 0o755)
-  console.log(`已准备（官方 @larksuite/cli）：${target}`)
+  /**
+   * ★ 走 `installExecutable` 而不是自己 copy+chmod。
+   *
+   * 独立实现少了那条**关键**的一步：`assertRunnable`（真跑一次 `--version`）。
+   * 少了它的后果是打包后那个二进制可能是坏的，而只有用户点「授权飞书」
+   * 时才发现 —— 那时的表现是一个退出码，看不出是二进制本身有问题。
+   * 顺带也拿到 macOS 重签（新 inode + ad-hoc 签名，绕开内核缓存的旧签名）。
+   */
+  const result = installExecutable({ source, target, label: "lark-cli" })
+  console.log(
+    result === "skipped"
+      ? `已是最新（官方 @larksuite/cli）：${target}`
+      : `已准备（官方 @larksuite/cli）：${target}`,
+  )
 }
 
 // ---------------------------------------------------------------

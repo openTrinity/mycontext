@@ -24,6 +24,20 @@ export function createFeishuPlugin(options: FeishuPluginOptions): ChannelPlugin 
     auth: new FeishuAuth(options, cli),
     ingest: createFeishuIngest(cli),
     identity: createFeishuIdentity(cli),
+    /**
+     * ★★ 必须给，否则飞书的语料会被打上**钉钉的** workspace id
+     * （导出层的缺省），于是两个渠道的会话挂在同一个 workspace 下 ——
+     * "这条事实来自哪个渠道"在图里就丢了，而且不报错。
+     *
+     * `senderIdField` 用中性名：飞书的主 id 是 open_id，与钉钉那个字段
+     * 不是同一个体系，共用一个名字会让下游误以为可以互相比对。
+     */
+    exportProfile: {
+      workspaceId: "workspace:feishu",
+      workspaceLabel: "飞书工作区",
+      deepLinkScheme: "feishu",
+      senderIdField: "senderOpenId",
+    },
   }
 }
 
