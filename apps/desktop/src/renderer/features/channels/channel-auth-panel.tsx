@@ -194,12 +194,29 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    */
   const identityMismatch = (() => {
     if (!authorized) return null
-    const boundCorpId = selfIdentity.data?.corpId
+    /**
+     * ★★ 只对**这条身份行所属的那个渠道**判。
+     *
+     * `readSelfIdentity()` 返回的是**主渠道**那一行（主进程里写死
+     * `plugin.meta.id`，见 `DataPlaneService.readSelfIdentity`）。拿它去比
+     * 另一个渠道的授权态，两个 corpId 来自不同的组织体系 ——
+     * **必然不相等**，于是那张卡片上恒挂一条"身份配置异常"的假警报。
+     *
+     * 而这条告警的本意是抓「渠道 CLI 的配置目录被外部改过」，
+     * 那个目录本身就是按渠道分的（`VaultPaths.dwsHome` / `feishuAuthRoot`）
+     * —— 所以跨渠道比对压根不是它要回答的问题。
+     *
+     * 非主渠道要有同样的守卫，得先让 `readSelfIdentity` 支持按渠道取
+     * （那需要每个渠道各自的身份行）。在那之前**不判**比误报好：
+     * 一条恒亮的假警报会让用户学会忽略它，而真的错位到来时也就看不见了。
+     */
+    if (selfIdentity.data?.channelId !== channel.id) return null
+    const boundCorpId = selfIdentity.data.corpId
     if (boundCorpId === undefined || boundCorpId === null || boundCorpId === "") return null
     if (boundCorpId === status.corpId) return null
     return {
       channelCorp: status.corpName,
-      boundCorp: selfIdentity.data?.corpName ?? boundCorpId,
+      boundCorp: selfIdentity.data.corpName ?? boundCorpId,
     }
   })()
 

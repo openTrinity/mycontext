@@ -67,11 +67,11 @@ function authorized(
   }
 }
 
-function channel(status: AuthStatus): ChannelSummary {
+function channel(status: AuthStatus, id = "dingtalk"): ChannelSummary {
   return {
-    id: "dingtalk",
-    labelKey: "channels:dingtalk.label",
-    descriptionKey: "channels:dingtalk.description",
+    id,
+    labelKey: `channels:${id}.label`,
+    descriptionKey: `channels:${id}.description`,
     available: true,
     stepKeys: [],
     status,
@@ -140,12 +140,16 @@ function installApi(boundCorpId: string | null, confirmed = true): void {
   ;(window as unknown as { mycontext: MyContextApi }).mycontext = api
 }
 
-function wrap(status: AuthStatus, variant: "onboarding" | "settings" = "settings") {
+function wrap(
+  status: AuthStatus,
+  variant: "onboarding" | "settings" = "settings",
+  channelId = "dingtalk",
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <I18nextProvider i18n={createI18n("zh")}>
       <QueryClientProvider client={client}>
-        <ChannelAuthPanel channel={channel(status)} variant={variant} />
+        <ChannelAuthPanel channel={channel(status, channelId)} variant={variant} />
       </QueryClientProvider>
     </I18nextProvider>,
   )
@@ -310,5 +314,34 @@ describe("引导页的平台卡片保持紧凑", () => {
     expect(screen.getByRole("button", { name: "收起" })).toBeTruthy()
     expect(screen.getByText("开始授权")).toBeTruthy()
     expect(screen.getByText("授权范围")).toBeTruthy()
+  })
+})
+
+/**
+ * ★★ 多渠道之后这条告警**只能对它自己那个渠道**判。
+ *
+ * `readSelfIdentity()` 返回的是**主渠道**那一行（主进程里写死
+ * `plugin.meta.id`）。拿它去比另一个渠道的授权态，两个 corpId 来自不同的
+ * 组织体系 —— **必然不相等**，于是那张卡片上恒挂一条假警报。
+ *
+ * 一条恒亮的假警报比没有更糟：用户会学会忽略它，而真的错位到来时也就
+ * 看不见了。这一组锁住"跨渠道不误报"，同时保证主渠道那条真守卫还在。
+ */
+describe("★★ 跨渠道不误报身份错位", () => {
+  it("★★ 飞书卡片不因为「身份行是钉钉的」而报错位", async () => {
+    // 身份行绑钉钉的组织甲；飞书这张卡片连的是另一个组织（正常状态）
+    installApi(CORP_BOUND)
+    wrap(authorized("feishuTenant0001", "某飞书组织"), "settings", "feishu")
+
+    await waitFor(() => expect(screen.getAllByText(/某飞书组织/).length).toBeGreaterThan(0))
+    // ★ 关键：不该出现那条告警
+    expect(screen.queryByText(/身份配置异常/)).toBeNull()
+  })
+
+  it("★ 主渠道那条真守卫仍在（同渠道、组织不一致 → 照旧告警）", async () => {
+    installApi(CORP_BOUND)
+    wrap(authorized(CORP_CHANNEL, "组织乙"), "settings", "dingtalk")
+
+    await waitFor(() => expect(screen.getByText(/身份配置异常/)).toBeTruthy())
   })
 })
