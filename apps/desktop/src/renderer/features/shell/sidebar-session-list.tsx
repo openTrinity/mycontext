@@ -12,6 +12,7 @@
 import { useState } from "react"
 import { cn } from "@mycontext/design"
 import type { SearchSessionSummary } from "@mycontext/ipc-contract"
+import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
 export interface SidebarSessionListProps {
@@ -45,6 +46,19 @@ export function groupOf(session: SearchSessionSummary, nowMs: number): GroupKey 
 }
 
 const GROUP_ORDER: readonly GroupKey[] = ["pinned", "today", "yesterday", "week", "earlier"]
+
+/**
+ * 会话的检索档位图标。
+ *
+ * ★ 认不出的档位（`all` / 未来的新档 / 旧会话没有这个字段）返回 null ——
+ * 不画比画一个猜的图标好：这个图标是"答案从哪来"的唯一线索，猜错比没有更糟。
+ */
+function SessionScopeIcon({ scope }: { scope?: string | undefined }) {
+  if (scope === undefined || scope === "") return null
+  const Icon = CHANNEL_BRAND_ICONS[scope]
+  if (Icon === undefined) return null
+  return <Icon className="size-3 shrink-0 rounded-[3px]" />
+}
 
 export function SidebarSessionList({
   sessions,
@@ -127,10 +141,22 @@ export function SidebarSessionList({
                 <button
                   type="button"
                   onClick={() => onSelect(session.id)}
-                  className="typography-body-small-400 min-w-0 flex-1 truncate text-left text-[var(--text-base-primary)]"
+                  className="typography-body-small-400 flex min-w-0 flex-1 items-center gap-1.5 truncate text-left text-[var(--text-base-primary)]"
                   title={session.title ?? t("sessions.untitled")}
                 >
-                  {session.title ?? t("sessions.untitled")}
+                  {/*
+                    ★★ 检索档位的品牌图标 —— 一个会话是"只搜钉钉"还是"只搜飞书"
+                    直接决定它的答案，而列表里只有标题的话完全看不出来
+                    （实测：三个会话都叫一句中文问句，没人知道哪个搜的是哪儿）。
+
+                    ★ 用图标而不是文字：侧栏很窄，加两个字会把标题挤掉。
+                    「混合」档没有品牌图标 —— 那时不画（下面 `SessionScopeIcon`
+                    返回 null），因为它本来就不属于某一个渠道。
+                  */}
+                  <SessionScopeIcon scope={session.graphScope} />
+                  <span className="min-w-0 flex-1 truncate">
+                    {session.title ?? t("sessions.untitled")}
+                  </span>
                 </button>
               )}
 

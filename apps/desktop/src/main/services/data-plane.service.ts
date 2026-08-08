@@ -975,16 +975,23 @@ export class DataPlaneService {
       : (this.sourceDatabases.get(channelId) ?? null)
   }
 
+  /**
+   * 顶层快照读哪个 `IngestService`。
+   *
+   * ## ★★ 永远是**主渠道**（这一条是修一个真实的错位）
+   *
+   * 原来的实现是"主渠道没在跑就挑一个活跃的 source"。那在单渠道时无害，
+   * 但多渠道之后它让**顶层快照的语义变成"某个不确定的渠道"** —— 而下游
+   * （渲染层的 `?? snap.x` 兜底、`readIngest` 的问题判据）都假设顶层是主渠道。
+   *
+   * 实测的错位形态：主渠道重挂那一瞬间这里返回飞书的 ingest，于是顶层
+   * 「已采集」变成 8，而用户选的是钉钉 —— 一个属于另一个渠道的数字，
+   * 不报错。
+   *
+   * 逐渠道的数字走 `perChannel`（那才是它该在的地方）。顶层只回答
+   * "主渠道怎么样"，未挂载时由 `snapshot()` 给全零 + `running:false`。
+   */
   private snapshotIngest(): IngestService | null {
-    if (
-      this.ingest !== null &&
-      (this.activeChannels.size === 0 || this.activeChannels.has(this.options.plugin.meta.id))
-    ) {
-      return this.ingest
-    }
-    for (const [channelId, source] of this.sourceIngest) {
-      if (this.activeChannels.has(channelId)) return source
-    }
     return this.ingest
   }
 
@@ -1050,7 +1057,40 @@ export class DataPlaneService {
         })
       }
     }
+    /**
+     * ★★ 主渠道那一行**必须**在，哪怕它的 `IngestService` 还没挂上。
+     *
+     * 原来是 `if (this.ingest !== null) collect(...)` —— 于是重挂那一瞬间
+     * （`intervalsSave` / 范围变更都会 detach+attach）主渠道行**消失**，
+     * 而渲染层"找不到那个渠道就落回顶层快照"，顶层在 ingest 为 null 时是
+     * 一份**全零**快照 → 界面上「会话 0 · 消息 0」，而库里有 1674 条。
+     *
+     * 实测就是这个形态（用户截图：会话 0 / 消息 0，而实体 361、事实 719 正常
+     * —— 因为那三个来自图库，不走这条路）。
+     *
+     * 挂载中给一行"0 但标记未在跑"比让它整行消失好：前者是一个可解释的
+     * 中间态，后者会让下游落回一个语义完全不同的兜底值。
+     */
     if (this.ingest !== null) collect(primaryId, this.ingest)
+    else {
+      rows.push({
+        channelId: primaryId,
+        running: false,
+        messages: 0,
+        conversations: 0,
+        mediaAssets: 0,
+        ftsIndexed: 0,
+        ftsLag: 0,
+        unjudged: 0,
+        outboxHead: 0,
+        minutes: 0,
+        probeIntervalMs: 0,
+        probeThrottled: false,
+        selfConfirmed: false,
+        lastError: null,
+        blockedReason: null,
+      })
+    }
     for (const [channelId, source] of this.sourceIngest) collect(channelId, source)
     return { perChannel: rows }
   }

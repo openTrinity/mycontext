@@ -83,6 +83,14 @@ export const LARK_AUTH_SCOPES = [
   "docx:document:readonly",
 ] as const
 
+/**
+ * 拿不到会话名时的占位。
+ *
+ * ★ 单独一个常量而不是散在各处的字面量：解析里要判"这个名字是不是占位"
+ * （见单聊那段的"已有名字不覆盖"），而拿字面量比对是那类会漂的判据。
+ */
+const FEISHU_FALLBACK_TITLE = "飞书会话"
+
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
 }
@@ -255,10 +263,43 @@ export function parseLarkMessagePage(payload: unknown, fetchedAt: number): Chann
     if (conversationId === null) continue
     const sender = record(item["sender"])
     const chatType = str(item["chat_type"], item["chatType"], chat["chat_type"])
+    const isDirect = chatType === "p2p" || chatType === "direct"
+    /**
+     * ★★ 单聊的会话名要从**对端发的那条消息**里取。
+     *
+     * 实测：消息搜索的响应里 `chat_partner` **只有 open_id、没有名字**
+     * （`{"open_id":"ou_…"}`），而 `chat_name` / `chat.name` 在单聊上压根不存在。
+     * 于是原来那三个候选全空 → 每个单聊都叫「飞书会话」，用户在采集范围里
+     * 看到三行一模一样的「飞书会话」，完全没法选。
+     *
+     * 而 `sender.name` **是有真名的**（实测：开发者小助手 / 用户391097 / …）。
+     * 所以：单聊取"不是我发的那条消息"的 sender 名 —— 那就是对端的名字。
+     *
+     * ★ 判据用 `sender.open_id !== chat_partner.open_id` 的**反面**：
+     * 直接判 `=== partner.open_id` 更准（那明确是对端），而"不是我"要先知道
+     * 我是谁，那需要多一次身份查询。
+     *
+     * ★ 已经有名字的会话**不覆盖**：同一个会话会在多页里重复出现，而后一页
+     * 可能恰好只有我自己发的消息 —— 那时不该把已经拿到的名字冲成占位。
+     */
+    const partnerOpenId = str(partner["open_id"], partner["openId"])
+    const senderOpenId = str(sender["open_id"], sender["openId"], sender["id"])
+    const senderName = str(sender["name"], sender["display_name"])
+    const fromPartner =
+      isDirect && partnerOpenId !== null && senderOpenId === partnerOpenId ? senderName : null
+
+    const known = conversations.get(conversationId)
+    const title =
+      str(item["chat_name"], chat["name"], partner["name"]) ??
+      fromPartner ??
+      // 上一页已经拿到的名字优先于占位（见上面最后一段）
+      (known?.title !== null && known?.title !== undefined && known.title !== FEISHU_FALLBACK_TITLE
+        ? known.title
+        : FEISHU_FALLBACK_TITLE)
     conversations.set(conversationId, {
       externalId: conversationId,
-      title: str(item["chat_name"], chat["name"], partner["name"]) ?? "飞书会话",
-      type: chatType === "p2p" || chatType === "direct" ? "direct" : "group",
+      title,
+      type: isDirect ? "direct" : "group",
       memberCount: null,
     })
     messages.push({

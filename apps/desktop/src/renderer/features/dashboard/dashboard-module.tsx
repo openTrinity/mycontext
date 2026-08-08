@@ -530,7 +530,18 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           `SelfIdentityPanel` 挂在 `StatusPanel` 里（见 data-plane-panel.tsx）。
           从前那句写的是"去设置里确认一下"，而那个页面上根本没有这个入口。
         */}
-        {identity.selfState === "unconfirmed" && identityProblem !== null ? (
+        {/*
+          ★★ 这条横幅**只对主渠道**成立。
+          
+          非主渠道压根没有身份行（`readSelfIdentity` 返回的是主渠道那一行，
+          而 `selfConfirmed` 在它们的 perChannel 里恒 false）—— 于是选了飞书时
+          这条恒亮，且它指向的操作（去运行状态解析身份）在飞书上不存在：
+          那一页的身份卡本身就只对主渠道渲染。
+          
+          一条恒亮、且照着做也没有结果的红色告警比不显示糟得多 ——
+          用户会学会忽略它，而主渠道真的没确认时也一起忽略了。
+        */}
+        {scope.personaSupported && identity.selfState === "unconfirmed" && identityProblem !== null ? (
           <div className="col-span-12">
             <ProblemLine
               text={

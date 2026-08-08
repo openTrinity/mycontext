@@ -115,7 +115,12 @@ export function DropdownMenu({
    * 换 `fixed` 之后它脱离所有滚动/裁剪容器，代价是要自己算坐标（下面那段）
    * 并在窗口尺寸/滚动变化时重算。
    */
-  const [rect, setRect] = useState<{ top: number; left: number; right: number } | null>(null)
+  const [rect, setRect] = useState<{
+    top: number
+    left: number
+    right: number
+    triggerWidth: number
+  } | null>(null)
 
   /**
    * 每次打开都按触发器的**实测**位置算一遍。
@@ -137,6 +142,18 @@ export function DropdownMenu({
         top: side === "top" ? box.top : box.bottom,
         left: box.left,
         right: window.innerWidth - box.right,
+        /**
+         * ★★ 触发器宽度 —— 浮层的 `max-width` 要参考它。
+         *
+         * `absolute` 时浮层的包含块是**父容器**（如侧栏 365px），文字自然在
+         * 那个宽度里换行。改成 `fixed` 之后包含块变成**视口**（2000px），
+         * 于是长文本（邮箱、组织名）不再换行，菜单横向撑得极宽 ——
+         * 实测账号菜单从一列变成横跨大半个窗口。
+         *
+         * 用"触发器宽度与一个上限里取大的那个"：既不比触发器窄（对齐好看），
+         * 也不会因为一条长文本无限变宽。
+         */
+        triggerWidth: box.width,
       })
     }
     measure()
@@ -206,6 +223,15 @@ export function DropdownMenu({
                   // side=top：把自己整体上移一个身高，从而贴在触发器上方
                   transform: side === "top" ? "translateY(calc(-100% - 4px))" : undefined,
                   marginTop: side === "top" ? undefined : 4,
+                  /**
+                   * ★ 限宽（见 `triggerWidth` 的注释）。取 `max(触发器宽, 280)`
+                   * 并且不超过视口留边 —— 于是长文本回到换行，而窄触发器
+                   * （如一个图标按钮）也不会得到一个 40px 的菜单。
+                   */
+                  maxWidth: Math.min(
+                    Math.max(rect.triggerWidth, 280),
+                    window.innerWidth - 24,
+                  ),
                 }
           }
           className={cn(
