@@ -117,7 +117,7 @@ def test_incremental_projection_receives_reversible_community_keys(tmp_path) -> 
         patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj,
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
     ):
-        run_improvement(
+        result = run_improvement(
             "incremental",
             store=store,
             qdrant=MagicMock(),
@@ -130,6 +130,7 @@ def test_incremental_projection_receives_reversible_community_keys(tmp_path) -> 
         community_ids=set(changes),
         community_keys={("entity", "L0", 7)},
     )
+    assert result.changed_community_ids == tuple(sorted(changes))
     store.close()
 
 
@@ -158,7 +159,7 @@ def test_incremental_projection_recovers_keys_from_checkpoint(tmp_path) -> None:
         patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj,
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
     ):
-        run_improvement(
+        result = run_improvement(
             "incremental",
             store=store,
             qdrant=MagicMock(),
@@ -172,6 +173,7 @@ def test_incremental_projection_recovers_keys_from_checkpoint(tmp_path) -> None:
         community_ids=set(changes),
         community_keys={("entity", "L0", 7)},
     )
+    assert result.changed_community_ids == tuple(sorted(changes))
     store.close()
 
 

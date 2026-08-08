@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from kl_graph.ingest.improvement import ImprovementTargets
+from kl_graph.ingest.improvement import ImprovementResult, ImprovementTargets
 from kl_graph.ingest.runner import IngestOptions, IngestResult, run_ingestion
 
 
@@ -136,7 +137,13 @@ def test_runner_applies_incremental_improvement_targets(tmp_path) -> None:
     )
     checkpoint = MagicMock(batch_id="batch-improve")
     checkpoint.is_done.return_value = False
-    applied = MagicMock(applied_mode="incremental")
+    pipeline.all_chunks.return_value = [SimpleNamespace(id="c1")]
+    applied = ImprovementResult(
+        requested_mode="auto",
+        applied_mode="incremental",
+        changed_community_ids=("comm-new", "comm-old"),
+    )
+    finalize = MagicMock()
 
     with (
         patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline),
@@ -146,12 +153,77 @@ def test_runner_applies_incremental_improvement_targets(tmp_path) -> None:
             run_ingestion(
                 IngestOptions(tmp_path, "slack-prod", improve_mode="auto"),
                 checkpoint=checkpoint,
+                finalize_callback=finalize,
             )
         )
 
     improve.assert_called_once()
     assert improve.call_args.args[0] == "auto"
     assert improve.call_args.kwargs["targets"].fact_ids == ("f1",)
+    update = finalize.call_args.args[0]
+    assert update.similarity_nodes == (("entity", "e1"), ("fact", "f1"))
+    assert update.community_ids == ("comm-new", "comm-old")
+
+
+def test_runner_sends_dirty_serving_index_scopes_to_finalizer(tmp_path) -> None:
+    pipeline = MagicMock()
+    pipeline._phase_a_complete.return_value = False
+    pipeline.units_discovered = 1
+    pipeline.units_skipped = 0
+    pipeline.workset_unit_count = 1
+    pipeline.workset_chunk_count = 1
+    pipeline.run_extraction = AsyncMock()
+    pipeline.run_graph_build = AsyncMock()
+    pipeline.all_chunks.return_value = [SimpleNamespace(id="c1")]
+    pipeline.improvement_targets.return_value = ImprovementTargets(
+        entity_ids=("e1",), fact_ids=("f1",)
+    )
+    checkpoint = MagicMock(batch_id="batch-finalize")
+    checkpoint.is_done.return_value = False
+    finalize = MagicMock()
+
+    with patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline):
+        asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod", improve_mode="off"),
+                checkpoint=checkpoint,
+                finalize_callback=finalize,
+            )
+        )
+
+    update = finalize.call_args.args[0]
+    assert update.structural_nodes == (("chunk", "c1"), ("fact", "f1"))
+    assert update.similarity_nodes == ()
+    assert update.community_ids == ()
+    assert update.pagerank_dirty is True
+    assert update.full_adjacency is False
+
+
+def test_runner_skips_finalizer_for_empty_mutation_free_run(tmp_path) -> None:
+    pipeline = MagicMock()
+    pipeline._phase_a_complete.return_value = False
+    pipeline.units_discovered = 0
+    pipeline.units_skipped = 0
+    pipeline.workset_unit_count = 0
+    pipeline.workset_chunk_count = 0
+    pipeline.run_extraction = AsyncMock()
+    pipeline.run_graph_build = AsyncMock()
+    pipeline.all_chunks.return_value = []
+    pipeline.improvement_targets.return_value = ImprovementTargets()
+    checkpoint = MagicMock(batch_id="batch-empty")
+    checkpoint.is_done.return_value = False
+    finalize = MagicMock()
+
+    with patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline):
+        asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod", improve_mode="off"),
+                checkpoint=checkpoint,
+                finalize_callback=finalize,
+            )
+        )
+
+    finalize.assert_not_called()
 
 
 def test_cli_default_path_delegates_to_shared_runner(tmp_path) -> None:

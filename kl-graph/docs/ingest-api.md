@@ -98,7 +98,9 @@ Poll `GET /status` and read its `ingest` object. Important fields are:
 - `run_id`, `source_id`, `improve_mode`, and `error`.
 
 Phase A completion makes chunk vector/BM25 retrieval usable. Phase B adds the
-extracted graph. Finalization refreshes the server's in-memory adjacency index.
+extracted graph. Finalization reconciles affected in-memory adjacency buckets
+from committed graph state. It refreshes the facts-only PageRank prior only
+when the workset contains facts that may have changed its ABOUT projection.
 
 ## Incremental and retry semantics
 
@@ -135,6 +137,8 @@ Variables used below:
 - `D`: embedding vector width;
 - `F`: total facts in the graph;
 - `A`: the ANN result limit per affected node (currently 50).
+- `Z`, `I_Z`: dirty adjacency keys and their incident stored edges;
+- `E_R`, `J`: edges in the facts-only entity projection and PageRank iterations.
 
 “External cost” means paid or remote-model work. “Local cost” means server CPU,
 RAM, disk I/O, and graph/Qdrant operations.
@@ -162,7 +166,8 @@ RAM, disk I/O, and graph/Qdrant operations.
 | F2. Full entity similarity | Whole graph | Heavy | Graph-wide all-pairs vector prefilter, approximately `O(V_e² × D)`, plus structural hybrid scoring for retained candidates. |
 | F3. Entity disambiguation | Whole graph | Variable/heavy | Local phonetic/hybrid candidate generation plus an LLM judge capped at 500 calls by default. |
 | F4. Full communities | Whole graph | Medium–heavy | Four entity and four fact Leiden resolutions over graph-wide projections. |
-| Z1. Server finalization | Whole graph | Medium–heavy | Hot-swap rebuild scans all graph edges to reconstruct in-memory adjacency, `O(E)`. |
+| Z1. Adjacency finalization | Dirty endpoints | Light–medium | Rereads authoritative incident edges and replaces immutable buckets, approximately `O(Z + I_Z)`. A full improvement, broad frontier, startup, or failed incremental refresh falls back to `O(E)`. |
+| Z2. PageRank refresh | Facts-only entity projection | Medium–heavy when triggered | Runs only when workset facts may have changed facts/ABOUT inputs. It scans facts and ABOUT edges, constructs entity pairs per fact, then performs up to `J` iterations over `E_R`; improvement-only changes reuse the current prior. |
 
 ### Practical interpretation
 
@@ -173,10 +178,12 @@ RAM, disk I/O, and graph/Qdrant operations.
   can make a small batch locally expensive without causing a whole-graph scan.
 - The structural cache costs `O(S)` startup reads and resident memory. Batch
   deltas are applied inside the durable edge-construction checkpoint.
-- After the one-time legacy assignment-index build, the recurring graph-wide
-  operation is server finalization (`O(E)` adjacency hot-swap). Standalone runs
-  without the cache and UUID-only custom strategies retain compatibility
-  fallbacks documented above.
+- Normal server finalization is output-sensitive (`O(Z + I_Z)`) and atomically
+  publishes copy-on-write adjacency buckets. Full improvement, broad dirty
+  frontiers, startup, and recovery retain the `O(E)` reconciliation path.
+- PageRank is a serving-index prior, not an optional improvement step. It is
+  reused for similarity/community-only changes and recomputed when new facts
+  may have changed the ABOUT projection.
 - Full improvement is the primary CPU/RAM risk. Do not select `full` merely
   because a batch is large; use it when global re-clustering is intentionally
   required.

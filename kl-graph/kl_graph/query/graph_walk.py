@@ -22,7 +22,7 @@ further-away nodes are monotonically penalized and best-path wins.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 from kl_graph.models.types import EdgeType
 
@@ -104,7 +104,7 @@ def _rank_and_cap(
 
 
 def graph_walk(
-    adjacency: dict[str, list[tuple]],
+    adjacency: Mapping[str, Sequence[tuple]],
     seeds: list[tuple[str, float]],
     *,
     radius: int = 1,

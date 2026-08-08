@@ -6,7 +6,8 @@ the number of entities/facts affected by the batch; `P`/`E_P` are frontier
 nodes/induced edges; `I_K` is structural incidence traversed for affected nodes;
 `Q_P` is structural candidate pairs enumerated in the frontier; `C` is
 changed-community membership rows; `S` is cached structural edges; and `D` is
-embedding width.
+embedding width. `Z`/`I_Z` are dirty serving-index keys and their incident
+edges; `E_R`/`J` are facts-only entity-projection edges and PageRank iterations.
 
 | Stage | Scope | Typical weight | Main scaling / bottleneck |
 |---|---|---:|---|
@@ -21,7 +22,8 @@ embedding width.
 | Structural edge construction | Batch | Medium | Linear in extracted mentions/facts, plus chat temporal/reply relationships |
 | Structural cache startup | Whole structural graph | Medium | One server-start scan plus resident bidirectional sets, `O(S)` time and memory |
 | Structural cache delta | Batch structural edges | Light | Updates in-memory entity↔chunk and entity↔fact mappings, linear in new structural edges; it is part of the edge-construction checkpoint |
-| Server index hot-swap | Whole graph | Medium–heavy | Rebuilds in-memory adjacency by scanning all graph edges, `O(E)` |
+| Adjacency finalization | Dirty endpoints | Light–medium | Reconciles immutable buckets from committed incident edges, `O(Z + I_Z)`; full/broad/recovery paths remain `O(E)` |
+| PageRank refresh | Facts-only projection | Conditional medium–heavy | Runs only when workset facts may change ABOUT inputs; scans facts/ABOUT, constructs per-fact entity pairs, then iterates over `E_R` up to `J` times |
 
 ## Improvement modes
 
@@ -55,11 +57,13 @@ Ladybug, and keyed COMM_MEMBER projection keep that work output-sensitive.
 | Summary invalidation | Light | Marks affected summaries stale using local metadata updates. No LLM calls. |
 
 Excluding ANN and dense cosine work itemized above, local incremental graph work
-is approximately `O(K + I_K + P + Q_P + E_P + C)`. After one-time index/counter
-initialization, server finalization is the recurring graph-wide operation
-(`O(E)` adjacency hot-swap). Cacheless standalone runs retain their explicit
-`O(E)` fallback. For mature graphs with small, non-hub batches, LLM extraction
-and embedding latency normally dominate.
+is approximately `O(K + I_K + P + Q_P + E_P + C)`, followed by an
+`O(Z + I_Z)` adjacency refresh. Full improvement, a broad dirty frontier,
+startup, or incremental-refresh failure uses the `O(E)` reconciliation path.
+PageRank is reused for similarity/community-only changes but remains a
+conditional global computation when the workset adds facts. Cacheless
+standalone runs retain their explicit `O(E)` fallbacks. For mature graphs with
+small, non-hub batches, LLM extraction and embedding latency normally dominate.
 
 ### Checkpoint semantics
 

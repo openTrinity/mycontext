@@ -18,10 +18,11 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -64,9 +65,13 @@ QUERY_MAX_CONCURRENCY = int(cfg.pipelines.query.max_concurrency)
 CURRENT_USER = str(cfg.pipelines.query.global_search.current_user or "")
 
 from kl_graph.query import graph_walk as gw
+from kl_graph.query.adjacency import AdjacencyEntry, AdjacencyIndex
 from kl_graph.query.global_search import NO_DATA_ANSWER, GlobalSearch
 from kl_graph.query.pagerank import compute_entity_pagerank
 from kl_graph.storage.base import KnowledgeStore, create_store
+
+if TYPE_CHECKING:
+    from kl_graph.ingest.runner import ServingIndexUpdate
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -89,7 +94,7 @@ class ServerState:
 
     qdrant_main: object | None = None  # QdrantClient
     qdrant_communities: object | None = None  # QdrantClient
-    adjacency: dict | None = (
+    adjacency: Mapping[str, tuple[AdjacencyEntry, ...]] | None = (
         None  # entity_id/fact_id -> list of (edge_type, neighbor_id, neighbor_type, dir)
     )
     pagerank: dict | None = (
@@ -200,7 +205,7 @@ def _query_sema() -> asyncio.Semaphore:
     return sema
 
 
-def _build_adjacency(store: KnowledgeStore) -> dict:
+def _build_adjacency_buckets_full(store: KnowledgeStore) -> dict:
     """Build in-memory adjacency index from edges via KnowledgeStore.
 
     Key: entity_id, fact_id, chunk_id or community_id (namespacing is applied
@@ -312,6 +317,191 @@ def _build_adjacency(store: KnowledgeStore) -> dict:
     return adj
 
 
+EdgeRecord = tuple[str, str, str, str, str]
+NodeRef = tuple[str, str]
+
+# Endpoint schemas from graph-design.md. COMM_MEMBER accepts two source types,
+# so it intentionally has two entries. This lets incremental refresh reuse the
+# endpoint-indexed store primitive and reconstruct full edge records.
+_EDGE_ENDPOINTS: tuple[tuple[str, str, str], ...] = (
+    ("TEMPORAL", "chunk", "chunk"),
+    ("REPLY_TO", "chunk", "chunk"),
+    ("AUTHORED_BY", "chunk", "entity"),
+    ("PART_OF", "chunk", "scope"),
+    ("MENTIONS", "chunk", "entity"),
+    ("STATES", "fact", "chunk"),
+    ("ABOUT", "fact", "entity"),
+    ("ENTITY_SIMILAR", "entity", "entity"),
+    ("FACT_SIMILAR", "fact", "fact"),
+    ("ENTAILS", "fact", "fact"),
+    ("CONTRADICTS", "fact", "fact"),
+    ("COMM_MEMBER", "entity", "community"),
+    ("COMM_MEMBER", "fact", "community"),
+)
+
+
+def _append_adjacency_edge(
+    adjacency: dict[str, list[AdjacencyEntry]],
+    edge: EdgeRecord,
+    *,
+    only_ids: set[str] | None = None,
+) -> None:
+    """Project one stored edge into the server's existing adjacency shape."""
+
+    source_type, source_id, target_type, target_id, edge_type = edge
+
+    def append(node_id: str, entry: AdjacencyEntry) -> None:
+        if only_ids is None or node_id in only_ids:
+            adjacency.setdefault(node_id, []).append(entry)
+
+    if source_type == "entity":
+        append(source_id, (edge_type, target_id, target_type, "out"))
+    if target_type == "entity":
+        append(target_id, (edge_type, source_id, source_type, "in"))
+    if source_type == "fact" and edge_type == "ABOUT":
+        append(source_id, (edge_type, target_id, target_type, "out"))
+
+    if source_type == "chunk":
+        append(source_id, (edge_type, target_id, target_type, "out"))
+    if target_type == "chunk":
+        append(target_id, (edge_type, source_id, source_type, "in"))
+        if source_type not in ("entity", "chunk"):
+            append(source_id, (edge_type, target_id, target_type, "out"))
+
+    if target_type == "community":
+        if source_type != "entity":
+            append(source_id, (edge_type, target_id, target_type, "out"))
+        append(target_id, (edge_type, source_id, source_type, "in"))
+    elif source_type == "community":
+        append(source_id, (edge_type, target_id, target_type, "out"))
+        if target_type != "entity":
+            append(target_id, (edge_type, source_id, source_type, "in"))
+
+
+def _adjacency_buckets(
+    edges: Iterable[EdgeRecord], *, only_ids: set[str] | None = None
+) -> dict[str, list[AdjacencyEntry]]:
+    adjacency: dict[str, list[AdjacencyEntry]] = {}
+    for edge in edges:
+        _append_adjacency_edge(adjacency, edge, only_ids=only_ids)
+    return adjacency
+
+
+def _build_adjacency(store: KnowledgeStore) -> AdjacencyIndex:
+    """Build the complete immutable adjacency serving index from storage."""
+
+    return AdjacencyIndex.from_mapping(_build_adjacency_buckets_full(store))
+
+
+def _scan_incident_edges(
+    store: KnowledgeStore,
+    nodes: set[NodeRef],
+    *,
+    edge_types: set[str] | None = None,
+) -> list[EdgeRecord]:
+    """Read typed edges touching ``nodes`` through indexed store APIs."""
+
+    if not nodes:
+        return []
+    seen: set[EdgeRecord] = set()
+    edges: list[EdgeRecord] = []
+    for edge_type, source_type, target_type in _EDGE_ENDPOINTS:
+        if edge_types is not None and edge_type not in edge_types:
+            continue
+        node_ids = {
+            node_id
+            for node_type, node_id in nodes
+            if node_type == source_type or node_type == target_type
+        }
+        if not node_ids:
+            continue
+        for source_id, target_id, _properties in store.scan_edges_for_nodes(
+            [edge_type],
+            node_ids,
+            source_type=source_type,
+            target_type=target_type,
+        ):
+            edge = (source_type, source_id, target_type, target_id, edge_type)
+            if (source_type, source_id) not in nodes and (
+                target_type,
+                target_id,
+            ) not in nodes:
+                # The store endpoint filter is untyped. Reject the extremely
+                # unlikely case where two node types share the same bare ID.
+                continue
+            if edge not in seen:
+                seen.add(edge)
+                edges.append(edge)
+    return edges
+
+
+def _incremental_adjacency(
+    store: KnowledgeStore,
+    current: Mapping[str, tuple[AdjacencyEntry, ...]],
+    update: ServingIndexUpdate,
+) -> AdjacencyIndex:
+    """Reconcile affected buckets from committed graph state."""
+
+    base = (
+        current
+        if isinstance(current, AdjacencyIndex)
+        else AdjacencyIndex.from_mapping(current)
+    )
+    structural_nodes = set(update.structural_nodes)
+    similarity_nodes = set(update.similarity_nodes)
+    community_nodes = {
+        ("community", community_id) for community_id in update.community_ids
+    }
+    dirty_nodes = structural_nodes | similarity_nodes | community_nodes
+
+    # Deleted memberships are absent from the new store view. The old snapshot
+    # supplies their member endpoints so those buckets are cleared too.
+    for _community_type, community_id in community_nodes:
+        for edge_type, related_id, related_type, _direction in base.get(
+            community_id, ()
+        ):
+            if edge_type == "COMM_MEMBER":
+                dirty_nodes.add((related_type, related_id))
+
+    discovery_edges: list[EdgeRecord] = []
+    discovery_edges.extend(_scan_incident_edges(store, structural_nodes))
+    discovery_edges.extend(
+        _scan_incident_edges(
+            store,
+            similarity_nodes,
+            edge_types={"ENTITY_SIMILAR", "FACT_SIMILAR"},
+        )
+    )
+    discovery_edges.extend(
+        _scan_incident_edges(store, community_nodes, edge_types={"COMM_MEMBER"})
+    )
+    for source_type, source_id, target_type, target_id, _edge_type in discovery_edges:
+        dirty_nodes.add((source_type, source_id))
+        dirty_nodes.add((target_type, target_id))
+
+    dirty_ids = {node_id for _node_type, node_id in dirty_nodes}
+    if len(base) >= 1_000 and len(dirty_ids) > len(base) // 4:
+        logger.info(
+            "Adjacency frontier is broad (%d/%d keys); using full rebuild",
+            len(dirty_ids),
+            len(base),
+        )
+        return _build_adjacency(store)
+
+    current_edges = _scan_incident_edges(store, dirty_nodes)
+    buckets = _adjacency_buckets(current_edges, only_ids=dirty_ids)
+    replacements = {node_id: buckets.get(node_id, ()) for node_id in dirty_ids}
+    refreshed = base.replace_buckets(replacements)
+    logger.info(
+        "Adjacency incremental refresh: %d dirty keys, %d incident edges, "
+        "%d total keys",
+        len(dirty_ids),
+        len(current_edges),
+        len(refreshed),
+    )
+    return refreshed
+
+
 def _compute_pagerank(
     store: KnowledgeStore,
     damping: float = 0.85,
@@ -347,21 +537,41 @@ def _shared_stores():
     return shared_store, shared_qdrant
 
 
-def _hot_swap_graph():
-    """Rebuild the in-memory graph indexes from the updated DB and swap them in.
+def _hot_swap_graph(update: ServingIndexUpdate | None = None):
+    """Refresh only dirty serving indexes, retaining a full recovery path.
 
-    Called after a background ingest commits new entities/facts/edges. Python
-    reference assignment is atomic, so in-flight queries keep using the old
-    index until the new one is fully built — no locking, no restart.
+    A missing update keeps the historical/manual behavior: full adjacency and
+    PageRank rebuild. Normal server ingestion passes ``ServingIndexUpdate`` so
+    adjacency buckets are reconciled from committed store state and PageRank is
+    recomputed only when facts/ABOUT inputs may have changed.
     """
-    logger.info("Hot-swapping graph indexes after ingest...")
-    new_adjacency = _build_adjacency(state.store)
-    new_pagerank = _compute_pagerank(state.store)
-    state.adjacency = new_adjacency
-    state.pagerank = new_pagerank
-    # The query engine reads pagerank by reference; refresh its handle too.
-    if state.engine is not None and hasattr(state.engine, "pagerank"):
-        state.engine.pagerank = new_pagerank
+
+    if update is None:
+        from kl_graph.ingest.runner import ServingIndexUpdate
+
+        update = ServingIndexUpdate(full_adjacency=True, pagerank_dirty=True)
+
+    logger.info("Refreshing graph serving indexes after ingest...")
+    if update.adjacency_dirty:
+        try:
+            if update.full_adjacency or state.adjacency is None:
+                new_adjacency = _build_adjacency(state.store)
+            else:
+                new_adjacency = _incremental_adjacency(
+                    state.store, state.adjacency, update
+                )
+        except Exception:  # noqa: BLE001 - recovery must prefer correctness
+            logger.exception("Incremental adjacency refresh failed; rebuilding fully")
+            new_adjacency = _build_adjacency(state.store)
+        state.adjacency = new_adjacency
+
+    pagerank_refreshed = update.pagerank_dirty or state.pagerank is None
+    if pagerank_refreshed:
+        new_pagerank = _compute_pagerank(state.store)
+        state.pagerank = new_pagerank
+        # The query engine reads pagerank by reference; refresh its handle too.
+        if state.engine is not None and hasattr(state.engine, "pagerank"):
+            state.engine.pagerank = new_pagerank
     # Re-open the community store if this ingest created it.
     if state.qdrant_communities is None and Path(COMMUNITY_QDRANT_PATH).exists():
         try:
@@ -370,7 +580,11 @@ def _hot_swap_graph():
             state.qdrant_communities = QdrantClient(path=COMMUNITY_QDRANT_PATH)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Could not open community store after ingest: {e}")
-    logger.info(f"Hot-swap done: {len(new_adjacency)} adjacency keys")
+    logger.info(
+        "Serving-index refresh done: %d adjacency keys%s",
+        len(state.adjacency or ()),
+        ", PageRank refreshed" if pagerank_refreshed else "",
+    )
 
 
 def _set_progress(

@@ -50,6 +50,7 @@ class ImprovementResult:
     similarity_edges: int = 0
     changed_communities: int = 0
     stale_summaries: int = 0
+    changed_community_ids: tuple[str, ...] = ()
 
 
 def validate_improve_mode(mode: str) -> ImproveMode:
@@ -316,6 +317,7 @@ def run_incremental_improvement(
         similarity_edges=similarity_edges,
         changed_communities=len(changed),
         stale_summaries=stale_count,
+        changed_community_ids=tuple(sorted(changed)),
     )
 
 
@@ -358,11 +360,12 @@ def run_improvement(
             structural_cache=structural_cache,
         )
         return ImprovementResult(
-            requested,
-            "incremental",
-            result.similarity_edges,
-            result.changed_communities,
-            result.stale_summaries,
+            requested_mode=requested,
+            applied_mode="incremental",
+            similarity_edges=result.similarity_edges,
+            changed_communities=result.changed_communities,
+            stale_summaries=result.stale_summaries,
+            changed_community_ids=result.changed_community_ids,
         )
 
     from kl_graph.periodic.runner import run_periodic_improvement

@@ -15,6 +15,7 @@ from pathlib import Path
 from kl_graph.config import DATA_DIR
 from kl_graph.ingest.checkpoint import IngestCheckpoint
 from kl_graph.ingest.improvement import (
+    ImprovementResult,
     ImprovementTargets,
     ImproveMode,
     has_full_improvement_baseline,
@@ -26,6 +27,7 @@ from kl_graph.ingest.pipeline import KEEP_EXTRACTION_CACHE, IngestionPipeline
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str, float, str], None]
+NodeRef = tuple[str, str]
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,38 @@ class IngestResult:
     units_skipped: int
     units_processed: int
     chunks_created: int
+
+
+@dataclass(frozen=True)
+class ServingIndexUpdate:
+    """Authoritative-store scopes needed to refresh server-side query indexes.
+
+    These are dirty *seeds*, not a replay log.  The server rereads their
+    committed incident edges before publishing new adjacency buckets, which is
+    safe across duplicate-ignore writes and checkpoint resumes.
+    """
+
+    structural_nodes: tuple[NodeRef, ...] = ()
+    similarity_nodes: tuple[NodeRef, ...] = ()
+    community_ids: tuple[str, ...] = ()
+    full_adjacency: bool = False
+    pagerank_dirty: bool = False
+
+    @property
+    def adjacency_dirty(self) -> bool:
+        return bool(
+            self.full_adjacency
+            or self.structural_nodes
+            or self.similarity_nodes
+            or self.community_ids
+        )
+
+    @property
+    def required(self) -> bool:
+        return self.adjacency_dirty or self.pagerank_dirty
+
+
+FinalizeCallback = Callable[[ServingIndexUpdate], None]
 
 
 def checkpoint_path(source_id: str, data_dir: Path = DATA_DIR) -> Path:
@@ -70,7 +104,7 @@ async def run_ingestion(
     checkpoint: IngestCheckpoint | None = None,
     progress_callback: ProgressCallback | None = None,
     counts_callback: Callable[[IngestResult], None] | None = None,
-    finalize_callback: Callable[[], None] | None = None,
+    finalize_callback: FinalizeCallback | None = None,
     structural_cache=None,
 ) -> IngestResult:
     """Run the canonical unit-incremental ingestion workflow."""
@@ -151,7 +185,10 @@ async def run_ingestion(
                     )
                     if finalize_callback is not None:
                         report("finalize", 0.95, "refreshing indexes")
-                        await asyncio.to_thread(finalize_callback)
+                        await asyncio.to_thread(
+                            finalize_callback,
+                            ServingIndexUpdate(full_adjacency=True),
+                        )
                 except ImportError as exc:
                     if improve_mode == "full":
                         raise
@@ -206,8 +243,15 @@ async def run_ingestion(
             )
         )
 
-        if improve_mode != "off":
+        targets = ImprovementTargets()
+        if improve_mode != "off" or finalize_callback is not None:
             targets = pipeline.improvement_targets()
+
+        improvement = ImprovementResult(
+            requested_mode=improve_mode,
+            applied_mode="off",
+        )
+        if improve_mode != "off":
             report(
                 "improve",
                 0.85,
@@ -236,8 +280,36 @@ async def run_ingestion(
                 logger.warning("Automatic improvement skipped: %s", exc)
 
         if finalize_callback is not None:
-            report("finalize", 0.95, "refreshing indexes")
-            await asyncio.to_thread(finalize_callback)
+            structural_nodes: set[NodeRef] = {
+                ("chunk", chunk.id) for chunk in pipeline.all_chunks()
+            }
+            structural_nodes.update(("fact", fact_id) for fact_id in targets.fact_ids)
+
+            similarity_nodes: set[NodeRef] = set()
+            community_ids: tuple[str, ...] = ()
+            full_adjacency = improvement.applied_mode == "full"
+            if improvement.applied_mode == "incremental":
+                similarity_nodes.update(
+                    ("entity", entity_id) for entity_id in targets.entity_ids
+                )
+                similarity_nodes.update(
+                    ("fact", fact_id) for fact_id in targets.fact_ids
+                )
+                community_ids = improvement.changed_community_ids
+
+            index_update = ServingIndexUpdate(
+                structural_nodes=tuple(sorted(structural_nodes)),
+                similarity_nodes=tuple(sorted(similarity_nodes)),
+                community_ids=tuple(sorted(set(community_ids))),
+                full_adjacency=full_adjacency,
+                # The current prior depends only on facts/confidence and ABOUT.
+                # Every workset fact is a conservative signal that those inputs
+                # may have changed; similarity/community-only work is not.
+                pagerank_dirty=bool(targets.fact_ids),
+            )
+            if index_update.required:
+                report("finalize", 0.95, "refreshing changed indexes")
+                await asyncio.to_thread(finalize_callback, index_update)
 
         # Safe ordering: a crash before this point retains the workset; a crash
         # after the checkpoint but before cleanup is handled by the idempotent
