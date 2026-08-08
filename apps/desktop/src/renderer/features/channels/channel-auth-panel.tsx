@@ -240,9 +240,31 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const bootstrap = useBootstrapState()
   const selfAvatar = bootstrap.data?.session?.avatarUrl ?? null
 
-  // 进度事件里的失败带 i18n key 与原始细节；抛出来的错误走 useErrorText。
-  const failure =
-    progress?.phase === "failed"
+  /**
+   * 上一次授权的失败原因。
+   *
+   * 进度事件里的失败带 i18n key 与原始细节；抛出来的错误走 useErrorText。
+   *
+   * ## ★★ 已经连上了就**不显示**旧的失败 —— 那是过期状态残留
+   *
+   * 这两个来源（`progress` 是本地 state，`start.error` 是 mutation 的 error）
+   * 都只在**下一次点授权**时才被清（`begin()` 里 `setProgress(null)` +
+   * `start.reset()`）。也就是说：授权失败一次之后，即使登录态**后来自己好了**
+   * （CLI 懒刷新会就地把 token 刷回来，或者用户在终端里登了一次），
+   * 那句红字仍然挂在卡片上，直到用户再点一次授权。
+   *
+   * 实测踩到的真实形态（2026-08-08 本机）：卡片显示「未连接」+
+   * 「授权流程结束但未检测到有效登录态，请重试」，而同一刻拿应用自己的
+   * dws-home 跑 `auth status` 是 `authenticated: true, refreshed: true` ——
+   * 登录早就好了，只有界面还在报错。用户据此以为坏了、反复点重试。
+   *
+   * 所以判据加一条 `!accountConnected`：连上了就不再展示历史失败。
+   * ★ 用 `accountConnected` 而不是 `authorized`：后者只说明"这台电脑登录过
+   * 钉钉"，而这张卡片要回答的是"**这个账号**连好了吗"（见它上方那段）。
+   */
+  const failure = accountConnected
+    ? undefined
+    : progress?.phase === "failed"
       ? t(progress.messageKey, { detail: progress.detail ?? "" })
       : start.error !== null
         ? errorText(start.error)

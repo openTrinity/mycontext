@@ -10,7 +10,8 @@
     "unsupported": "This channel isn't available yet",
     "authInProgress": "This channel is already being authorized",
     "authFailed": "Authorization failed: {{detail}}",
-    "authNotDetected": "The authorization flow finished but no valid session was found — please try again"
+    "authNotDetected": "The authorization flow finished but no valid session was found — please try again",
+    "authLegacyTokenSlot": "This machine already has a legacy session that the channel CLI refuses to overwrite (it may be the only copy of a login you use in your terminal). Run a one-time login with your identity in a terminal to migrate it: dws auth login --profile <your org corpId>"
   },
   "process": {
     "spawnFailed": "Could not start the required program",
@@ -51,6 +52,7 @@
     "CHANNEL_UNKNOWN": "Unknown channel",
     "CHANNEL_AUTH_IN_PROGRESS": "This channel is already being authorized",
     "CHANNEL_AUTH_FAILED": "Channel authorization failed",
+    "CHANNEL_AUTH_LEGACY_TOKEN_SLOT": "This machine already has a legacy session that the channel CLI refuses to overwrite. Run a one-time login with your identity in a terminal to migrate it.",
     "CHANNEL_UNSUPPORTED": "This channel isn't available yet",
     "SELF_IDENTITY_AMBIGUOUS": "Couldn't identify you uniquely — please confirm manually",
     "SELF_IDENTITY_CONFLICT": "This data belongs to a different identity (org or member id). Each identity keeps its own data — switch identity in channel settings, or re-authorize to the one you want.",

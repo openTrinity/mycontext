@@ -340,6 +340,34 @@ const SUSPEND_SELF_HEAL_MS = 2 * 60 * 60_000
  */
 const GATE_LOG_THROTTLE_MS = 5 * 60_000
 /**
+ * 被 `session_expired` 闸住之后，隔多久**主动复核**一次登录态。
+ *
+ * ## ★★ 为什么必须有这个复核 —— 否则登录好了应用也不会动
+ *
+ * `blockedReason` 是终态，原来**只能**由 `clearBlocked()` 清掉，
+ * 而它的调用方只有「状态页那个提示的关闭按钮」「IPC 重试」「post-auth 钩子」。
+ * 定时轮询不重新探活。于是这条真实链路会永久卡住（实测,日志可复现）：
+ *
+ * 1. 睡眠/网络抖动 → 一次 token 刷新失败 → 置 `session_expired`；
+ * 2. 醒来后 CLI 自己把 token 刷好了（`auth status` 返回 authenticated=true）；
+ * 3. **没有人调 `clearBlocked()`** → 六处闸门继续全部关闭,
+ *    日志每 5 分钟一条 `ingest round skipped {"blockedReason":"session_expired"}`,
+ *    而界面显示「未连接」。用户唯一的出路是重启应用或去点那个提示。
+ *
+ * 这正是本项目最怕的那类静默失效：**每一层都"正常工作"**
+ * （闸门按 blocked 跳过、日志照记、UI 照显示），只有整体是死的。
+ *
+ * 5 分钟：`auth status` 是一次子进程 + 可能的刷新网络请求（实测约 0.3–2s），
+ * 比一轮采集便宜得多；而用户重新授权后最多等 5 分钟就自动恢复。
+ * 取值与 `GATE_LOG_THROTTLE_MS` 一致不是巧合 —— 那条日志正好是
+ * "还卡着"的心跳,两者同频时日志里每条 skipped 都对应一次真实复核。
+ *
+ * ★ 只对 `session_expired` 复核，**不碰** `permission_required`：
+ * 后者要用户去来源应用点授权，我们这边复核不出结果（`auth status` 是
+ * authorized 的，缺的是数据权限），白烧一次子进程。
+ */
+const SESSION_RECHECK_INTERVAL_MS = 5 * 60_000
+/**
  * 回填的单轮翻页预算。
  *
  * ## ★ 为什么比增量的 600 小得多
@@ -622,6 +650,14 @@ export class IngestService {
   private gateLoggedAt = new Map<string, number>()
   private lastError: string | null = null
   private blockedReason: IngestSnapshot["blockedReason"] = null
+  /**
+   * 上次为 `session_expired` 做主动复核的时刻；0 = 还没复核过。
+   *
+   * 与 `gateLoggedAt` 分开存：那张表是**日志节流**，清它只影响"下一条日志
+   * 什么时候能出来"。而这个是**探活节流**，混用会让「清了节流表」
+   * 顺带触发一次真实的子进程调用 —— 两件事的代价差几个数量级。
+   */
+  private lastSessionRecheckAt = 0
   private pendingHints = new Set<string>()
   /**
    * 在途的 `tickPull`。`stop()` 要 await 它。
@@ -1022,9 +1058,21 @@ export class IngestService {
     const ingest = this.options.plugin.ingest
     // `running` 复查与 tickPull 同理：stop 之后不该再起新的子进程。
     if (ingest === undefined || !this.running) return 0
+    /**
+     * ★ 闸门判定前先给一次**自愈机会**（节流过，见 `recheckSessionIfBlocked`）。
+     *
+     * 挂在探针这一路而不是六处都挂：探针是最廉价、最高频的那条,
+     * 它一解闸,另外五路本轮或下一轮自然跟上。六处各挂一次的话,
+     * 同一个 5 分钟窗口里会有六次复核抢同一个节流名额,
+     * 谁先跑到谁生效 —— 那种时序依赖没法测。
+     */
     if (this.blockedReason !== null) {
-      this.noteGated("blocked", "probe")
-      return 0
+      if (!(await this.recheckSessionIfBlocked())) {
+        this.noteGated("blocked", "probe")
+        return 0
+      }
+      // 自愈成功：`running` 可能在 await 期间被 stop() 改掉,重新确认一次。
+      if (!this.running) return 0
     }
     if (this.suspendedNow()) {
       this.noteGated("suspended", "probe")
@@ -3237,9 +3285,55 @@ export class IngestService {
           return
         }
         this.blockedReason = "session_expired"
+        /**
+         * ★★ 置闸门的同时**记一次复核时刻** —— 这次判定本身就是一次权威复核。
+         *
+         * 不记的话下一轮探针会立刻再问一次 `auth status`（间隔判据看到的是
+         * `lastSessionRecheckAt = 0`），也就是同一秒内为同一个结论烧两个子进程。
+         * 而且那次复核的答案必然还是"未授权"—— 纯浪费。
+         *
+         * 语义上也该记：`sessionStillValid()` 刚刚问过权威来源并得到否定答案,
+         * 复核窗口理应从**这一刻**起算，而不是从下一轮探针起算。
+         */
+        this.lastSessionRecheckAt = this.options.clock.now()
       } else if (error.code === "PERMISSION_REQUIRED") this.blockedReason = "permission_required"
     }
     this.options.logger.warn("ingest tick failed", { detail: message, blocked: this.blockedReason })
+  }
+
+  /**
+   * 被 `session_expired` 闸住时，节流地复核一次登录态；恢复了就**自动解闸**。
+   *
+   * 完整的 why 在 `SESSION_RECHECK_INTERVAL_MS` 上方 —— 一句话：
+   * 那个终态原本没有任何自动出路，token 刷好了应用也不会动。
+   *
+   * @returns `true` = 现在没被闸住（本来就没有，或刚刚自愈）
+   *
+   * ★ 复核**不抛**（`sessionStillValid` 已经吞掉异常）：拿不到答案就
+   * 保持闸住，下一轮再试。让一次网络抖动把闸门打开是更坏的方向。
+   */
+  private async recheckSessionIfBlocked(): Promise<boolean> {
+    if (this.blockedReason === null) return true
+    // 数据权限缺失复核不出结果（见常量注释），保持闸住。
+    if (this.blockedReason !== "session_expired") return false
+
+    const now = this.options.clock.now()
+    if (now - this.lastSessionRecheckAt < SESSION_RECHECK_INTERVAL_MS) return false
+    this.lastSessionRecheckAt = now
+
+    if (!(await this.sessionStillValid())) return false
+
+    /**
+     * 恢复了。这条必须是 `info` 而不是 `debug`：
+     * "卡住了"每 5 分钟一条日志，而"恢复了"只有这一条 ——
+     * 少了它，日志里就只剩一串 skipped 然后突然开始正常采集，
+     * 没人能解释中间发生了什么。
+     */
+    this.options.logger.info("ingest session recovered; clearing blocked gate", {
+      previous: this.blockedReason,
+    })
+    this.clearBlocked()
+    return true
   }
 
   /**
@@ -3275,6 +3369,15 @@ export class IngestService {
     this.lastError = null
     this.backoffRounds = 0
     this.gateLoggedAt.clear()
+    /**
+     * ★ 也清复核节流：用户点「重试」之后如果又被闸住，
+     * 下一轮该**立刻**去问一次权威来源，而不是背着上一个 5 分钟窗口。
+     *
+     * 具体的坏情形：用户重新扫码 → 点重试（清闸门）→ 但扫的是另一个身份、
+     * 于是又被闸住 → 那时 `lastSessionRecheckAt` 还是旧值，
+     * 于是"真正修好之后"最多要再等 5 分钟才被发现。
+     */
+    this.lastSessionRecheckAt = 0
   }
 
   /**

@@ -59,10 +59,44 @@ interface ProfilesFile {
   profiles: { corpId: string; userId: string; clientId?: string }[]
 }
 
-/** 上游当前的 `profiles.json` 版本号（实测 v1）。 */
+/**
+ * 我们写入时用的 `profiles.json` 版本号。
+ *
+ * ## ★ 写 1 是**故意**的，即使当前 CLI 用的是 v2
+ *
+ * 实测（v1.0.56 / v1.0.57，2026-08-08）：往目录里放一份 `version: 1` 的
+ * seed，跑一次 `auth status` 之后 CLI **就地把它升级成 v2** 并补上
+ * `orgCurrentProfiles`，profile 条目也被补成 `{corpId, name, status, userId}`
+ * —— 而我们 seed 的那一条身份**没被改动**，`authenticated: true` 正常返回。
+ *
+ * 也就是说版本号由上游负责迁移，我们跟着写高版本反而有风险：
+ * v2 的 `orgCurrentProfiles` 我们并不知道该填什么（它是"每个组织当前用哪个
+ * 身份"的映射），瞎填一个会让 CLI 拿着我们编的值去寻址。写最小的 v1
+ * 让上游自己补齐，是这里唯一**不需要我们理解 v2 语义**的写法。
+ *
+ * ⚠️ 如果哪天上游不再接受 v1，症状是 seed 后 `auth status` 变成未登录 ——
+ * 那时要重新实测再决定写什么，不要照抄这段注释。
+ */
 const PROFILES_VERSION = 1
 
-/** 身份的寻址形态。与 `--profile` 用的是同一种写法（上游 `--help` 推荐）。 */
+/**
+ * `profiles.json` 里**指针字段**（`primaryProfile` / `currentProfile`）的写法。
+ *
+ * 用 `corpId:userId` —— 实测真实文件（CLI 自己写的那份）就是这个形状。
+ *
+ * ## ★ 这与命令行 `--profile` 是**两件事**，别顺手统一
+ *
+ * `--profile` 的形态见 `active-identity.service.ts` 的 `CHANNEL_PROFILE_FORM`
+ * （那里记的是裸 corpId，附了当时的实测）。这里是**文件内容**，那里是
+ * **命令行参数**；即使两者恰好长得一样，它们的正确性也由不同的东西保证,
+ * 改一处不代表另一处跟着变。
+ *
+ * ⚠️ 关于 `--profile` 两种形态的差异：2026-08-08 在 v1.0.56 上重测,
+ * 裸 corpId 与 `corpId:userId` 在 `auth status` 与 `contact user get-self`
+ * 上**表现相同**（都能定位到身份）,也就是说 442a605 记录的那个差异
+ * 在当前版本上已经复现不出来了。所以**不要**依赖"哪种形态才对"这个结论 ——
+ * 要改动 `--profile` 的拼法时重新实测（CLAUDE.md §4：注释里的实测有保质期）。
+ */
 function profileId(seed: ChannelProfileSeed): string {
   return `${seed.corpId}:${seed.userId}`
 }
@@ -113,6 +147,24 @@ export function seedChannelProfile(dwsHome: string, seed: ChannelProfileSeed): b
  * 三条都要成立：只有一个 profile 条目、它是目标身份、两个指针都指向它。
  * 少判任何一条都会让"多了一个身份"或"指针指着别人"这种状态被当成 OK ——
  * 而那正是隔离失效的样子。
+ *
+ * ## ★★ 「只有一条」是**我们的**要求，不是渠道 CLI 的限制
+ *
+ * 渠道 CLI 本身**允许一个配置目录里有多个 profile**（多组织/多身份是它的
+ * 正常能力，`profile list` 就是为此存在的）。这里要求 `length === 1` 是
+ * 因为**我们**给每个 vault 一个目录、一个身份 —— 目录即隔离边界。
+ *
+ * 这个区别有实际后果，别读反：
+ * · 在**我们的** dws-home 里看到两条 profile → 说明 seed 没跑过或被绕过了,
+ *   要修的是 seed 的调用时机,不是去删用户的 profile；
+ * · 在**用户自己的** dws-home（终端里那个）里有多条 → 完全正常,
+ *   不要去"纠正"它。我们只管自己那份。
+ *
+ * 实测踩到过的真实场景（2026-08-08）：引导还没走完时 vault 尚未绑身份,
+ * `startup.ts` 那处 seed 因此**不执行**,于是目录里留着 CLI 自己重建的
+ * 双 profile 文件（两个组织）。那时再 `auth login` 会被上游以
+ * `refusing to overwrite a potentially unique old login` 拒绝 ——
+ * 症状是界面上「授权流程结束但未检测到有效登录态」,而根因与"检测"无关。
  */
 function matchesSeed(file: string, seed: ChannelProfileSeed): boolean {
   let parsed: unknown

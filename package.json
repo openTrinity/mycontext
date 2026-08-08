@@ -81,7 +81,7 @@
     "@types/react-dom": "19.0.4",
     "@vitejs/plugin-react": "4.3.4",
     "@vitest/coverage-v8": "4.1.10",
-    "dingtalk-workspace-cli": "1.0.56",
+    "dingtalk-workspace-cli": "1.0.57",
     "electron": "43.2.0",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",

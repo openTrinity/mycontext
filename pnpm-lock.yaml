@@ -49,8 +49,8 @@ importers:
         specifier: 4.1.10
         version: 4.1.10(vitest@4.1.10)
       dingtalk-workspace-cli:
-        specifier: 1.0.56
-        version: 1.0.56
+        specifier: 1.0.57
+        version: 1.0.57
       electron:
         specifier: 43.2.0
         version: 43.2.0
@@ -1902,8 +1902,8 @@ packages:
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
 
-  dingtalk-workspace-cli@1.0.56:
-    resolution: {integrity: sha512-FjbIjrprVx7vEDtkQ9M3FR9+0IBCEKzvrpI/EHR3lIiz8cVnmpGjX9yrMoATMhpN7upWAcOlk/hrZ1F6ZHi2nA==}
+  dingtalk-workspace-cli@1.0.57:
+    resolution: {integrity: sha512-3eKQMxLVP5hBXSZWYixMpfo0UhP7FItumN9+cYKeb0/VJVqLRHB/ZneeaWLoyZwuoI3jjPyATeKZM/Pr2pOzQA==}
     engines: {node: '>=16'}
     hasBin: true
 
@@ -5319,7 +5319,7 @@ snapshots:
     dependencies:
       dequal: 2.0.3
 
-  dingtalk-workspace-cli@1.0.56: {}
+  dingtalk-workspace-cli@1.0.57: {}
 
   dir-compare@4.2.0:
     dependencies:

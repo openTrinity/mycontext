@@ -10,7 +10,8 @@
     "unsupported": "该渠道尚未开放",
     "authInProgress": "该渠道正在授权中",
     "authFailed": "授权失败：{{detail}}",
-    "authNotDetected": "授权流程结束但未检测到有效登录态，请重试"
+    "authNotDetected": "授权流程结束但未检测到有效登录态，请重试",
+    "authLegacyTokenSlot": "本机已有一份旧格式的登录态，渠道 CLI 拒绝覆盖它（怕误删你终端里在用的登录）。请在终端执行一次带身份的登录完成迁移：dws auth login --profile <你的组织 corpId>"
   },
   "process": {
     "spawnFailed": "无法启动所需的程序",
@@ -51,6 +52,7 @@
     "CHANNEL_UNKNOWN": "未知渠道",
     "CHANNEL_AUTH_IN_PROGRESS": "该渠道正在授权中",
     "CHANNEL_AUTH_FAILED": "渠道授权失败",
+    "CHANNEL_AUTH_LEGACY_TOKEN_SLOT": "本机已有一份旧格式的登录态，渠道 CLI 拒绝覆盖它。请在终端执行一次带身份的登录完成迁移。",
     "CHANNEL_UNSUPPORTED": "该渠道尚未开放",
     "SELF_IDENTITY_AMBIGUOUS": "无法唯一确定你的身份，请手动确认后再继续",
     "SELF_IDENTITY_CONFLICT": "这份数据属于另一个身份（组织或工号不同）。每个身份有自己的一份数据 —— 去渠道设置里切换身份，或重新授权到你想用的那个。",

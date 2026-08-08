@@ -245,7 +245,7 @@ export const REAL_USER_SEARCH = {
       name: "沈云舟",
       nick: "云舟",
       openDingTalkId: "D9zzOtherPersonSameName001",
-      userId: "2355696860604348",
+      userId: "1900000000000001",
     },
     { name: "沈云舟", openDingTalkId: "D9zzOtherPersonSameName002", userId: "532322" },
     { name: "沈云舟", openDingTalkId: "D9zzOtherPersonSameName003", userId: "WB02488056" },

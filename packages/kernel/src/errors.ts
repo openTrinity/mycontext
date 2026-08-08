@@ -30,6 +30,15 @@ export const ERROR_CODES = [
   "CHANNEL_UNKNOWN",
   "CHANNEL_AUTH_IN_PROGRESS",
   "CHANNEL_AUTH_FAILED",
+  /**
+   * 渠道 CLI **拒绝覆盖**本地既有登录态（旧格式 token 槽与 profile 对不上）。
+   *
+   * 与 `CHANNEL_AUTH_FAILED` 分开是因为**可操作性完全不同**：那个是
+   * "这次没成,再试试";这个是上游的安全拒绝,exit code 恒为 2,
+   * 重试一百次都一样 —— 出路是带 `--profile` 在终端跑一次 login 完成迁移。
+   * 合并成一个码就只能给出「请重试」,而那句话会把用户钉在一面墙上。
+   */
+  "CHANNEL_AUTH_LEGACY_TOKEN_SLOT",
   "CHANNEL_UNSUPPORTED",
   // 数据面：解析与身份
   /** 本人身份无法唯一确定（同名多 ID）；宁可不蒸馏也不能把别人的消息当本人语料 */

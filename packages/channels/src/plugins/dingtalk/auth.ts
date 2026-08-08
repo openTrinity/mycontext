@@ -36,6 +36,42 @@ const LOGIN_TIMEOUT_MS = 16 * 60 * 1000
 /** status 查询超时：本地命令 + 可能的 token 刷新网络请求。 */
 const STATUS_TIMEOUT_MS = 20_000
 
+/**
+ * 上游**拒绝写入本地登录态**时的错误特征。
+ *
+ * ## ★★ 为什么要单独识别它 —— 「请重试」会把人钉在一面墙上
+ *
+ * 实测（v1.0.56 / v1.0.57，真实机器）：本地存在一个**旧格式的 token 槽**
+ * （`token.json` 里只有 `updated_at`、没有任何 token 字段）而同组织下的
+ * profile 又对不上时，`auth login` 直接 `exit=2` 并输出：
+ *
+ * ```
+ * [AUTH] dingtalk login failed: 本地登录态无法安全更新:
+ * legacy token slot "auth-token" does not safely match the only profile
+ * in organization "…"; refusing to overwrite a potentially unique old login
+ * ```
+ *
+ * 这是上游**主动的安全拒绝**（怕覆盖掉一份可能唯一的旧登录），不是
+ * 「没检测到登录态」。归到 `authNotDetected`（「请重试」）的后果是：
+ * 用户点一次撞一次,exit code 永远是 2 —— 而真正的解法是带 `--profile`
+ * 在终端跑一次 login，把那个旧槽显式迁移掉。
+ *
+ * 判据用**两段特征词**而不是整句：上游的中文前缀（"本地登录态无法安全更新"）
+ * 与英文主体分属不同版本/语言，只匹配一段会在另一种形态上漏掉。
+ * 两个词任一命中即算 —— 宁可多提示一次可执行的修复，也不要让用户
+ * 在「请重试」上打转。
+ */
+const LEGACY_TOKEN_SLOT_MARKERS: readonly string[] = [
+  "refusing to overwrite",
+  "does not safely match",
+  "本地登录态无法安全更新",
+]
+
+/** 这次 login 失败是不是「上游拒绝覆盖旧登录槽」。 */
+function isLegacyTokenSlotRefusal(detail: string): boolean {
+  return LEGACY_TOKEN_SLOT_MARKERS.some((marker) => detail.includes(marker))
+}
+
 export interface DingTalkAuthOptions {
   runtime: RuntimeEnv
   processes: ProcessRunner
@@ -197,6 +233,30 @@ export class DingTalkAuth implements ChannelAuth {
         throw error
       }
       const detail = error instanceof Error ? error.message : String(error)
+      /**
+       * ★★ 上游拒绝覆盖旧登录槽 → 单独报，**不要**走 `authFailed` 的泛化文案。
+       *
+       * 这类失败**不是 retryable**：exit code 恒为 2，点一百次重试都一样
+       * （见 `LEGACY_TOKEN_SLOT_MARKERS` 上方那段）。标 `retryable: true`
+       * 会让 UI 继续摆一个「重试」按钮，把用户钉在一面墙上 ——
+       * 而真正的出路是带 `--profile` 在终端跑一次 login 完成迁移。
+       */
+      if (isLegacyTokenSlotRefusal(detail)) {
+        ctx.onProgress({
+          phase: "failed",
+          messageKey: "errors:channel.authLegacyTokenSlot",
+          detail,
+        })
+        throw new AppError(
+          "CHANNEL_AUTH_LEGACY_TOKEN_SLOT",
+          `钉钉拒绝覆盖本地既有登录态：${detail}`,
+          {
+            cause: error,
+            retryable: false,
+            messageKey: "errors:channel.authLegacyTokenSlot",
+          },
+        )
+      }
       ctx.onProgress({ phase: "failed", messageKey: "errors:channel.authFailed", detail })
       throw new AppError("CHANNEL_AUTH_FAILED", `钉钉授权失败：${detail}`, {
         cause: error,
