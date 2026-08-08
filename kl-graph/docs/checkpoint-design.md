@@ -24,7 +24,7 @@ The ingestion pipeline (`kl_graph/ingest/pipeline.py`) orchestrates a multi-phas
 If the user powers off or the process crashes mid-pipeline, we want to resume from where we left off without re-doing expensive work. Some resilience already exists (per-chunk extraction cache, Qdrant point-id dedup), but there's no unified checkpoint that tracks which *pipeline steps* completed.
 
 **Symptoms of missing checkpoints:**
-- A crash during Phase B.2 (e.g., after entities are built but before edges) causes the next `run_full()` to re-run all of Phase B.2 — re-upserting entities (inflating `mention_count`), re-building facts, re-embedding things that Qdrant already has (wasted CPU on dedup checks).
+- A crash during Phase B.2 (e.g., after entities are built but before edges) causes the next canonical runner invocation to re-run all of Phase B.2 — re-upserting entities (inflating `mention_count`), re-building facts, re-embedding things that Qdrant already has (wasted CPU on dedup checks).
 - The improve phase has no step-level tracking — a crash at community detection re-runs similarity from scratch.
 
 ---
@@ -462,6 +462,6 @@ When adding a new pipeline step, follow this checklist:
 4. **If the step has downstream dependents:** add a `_ensure_X_loaded()` helper and document it in Section 4 (Reload Strategy table).
 5. **If the step uses LLM:** ensure per-item caching (Pattern C) so crashes don't lose completed LLM calls.
 6. **If the step accepts tunable parameters:** use `params` kwarg so parameter changes trigger re-execution.
-7. **Wire it into the pipeline orchestrator** (`run_graph_build`, `run_full`, or the periodic runner).
+7. **Wire it into the pipeline orchestrator** (`run_graph_build`, the canonical ingestion runner, or the periodic runner).
 8. **Add to `scripts/ingest.py`** if independently runnable.
 9. **Update this document** (add to the Transaction Table, Edge Cases if relevant).

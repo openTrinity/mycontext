@@ -458,8 +458,8 @@ def status():
 )
 @click.option(
     "--improve/--no-improve",
-    default=False,
-    help="Run periodic similarity/community improvement after graph build (needs igraph/leidenalg/hdbscan; works on both backends)",
+    default=True,
+    help="Auto-select incremental improvement, or disable it (default: improve)",
 )
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="JSON output")
 def ingest(input_dir, source_id, concurrency, improve, json_out):
@@ -475,7 +475,7 @@ def ingest(input_dir, source_id, concurrency, improve, json_out):
         "input_dir": str(input_dir.resolve()),
         "source_id": source_id,
         "concurrency": concurrency,
-        "run_improve": improve,
+        "improve_mode": "auto" if improve else "off",
     }
     data = _server_request("POST", "/ingest", json=body)
     if json_out:

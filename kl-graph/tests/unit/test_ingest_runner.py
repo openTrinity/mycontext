@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from kl_graph.ingest.improvement import ImprovementTargets
 from kl_graph.ingest.runner import IngestOptions, IngestResult, run_ingestion
 
 
@@ -31,7 +32,7 @@ def test_runner_constructs_unit_incremental_pipeline(tmp_path) -> None:
                 IngestOptions(
                     input_dir=tmp_path,
                     source_id="slack-prod",
-                    run_improve=False,
+                    improve_mode="off",
                 ),
                 checkpoint=checkpoint,
             )
@@ -62,7 +63,7 @@ def test_runner_retains_workset_when_graph_build_fails(tmp_path) -> None:
         try:
             asyncio.run(
                 run_ingestion(
-                    IngestOptions(tmp_path, "slack-prod", run_improve=False),
+                    IngestOptions(tmp_path, "slack-prod", improve_mode="off"),
                     checkpoint=checkpoint,
                 )
             )
@@ -95,6 +96,64 @@ def test_completed_checkpoint_only_retries_workset_cleanup(tmp_path) -> None:
     pipeline.run_graph_build.assert_not_called()
 
 
+def test_completed_auto_run_can_seed_missing_improvement_baseline(tmp_path) -> None:
+    pipeline = MagicMock()
+    pipeline.store.count_entities.return_value = 1
+    pipeline.store.count_facts.return_value = 0
+    checkpoint = MagicMock(batch_id="batch-complete")
+    checkpoint.is_done.side_effect = lambda step, **_: step == "ingest.complete"
+
+    with (
+        patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline),
+        patch(
+            "kl_graph.ingest.runner.has_full_improvement_baseline",
+            return_value=False,
+        ),
+        patch("kl_graph.ingest.runner.run_improvement") as improve,
+    ):
+        asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod", improve_mode="auto"),
+                checkpoint=checkpoint,
+            )
+        )
+
+    improve.assert_called_once()
+    assert improve.call_args.args[0] == "full"
+
+
+def test_runner_applies_incremental_improvement_targets(tmp_path) -> None:
+    pipeline = MagicMock()
+    pipeline._phase_a_complete.return_value = False
+    pipeline.units_discovered = 1
+    pipeline.units_skipped = 0
+    pipeline.workset_unit_count = 1
+    pipeline.workset_chunk_count = 1
+    pipeline.run_extraction = AsyncMock()
+    pipeline.run_graph_build = AsyncMock()
+    pipeline.improvement_targets.return_value = ImprovementTargets(
+        entity_ids=("e1",), fact_ids=("f1",)
+    )
+    checkpoint = MagicMock(batch_id="batch-improve")
+    checkpoint.is_done.return_value = False
+    applied = MagicMock(applied_mode="incremental")
+
+    with (
+        patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline),
+        patch("kl_graph.ingest.runner.run_improvement", return_value=applied) as improve,
+    ):
+        asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod", improve_mode="auto"),
+                checkpoint=checkpoint,
+            )
+        )
+
+    improve.assert_called_once()
+    assert improve.call_args.args[0] == "auto"
+    assert improve.call_args.kwargs["targets"].fact_ids == ("f1",)
+
+
 def test_cli_default_path_delegates_to_shared_runner(tmp_path) -> None:
     from scripts import ingest
 
@@ -118,4 +177,4 @@ def test_cli_default_path_delegates_to_shared_runner(tmp_path) -> None:
     options = shared_run.await_args.args[0]
     assert options.input_dir == tmp_path.resolve()
     assert options.source_id == "teams-prod"
-    assert options.run_improve is False
+    assert options.improve_mode == "off"

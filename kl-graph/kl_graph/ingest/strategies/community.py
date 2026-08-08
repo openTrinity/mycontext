@@ -8,14 +8,11 @@ of stable assignments.
 
 from __future__ import annotations
 
-import json
 import logging
-import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import TYPE_CHECKING
 
 from kl_graph.models.types import community_id_from
-from kl_graph.periodic.community_detection import RESOLUTIONS
 from kl_graph.storage.base import KnowledgeStore
 
 if TYPE_CHECKING:
@@ -124,7 +121,7 @@ class DynamicFrontierLeiden:
         id_to_idx: dict[str, int] = {nid: i for i, nid in enumerate(all_node_ids)}
 
         # Build igraph for this node type
-        g = self._build_graph(conn, node_type, all_node_ids, id_to_idx)
+        g = self._build_graph(store, node_type, all_node_ids, id_to_idx)
         if g is None:
             return changed
 
@@ -134,6 +131,11 @@ class DynamicFrontierLeiden:
         for idx in new_indices:
             for neighbor in g.neighbors(idx):
                 frontier_set.add(neighbor)
+        if not frontier_set:
+            return changed
+        frontier_indices = sorted(frontier_set)
+        frontier_graph = g.induced_subgraph(frontier_indices)
+        frontier_node_ids = [all_node_ids[idx] for idx in frontier_indices]
 
         for level, resolution in resolutions.items():
             col = f"community_{level}"
@@ -155,22 +157,33 @@ class DynamicFrontierLeiden:
                 if row[1] is not None:
                     existing_assignment[row[0]] = int(row[1])
 
-            # Build initial_membership list: -1 for unassigned nodes
-            # leidenalg uses -1 to mean "free to place anywhere"
-            initial_membership = [
-                existing_assignment.get(nid, -1) for nid in all_node_ids
-            ]
+            # ``leidenalg`` requires dense integer membership labels. Persisted
+            # community IDs can be sparse, so map them to dense labels and give
+            # every unassigned node a temporary singleton cluster.
+            persisted_ids = sorted(set(existing_assignment.values()))
+            dense_for_persisted = {
+                community_id: dense
+                for dense, community_id in enumerate(persisted_ids)
+            }
+            next_cluster = len(dense_for_persisted)
+            initial_membership: list[int] = []
+            for node_id in frontier_node_ids:
+                persisted = existing_assignment.get(node_id)
+                if persisted is None:
+                    dense_membership = next_cluster
+                    next_cluster += 1
+                else:
+                    dense_membership = dense_for_persisted[persisted]
+                initial_membership.append(dense_membership)
 
             try:
                 partition = leidenalg.find_partition(
-                    g,
+                    frontier_graph,
                     leidenalg.RBConfigurationVertexPartition,
                     weights="weight",
                     resolution_parameter=resolution,
                     n_iterations=_N_ITERATIONS,
-                    initial_membership=[
-                        m if m >= 0 else None for m in initial_membership
-                    ],
+                    initial_membership=initial_membership,
                 )
             except Exception:
                 logger.exception(
@@ -180,14 +193,35 @@ class DynamicFrontierLeiden:
                 )
                 continue
 
-            # Diff: find changed nodes
-            new_assignment = partition.membership
+            # Map Leiden's dense output labels back onto stable persisted IDs.
+            # A cluster containing existing nodes inherits their most common ID;
+            # a new-only cluster receives the next unused persisted ID.
+            dense_members = defaultdict(list)
+            for idx, dense_id in enumerate(partition.membership):
+                dense_members[dense_id].append(idx)
+            next_persisted = max(persisted_ids, default=-1) + 1
+            persisted_for_dense: dict[int, int] = {}
+            for dense_id, indices in dense_members.items():
+                candidates = Counter(
+                    existing_assignment[frontier_node_ids[idx]]
+                    for idx in indices
+                    if frontier_node_ids[idx] in existing_assignment
+                )
+                if candidates:
+                    persisted_for_dense[dense_id] = min(
+                        candidates,
+                        key=lambda cid: (-candidates[cid], cid),
+                    )
+                else:
+                    persisted_for_dense[dense_id] = next_persisted
+                    next_persisted += 1
+
+            new_assignment = [
+                persisted_for_dense[dense_id] for dense_id in partition.membership
+            ]
             changed_updates: list[tuple[int, str]] = []
 
-            for idx in frontier_set:
-                if idx >= len(new_assignment):
-                    continue
-                node_id = all_node_ids[idx]
+            for idx, node_id in enumerate(frontier_node_ids):
                 old_cid = existing_assignment.get(node_id, -1)
                 new_cid = new_assignment[idx]
 
@@ -215,7 +249,7 @@ class DynamicFrontierLeiden:
 
     def _build_graph(
         self,
-        conn: sqlite3.Connection,
+        store: KnowledgeStore,
         node_type: str,
         all_node_ids: list[str],
         id_to_idx: dict[str, int],
@@ -226,7 +260,7 @@ class DynamicFrontierLeiden:
         FACT_SIMILAR + shared-entity projection for facts.
 
         Args:
-            conn: Raw SQLite connection.
+            store: Backend-agnostic graph store.
             node_type: "entity" or "fact".
             all_node_ids: All IDs in order.
             id_to_idx: Mapping from node ID to igraph vertex index.
@@ -241,28 +275,23 @@ class DynamicFrontierLeiden:
 
         if node_type == "entity":
             # ENTITY_SIMILAR edges
-            similar_rows = conn.execute(
-                """SELECT source_id, target_id, properties FROM edges
-                   WHERE edge_type = 'ENTITY_SIMILAR'
-                     AND source_type = 'entity' AND target_type = 'entity'"""
-            ).fetchall()
-            for row in similar_rows:
-                src_idx = id_to_idx.get(row[0])
-                tgt_idx = id_to_idx.get(row[1])
+            for source_id, target_id, props in store.scan_edges_by_type(
+                ["ENTITY_SIMILAR"], source_type="entity", target_type="entity"
+            ):
+                src_idx = id_to_idx.get(source_id)
+                tgt_idx = id_to_idx.get(target_id)
                 if src_idx is not None and tgt_idx is not None:
                     edge_list.append((src_idx, tgt_idx))
-                    props = json.loads(row[2]) if row[2] else {}
                     weights.append(float(props.get("hybrid_score", 0.5)))
 
             # Co-mention edges (entities in same chunk, at least 2 shared)
-            mention_rows = conn.execute(
-                """SELECT target_id, source_id FROM edges
-                   WHERE edge_type IN ('MENTIONS', 'AUTHORED_BY')
-                     AND source_type = 'chunk' AND target_type = 'entity'"""
-            ).fetchall()
             entity_chunks: dict[str, set[str]] = {}
-            for row in mention_rows:
-                entity_chunks.setdefault(row[0], set()).add(row[1])
+            for chunk_id, entity_id, _props in store.scan_edges_by_type(
+                ["MENTIONS", "AUTHORED_BY"],
+                source_type="chunk",
+                target_type="entity",
+            ):
+                entity_chunks.setdefault(entity_id, set()).add(chunk_id)
 
             chunk_entities: dict[str, set[str]] = defaultdict(set)
             for eid, chunks in entity_chunks.items():
@@ -286,28 +315,21 @@ class DynamicFrontierLeiden:
 
         else:  # "fact"
             # FACT_SIMILAR edges
-            similar_rows = conn.execute(
-                """SELECT source_id, target_id, properties FROM edges
-                   WHERE edge_type = 'FACT_SIMILAR'
-                     AND source_type = 'fact' AND target_type = 'fact'"""
-            ).fetchall()
-            for row in similar_rows:
-                src_idx = id_to_idx.get(row[0])
-                tgt_idx = id_to_idx.get(row[1])
+            for source_id, target_id, props in store.scan_edges_by_type(
+                ["FACT_SIMILAR"], source_type="fact", target_type="fact"
+            ):
+                src_idx = id_to_idx.get(source_id)
+                tgt_idx = id_to_idx.get(target_id)
                 if src_idx is not None and tgt_idx is not None:
                     edge_list.append((src_idx, tgt_idx))
-                    props = json.loads(row[2]) if row[2] else {}
                     weights.append(float(props.get("score", 0.5)))
 
             # Shared-entity projection
-            about_rows = conn.execute(
-                """SELECT source_id, target_id FROM edges
-                   WHERE edge_type = 'ABOUT'
-                     AND source_type = 'fact' AND target_type = 'entity'"""
-            ).fetchall()
             entity_to_facts: dict[str, list[str]] = {}
-            for row in about_rows:
-                entity_to_facts.setdefault(row[1], []).append(row[0])
+            for fact_id, entity_id, _props in store.scan_edges_by_type(
+                ["ABOUT"], source_type="fact", target_type="entity"
+            ):
+                entity_to_facts.setdefault(entity_id, []).append(fact_id)
 
             max_facts_per_entity = 200
             projection_counts: dict[tuple[str, str], int] = defaultdict(int)

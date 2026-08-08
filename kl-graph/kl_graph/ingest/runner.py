@@ -14,6 +14,13 @@ from pathlib import Path
 
 from kl_graph.config import DATA_DIR
 from kl_graph.ingest.checkpoint import IngestCheckpoint
+from kl_graph.ingest.improvement import (
+    ImprovementTargets,
+    ImproveMode,
+    has_full_improvement_baseline,
+    run_improvement,
+    validate_improve_mode,
+)
 from kl_graph.ingest.pipeline import KEEP_EXTRACTION_CACHE, IngestionPipeline
 
 logger = logging.getLogger(__name__)
@@ -28,7 +35,7 @@ class IngestOptions:
     input_dir: Path
     source_id: str
     concurrency: int = 50
-    run_improve: bool = True
+    improve_mode: ImproveMode = "auto"
     keep_cache: bool = KEEP_EXTRACTION_CACHE
 
 
@@ -74,13 +81,14 @@ async def run_ingestion(
         raise ValueError("source_id must not be empty")
     if options.concurrency < 1:
         raise ValueError("concurrency must be at least 1")
+    improve_mode = validate_improve_mode(options.improve_mode)
 
     checkpoint = checkpoint or make_checkpoint(
         IngestOptions(
             input_dir=input_dir,
             source_id=options.source_id,
             concurrency=options.concurrency,
-            run_improve=options.run_improve,
+            improve_mode=improve_mode,
             keep_cache=options.keep_cache,
         )
     )
@@ -107,6 +115,44 @@ async def run_ingestion(
         if checkpoint.is_done("ingest.complete", params=completion_params):
             # Completion is checkpointed before cleanup. Repeating cleanup makes
             # a crash in that tiny window converge without re-running any phase.
+            # A forced global improvement remains useful after the workset has
+            # been cleaned, while auto/incremental correctly have no delta left.
+            recover_missing_baseline = False
+            if improve_mode == "auto":
+                pipeline._init_stores()
+                has_graph_nodes = bool(
+                    pipeline.store.count_entities() or pipeline.store.count_facts()
+                )
+                recover_missing_baseline = (
+                    has_graph_nodes and not has_full_improvement_baseline(pipeline.store)
+                )
+            if improve_mode == "full" or recover_missing_baseline:
+                pipeline._init_stores()
+                if improve_mode == "full":
+                    checkpoint.clear_prefix("improve.")
+                detail = (
+                    "forced full improvement"
+                    if improve_mode == "full"
+                    else "seeding missing improvement baseline"
+                )
+                report("improve", 0.85, detail)
+                try:
+                    await asyncio.to_thread(
+                        run_improvement,
+                        "full",
+                        store=pipeline.store,
+                        qdrant=pipeline.qdrant,
+                        targets=ImprovementTargets(),
+                        checkpoint=checkpoint,
+                        batch_id=checkpoint.batch_id,
+                    )
+                    if finalize_callback is not None:
+                        report("finalize", 0.95, "refreshing indexes")
+                        await asyncio.to_thread(finalize_callback)
+                except ImportError as exc:
+                    if improve_mode == "full":
+                        raise
+                    logger.warning("Automatic improvement skipped: %s", exc)
             await asyncio.to_thread(pipeline.complete_workset)
             report("done", 1.0, "ingest already complete")
             return IngestResult(0, 0, 0, 0)
@@ -157,12 +203,33 @@ async def run_ingestion(
             )
         )
 
-        if options.run_improve:
-            report("improve", 0.85, "communities + similarity")
+        if improve_mode != "off":
+            targets = pipeline.improvement_targets()
+            report(
+                "improve",
+                0.85,
+                f"{improve_mode}: {len(targets.entity_ids)} entities, "
+                f"{len(targets.fact_ids)} facts",
+            )
             try:
-                await asyncio.to_thread(pipeline.run_similarity_and_communities)
-            except (TypeError, ImportError) as exc:
-                logger.warning("Similarity/community step skipped: %s", exc)
+                improvement = await asyncio.to_thread(
+                    run_improvement,
+                    improve_mode,
+                    store=pipeline.store,
+                    qdrant=pipeline.qdrant,
+                    targets=targets,
+                    checkpoint=checkpoint,
+                    batch_id=checkpoint.batch_id,
+                )
+                report(
+                    "improve",
+                    0.95,
+                    f"applied {improvement.applied_mode} improvement",
+                )
+            except ImportError as exc:
+                if improve_mode in ("incremental", "full"):
+                    raise
+                logger.warning("Automatic improvement skipped: %s", exc)
 
         if finalize_callback is not None:
             report("finalize", 0.95, "refreshing indexes")

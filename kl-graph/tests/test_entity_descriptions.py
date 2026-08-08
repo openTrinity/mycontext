@@ -283,9 +283,9 @@ def test_sqlite_entity_roundtrip_keeps_description(store: SQLiteStore) -> None:
 
 
 def test_sqlite_missing_description_defaults_empty(store: SQLiteStore) -> None:
-    ent = Entity(id="e2", name="李明", entity_type=EntityType.PERSON)
+    ent = Entity(id="e2", name="李强", entity_type=EntityType.PERSON)
     store.upsert_entities([ent])
-    got = store.get_entity_by_name("李明")
+    got = store.get_entity_by_name("李强")
     assert got is not None
     assert got.description == ""
 

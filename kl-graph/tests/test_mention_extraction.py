@@ -17,13 +17,13 @@ from kl_graph.ingest.llm_extractor import (
 
 
 def test_strips_leading_at():
-    assert _clean_mention("@王芳") == "王芳"
+    assert _clean_mention("@李娜") == "李娜"
 
 
 def test_strips_trailing_punctuation():
-    assert _clean_mention("@李明，") == "李明"
-    assert _clean_mention("李明。") == "李明"
-    assert _clean_mention("@王芳，。") == "王芳"
+    assert _clean_mention("@李强，") == "李强"
+    assert _clean_mention("李强。") == "李强"
+    assert _clean_mention("@李娜，。") == "李娜"
     # Mixed ASCII/CJK trailing punctuation.
     assert _clean_mention("InkFlow!") == "InkFlow"
 
@@ -97,22 +97,22 @@ def test_non_string_and_empty_dropped():
 def test_normalize_scrubs_entities_and_involved():
     raw = {
         "entities": [
-            {"name": "@王芳", "entity_type": "Person"},
+            {"name": "@李娜", "entity_type": "Person"},
             {"name": "@所有人", "entity_type": "Person"},  # broadcast → dropped
             {"name": "@lQLPKGS2kqdzkgtaVLCpORJ", "entity_type": "Person"},  # media id → dropped
-            {"name": "李明。", "entity_type": "Person"},  # trailing punct
+            {"name": "李强。", "entity_type": "Person"},  # trailing punct
         ],
         "facts": [
             {
-                "subject_entity": "王芳",
+                "subject_entity": "李娜",
                 "object_entity": None,
                 "involved_entities": [
-                    "@王芳",
-                    "@李明",
+                    "@李娜",
+                    "@李强",
                     "@所有人",  # broadcast → dropped
-                    "王芳",  # duplicate of cleaned "@王芳" → deduped
+                    "李娜",  # duplicate of cleaned "@李娜" → deduped
                 ],
-                "fact_text": "王芳和李明两人负责测评任务",
+                "fact_text": "李娜和李强两人负责测评任务",
             }
         ],
     }
@@ -121,11 +121,11 @@ def test_normalize_scrubs_entities_and_involved():
 
     # Entities: broadcast + media dropped, names cleaned.
     names = [e["name"] for e in raw["entities"]]
-    assert names == ["王芳", "李明"]
+    assert names == ["李娜", "李强"]
 
     # involved_entities: cleaned, broadcast dropped, deduped, order-preserving.
     involved = raw["facts"][0]["involved_entities"]
-    assert involved == ["王芳", "李明"]
+    assert involved == ["李娜", "李强"]
 
 
 def test_normalize_defensive_on_malformed():
@@ -142,7 +142,7 @@ def test_normalize_defensive_on_malformed():
             None,
             {"fact_text": "no involved_entities key here"},
             {"involved_entities": "not-a-list"},
-            {"involved_entities": [None, 123, "@王芳"]},
+            {"involved_entities": [None, 123, "@李娜"]},
         ],
     }
     _normalize_result(raw)

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from kl_graph.ingest.checkpoint import IngestCheckpoint
 from kl_graph.ingest.pipeline import IngestionPipeline
-from kl_graph.models.types import Chunk, ChunkUnit, SourceUnit
+from kl_graph.models.types import Chunk, ChunkUnit, Edge, EdgeType, Fact, SourceUnit
 from kl_graph.storage.sqlite_store import SQLiteStore
 
 
@@ -141,3 +141,28 @@ def test_store_initialization_does_not_move_extractor_across_threads(tmp_path) -
 
     assert pipeline.extractor is extractor
     extractor.close.assert_not_called()
+
+
+def test_improvement_targets_are_recovered_from_committed_workset(tmp_path) -> None:
+    _, checkpoint, store = _committed_batch(tmp_path)
+    store.insert_facts(
+        [Fact(id="f1", text="fact", source_chunk_id="ding:wiki")]
+    )
+    store.insert_edges(
+        [
+            Edge("chunk", "ding:chat", "entity", "e1", EdgeType.MENTIONS),
+            Edge("fact", "f1", "entity", "e2", EdgeType.ABOUT),
+        ]
+    )
+    pipeline = IngestionPipeline(
+        store=store,
+        qdrant=MagicMock(),
+        checkpoint=checkpoint,
+        source_id="ding",
+        incremental_units=True,
+    )
+
+    targets = pipeline.improvement_targets()
+
+    assert targets.fact_ids == ("f1",)
+    assert targets.entity_ids == ("e1", "e2")

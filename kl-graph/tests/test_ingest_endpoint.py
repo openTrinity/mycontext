@@ -6,6 +6,9 @@ import asyncio
 import sqlite3
 from unittest.mock import AsyncMock
 
+import pytest
+from pydantic import ValidationError
+
 import kl_server
 from kl_graph.storage.sqlite_store import SQLiteStore
 
@@ -91,3 +94,31 @@ def test_server_ingest_job_delegates_to_shared_runner(tmp_path, monkeypatch) -> 
     assert options.input_dir == tmp_path
     assert options.source_id == "slack-prod"
     assert options.concurrency == 12
+    assert options.improve_mode == "auto"
+
+
+def test_ingest_request_accepts_improvement_override(tmp_path) -> None:
+    request = kl_server.IngestRequest(
+        input_dir=str(tmp_path),
+        source_id="slack-prod",
+        improve_mode="full",
+    )
+    assert request.improve_mode == "full"
+
+
+def test_ingest_request_rejects_removed_run_improve_field(tmp_path) -> None:
+    with pytest.raises(ValidationError):
+        kl_server.IngestRequest(
+            input_dir=str(tmp_path),
+            source_id="slack-prod",
+            run_improve=False,
+        )
+
+
+def test_ingest_request_rejects_nonpositive_concurrency(tmp_path) -> None:
+    with pytest.raises(ValidationError):
+        kl_server.IngestRequest(
+            input_dir=str(tmp_path),
+            source_id="slack-prod",
+            concurrency=0,
+        )

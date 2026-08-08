@@ -7,7 +7,7 @@ Tests verify:
 - After the first pipeline is closed (lock released), a new pipeline can acquire
 - Lock is acquired only when the pipeline owns its stores
   (injected store/qdrant skips lock acquisition)
-- run_incremental() acquires the same lock as run_full()
+- All owned-store pipeline runs share the same advisory lock
 """
 
 from __future__ import annotations
@@ -124,61 +124,51 @@ class TestLockContention:
         assert pipeline2._lock is not None
         pipeline2.close()
 
-    def test_concurrent_incremental_raises_runtime_error(
+    def test_concurrent_pipeline_raises_runtime_error(
         self, tmp_path: pathlib.Path
     ) -> None:
-        """Attempting run_incremental() while another pipeline holds the lock raises RuntimeError.
-
-        The lock is acquired at IngestionPipeline.__init__ time (when _owns_stores=True),
-        so constructing a second pipeline to call run_incremental() fails before
-        run_incremental() is even reached.
-        """
+        """A second owned-store pipeline fails while the first holds the lock."""
         # pipeline1 holds the lock
         pipeline1 = IngestionPipeline(
             sqlite_path=tmp_path / "a.db",
             qdrant_path=str(tmp_path / "qdrant"),
         )
         try:
-            # Attempting to create a second pipeline (prerequisite for run_incremental)
-            # raises RuntimeError because the lock is already held.
             with pytest.raises(RuntimeError, match="already running"):
                 pipeline2 = IngestionPipeline(
                     sqlite_path=tmp_path / "a.db",
                     qdrant_path=str(tmp_path / "qdrant"),
                 )
-                # Would call: asyncio.run(pipeline2.run_incremental())
                 pipeline2.close()  # never reached
         finally:
             pipeline1.close()
 
-    def test_full_build_also_blocked_by_held_lock(self, tmp_path: pathlib.Path) -> None:
-        """run_full() is also blocked when the lock is held by another pipeline.
+    def test_owned_pipeline_blocked_by_held_lock(self, tmp_path: pathlib.Path) -> None:
+        """Owned pipeline construction is blocked while another process holds the lock.
 
         Holds the lock via filelock directly (without a running pipeline), then
-        verifies that constructing an IngestionPipeline — a prerequisite for
-        run_full() — raises RuntimeError due to lock contention.
-        This confirms that full build and incremental ingest share the same
-        INGEST_LOCK_PATH advisory lock.
+        verifies that constructing an IngestionPipeline raises RuntimeError due
+        to lock contention.
+        This confirms that all owned-store ingestion uses INGEST_LOCK_PATH.
         """
         from filelock import FileLock
 
         # Hold the lock directly via filelock (simulates another process
-        # that already started a run_full() or run_incremental())
+        # that already started ingestion)
         lock_path = str(INGEST_LOCK_PATH)
         INGEST_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
         with (
             FileLock(lock_path, timeout=0),
             pytest.raises(RuntimeError, match="already running"),
         ):
-            # Constructing a pipeline (required before calling run_full) must fail
+            # Constructing an owned pipeline must fail before any phase can run.
             pipeline = IngestionPipeline(
                 sqlite_path=tmp_path / "b.db",
                 qdrant_path=str(tmp_path / "qdrant2"),
             )
-            # Would call: asyncio.run(pipeline.run_full())
             pipeline.close()  # never reached
 
-        # Lock released — now run_full() would be accessible
+        # Lock released — a new owned pipeline can now start.
         pipeline = IngestionPipeline(
             sqlite_path=tmp_path / "b.db",
             qdrant_path=str(tmp_path / "qdrant2"),
@@ -188,17 +178,17 @@ class TestLockContention:
 
 
 # ---------------------------------------------------------------------------
-# Tests: run_incremental lock via the lock file directly
+# Tests: owned-pipeline lock lifecycle
 # ---------------------------------------------------------------------------
 
 
-class TestIncrementalLockViaFilelock:
-    """run_incremental acquires the same lock (tested via filelock directly)."""
+class TestOwnedPipelineLock:
+    """An owned-store pipeline holds the shared ingestion lock."""
 
-    def test_run_incremental_acquires_lock_on_owned_pipeline(
+    def test_owned_pipeline_acquires_lock(
         self, tmp_path: pathlib.Path
     ) -> None:
-        """When pipeline owns stores, it holds the lock during run_incremental."""
+        """When a pipeline owns stores, it holds the ingestion lock."""
         pipeline = IngestionPipeline(
             sqlite_path=tmp_path / "test.db",
             qdrant_path=str(tmp_path / "qdrant"),

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from kl_graph.ingest.strategies.similarity import AnnPlusIntraBatch
 from kl_graph.models.types import Edge, EdgeType, Entity, EntityType, Fact, FactType
 from kl_graph.storage.base import create_store
 
@@ -102,6 +103,10 @@ def _read_edge_sets(store):
     return mentions, about, similar
 
 
+def _read_incremental_structural_sets(store):
+    return AnnPlusIntraBatch()._load_structural_data(store)
+
+
 def _sqlite_store(tmp_path: Path):
     return create_store(backend="sqlite", db_path=tmp_path / "knowledge.db")
 
@@ -122,6 +127,9 @@ def test_sqlite_edge_reads(tmp_path: Path) -> None:
         assert mentions == [("c1", "e1"), ("c1", "e1"), ("c2", "e1"), ("c2", "e2")]
         assert about == [("f1", "e1")]
         assert similar == [("e1", "e2", 0.82, "similarity")]
+        msg_sets, fact_sets = _read_incremental_structural_sets(store)
+        assert msg_sets["e1"] == {"c1", "c2"}
+        assert fact_sets["e1"] == {"f1"}
     finally:
         store.close()
 
@@ -141,6 +149,7 @@ def test_ladybug_edge_reads_match_sqlite(tmp_path: Path) -> None:
         _seed(sq)
         _seed(lb)
         assert _read_edge_sets(lb) == _read_edge_sets(sq)
+        assert _read_incremental_structural_sets(lb) == _read_incremental_structural_sets(sq)
     finally:
         sq.close()
         lb.close()

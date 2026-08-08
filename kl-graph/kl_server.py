@@ -21,9 +21,10 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
@@ -378,8 +379,9 @@ def _set_progress(
     state.ingest_progress = {
         "run_id": state.current_run_id,
         "source_id": previous.get("source_id"),
+        "improve_mode": previous.get("improve_mode"),
         "state": state_str,  # idle | running | done | error
-        "phase": phase,  # phase_a | phase_b | improve | ""
+        "phase": phase,  # phase_a | phase_b | improve | finalize | ""
         "percent": round(percent, 3),
         "detail": detail,
         "error": error,
@@ -442,7 +444,7 @@ async def _run_single_ingest_job(req: IngestRequest):
                 input_dir=Path(req.input_dir),
                 source_id=req.source_id,
                 concurrency=req.concurrency,
-                run_improve=req.run_improve,
+                improve_mode=req.improve_mode,
             ),
             store=shared_store,
             qdrant=qdrant,
@@ -466,7 +468,10 @@ async def _run_ingest_queue(first: tuple[str, IngestRequest]) -> None:
         while pending is not None:
             run_id, req = pending
             state.current_run_id = run_id
-            state.ingest_progress = {"source_id": req.source_id}
+            state.ingest_progress = {
+                "source_id": req.source_id,
+                "improve_mode": req.improve_mode,
+            }
             _set_progress("running", "phase_a", 0.0, "queued")
             await _run_single_ingest_job(req)
             pending = state.ingest_queue.pop(0) if state.ingest_queue else None
@@ -631,10 +636,12 @@ class EmbedSearchRequest(BaseModel):
 
 
 class IngestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     input_dir: str
     source_id: str = Field(min_length=1)
-    concurrency: int = 50  # max concurrent extraction LLM calls
-    run_improve: bool = True  # re-run community detection / PageRank after graph build
+    concurrency: int = Field(default=50, ge=1)  # concurrent extraction LLM calls
+    improve_mode: Literal["off", "auto", "incremental", "full"] = "auto"
 
 
 class AskRequest(BaseModel):
@@ -812,7 +819,10 @@ async def ingest(req: IngestRequest):
         }
 
     state.current_run_id = run_id
-    state.ingest_progress = {"source_id": req.source_id}
+    state.ingest_progress = {
+        "source_id": req.source_id,
+        "improve_mode": req.improve_mode,
+    }
     _set_progress("running", "phase_a", 0.0, "queued")
     state.ingest_task = asyncio.create_task(_run_ingest_queue(item))
     return {"status": "started", "run_id": run_id, "ingest": state.ingest_progress}

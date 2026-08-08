@@ -82,27 +82,22 @@ def _make_mock_store(
 ) -> MagicMock:
     """Create a mock KnowledgeStore with configurable structural data."""
     store = MagicMock()
-    conn = MagicMock()
-    store.sql_conn = conn
+    mention_rows = [
+        (chunk_id, entity_id, {})
+        for entity_id, chunk_ids in (msg_sets or {}).items()
+        for chunk_id in chunk_ids
+    ]
+    about_rows = [
+        (fact_id, entity_id, {})
+        for entity_id, fact_ids in (fact_sets or {}).items()
+        for fact_id in fact_ids
+    ]
 
-    msg_rows = [(eid, mid) for eid, mids in (msg_sets or {}).items() for mid in mids]
-    fact_rows = [(eid, fid) for eid, fids in (fact_sets or {}).items() for fid in fids]
-    conn.execute.side_effect = lambda sql, *a, **kw: _cursor_for_sql(
-        sql, msg_rows, fact_rows
-    )
+    def _scan(edge_types, **_kwargs):
+        return iter(about_rows if edge_types == ["ABOUT"] else mention_rows)
+
+    store.scan_edges_by_type.side_effect = _scan
     return store
-
-
-def _cursor_for_sql(sql: str, msg_rows: list, fact_rows: list) -> MagicMock:
-    """Return a mock cursor whose fetchall matches the query type."""
-    cursor = MagicMock()
-    if "MENTIONS" in sql or "AUTHORED_BY" in sql:
-        cursor.fetchall.return_value = msg_rows
-    elif "ABOUT" in sql:
-        cursor.fetchall.return_value = fact_rows
-    else:
-        cursor.fetchall.return_value = []
-    return cursor
 
 
 def _make_mock_qdrant(

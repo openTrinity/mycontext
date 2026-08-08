@@ -142,7 +142,6 @@ class ExtractionConfig(_ConfigModel):
 
 
 class IncrementalConfig(_ConfigModel):
-    full_rebuild_every: int
     community_summary_threshold: float
     similarity_strategy: str
     community_strategy: str

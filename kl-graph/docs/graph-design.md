@@ -158,9 +158,9 @@ remaining delta. The same workflow handles the initial build and later updates.
 > **Build vs. Improve boundary.** The Phase 1 pipeline splits into two conceptual halves:
 >
 > - **Build** (steps 1.1–1.15): everything derived *per-chunk* from the source data. Each chunk can be processed independently — entity extraction, fact creation, structural edge wiring. The computation is local to the chunk (or at most its immediate neighbors in the source threading). Deterministic given the input chunk.
-> - **Improve** (steps 1.16–1.23): everything derived from the *graph as a whole*. Similarity edges require pairwise comparison across the full embedding set. Community detection requires the complete entity/fact graph. Disambiguation requires knowing all entities to find collisions. These steps cannot run until Build is complete.
+> - **Improve** (steps 1.16–1.23): semantic relationships derived after Build. The initial/full pass uses the graph as a whole; later server runs can use ANN similarity plus one-hop frontier communities for the affected batch. These steps cannot run until Build is complete.
 >
-> The boundary criterion: **"Does this step need the complete graph, or just the current chunk?"** If it only needs the current chunk (and its extraction cache), it's Build. If it needs the full entity/fact/edge/embedding corpus, it's Improve.
+> The boundary criterion: **"Can this be derived independently from one chunk?"** If yes, it is Build. Cross-chunk semantic relationships are Improve, even when their incremental implementation limits writes to an affected frontier.
 
 ---
 
@@ -183,8 +183,8 @@ does not imply deletion.
 | 2.1 | **Load new units** — deduplicate by `(source_id, source_type, unit_id)` before chunking | New unit list |
 | 2.2 | **Chunk + embed new content** — same as 1.3–1.4 but only for new chunks | New chunk nodes + vectors |
 | 2.3 | **Structural edges for new chunks** — PART_OF plus TEMPORAL/REPLY_TO relationships available inside the selected batch; historical chunks are not rewritten | Structural edges |
-| 2.4 | **Optional improvement** — when requested, refresh similarity over the updated corpus | ENTITY_SIMILAR / FACT_SIMILAR edges |
-| 2.5 | **Optional communities** — run the configured community improvement strategy | Community nodes + COMM_MEMBER edges |
+| 2.4 | **Post-build improvement** — `auto` by default; ANN update after a baseline, graph-wide when explicitly forced | ENTITY_SIMILAR / FACT_SIMILAR edges |
+| 2.5 | **Communities** — one-hop frontier update after a baseline; graph-wide initialization/rebuild otherwise | Community nodes + COMM_MEMBER edges |
 
 #### Sophisticated Operations (LLM)
 
@@ -196,9 +196,10 @@ does not imply deletion.
 | 2.9 | **Optional disambiguation** — the improve path can reconsider ambiguous entities over the updated corpus | Merged entities, ENTITY_SIMILAR edges |
 | 2.10 | **Community summaries** — refreshed separately by the community summarizer after community changes | Updated summary text |
 
-> **Community behavior.** Normal ingestion does not require improvement. When
-> requested, the configured improvement path may refresh global similarity and
-> community state over the updated corpus; it is not part of unit delta detection.
+> **Community behavior.** `POST /ingest` defaults to `improve_mode=auto`: seed a
+> missing full baseline, then update similarity and communities incrementally.
+> Callers may choose `off`, force `incremental` (baseline required), or force
+> `full`. Improvement remains separate from unit delta detection.
 
 > **No watermark.** Timestamps are ordering metadata only. Re-running ingestion
 > is idempotent because committed composite unit ids are skipped. A late message

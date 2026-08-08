@@ -45,8 +45,8 @@ def test_get_meta_missing_key_returns_none(tmp_path: pathlib.Path) -> None:
 def test_get_meta_returns_set_value(tmp_path: pathlib.Path) -> None:
     """get_meta returns the value stored by set_meta."""
     store = _make_store(tmp_path)
-    store.set_meta("watermark.message", "1700000000000")
-    result = store.get_meta("watermark.message")
+    store.set_meta("improvement.full.completed_at", "1700000000000")
+    result = store.get_meta("improvement.full.completed_at")
     assert result == "1700000000000"
     store.close()
 
@@ -54,9 +54,9 @@ def test_get_meta_returns_set_value(tmp_path: pathlib.Path) -> None:
 def test_set_meta_overwrites_existing(tmp_path: pathlib.Path) -> None:
     """set_meta replaces an existing value (INSERT OR REPLACE semantics)."""
     store = _make_store(tmp_path)
-    store.set_meta("incremental_run_count", "3")
-    store.set_meta("incremental_run_count", "5")
-    assert store.get_meta("incremental_run_count") == "5"
+    store.set_meta("example_counter", "3")
+    store.set_meta("example_counter", "5")
+    assert store.get_meta("example_counter") == "5"
     store.close()
 
 

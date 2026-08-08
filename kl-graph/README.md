@@ -305,7 +305,7 @@ The equivalent HTTP request is:
 POST /ingest
 Content-Type: application/json
 
-{"input_dir":"/path/on/server/dws_export","source_id":"dingtalk-personal"}
+{"input_dir":"/path/on/server/dws_export","source_id":"dingtalk-personal","improve_mode":"auto"}
 ```
 
 If another run is active, the request is persisted and queued. Poll
@@ -313,9 +313,17 @@ If another run is active, the request is persisted and queued. Poll
 unit counters, chunk count, and any error.
 
 `kl ingest` has no wipe flag; for a clean rebuild use the offline `--fresh-db`
-workflow below. Periodic improvement is opt-in via
-`--improve` (community detection via Leiden + similarity edges), and
-works on both graph backends; `-c N` raises extraction concurrency.
+workflow below. Improvement defaults to `auto`: it seeds a missing community
+baseline with one global pass, then uses batch-targeted similarity and frontier
+community updates. `--no-improve` disables it; `-c N` raises extraction
+concurrency.
+
+The HTTP `improve_mode` field accepts `auto`, `incremental`, `full`, or `off`.
+`incremental` requires an existing full baseline; `full` forces the graph-wide
+periodic pass. Selection is based on persisted community state, not timestamps
+or an arbitrary run counter.
+See [Ingest API and Cost Guide](docs/ingest-api.md) for queue/status semantics,
+errors, retries, and the cost of every pipeline step.
 
 To keep two knowledge bases physically separate, run them with different
 `application.data_dir` / `KL_DATA_DIR` values. That separates `knowledge.db`,
@@ -362,11 +370,14 @@ python scripts/embed_communities.py
 | `--extract-only` | Advanced: LLM extraction only, cache results (assumes Phase A ran) |
 | `--build-only` | Advanced: build graph from cached results only, no LLM (assumes Phase A ran) |
 | `--concurrency N` | Max concurrent extraction LLM calls (recommended: **50**) |
+| `--improve-mode MODE` | `auto` (default), `incremental`, `full`, or `off` |
 | `--fresh-db` | Delete `knowledge.db`, Qdrant, and the active Ladybug graph first (the extraction cache lives inside `knowledge.db`, so it is cleared too) |
 
 The script and `POST /ingest` use the same unit-incremental runner and the same
 source-specific checkpoint. There is no timestamp watermark or separate
 incremental mode: every normal run skips unit IDs already stored for that source.
+See [Ingestion Cost Profile](docs/ingestion-cost-profile.md) for the scaling and
+resource characteristics of each phase.
 
 `scripts.improve` runs the **finalization sub-phase** standalone (similarity edges +
 communities). Useful for tuning parameters without re-running extraction. Flags
@@ -416,7 +427,7 @@ and accept `--json`.
 ./kl search "网络白名单" -c communities
 
 # Path — shortest path between two entities/facts in the knowledge graph
-./kl path "李明" "杨帆"                        # single shortest path
+./kl path "李强" "杨帆"                        # single shortest path
 ./kl path "张伟" "黄磊" --all-shortest        # all shortest paths
 ./kl path "A" "B" --max-hops 3 --edge-types ABOUT,INVOLVES
 

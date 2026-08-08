@@ -52,27 +52,27 @@ def _edge_tuples(edges) -> list[tuple]:
 
 
 MSG_ID = "msg:conv/abc123"
-FACT_TEXT = "V107/V108 vs V100 的 coding 测评任务是王芳和李明两人一起做的"
+FACT_TEXT = "V107/V108 vs V100 的 coding 测评任务是李娜和李强两人一起做的"
 
 
 # ─── tests ──────────────────────────────────────────────────────────────────
 
 
 def test_joint_claim_fans_out_to_all_entities():
-    """subject 王芳 + involved [王芳, 李明] ⇒ ABOUT to BOTH people."""
-    all_entities = _entities("王芳", "李明")
+    """subject 李娜 + involved [李娜, 李强] ⇒ ABOUT to BOTH people."""
+    all_entities = _entities("李娜", "李强")
     raw_fact = {
-        "subject_entity": "王芳",
+        "subject_entity": "李娜",
         "object_entity": None,
         "relation_type": "WORKED_ON",
         "fact_text": FACT_TEXT,
-        "involved_entities": ["王芳", "李明"],
+        "involved_entities": ["李娜", "李强"],
     }
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
 
     targets = _about_targets(edges)
-    assert entity_id_from_name("王芳") in targets, "subject 王芳 missing ABOUT edge"
-    assert entity_id_from_name("李明") in targets, "participant 李明 missing ABOUT edge"
+    assert entity_id_from_name("李娜") in targets, "subject 李娜 missing ABOUT edge"
+    assert entity_id_from_name("李强") in targets, "participant 李强 missing ABOUT edge"
     # Every fact→entity edge is ABOUT (Option A: uniform fan-out).
     assert all(
         e.edge_type == EdgeType.ABOUT
@@ -83,28 +83,28 @@ def test_joint_claim_fans_out_to_all_entities():
     assert not any(
         getattr(e.edge_type, "value", e.edge_type) == "INVOLVES" for e in edges
     ), "INVOLVES is removed (divergence B) and must never be emitted"
-    print("ok  joint claim fans out to both 王芳 and 李明 via ABOUT")
+    print("ok  joint claim fans out to both 李娜 and 李强 via ABOUT")
 
 
 def test_no_duplicate_edges_for_repeated_or_subject_equal_participants():
     """involved_entities repeating subject/object (and each other) ⇒ no dup edges."""
-    all_entities = _entities("王芳", "李明")
+    all_entities = _entities("李娜", "李强")
     raw_fact = {
-        "subject_entity": "王芳",
-        "object_entity": "李明",
+        "subject_entity": "李娜",
+        "object_entity": "李强",
         "fact_text": FACT_TEXT,
         # subject + object repeated, plus a duplicate participant.
-        "involved_entities": ["王芳", "李明", "李明", "王芳"],
+        "involved_entities": ["李娜", "李强", "李强", "李娜"],
     }
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
 
     tuples = _edge_tuples(edges)
     assert len(tuples) == len(set(tuples)), f"duplicate edges emitted: {tuples}"
-    # Exactly: 1 STATES + ABOUT(王芳) + ABOUT(李明) = 3 edges, no more.
+    # Exactly: 1 STATES + ABOUT(李娜) + ABOUT(李强) = 3 edges, no more.
     about = _about_targets(edges)
     assert about == {
-        entity_id_from_name("王芳"),
-        entity_id_from_name("李明"),
+        entity_id_from_name("李娜"),
+        entity_id_from_name("李强"),
     }
     assert len(edges) == 3, f"expected 3 edges (STATES + 2 ABOUT), got {len(edges)}"
     print("ok  repeated / subject-equal participants produce no duplicate edges")
@@ -112,9 +112,9 @@ def test_no_duplicate_edges_for_repeated_or_subject_equal_participants():
 
 def test_missing_involved_entities_degrades_gracefully():
     """Old-cache fact without involved_entities ⇒ only subject/object edges, no error."""
-    all_entities = _entities("王芳")
+    all_entities = _entities("李娜")
     raw_fact = {
-        "subject_entity": "王芳",
+        "subject_entity": "李娜",
         "object_entity": None,
         "fact_text": FACT_TEXT,
         # NOTE: no "involved_entities" key at all (old cache shape).
@@ -122,7 +122,7 @@ def test_missing_involved_entities_degrades_gracefully():
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
 
     about = _about_targets(edges)
-    assert about == {entity_id_from_name("王芳")}, (
+    assert about == {entity_id_from_name("李娜")}, (
         "without involved_entities only the subject ABOUT edge should exist"
     )
     # STATES + subject ABOUT only.
@@ -132,19 +132,19 @@ def test_missing_involved_entities_degrades_gracefully():
 
 def test_participant_not_in_entities_yields_no_edge():
     """A participant that never became an entity node ⇒ no dangling edge."""
-    all_entities = _entities("王芳")  # 李明 deliberately absent
+    all_entities = _entities("李娜")  # 李强 deliberately absent
     raw_fact = {
-        "subject_entity": "王芳",
+        "subject_entity": "李娜",
         "fact_text": FACT_TEXT,
-        "involved_entities": ["王芳", "李明"],
+        "involved_entities": ["李娜", "李强"],
     }
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
 
     about = _about_targets(edges)
-    assert entity_id_from_name("李明") not in about, (
+    assert entity_id_from_name("李强") not in about, (
         "no edge should be emitted for a participant absent from all_entities"
     )
-    assert about == {entity_id_from_name("王芳")}
+    assert about == {entity_id_from_name("李娜")}
     print("ok  participant absent from all_entities yields no edge")
 
 
@@ -155,11 +155,11 @@ def test_fact_id_agreement_between_build_and_edges():
     delegates to _fact_edges which also calls _fact_id. Assert the STATES/ABOUT
     edges reference precisely that id, proving the two sites cannot diverge.
     """
-    all_entities = _entities("王芳")
+    all_entities = _entities("李娜")
     raw_fact = {
-        "subject_entity": "王芳",
+        "subject_entity": "李娜",
         "fact_text": FACT_TEXT,
-        "involved_entities": ["王芳"],
+        "involved_entities": ["李娜"],
     }
     expected_id = _fact_id(MSG_ID, FACT_TEXT)
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
@@ -183,12 +183,12 @@ def test_fact_id_agreement_between_build_and_edges():
 
 def test_regression_preexisting_edges_still_emitted():
     """[!RED] The fan-out must not remove/gate the pre-existing STATES + ABOUT."""
-    all_entities = _entities("王芳", "李明")
+    all_entities = _entities("李娜", "李强")
     raw_fact = {
-        "subject_entity": "王芳",
-        "object_entity": "李明",
+        "subject_entity": "李娜",
+        "object_entity": "李强",
         "fact_text": FACT_TEXT,
-        "involved_entities": ["王芳", "李明"],
+        "involved_entities": ["李娜", "李强"],
     }
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
 
@@ -201,11 +201,11 @@ def test_regression_preexisting_edges_still_emitted():
         and e.target_id == MSG_ID
         for e in edges
     ), "pre-existing STATES edge (fact→chunk) missing"
-    # Pre-existing subject ABOUT: fact → 王芳.
+    # Pre-existing subject ABOUT: fact → 李娜.
     assert any(
         e.edge_type == EdgeType.ABOUT
         and e.target_type == "entity"
-        and e.target_id == entity_id_from_name("王芳")
+        and e.target_id == entity_id_from_name("李娜")
         for e in edges
     ), "pre-existing subject ABOUT edge missing"
     print("ok  regression: pre-existing STATES + subject ABOUT still emitted")
@@ -213,7 +213,7 @@ def test_regression_preexisting_edges_still_emitted():
 
 def test_trivial_fact_text_yields_no_edges():
     """Guard parity with the original: <5-char / empty fact_text ⇒ no edges."""
-    all_entities = _entities("王芳")
+    all_entities = _entities("李娜")
     assert IngestionPipeline._fact_edges(MSG_ID, {"fact_text": "hi"}, all_entities) == []
     assert IngestionPipeline._fact_edges(MSG_ID, {}, all_entities) == []
     assert IngestionPipeline._fact_edges(MSG_ID, "not a dict", all_entities) == []
@@ -223,31 +223,31 @@ def test_trivial_fact_text_yields_no_edges():
 def test_at_prefixed_subject_recovered_not_dropped():
     """[fix-now regression] '@'-prefixed subject must still get exactly one ABOUT.
 
-    Old/malformed cache can carry ``subject_entity='@王芳'`` while the entity
-    node was created under the '@'-stripped name '王芳' (by ``_build_entities``).
-    Before the fix, the subject ABOUT lookup used the unstripped '@王芳' (not in
+    Old/malformed cache can carry ``subject_entity='@李娜'`` while the entity
+    node was created under the '@'-stripped name '李娜' (by ``_build_entities``).
+    Before the fix, the subject ABOUT lookup used the unstripped '@李娜' (not in
     all_entities → no subject edge), and ``seen`` was seeded with the stripped
-    '王芳' → the ``involved_entities=['王芳']`` entry was skipped too, so the
+    '李娜' → the ``involved_entities=['李娜']`` entry was skipped too, so the
     person got NO edge at all. After the fix, subject/object/involved all
     normalize identically, so the person is emitted exactly once.
     """
     # Node exists under the '@'-STRIPPED name, as _build_entities creates it.
-    all_entities = _entities("王芳")
+    all_entities = _entities("李娜")
     raw_fact = {
-        "subject_entity": "@王芳",
+        "subject_entity": "@李娜",
         "object_entity": None,
         "fact_text": FACT_TEXT,
-        "involved_entities": ["王芳"],
+        "involved_entities": ["李娜"],
     }
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
 
-    tianwenze = entity_id_from_name("王芳")
+    tianwenze = entity_id_from_name("李娜")
     about_edges = [
         e for e in edges
         if e.edge_type == EdgeType.ABOUT and e.target_type == "entity"
     ]
     assert _about_targets(edges) == {tianwenze}, (
-        "'@'-prefixed subject must resolve to the '王芳' node (recovered, not dropped)"
+        "'@'-prefixed subject must resolve to the '李娜' node (recovered, not dropped)"
     )
     assert len(about_edges) == 1, (
         f"expected exactly ONE ABOUT edge (no duplicate from involved_entities), "
@@ -257,18 +257,18 @@ def test_at_prefixed_subject_recovered_not_dropped():
 
 
 def test_clean_subject_still_single_about_no_regression():
-    """No-regression companion: a clean 'subject_entity=王芳' with the same
+    """No-regression companion: a clean 'subject_entity=李娜' with the same
 
-    involved_entities=['王芳'] still yields exactly one ABOUT edge (the fix is a
+    involved_entities=['李娜'] still yields exactly one ABOUT edge (the fix is a
     no-op for already-normalized input, since '.lstrip("@")' on a clean name
     changes nothing).
     """
-    all_entities = _entities("王芳")
+    all_entities = _entities("李娜")
     raw_fact = {
-        "subject_entity": "王芳",
+        "subject_entity": "李娜",
         "object_entity": None,
         "fact_text": FACT_TEXT,
-        "involved_entities": ["王芳"],
+        "involved_entities": ["李娜"],
     }
     edges = IngestionPipeline._fact_edges(MSG_ID, raw_fact, all_entities)
 
@@ -276,7 +276,7 @@ def test_clean_subject_still_single_about_no_regression():
         e for e in edges
         if e.edge_type == EdgeType.ABOUT and e.target_type == "entity"
     ]
-    assert _about_targets(edges) == {entity_id_from_name("王芳")}
+    assert _about_targets(edges) == {entity_id_from_name("李娜")}
     assert len(about_edges) == 1, (
         f"clean subject must still yield exactly one ABOUT edge, got {len(about_edges)}"
     )

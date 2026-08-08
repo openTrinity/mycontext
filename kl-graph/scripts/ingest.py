@@ -146,7 +146,13 @@ async def main():
     parser.add_argument(
         "--no-improve",
         action="store_true",
-        help="Skip similarity/community steps (faster iteration)",
+        help="Deprecated alias for --improve-mode off",
+    )
+    parser.add_argument(
+        "--improve-mode",
+        choices=("off", "auto", "incremental", "full"),
+        default="auto",
+        help="Post-build similarity/community policy (default: auto)",
     )
     parser.add_argument(
         "--concurrency",
@@ -183,7 +189,7 @@ async def main():
         input_dir=input_dir,
         source_id=args.source_id,
         concurrency=args.concurrency,
-        run_improve=not args.no_improve,
+        improve_mode="off" if args.no_improve else args.improve_mode,
         keep_cache=False if args.no_keep_cache else KEEP_EXTRACTION_CACHE,
     )
     checkpoint_file = checkpoint_path(args.source_id)

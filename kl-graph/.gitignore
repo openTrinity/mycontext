@@ -29,14 +29,11 @@ locomo/
 # AgentKit runtime state (session-specific)
 .agentkit/
 
-# AI assistant local files (not tracked)
-CLAUDE.md
-.claude/
-
 # Local runtime config with secrets — never commit
 .env
 config.yaml
 scripts/live_env.sh
+skills/kl-graph-anonymize/
 
 # DWS CLI binary and auth/config (proprietary, org-specific)
 tools/dws.exe

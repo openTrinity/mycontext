@@ -27,7 +27,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kl_graph.ingest.loaders.base import (
-    format_ts,
     SESSION_BREAK_MARKER,
     SESSION_GAP_MS,
     scope_chat_kind,
@@ -95,11 +94,11 @@ def test_render_direct_with_reply():
 
 def test_render_quote_is_verbatim():
     """Quoted body is NOT truncated and media/@ noise is NOT stripped."""
-    long_quote = "@王芳 [图片消息] " + ("很长的内容" * 80)
-    quoted = {"openMessageId": "x", "sender": "李明", "content": long_quote}
+    long_quote = "@李娜 [图片消息] " + ("很长的内容" * 80)
+    quoted = {"openMessageId": "x", "sender": "李强", "content": long_quote}
     out = _render_content("收到", "赵辰", "group", "G", quoted)
     assert long_quote in out, "quoted body must be inlined verbatim (no truncation)"
-    assert "@王芳" in out and "[图片消息]" in out, "no @/media stripping"
+    assert "@李娜" in out and "[图片消息]" in out, "no @/media stripping"
 
 
 def test_render_quote_keeps_boundary_whitespace():
@@ -110,11 +109,11 @@ def test_render_quote_keeps_boundary_whitespace():
     as stored.
     """
     q_body = "  前后有空白\n第二行  "
-    quoted = {"openMessageId": "x", "sender": "李明", "content": q_body}
+    quoted = {"openMessageId": "x", "sender": "李强", "content": q_body}
     out = _render_content("收到", "赵辰", "group", "G", quoted)
-    assert f"↳ 回复 李明：{q_body}" in out, out
+    assert f"↳ 回复 李强：{q_body}" in out, out
     # Spelled out literally so the two-space margins are visible in the diff.
-    assert out == "[群聊: G] 赵辰\n↳ 回复 李明：  前后有空白\n第二行  \n收到", out
+    assert out == "[群聊: G] 赵辰\n↳ 回复 李强：  前后有空白\n第二行  \n收到", out
 
 
 def test_render_self_quote():
@@ -349,11 +348,11 @@ def test_mail_direction_header_with_cc():
                     "body": {
                         "subject": "周报",
                         "markdownBody": "本周进展如下。",
-                        "from": {"name": "孙亮", "email": "sl@x.com"},
-                        "toRecipients": [{"name": "周强", "email": "zq@x.com"}],
+                        "from": {"name": "孙亮", "email": "sl@example.com"},
+                        "toRecipients": [{"name": "周强", "email": "zq@example.com"}],
                         "ccRecipients": [
-                            {"name": "李明", "email": "lm@x.com"},
-                            {"name": "王芳", "email": "wf@x.com"},
+                            {"name": "李强", "email": "lm@example.com"},
+                            {"name": "李娜", "email": "wf@example.com"},
                         ],
                         "conversationId": "thread:1",
                         "receivedDateTime": "2026-05-11T15:07:03Z",
@@ -363,15 +362,15 @@ def test_mail_direction_header_with_cc():
         )
         (c,) = load_mail(d)
         first = c.content.split("\n")[0]
-        assert first.startswith("[邮件] 发件人 孙亮 <sl@x.com>"), first
-        assert "→ 收件人 周强 <zq@x.com>" in first
+        assert first.startswith("[邮件] 发件人 孙亮 <sl@example.com>"), first
+        assert "→ 收件人 周强 <zq@example.com>" in first
         # Full cc list included (human decision: no cap).
-        assert "李明 <lm@x.com>" in first and "王芳 <wf@x.com>" in first
+        assert "李强 <lm@example.com>" in first and "李娜 <wf@example.com>" in first
         # Subject + body still present beneath the header.
         assert "主题：周报" in c.content
         assert c.content.rstrip().endswith("本周进展如下。")
         # Metadata unchanged.
-        assert c.metadata["cc"] == ["李明 <lm@x.com>", "王芳 <wf@x.com>"]
+        assert c.metadata["cc"] == ["李强 <lm@example.com>", "李娜 <wf@example.com>"]
         assert c.metadata["conversation_id"] == "thread:1"
 
 
@@ -396,8 +395,8 @@ def test_mail_long_body_splits_without_truncation():
                 "data": {"messageId": "mlong", "body": {
                     "subject": "长邮件",
                     "markdownBody": body,
-                    "from": {"name": "发件人甲", "email": "a@x.com"},
-                    "toRecipients": [{"name": "收件人乙", "email": "b@x.com"}],
+                    "from": {"name": "发件人甲", "email": "a@example.com"},
+                    "toRecipients": [{"name": "收件人乙", "email": "b@example.com"}],
                 }},
             }],
         )
@@ -457,13 +456,13 @@ def test_mail_header_omits_absent_parts():
                 "id": "mail:2", "scope_id": "t", "type": "email",
                 "data": {"messageId": "m2", "body": {
                     "subject": "S", "markdownBody": "B",
-                    "from": {"name": "A", "email": "a@x.com"},
+                    "from": {"name": "A", "email": "a@example.com"},
                 }},
             }],
         )
         (c,) = load_mail(d)
         first = c.content.split("\n")[0]
-        assert first == "[邮件] 发件人 A <a@x.com>", first
+        assert first == "[邮件] 发件人 A <a@example.com>", first
         assert "→" not in first
 
 

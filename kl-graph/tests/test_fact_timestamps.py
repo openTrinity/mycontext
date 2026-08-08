@@ -165,12 +165,8 @@ class _FakeStore:
         self.edges.extend(edges)
 
 
-def test_batch_incremental_fact_id_text_parity():
-    """Parity (review fix-now): batch ``_build_facts`` and incremental
-    ``_build_incremental_facts`` must yield IDENTICAL fact id + stored text for
-    the same (chunk, raw fact), so incremental ingest cannot drift from a full
-    /cache-replay build. Both real code paths are driven — no formula copy."""
-    from kl_graph.ingest.incremental import IncrementalIngestion
+def test_unit_incremental_fact_build_uses_dated_text():
+    """The canonical unit-incremental builder dates stored text and fact IDs."""
     from kl_graph.models.types import Chunk
 
     ts = _china_ts(2026, 7, 15)
@@ -190,18 +186,7 @@ def test_batch_incremental_fact_id_text_parity():
     pipe.store = batch_store
     pipe._build_facts()
 
-    # Incremental path: real _build_incremental_facts.
-    incr_store = _FakeStore(entities=[subj])
-    incr = IncrementalIngestion(store=incr_store, qdrant=None)
-    new_ids = incr._build_incremental_facts([chunk], {chunk.id: result})
-
     assert len(pipe.all_facts) == 1
-    assert len(incr_store.facts) == 1
-    batch_fact, incr_fact = pipe.all_facts[0], incr_store.facts[0]
-    assert incr_fact.id == batch_fact.id
-    assert incr_fact.text == batch_fact.text == _dated_fact_text(FACT_TEXT, ts)
-    assert new_ids == [batch_fact.id]
-    # Incremental STATES/ABOUT edges must reference the same prefixed fact id
-    # as the node, so edges cannot orphan from batch-built facts.
-    assert incr_store.edges
-    assert {e.source_id for e in incr_store.edges} == {batch_fact.id}
+    fact = pipe.all_facts[0]
+    assert fact.text == _dated_fact_text(FACT_TEXT, ts)
+    assert fact.id == _fact_id(MSG_ID, fact.text)

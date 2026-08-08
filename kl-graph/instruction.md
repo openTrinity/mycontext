@@ -381,7 +381,7 @@ field names differ from CLI flags** — the table below is authoritative.
 | `context` | `POST /context` | `{fact_id}` |
 | `timeline` | `POST /timeline` | `{entity_name, from_date?, to_date?, limit}` |
 | `hop` | `POST /graph_hop` | `{node_id, cursor, max_fanout}` |
-| `ingest` | `POST /ingest` | `{export_dir?, concurrency, run_improve}` |
+| `ingest` | `POST /ingest` | `{input_dir, source_id, concurrency?, improve_mode?}` |
 | `status` | `GET /status` | — |
 | — | `GET /health` | — |
 

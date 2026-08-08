@@ -79,7 +79,6 @@ pipelines:
       concurrency: ${oc.env:KL_ENTITY_DESCRIPTION_CONCURRENCY,8}
 
     incremental:
-      full_rebuild_every: ${oc.env:KL_FULL_REBUILD_EVERY,10}
       community_summary_threshold: ${oc.env:KL_INCR_COMMUNITY_SUMMARY_THRESHOLD,0.1}
       similarity_strategy: ${oc.env:KL_INCR_SIMILARITY_STRATEGY,ann_intra_batch}
       community_strategy: ${oc.env:KL_INCR_COMMUNITY_STRATEGY,dynamic_frontier_leiden}

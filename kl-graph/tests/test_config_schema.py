@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from kl_graph.config import AppConfig, cfg
 
-
 EXPECTED_LEAVES = {
     "application.data_dir",
     "application.dws_export_dir",
@@ -49,7 +48,6 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.extraction.batch_timeout",
     "pipelines.ingestion.entity_description.summarize",
     "pipelines.ingestion.entity_description.concurrency",
-    "pipelines.ingestion.incremental.full_rebuild_every",
     "pipelines.ingestion.incremental.community_summary_threshold",
     "pipelines.ingestion.incremental.similarity_strategy",
     "pipelines.ingestion.incremental.community_strategy",

@@ -25,10 +25,10 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from kl_graph.config import cfg
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 from kl_graph.models.types import Edge, EdgeType
 from kl_graph.storage.base import KnowledgeStore
 from kl_graph.storage.qdrant_store import QdrantStore
+from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
 
 @dataclass
@@ -444,10 +444,10 @@ def score_candidates(
 def _run_coro_sync(coro):
     """Run *coro* to completion from sync code, with or without a running loop.
 
-    ``scripts/improve.py`` calls the periodic path with no event loop, but
-    ``scripts/ingest.py`` runs ``run_full`` inside ``asyncio.run(main())`` —
-    where ``asyncio.run`` cannot nest. In that case the coroutine runs on a
-    dedicated thread with its own loop. Callers must ensure the coroutine
+    ``scripts/improve.py`` calls the periodic path with no event loop, but a
+    library caller may already have one where ``asyncio.run`` cannot nest. In
+    that case the coroutine runs on a dedicated thread with its own loop.
+    Callers must ensure the coroutine
     performs no thread-bound IO (e.g. SQLite handles created on the main
     thread); the judge coroutines are LLM-only after prompt pre-build.
     """
@@ -504,8 +504,8 @@ def run_llm_judge(
     ]
     # Build prompts (the only store reads) synchronously on the caller's thread
     # so the async judge coroutines are LLM-only — that keeps them safe to run
-    # on a side thread when we are already inside an event loop
-    # (scripts/ingest.py run_full; see _run_coro_sync).
+    # on a side thread when we are already inside an event loop (see
+    # _run_coro_sync).
     prompts = [_build_judge_prompt(batch, store) for batch in batches]
 
     async def _run_all() -> int:

@@ -760,6 +760,54 @@ class IngestionPipeline:
         self._init_stores()
         self.store.complete_ingest_batch(self.batch_id)
 
+    def improvement_targets(self):
+        """Return entity/fact IDs affected by this batch's durable workset.
+
+        Targets are recovered from committed graph state rather than timestamps,
+        so this also works after a checkpoint resume where the build steps were
+        skipped and their in-memory accumulators were reloaded globally.
+        """
+
+        from kl_graph.ingest.improvement import ImprovementTargets
+
+        self._init_stores()
+        self._load_workset()
+        chunk_ids = {chunk.id for chunk in self.all_chunks()}
+        if not chunk_ids:
+            return ImprovementTargets()
+
+        fact_ids: set[str] = set()
+        ordered_chunks = sorted(chunk_ids)
+        for start in range(0, len(ordered_chunks), 500):
+            batch = ordered_chunks[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.store.sql_conn.execute(
+                "SELECT id FROM facts "
+                f"WHERE source_chunk_id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            fact_ids.update(str(row[0]) for row in rows)
+
+        entity_ids: set[str] = set()
+        for chunk_id, entity_id, _props in self.store.scan_edges_by_type(
+            ["MENTIONS", "AUTHORED_BY"],
+            source_type="chunk",
+            target_type="entity",
+        ):
+            if chunk_id in chunk_ids:
+                entity_ids.add(entity_id)
+        if fact_ids:
+            for fact_id, entity_id, _props in self.store.scan_edges_by_type(
+                ["ABOUT"], source_type="fact", target_type="entity"
+            ):
+                if fact_id in fact_ids:
+                    entity_ids.add(entity_id)
+
+        return ImprovementTargets(
+            entity_ids=tuple(sorted(entity_ids)),
+            fact_ids=tuple(sorted(fact_ids)),
+        )
+
     # ─── Checkpoint reload helpers ─────────────────────────────────────────
 
     @contextmanager
@@ -1111,51 +1159,6 @@ class IngestionPipeline:
             llm_max_budget=llm_max_budget,
         )
 
-    async def run_incremental(self, since_timestamp: int | None = None) -> dict:
-        """Phase 2: Incremental ingestion — process only new data since watermark.
-
-        Acquires the same advisory lock as run_full() to prevent concurrent runs.
-        Delegates to IncrementalIngestion.run() for the full orchestration.
-
-        Args:
-            since_timestamp: Optional explicit cutoff (unix ms). Overrides stored watermark.
-
-        Returns:
-            Dict with keys: new_chunks, new_entities, new_facts, new_edges, changed_communities.
-        """
-        from kl_graph.ingest.incremental import IncrementalIngestion
-        from kl_graph.ingest.strategies import (
-            get_community_strategy,
-            get_similarity_strategy,
-        )
-        from kl_graph.ingest.watermark import needs_full_rebuild
-
-        full_rebuild_every = int(cfg.pipelines.ingestion.incremental.full_rebuild_every)
-
-        self._init_stores()
-
-        # Check if a full rebuild should run first
-        if needs_full_rebuild(self.store, full_rebuild_every):
-            logger.info(
-                "run_incremental: full rebuild triggered before incremental run"
-            )
-            self.run_similarity_and_communities()
-            from kl_graph.ingest.watermark import reset_run_count
-
-            reset_run_count(self.store)
-
-        incr = IncrementalIngestion(
-            store=self.store,
-            qdrant=self.qdrant,
-            embedder=self.embedder,
-            checkpoint=self.checkpoint,
-            similarity_strategy=get_similarity_strategy(),
-            community_strategy=get_community_strategy(),
-            cache_db=self.cache_db,
-            max_concurrent_llm=self.max_concurrent_llm,
-        )
-        return await incr.run(since_timestamp=since_timestamp)
-
     def _load_delta(self) -> list[Chunk]:
         """Load all source chunks and filter to those not already in the DB.
 
@@ -1227,7 +1230,7 @@ class IngestionPipeline:
                         continue
                     name = raw.get("name", "").strip()
                     # Defense-in-depth (the extractor sanitizer is the primary
-                    # scrub): strip a stray leading '@' so "@李明" and "李明"
+                    # scrub): strip a stray leading '@' so "@李强" and "李强"
                     # collapse to one node, and drop broadcast tokens that are not
                     # people. Redundant-but-guarded per AGENTS.md.
                     name = name.lstrip("@").strip()
@@ -1922,7 +1925,7 @@ class IngestionPipeline:
         # helper (strip whitespace + leading '@') so the subject/object lookup,
         # the ``seen`` seeds, and the involved_entities fan-out key on the same
         # names. ``_build_entities`` creates nodes under the '@'-stripped name,
-        # so a malformed/old-cache ``subject_entity='@王芳'`` must be stripped
+        # so a malformed/old-cache ``subject_entity='@李娜'`` must be stripped
         # here too or its ABOUT edge is dropped. ``.lstrip('@')`` on a clean name
         # (fresh cache) is a no-op, so this is behavior-preserving.
         subject = (raw_fact.get("subject_entity") or "").strip().lstrip("@").strip()
@@ -2143,31 +2146,6 @@ class IngestionPipeline:
     # Full pipeline (run both phases)
     # ═══════════════════════════════════════════════════════════════════════
 
-    async def run_full(self, *, run_improve: bool = True):
-        """Run the complete pipeline with a smart resume.
-
-        Phase B on its own is useless (a graph with no embedded chunks to ground
-        it), so the only supported "do everything" entry point verifies Phase A
-        first: if every chunk that would be loaded is already persisted **and**
-        embedded, it skips straight to Phase B; otherwise it runs Phase A from
-        the beginning, then Phase B, then similarity/communities.
-
-        Args:
-            run_improve: If True (default), run similarity edges + community
-                detection + disambiguation after the graph build (steps 1.16–1.23).
-        """
-        self._init_stores()
-        if self._phase_a_complete():
-            print(
-                "Phase A already complete (all chunks persisted + embedded) — "
-                "resuming at Phase B."
-            )
-        else:
-            self.run_phase_a()
-        await self.run_phase_b()
-        if run_improve:
-            self.run_similarity_and_communities()
-
     def _phase_a_complete(self) -> bool:
         """True iff every loadable chunk is already persisted **and** embedded.
 
@@ -2175,7 +2153,7 @@ class IngestionPipeline:
         chunks Phase A would produce, then checks the SQLite ``chunks`` table
         and the Qdrant ``chunks`` collection both cover them. A partial Phase A
         (persisted but not embedded, or fewer rows than sources) counts as *not*
-        complete, so ``run_full`` re-runs Phase A from the start.
+        complete, so the canonical runner re-runs Phase A from the start.
         """
         # Once persistence commits, retries must use its durable batch workset.
         # Do not parse/filter the source directory merely to discover that the

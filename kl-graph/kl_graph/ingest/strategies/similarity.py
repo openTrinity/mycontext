@@ -38,7 +38,7 @@ class AnnPlusIntraBatch:
 
     Hybrid score for entities uses same weights as full rebuild:
     0.3 * embedding + 0.4 * structural (Jaccard co-occurrence) + 0.3 * fact_overlap
-    Structural data (msg_sets, fact_sets) loaded from store via raw SQL:
+    Structural data (msg_sets, fact_sets) loaded through the graph-store API:
     entity_id -> set of chunk_ids (MENTIONS/AUTHORED_BY edges),
     entity_id -> set of fact_ids (ABOUT edges)
     """
@@ -140,23 +140,17 @@ class AnnPlusIntraBatch:
         msg_sets: dict[str, set[str]] = {}
         fact_sets: dict[str, set[str]] = {}
 
-        mention_rows = store.sql_conn.execute(
-            """SELECT target_id, source_id FROM edges
-               WHERE target_type = 'entity'
-                 AND edge_type IN ('MENTIONS', 'AUTHORED_BY')
-                 AND source_type = 'chunk'"""
-        ).fetchall()
-        for row in mention_rows:
-            msg_sets.setdefault(row[0], set()).add(row[1])
+        for chunk_id, entity_id, _props in store.scan_edges_by_type(
+            ["MENTIONS", "AUTHORED_BY"],
+            source_type="chunk",
+            target_type="entity",
+        ):
+            msg_sets.setdefault(entity_id, set()).add(chunk_id)
 
-        about_rows = store.sql_conn.execute(
-            """SELECT target_id, source_id FROM edges
-               WHERE target_type = 'entity'
-                 AND edge_type = 'ABOUT'
-                 AND source_type = 'fact'"""
-        ).fetchall()
-        for row in about_rows:
-            fact_sets.setdefault(row[0], set()).add(row[1])
+        for fact_id, entity_id, _props in store.scan_edges_by_type(
+            ["ABOUT"], source_type="fact", target_type="entity"
+        ):
+            fact_sets.setdefault(entity_id, set()).add(fact_id)
 
         return msg_sets, fact_sets
 

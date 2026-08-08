@@ -239,17 +239,17 @@ def test_mail_loader_direction_header():
                 "id": "mail:1", "scope_id": "t1", "type": "email",
                 "data": {"messageId": "m1", "body": {
                     "subject": "周报", "markdownBody": "进展如下",
-                    "from": {"name": "A", "email": "a@x.com"},
-                    "toRecipients": [{"name": "B", "email": "b@x.com"}],
-                    "ccRecipients": [{"name": "C", "email": "c@x.com"}],
+                    "from": {"name": "A", "email": "a@example.com"},
+                    "toRecipients": [{"name": "B", "email": "b@example.com"}],
+                    "ccRecipients": [{"name": "C", "email": "c@example.com"}],
                 }},
             }],
         )
         (c,) = load_mail(d)
         head = c.content.split("\n")[0]
-        check(head.startswith("[邮件] 发件人 A <a@x.com>"), f"mail sender header (got {head!r})")
-        check("→ 收件人 B <b@x.com>" in head, "mail recipient rendered")
-        check("抄送 C <c@x.com>" in head, "mail cc rendered")
+        check(head.startswith("[邮件] 发件人 A <a@example.com>"), f"mail sender header (got {head!r})")
+        check("→ 收件人 B <b@example.com>" in head, "mail recipient rendered")
+        check("抄送 C <c@example.com>" in head, "mail cc rendered")
         check("主题：周报" in c.content, "subject retained under header")
         _assert_valid_chunks([c], "mail")
 
