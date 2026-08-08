@@ -47,13 +47,38 @@ export class MultiGraphQueryService {
    * 所以界面上给的是**切换**而不是筛选：一次看一个渠道的关系图。
    *
    * `channelId` 不给或就是主渠道 → 主渠道（存量行为）。
+   *
+   * ## ★★ 指到一个挂不上的渠道时**不许落回主渠道**
+   *
+   * 原来这里是 `source?.ego === undefined ? this.primary.ego() : …` —— 于是
+   * 「选了飞书但它的管线还没挂上」与「选了主渠道」走同一条路，返回的是
+   * **主渠道的**关系图。实测的表现：用户在仪表盘切到飞书，下面的事实与关系
+   * 一个都没换（截图里那个实体是钉钉库里的），而界面上没有任何痕迹说
+   * "你看的不是飞书"。
+   *
+   * 这正是本仓库最贵的那类 bug：不报错，只是答错 —— 而且答的是
+   * 「这个人在飞书里和谁有往来」这种会被当真的问题。
+   *
+   * 所以现在：认不出这个渠道就明确说不可用（`facts()` 下面那段同一判据）。
    */
   // ★ async：上游把 `GraphQueryService.ego()` 改成异步了（关系边要问 kl 的
   //   HTTP —— SQLite 的 `edges` 表在 ladybug 后端下按设计恒空）。
   async ego(channelId?: string): Promise<KlGraphEgo> {
-    if (channelId === undefined) return this.primary.ego()
+    if (channelId === undefined || channelId === this.primaryChannelId) {
+      return this.primary.ego()
+    }
     const source = this.sources.find((item) => item.channelId === channelId)
-    return source?.ego === undefined ? this.primary.ego() : source.ego()
+    const ego = source?.ego
+    if (ego === undefined) {
+      return {
+        available: false,
+        reason: "这个渠道的图谱还没挂上（刚授权时要等一会儿，或者它还没建过图）",
+        self: null,
+        nodes: [],
+        edges: [],
+      }
+    }
+    return ego()
   }
 
   /**
@@ -79,22 +104,40 @@ export class MultiGraphQueryService {
     const only = input.channelId
     if (only !== undefined && only !== this.primaryChannelId) {
       const source = this.sources.find((item) => item.channelId === only)
-      // 那个渠道没挂管线（没连 / 还在挂载中）→ 落回主渠道：它是唯一能查的
-      if (source !== undefined) {
-        try {
-          return source.facts(input)
-        } catch (error) {
-          /**
-           * ★ 抛错要**说出来**而不是静默落回主渠道 —— 后者会让用户以为
-           * 自己在看飞书的事实，而看到的是钉钉的。
-           */
-          return {
-            available: false,
-            reason: error instanceof Error ? error.message : String(error),
-            total: 0,
-            facts: [],
-            failedSources: [{ channelId: only, reason: "查询失败" }],
-          }
+      /**
+       * ★★ 那个渠道没挂管线（没连 / 还在挂载中）→ **明确说不可用**。
+       *
+       * 这里原来是"落回主渠道：它是唯一能查的" —— 也就是 `source === undefined`
+       * 时从这个 if 里掉出去，走到下面的合并分支，返回主渠道的事实。
+       * 实测的表现：仪表盘切到飞书，事实列表一条都没换（那些是钉钉库里的），
+       * 而界面上没有任何痕迹。
+       *
+       * 判据与下面那段 catch 完全一致（那里的注释已经写明"抛错要说出来而不是
+       * 静默落回主渠道 —— 后者会让用户以为自己在看飞书的事实"）——
+       * 「挂不上」漏了同一条判据，而它比抛错**更常见**。
+       */
+      if (source === undefined) {
+        return {
+          available: false,
+          reason: "这个渠道的图谱还没挂上（刚授权时要等一会儿，或者它还没建过图）",
+          total: 0,
+          facts: [],
+          failedSources: [],
+        }
+      }
+      try {
+        return source.facts(input)
+      } catch (error) {
+        /**
+         * ★ 抛错要**说出来**而不是静默落回主渠道 —— 后者会让用户以为
+         * 自己在看飞书的事实，而看到的是钉钉的。
+         */
+        return {
+          available: false,
+          reason: error instanceof Error ? error.message : String(error),
+          total: 0,
+          facts: [],
+          failedSources: [{ channelId: only, reason: "查询失败" }],
         }
       }
     }

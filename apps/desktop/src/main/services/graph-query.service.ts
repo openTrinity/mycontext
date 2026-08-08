@@ -314,16 +314,24 @@ export class GraphQueryService {
        * 而写死"钉钉"之后飞书那个实例会说"你在钉钉里叫什么" —— 用户切到飞书
        * 看到的是一句关于另一个渠道的话，而它还指向一个不存在的设置项。
        *
-       * ★ 非主渠道**没有**身份行（`getSelfNames` 恒返回空数组，见
-       * `startup.ts` 里那个 `() => []`）—— 所以它走到这里是**常态**而不是
-       * 用户漏配了什么。那时不该让人去"确认本人身份"，而要说清
-       * ego 图只在主渠道成立（两个渠道的人 id 没有安全映射）。
+       * ## ★★ 为什么这里不再说"关系图只在主渠道可用"
+       *
+       * 那句话是错的，而且它掩盖了一个真 bug。当时的判据是"非主渠道没有
+       * 身份行"，但那个"没有"是因为 `applyPostAuthIdentity` 把身份写到了
+       * 主渠道那张表上（渠道 id 没传下去）—— 不是因为非主渠道**不能**有。
+       *
+       * 事实上飞书这条路是通的：身份表按 `channel_id` 键、飞书的
+       * `resolveSelf` 直接从 `auth status --verify` 拿到 open_id 与显示名、
+       * 而 ego 图查的是**这个渠道自己的**图库。全程不涉及跨渠道 id 映射
+       * （`MultiGraphQueryService.ego()` 担心的是**合并**两个渠道的图，
+       * 不是"非主渠道不许有图"）。
+       *
+       * 所以现在两个渠道给同一句话：都是"还不知道你叫什么，去确认身份"，
+       * 因为两边的出路确实一样。
        */
       const channelId = this.options.sourceChannelId ?? PRIMARY_CHANNEL_ID
       return empty(
-        channelId === PRIMARY_CHANNEL_ID
-          ? `还不知道你在${CHANNEL_LABELS[channelId] ?? channelId}里叫什么 —— 先在设置里确认本人身份`
-          : `关系图只在${CHANNEL_LABELS[PRIMARY_CHANNEL_ID] ?? PRIMARY_CHANNEL_ID}上可用：${CHANNEL_LABELS[channelId] ?? channelId}是只读接入，两个渠道的人物标识无法安全对应`,
+        `还不知道你在${CHANNEL_LABELS[channelId] ?? channelId}里叫什么 —— 先在设置里确认本人身份`,
       )
     }
 

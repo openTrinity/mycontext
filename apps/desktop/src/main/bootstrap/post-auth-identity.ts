@@ -25,12 +25,18 @@ import { scopedChannelId, sourceKeyOf } from "@mycontext/channels"
  */
 export interface PostAuthDeps {
   dataPlane: {
-    resolveSelf(): Promise<{
+    /**
+     * ★ 吃 `channelId` —— 不给就是主渠道（`DataPlaneService` 侧的默认值）。
+     *
+     * 完整的 why 见 `applyPostAuthIdentity` 的 `channelId` 参数注释：
+     * 不传的话非主渠道的身份行**永远不会被写**。
+     */
+    resolveSelf(channelId?: string): Promise<{
       confirmed: boolean
       openIds: readonly unknown[]
       matchedMessageCount: number
     }>
-    confirmSelf(): { backfilled: number; mentionsBackfilled: number }
+    confirmSelf(channelId?: string): { backfilled: number; mentionsBackfilled: number }
     /**
      * 解除采集的 blocked 终态（登录过期 / 缺授权）。
      *
@@ -202,6 +208,26 @@ export async function routeAuthorizedIdentity(deps: {
 export async function applyPostAuthIdentity(
   deps: PostAuthDeps,
   status: Extract<AuthStatus, { state: "authorized" }>,
+  /**
+   * 这次授权的是**哪个渠道**。不给 = 主渠道（存量调用点的行为不变）。
+   *
+   * ## ★★ 为什么必须传（不传时非主渠道的身份行永远是空的）
+   *
+   * `resolveSelf()` / `confirmSelf()` 的默认值是主渠道，而这里原来两处都
+   * 裸调。于是飞书授权成功后走完这整段，写进去的仍然是**钉钉的**身份 ——
+   * 飞书那张 `channel_self_identity` 表一行都没有。
+   *
+   * 那个空表不是"少一行数据"，它让两件事静默失效：
+   * ① `startup.ts` 里非主渠道的 `getSelfNames()` 只能返回空数组，
+   *    于是 ego 图恒判"不知道你在这里叫什么" —— 而飞书**是有**关系图的
+   *    （它自己的库、自己的名字，不涉及跨渠道 id 映射）。
+   *    用户看到的是一句"关系图只在钉钉上可用"，而那是个假结论。
+   * ② `is_self` 不回填 —— 与主渠道那个 9768 条全被拒的坑同一个形状。
+   *
+   * 飞书侧拿身份的路是通的（`createFeishuIdentity` 用 `auth status --verify`
+   * 直接拿到 open_id 与显示名），缺的只是这里没把渠道传下去。
+   */
+  channelId?: string,
 ): Promise<void> {
   /**
    * ★★ 第零步：解除采集的 blocked 终态。
@@ -216,7 +242,7 @@ export async function applyPostAuthIdentity(
    */
   deps.dataPlane.clearBlocked()
 
-  await confirmIdentity(deps)
+  await confirmIdentity(deps, channelId)
   await refreshAccountProfile(deps, status)
 }
 
@@ -323,15 +349,16 @@ export async function describeAdoptableSession(deps: {
 }
 
 /** 第一段：身份。失败是"要用户处理"的状态，不阻断第二段。 */
-async function confirmIdentity(deps: PostAuthDeps): Promise<void> {
+async function confirmIdentity(deps: PostAuthDeps, channelId?: string): Promise<void> {
   const { dataPlane, logger } = deps
   try {
-    const resolved = await dataPlane.resolveSelf()
+    const resolved = await dataPlane.resolveSelf(channelId)
     // 已经确认过就不重复 confirm（重复 confirm 会再扫一遍全表回填）——
     // 但**刷新头像/显示名不受此限**，见第二段。
     if (!resolved.confirmed) {
-      dataPlane.confirmSelf()
+      dataPlane.confirmSelf(channelId)
       logger.info("self identity confirmed after auth", {
+        channelId,
         openIds: resolved.openIds.length,
         matched: resolved.matchedMessageCount,
       })
@@ -350,9 +377,9 @@ async function confirmIdentity(deps: PostAuthDeps): Promise<void> {
       (error.code === "SELF_IDENTITY_AMBIGUOUS" || error.code === "SELF_IDENTITY_CONFLICT")
     const detail = error instanceof Error ? error.message : String(error)
     if (expected) {
-      logger.info("self identity needs user action after auth", { detail })
+      logger.info("self identity needs user action after auth", { channelId, detail })
     } else {
-      logger.warn("resolve self identity after auth failed", { detail })
+      logger.warn("resolve self identity after auth failed", { channelId, detail })
     }
   }
 }

@@ -146,6 +146,8 @@
       "rebuild": "Rebuild",
       "rebuildHint": "Deletes the current graph and extraction cache, then re-extracts everything. Slower and more expensive than incremental. Needed after you narrow the capture scope: incremental builds only add, so entities and relations from unchecked conversations stay in the graph.",
       "buildProgress": "Building graph {{percent}}%",
+      "buildProgressOn": "Building {{channel}} graph {{percent}}%",
+      "buildingElsewhere": "{{channels}} is also building (channels are independent — you can still build here)",
       "channelIdle": "Not started (no corpus yet)",
       "channel": {
         "dingtalk": "DingTalk",

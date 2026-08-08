@@ -1315,11 +1315,30 @@ export function bootstrapApp(mainDir: string): AppContext {
         now: () => systemClock.now(),
         sourceChannelId: spec.channelId,
         /**
-         * ego 图只走主渠道（`MultiGraphQueryService.ego()` 也只问 primary）
-         * —— 「我是谁」的判据在主渠道的身份表里。给空数组是诚实的：
-         * 这个实例只提供 `facts`。
+         * ★★ 读**这个渠道自己**的身份行。
+         *
+         * 这里原来是 `() => []`，理由写的是"ego 图只走主渠道，「我是谁」的
+         * 判据在主渠道的身份表里"。那个理由是错的：身份表按 `channel_id` 键，
+         * 每个渠道有自己的一行，而这个 `GraphQueryService` 查的也是
+         * **这个渠道自己的**图库（`feedDirs.klRoot`）。
+         *
+         * 于是"用飞书的名字在飞书的图里找我" —— 全程不涉及跨渠道 id 映射，
+         * 也就没有 `MultiGraphQueryService.ego()` 注释里担心的那个问题
+         * （那条担心的是**合并两个渠道的图**，不是"非主渠道不能有 ego 图"）。
+         *
+         * 空数组的后果是 ego 图恒返回"不知道你在这里叫什么"，而界面把它
+         * 显示成一句"关系图只在钉钉上可用" —— 一个假结论。
+         *
+         * ★ 拿不到（还没授权 / 还没解析）时仍然返回空数组：那时 `ego()` 会
+         * 给一句可行动的话，与主渠道未登录时同一个行为。
          */
-        getSelfNames: () => [],
+        getSelfNames: () => {
+          try {
+            return new SelfIdentityRepository(handle.db).get(spec.channelId)?.displayNames ?? []
+          } catch {
+            return []
+          }
+        },
         getChannelByConversation: () => {
           try {
             return new ConversationRepository(handle.db).channelByExternalId()
@@ -2268,6 +2287,13 @@ export function bootstrapApp(mainDir: string): AppContext {
       await applyPostAuthIdentity(
         { dataPlane, media, auth, logger, toFileUrl: toLocalFileUrl },
         status,
+        /**
+         * ★ 把渠道传下去 —— 不传的话身份会写到**主渠道**那张表上，
+         * 而这次授权的渠道那张表一行都没有（完整后果见
+         * `applyPostAuthIdentity` 的 `channelId` 注释：ego 图恒不可用 +
+         * `is_self` 不回填）。
+         */
+        channelId,
       )
     },
   })

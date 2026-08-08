@@ -60,6 +60,7 @@ export class MultiKlServerService {
         reason: primary.reason,
         port: primary.port,
         building: primary.building,
+        buildProgress: primary.buildProgress,
         idle: false,
       },
       ...sources.map((source) => {
@@ -71,6 +72,14 @@ export class MultiKlServerService {
           reason: status.reason,
           port: status.port,
           building: status.building,
+          /**
+           * ★ 进度也**逐渠道**带上，不能只留顶层那一个。
+           *
+           * 顶层 `buildProgress` 取的是"任意一个在建的渠道"（下面那行
+           * `building?.buildProgress`），于是界面上「建图中 85%」不带归属 ——
+           * 用户切到飞书时看到的可能是钉钉那一轮的百分比。
+           */
+          buildProgress: status.buildProgress,
           // 没采到消息 → 我们**刻意**没起它。不是故障。
           idle: !enabled && status.state === "stopped",
         }

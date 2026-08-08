@@ -146,6 +146,8 @@
       "rebuild": "重建",
       "rebuildHint": "删除现有图谱与抽取缓存后全量重抽，耗时与开销都高于增量建图。★ 缩小了采集范围时需要它：增量建图只增不减，取消勾选的会话，其实体与关系仍留在图里。",
       "buildProgress": "建图中 {{percent}}%",
+      "buildProgressOn": "{{channel}} 建图中 {{percent}}%",
+      "buildingElsewhere": "{{channels}} 也在建图（各渠道互不影响，这里照常能点）",
       "channelIdle": "未启动（暂无语料）",
       "channel": {
         "dingtalk": "钉钉",

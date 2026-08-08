@@ -2321,6 +2321,29 @@ export const klServerStatusSchema = z.object({
         port: z.number().nullable(),
         building: z.boolean(),
         /**
+         * 这个渠道**自己**的建图进度。没在建 → `null`。
+         *
+         * ## ★★ 为什么顶层那个不够
+         *
+         * 顶层 `buildProgress` 取的是"**任意**一个在建的渠道"的进度
+         * （`MultiKlServerService.status()` 里 `find(status => status.building)`）。
+         * 于是界面上那行「建图中 85%」**不带渠道归属** —— 用户看到的是一个
+         * 不知道属于谁的百分比。而在多渠道下这个歧义是实打实的：切到飞书时
+         * 显示的可能是钉钉那一轮的进度（用户报的正是这个）。
+         *
+         * ★ 与顶层同一个形状（`percent` 是 0–1 小数，`startedAt` 可选），
+         * 所以渲染层可以复用 `klBuildPercent`。同样**只拿它显示百分比**，
+         * 不做时间减法 —— 见顶层那段关于「已运行 NaN 分钟」的注释。
+         */
+        buildProgress: z
+          .object({
+            phase: z.string(),
+            percent: z.number(),
+            startedAt: z.number().optional(),
+          })
+          .nullable()
+          .optional(),
+        /**
          * 这个渠道当前**没在跑**的原因（还没采到消息 → 不起 Python/Qdrant）。
          * 与 `reason` 分开：那个是"失败"，这个是"刻意没起"，
          * 混成一个会让一次正常的降级看起来像故障。

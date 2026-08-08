@@ -355,9 +355,40 @@ function KlPanel({ channelId }: { channelId: string | null }) {
    * 数据动作是否在跑 —— 只用来**互斥禁用那三个按钮**（别同时建两次）。
    *
    * ★ 不再参与服务徽章：见文件内上面那段注释。
+   *
+   * ## ★★ 按渠道判，不用顶层那个"任一在建"
+   *
+   * 顶层 `status.building` 是**任一渠道在建**。于是钉钉在建图时，飞书那栏的
+   * 「建图」按钮也是灰的 —— 两个渠道是两个独立的 kl（各自的进程、端口、
+   * Qdrant），钉钉在跑压根不妨碍飞书建图。锁住一个能点的按钮，
+   * 而界面上没有一句话说明为什么。
+   *
+   * ★ `row === undefined`（旧主进程没有 `perChannel`）时回落到顶层：
+   * 那时只有一个渠道，两者等价。
    */
-  const busy = build.isPending || status?.building === true
-  const percent = klBuildPercent(status?.buildProgress ?? null)
+  const busy = build.isPending || (row === undefined ? status?.building === true : row.building)
+  /**
+   * ★★ 进度按渠道取 —— 这一行原来读顶层 `status.buildProgress`，而那个是
+   * "**任意**一个在建的渠道"的进度（见 `MultiKlServerService.status()`）。
+   * 用户报的正是这个：界面上一行「建图中 85%」，而**不知道是谁在建**。
+   *
+   * `row?.buildProgress` 在旧主进程上是 `undefined`（字段还不存在）——
+   * 那时回落到顶层，与改动前行为一致。
+   */
+  const percent = klBuildPercent(
+    (row === undefined ? status?.buildProgress : row.buildProgress) ?? null,
+  )
+  /**
+   * 在建的是**别的**渠道吗。
+   *
+   * ★ 为什么要单独说这一句：不说的话用户在飞书那栏看到"没在建图"，
+   * 而后台钉钉正烧着 LLM 出网跑几十分钟 —— 那是个该被看见的事实
+   * （尤其它会占着机器）。但它**不该**表现为飞书这栏的进度条，
+   * 那正是改动前那个歧义。
+   */
+  const otherBuilding = (status?.perChannel ?? []).filter(
+    (item) => item.building && item.channelId !== channelId,
+  )
   const buildResult = build.data
 
   /**
@@ -577,7 +608,38 @@ function KlPanel({ channelId }: { channelId: string | null }) {
               // 分钟级任务：让读屏软件在进度变化时播报
               aria-live="polite"
             >
-              {t("status.kl.buildProgress", { percent })}
+              {/*
+                ★★ 带上渠道名。原来这里是 `status.kl.buildProgress`（只有百分比），
+                而多渠道下那个数字**不知道属于谁** —— 用户报的正是这个。
+                现在进度取自这一栏自己的渠道（见上面 `percent`），文案也说出来。
+              */}
+              {t("status.kl.buildProgressOn", {
+                channel: t(`status.kl.channel.${channelId ?? ""}`, {
+                  defaultValue: channelId ?? "",
+                }),
+                percent,
+                defaultValue: `{{channel}} 建图中 {{percent}}%`,
+              })}
+            </p>
+          )}
+
+          {/*
+            ★ 别的渠道在建图 —— 说出来但**不**显示成这一栏的进度。
+            它会占机器、会出网烧 LLM，用户有权知道；而把它显示成这一栏的
+            百分比就是改动前那个歧义。
+          */}
+          {otherBuilding.length > 0 && (
+            <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              {t("status.kl.buildingElsewhere", {
+                channels: otherBuilding
+                  .map((item) =>
+                    t(`status.kl.channel.${item.channelId}`, {
+                      defaultValue: item.channelId,
+                    }),
+                  )
+                  .join("、"),
+                defaultValue: `{{channels}} 也在建图（各渠道互不影响，这里照常能点）`,
+              })}
             </p>
           )}
 

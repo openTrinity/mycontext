@@ -419,6 +419,78 @@ describe("★★ 身份解析失败**不能**吃掉头像/显示名的刷新", (
   })
 
   /**
+   * ## ★★ 身份必须落到**这次授权的那个渠道**上
+   *
+   * 这一组锁的是一个静默失效：`resolveSelf()` / `confirmSelf()` 的默认参数是
+   * 主渠道，而这里原来两处都**裸调**。于是飞书授权成功后走完这整段，写进去的
+   * 仍然是钉钉的身份 —— 飞书那张 `channel_self_identity` 表一行都没有。
+   *
+   * 那个空表让两件事静默失效：
+   * ① 非主渠道的 `getSelfNames()` 只能返回空数组 → ego 图恒判"不知道你在这里
+   *    叫什么"，而界面把它显示成一句「关系图只在钉钉上可用」—— 一个假结论
+   *    （飞书**是有**关系图的：自己的库、自己的名字，不涉及跨渠道 id 映射）；
+   * ② `is_self` 不回填 —— 与主渠道那个 9768 条全被拒的坑同一个形状。
+   *
+   * 判据是"两个调用都收到了那个 channelId"，而不是"没抛错" —— 后者在
+   * 改动前也是绿的。
+   */
+  describe("★★ 身份写到这次授权的渠道上（不是恒定主渠道）", () => {
+    /** 记下 `resolveSelf` / `confirmSelf` 各收到什么 channelId。 */
+    function recordingDeps(): {
+      deps: PostAuthDeps
+      seen: { resolve: (string | undefined)[]; confirm: (string | undefined)[] }
+    } {
+      const seen: { resolve: (string | undefined)[]; confirm: (string | undefined)[] } = {
+        resolve: [],
+        confirm: [],
+      }
+      const { deps } = makeDeps(() =>
+        Promise.resolve({ confirmed: false, openIds: ["o1"], matchedMessageCount: 2 }),
+      )
+      return {
+        seen,
+        deps: {
+          ...deps,
+          dataPlane: {
+            ...deps.dataPlane,
+            resolveSelf: (channelId?: string) => {
+              seen.resolve.push(channelId)
+              return Promise.resolve({
+                confirmed: false,
+                openIds: ["o1"],
+                matchedMessageCount: 2,
+              })
+            },
+            confirmSelf: (channelId?: string) => {
+              seen.confirm.push(channelId)
+              return { backfilled: 2, mentionsBackfilled: 0 }
+            },
+          },
+        },
+      }
+    }
+
+    it("给了渠道 → resolve 与 confirm 都用它", async () => {
+      const { deps, seen } = recordingDeps()
+
+      await applyPostAuthIdentity(deps, AUTHORIZED, "feishu")
+
+      expect(seen.resolve).toEqual(["feishu"])
+      // ★ confirm 也要带 —— 只 resolve 对的话 is_self 会回填到另一个库上
+      expect(seen.confirm).toEqual(["feishu"])
+    })
+
+    it("不给渠道 → 两处都不传（主渠道那条存量路径行为不变）", async () => {
+      const { deps, seen } = recordingDeps()
+
+      await applyPostAuthIdentity(deps, AUTHORIZED)
+
+      expect(seen.resolve).toEqual([undefined])
+      expect(seen.confirm).toEqual([undefined])
+    })
+  })
+
+  /**
    * ★★ 授权成功必须解除采集的 blocked 终态。
    *
    * ## 这条锁的是第三个真实故障

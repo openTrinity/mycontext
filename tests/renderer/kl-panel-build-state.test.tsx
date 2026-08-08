@@ -172,6 +172,74 @@ describe("★ 进度真的渲染出来了", () => {
   })
 })
 
+/**
+ * ## ★★ 建图必须说清是**哪个渠道**在建
+ *
+ * 用户报的原话：「建图这里还是没有区分开渠道，我不知道现在是谁在建图」——
+ * 截图里是一个灰掉的「建图中…」按钮加一行「建图中 85%」，没有任何渠道归属。
+ *
+ * 成因在两处：
+ * ① `MultiKlServerService.status()` 顶层 `buildProgress` 取的是"**任意**一个
+ *    在建渠道"的进度（`find(s => s.building)`），归属在聚合时就丢了；
+ * ② `KlPanel` 里 `busy` / `percent` 都读顶层，而这一页其余部分（服务徽章、
+ *    端口、失败原因、三个按钮）**已经**按 `perChannel` 取了 —— 也就是同一页里
+ *    两套判据，而不一致的那一半正是用户看到的那行字。
+ *
+ * 顺带修掉的一个真行为问题：`busy` 读顶层"任一在建"，于是钉钉在建图时飞书那栏
+ * 的「建图」按钮也是灰的。两个渠道是两个独立的 kl（各自进程、端口、Qdrant），
+ * 钉钉在跑压根不妨碍飞书建图 —— 锁住一个能点的按钮，且界面上没有一句话说明。
+ */
+describe("★★ 建图带渠道归属", () => {
+  const code = panel
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
+    .replace(/\/\/.*$/gm, "")
+
+  /**
+   * ★ 判据是"进度**不从顶层取**"。
+   *
+   * 写成"不含 `status?.buildProgress`"而不是"含 `row.buildProgress`"：
+   * 后者在"两处都读、以顶层为准"这种半吊子实现下也是绿的，
+   * 而那正是改动前那一版的形状。
+   */
+  it("★★ 进度按 perChannel 那一行取，不读顶层聚合", () => {
+    expect(code).toContain("row.buildProgress")
+    // 顶层只能作为"旧主进程没有这个字段"的回落，不能是主判据
+    expect(code).toMatch(/row === undefined \? status\?\.buildProgress : row\.buildProgress/)
+  })
+
+  /** ★ 文案里必须出现渠道名 —— 只有百分比的那个 key 不够。 */
+  it("★★ 进度文案带渠道名", () => {
+    expect(code).toContain("buildProgressOn")
+    for (const loc of ["zh", "en"]) {
+      expect(readLocale(loc)["buildProgressOn"]).toContain("{{channel}}")
+      expect(readLocale(loc)["buildProgressOn"]).toContain("{{percent}}")
+    }
+  })
+
+  /**
+   * ★ 别的渠道在建图要说出来，但**不能**显示成这一栏的进度。
+   * 它会占机器、会出网烧 LLM —— 用户有权知道；而把它当成这一栏的百分比
+   * 就是改动前那个歧义本身。
+   */
+  it("★ 别的渠道在建图时给一句独立的说明", () => {
+    expect(code).toContain("buildingElsewhere")
+    for (const loc of ["zh", "en"]) {
+      expect(readLocale(loc)["buildingElsewhere"]).toContain("{{channels}}")
+    }
+  })
+
+  /**
+   * ★★ 按钮的禁用也按渠道判。
+   *
+   * 顶层 `status.building` 是"任一在建" —— 用它禁用的话钉钉建图期间
+   * 飞书那栏也点不了，而两者互不影响。
+   */
+  it("★★ busy 按渠道判，不是顶层的「任一在建」", () => {
+    expect(code).toMatch(/row === undefined \? status\?\.building === true : row\.building/)
+  })
+})
+
 describe("★ 重建：不弹系统确认框", () => {
   /**
    * `window.confirm` 是系统模态框（跳出应用视觉、不可样式化、文案也塞不进
