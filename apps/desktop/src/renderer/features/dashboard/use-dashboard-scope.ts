@@ -51,23 +51,31 @@ function scopeSnapshot(snap: IngestSnapshot | null, channelId: string | undefine
   const row = (snap.perChannel ?? []).find((item) => item.channelId === channelId)
   // 单渠道 / 那个渠道还没挂上 → 顶层那份就是它
   if (row === undefined) return snap
+  /**
+   * ★★ 逐字段兜底（`?? snap.x`），**不要**裸取 `row.x`。
+   *
+   * 实测过一次整页白屏：主进程还在跑旧代码（这些字段是后加的），渲染层已经
+   * 热更 —— `row.ftsIndexed` 是 undefined，`toLocaleString()` 抛错，整棵树崩。
+   * 开发态热更时这个错配是常态，打包态在「新渲染层 + 旧主进程」的升级窗口
+   * 里也会出现。一个字段缺失不该让整页看不见。
+   */
   return {
     ...snap,
-    channelId: row.channelId,
-    messages: row.messages,
-    conversations: row.conversations,
-    mediaAssets: row.mediaAssets,
-    ftsIndexed: row.ftsIndexed,
-    ftsLag: row.ftsLag,
-    unjudged: row.unjudged,
-    outboxHead: row.outboxHead,
-    minutes: row.minutes,
-    probeIntervalMs: row.probeIntervalMs,
-    probeThrottled: row.probeThrottled,
-    selfConfirmed: row.selfConfirmed,
-    running: row.running,
-    lastError: row.lastError,
-    blockedReason: row.blockedReason,
+    channelId: row.channelId ?? snap.channelId,
+    messages: row.messages ?? snap.messages,
+    conversations: row.conversations ?? snap.conversations,
+    mediaAssets: row.mediaAssets ?? snap.mediaAssets,
+    ftsIndexed: row.ftsIndexed ?? snap.ftsIndexed,
+    ftsLag: row.ftsLag ?? snap.ftsLag,
+    unjudged: row.unjudged ?? snap.unjudged,
+    outboxHead: row.outboxHead ?? snap.outboxHead,
+    minutes: row.minutes ?? snap.minutes,
+    probeIntervalMs: row.probeIntervalMs ?? snap.probeIntervalMs,
+    probeThrottled: row.probeThrottled ?? snap.probeThrottled,
+    selfConfirmed: row.selfConfirmed ?? snap.selfConfirmed,
+    running: row.running ?? snap.running,
+    lastError: row.lastError ?? snap.lastError,
+    blockedReason: row.blockedReason ?? snap.blockedReason,
   }
 }
 

@@ -2045,12 +2045,56 @@ export class KlServerService {
       signal: info.signal,
       stderr: this.stderrTail.slice(-5).join("\n"),
     })
-    const detail = this.stderrTail.at(-1)
-    this.fail(
-      `kl-server 进程退出（code=${info.code ?? "?"}, signal=${info.signal ?? "?"}）${
-        detail === undefined ? "" : `：${detail}`
-      }`,
-    )
+    this.fail(this.describeExit(info))
+  }
+
+  /**
+   * 把退出原因说成人话。
+   *
+   * ## ★★ 为什么不能只取 stderr 的最后一行
+   *
+   * 那一行往往是 uvicorn 的收尾（`Application startup failed. Exiting.`），
+   * 而**真正的原因在更前面**。实测一次飞书 kl 起不来：
+   * ```
+   * ERROR:    Traceback (most recent call last):
+   * Traceback (most recent call last):
+   * RuntimeError: Storage folder …/kl/feishu/qdrant_data is already accessed
+   *               by another instance of Qdrant client.
+   * ERROR:    Application startup failed. Exiting.   ← 只取这行等于什么都没说
+   * ```
+   * 于是界面上只有「进程退出（code=3）：Application startup failed」，
+   * 而真实原因（**目录被另一个 kl 占着**）与修法（清掉那个孤儿进程）
+   * 一个字都看不到。
+   *
+   * ★ Qdrant 锁冲突单独认：它有明确的用户动作，而且在多渠道之后**会更常见**
+   * —— 每个渠道一个 kl、各自一个 qdrant 目录，任何一次没走优雅退出
+   * （crash / 强杀 / 开发态热重启）都会留下一个占着目录的孤儿。
+   */
+  private describeExit(info: { code: number | null; signal: string | null }): string {
+    const tail = this.stderrTail.join("\n")
+    const suffix = `（code=${info.code ?? "?"}, signal=${info.signal ?? "?"}）`
+
+    // ★ 在整段 tail 里找，不是只看最后一行
+    if (/already accessed by another instance of Qdrant client/.test(tail)) {
+      const dir = /Storage folder (\S+) is already accessed/.exec(tail)?.[1]
+      return `图谱存储目录被另一个进程占用${suffix}。多半是上次没退干净留下的 kl 孤儿 —— 结束它之后重试${
+        dir === undefined ? "" : `。目录：${dir}`
+      }`
+    }
+    if (/ModuleNotFoundError|ImportError/.test(tail)) {
+      return `kl 的 Python 依赖缺失${suffix}。跑一次 \`pnpm setup:kl\` 装依赖后重试`
+    }
+    if (/Address already in use|EADDRINUSE/.test(tail)) {
+      return `端口 ${String(this.port)} 已被占用${suffix}。结束占着它的进程后重试`
+    }
+
+    /**
+     * 认不出时：找**最后一行看起来像错误的**（`XxxError: …`），
+     * 而不是最后一行（那通常是收尾噪音）。
+     */
+    const errorLine = [...this.stderrTail].reverse().find((line) => /\w+Error/.test(line))
+    const detail = errorLine ?? this.stderrTail.at(-1)
+    return `kl-server 进程退出${suffix}${detail === undefined ? "" : `：${detail}`}`
   }
 
   /**

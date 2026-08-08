@@ -74,26 +74,38 @@ export function DataPlanePanel({
    * 而用户以为自己在看飞书的采集情况。
    */
   const row = perChannel.find((item) => item.channelId === channel)
+  /**
+   * ★★ 逐字段兜底（`?? raw.x`），**不要**裸取 `row.x`。
+   *
+   * 实测过一次整页白屏：主进程还在跑旧代码（那几个字段是后加的），而渲染层
+   * 已经热更 —— 于是 `row.ftsIndexed` 是 undefined，`toLocaleString()` 抛错，
+   * 整棵 React 树崩掉。开发态热更时这个错配是**常态**，而打包态在
+   * 「新渲染层 + 旧主进程」的升级窗口里也会出现。
+   *
+   * 一个字段缺失不该让整页看不见。兜底到顶层那份（它一定有这些字段，
+   * 因为它就是 `IngestSnapshot` 本身）—— 值可能属于另一个渠道，
+   * 但那比白屏好，而且下一次热更就对了。
+   */
   const data =
     row === undefined
       ? raw
       : {
           ...raw,
           channelId: row.channelId,
-          messages: row.messages,
-          conversations: row.conversations,
-          mediaAssets: row.mediaAssets,
-          ftsIndexed: row.ftsIndexed,
-          ftsLag: row.ftsLag,
-          unjudged: row.unjudged,
-          outboxHead: row.outboxHead,
-          minutes: row.minutes,
-          probeIntervalMs: row.probeIntervalMs,
-          probeThrottled: row.probeThrottled,
-          selfConfirmed: row.selfConfirmed,
-          running: row.running,
-          lastError: row.lastError,
-          blockedReason: row.blockedReason,
+          messages: row.messages ?? raw.messages,
+          conversations: row.conversations ?? raw.conversations,
+          mediaAssets: row.mediaAssets ?? raw.mediaAssets,
+          ftsIndexed: row.ftsIndexed ?? raw.ftsIndexed,
+          ftsLag: row.ftsLag ?? raw.ftsLag,
+          unjudged: row.unjudged ?? raw.unjudged,
+          outboxHead: row.outboxHead ?? raw.outboxHead,
+          minutes: row.minutes ?? raw.minutes,
+          probeIntervalMs: row.probeIntervalMs ?? raw.probeIntervalMs,
+          probeThrottled: row.probeThrottled ?? raw.probeThrottled,
+          selfConfirmed: row.selfConfirmed ?? raw.selfConfirmed,
+          running: row.running ?? raw.running,
+          lastError: row.lastError ?? raw.lastError,
+          blockedReason: row.blockedReason ?? raw.blockedReason,
         }
 
   return (

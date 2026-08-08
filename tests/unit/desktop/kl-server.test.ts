@@ -225,7 +225,7 @@ describe("KlServerService · 状态机", () => {
     expect(svc.status().reason).toMatch(/退出/)
   })
 
-  it("启动崩溃时把 stderr 末行带进失败原因", async () => {
+  it("★ 缺依赖时给出可照做的修法（而不是原样贴 Python 报错）", async () => {
     process.env[KL_PYTHON] = "/fake/python"
     const runner = fakeRunner({
       lines: [
@@ -241,7 +241,57 @@ describe("KlServerService · 状态机", () => {
     await svc.ensureReady()
     runner.crash()
 
-    expect(svc.status().reason).toContain("ModuleNotFoundError: No module named 'fastapi'")
+    /**
+     * ★ 断言的是**用户能做什么**，而不是"末行被带上了"。
+     *
+     * 原来断言 `toContain("ModuleNotFoundError: …")` —— 那只保证"把 Python 的
+     * 报错贴上去了"，而用户看不懂那句话。现在 `describeExit` 把它翻成
+     * 「依赖缺失 + 跑 pnpm setup:kl」。
+     *
+     * ★ 而且"取末行"这个实现本身是错的：真正的原因常常**不在**末行
+     * （实测一次 Qdrant 锁冲突，末行是 uvicorn 的 `Application startup
+     * failed. Exiting.` —— 只取它等于什么都没说）。
+     */
+    const reason = svc.status().reason ?? ""
+    expect(reason).toContain("依赖")
+    expect(reason).toContain("pnpm setup:kl")
+  })
+
+  /**
+   * ★★ Qdrant 目录被占是多渠道之后**会更常见**的一种失败：每个渠道一个 kl、
+   * 各自一个 qdrant 目录，任何一次没走优雅退出（crash / 强杀 / dev 热重启）
+   * 都会留下一个占着目录的孤儿。
+   *
+   * 实测踩过：飞书的 kl 起不来，而界面上只有「进程退出（code=3）：
+   * Application startup failed. Exiting.」—— 真实原因（目录被另一个 kl 占着）
+   * 与修法（结束那个孤儿）一个字都看不到。
+   */
+  it("★★ Qdrant 目录被占用 → 说清是孤儿进程占着 + 带上目录", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const runner = fakeRunner({
+      lines: [
+        "ERROR:    Traceback (most recent call last):",
+        "Traceback (most recent call last):",
+        "RuntimeError: Storage folder /tmp/v1/kl/feishu/qdrant_data is already accessed by another instance of Qdrant client. If you require concurrent access, use Qdrant server instead.",
+        // ★ 末行是收尾噪音 —— 只取它就什么都没说
+        "ERROR:    Application startup failed. Exiting.",
+      ],
+    })
+    const svc = makeService({
+      runner,
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+    })
+    await svc.ensureReady()
+    runner.crash()
+
+    const reason = svc.status().reason ?? ""
+    expect(reason).toContain("被另一个进程占用")
+    expect(reason).toContain("孤儿")
+    // ★ 带上目录：用户要知道去哪看
+    expect(reason).toContain("/tmp/v1/kl/feishu/qdrant_data")
+    // ★ 反证：不能只把末行贴上来
+    expect(reason).not.toContain("Application startup failed")
   })
 
   it("failed 后 ensureReady 不自动重起；retry() 才重来", async () => {
