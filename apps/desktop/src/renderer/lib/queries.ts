@@ -1136,10 +1136,19 @@ export function useSelfIdentity(enabled = true) {
   })
 }
 
-export function useFeedInfo(enabled: boolean) {
+/**
+ * @param channelId 看哪个渠道的知识加工进度。★ 进 queryKey，否则切渠道命中
+ *   同一份缓存（界面上表现为"落后条数不跟着变"）。
+ */
+export function useFeedInfo(enabled: boolean, channelId?: string) {
   return useQuery({
-    queryKey: QUERY_KEYS.feed,
-    queryFn: async () => unwrap(await window.mycontext.pipeline.feedInfo()),
+    queryKey: [...QUERY_KEYS.feed, channelId ?? "primary"],
+    queryFn: async () =>
+      unwrap(
+        await window.mycontext.pipeline.feedInfo(
+          channelId === undefined ? undefined : { channelId },
+        ),
+      ),
     enabled,
   })
 }

@@ -52,7 +52,7 @@ export function createFeishuPlugin(options: FeishuPluginOptions): ChannelPlugin 
 
 export { FeishuAuth } from "./auth.js"
 export type { FeishuPluginOptions } from "./auth.js"
-export { LarkCli, assertAllowedLarkCommand, extractLarkJson } from "./cli.js"
+export { LarkCli, assertAllowedLarkCommand, describeLarkError, extractLarkJson } from "./cli.js"
 export { createFeishuIngest, createFeishuIdentity } from "./ingest.js"
 export { createFeishuDocuments } from "./documents.js"
 export {

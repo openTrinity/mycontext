@@ -221,5 +221,7 @@
   "modeYolo": "Direct",
   "yoloWarn": "★ Direct sends with no checks: ignores work hours, scene rules, the model's own hold-for-review, and rate limits. The kill switch still applies.",
   "railTabYolo": "Direct",
-  "railNoYolo": "No conversation uses Direct yet — set the reply mode to Direct in conversation settings."
+  "railNoYolo": "No conversation uses Direct yet — set the reply mode to Direct in conversation settings.",
+  "unsupportedChannel": "Persona is not available for this channel yet",
+  "unsupportedChannelHint": "This channel is read-only: its data is used for the graph and search, never for auto-reply or sending."
 }

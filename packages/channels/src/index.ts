@@ -84,6 +84,7 @@ export {
   FeishuAuth,
   LarkCli,
   assertAllowedLarkCommand,
+  describeLarkError,
   extractLarkJson,
   createFeishuIngest,
   createFeishuIdentity,

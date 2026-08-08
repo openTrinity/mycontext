@@ -452,7 +452,7 @@ export interface MyContextApi {
   }
   pipeline: {
     /** Feed 接口信息（给算法团队联调用） */
-    feedInfo(): Promise<Result<FeedInfo>>
+    feedInfo(input?: { channelId?: string }): Promise<Result<FeedInfo>>
     /** 物化导出（全量快照） */
     export(): Promise<Result<ExportResultView>>
   }

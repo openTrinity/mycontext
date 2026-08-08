@@ -46,17 +46,9 @@ import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
   useAdoptableSession,
   useBootstrapState,
-  useChannels,
   useDashboardTrends,
-  useDistillProgress,
-  useFeedInfo,
-  useIngestSnapshot,
   useKlGraphBuild,
-  useKlGraphEgo,
-  useKlGraphOverview,
-  useKlServerStatus,
   useOnboardingSteps,
-  usePersonaSnapshot,
   useSelfIdentity,
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
@@ -64,6 +56,7 @@ import { useTheme } from "../../lib/use-theme.js"
 import { EgoGraphPanel } from "../graph/ego-graph-panel.js"
 import { FactsExplorer } from "../graph/facts-explorer.js"
 import { ENTITY_NEUTRAL, entityColor } from "../graph/palette.js"
+import { useDashboardScope } from "./use-dashboard-scope.js"
 import { personaIdentityFromSteps } from "../persona/persona-identity.js"
 import { FocusBridge } from "./focus-bridge.js"
 import { Funnel } from "./funnel.js"
@@ -113,52 +106,23 @@ export interface DashboardModuleProps {
 }
 
 export function DashboardModule({ activeChannelId = null }: DashboardModuleProps = {}) {
-  const ingest = useIngestSnapshot(true)
-  const distill = useDistillProgress(true)
-  const persona = usePersonaSnapshot(true)
-  const feed = useFeedInfo(true)
-  const kl = useKlServerStatus()
+  /**
+   * ★★ 这一页的**全部数据**从一个 hook 来（见 `useDashboardScope`）。
+   *
+   * 上一版是一处一处判渠道（七处），而漏了两处就静默显示**另一个渠道的数字**
+   * —— 实测：飞书采了 8 条却显示「知识加工落后 11,309 条」（钉钉的水位），
+   * 数字分身那一排也是钉钉的草稿数。两个都不报错，只是属于别的渠道。
+   *
+   * 收口之后"这一页的数据"只有一个来源，漏字段变成拿不到值而不是拿错值。
+   */
+  const scope = useDashboardScope(activeChannelId)
+  const graphChannel = scope.channelId
+  const { ego, overview, kl, building } = scope
   const buildGraph = useKlGraphBuild()
-  const building = kl?.building === true
-  /**
-   * ★★ 图谱看**哪个渠道** —— 这是切换，不是筛选。
-   *
-   * 同一个人在两个渠道是两个 external_id（钉钉 openDingTalkId / 飞书 open_id），
-   * 而两者没有安全的映射（靠显示名对齐不行，同名同姓实测 6 个）。合并展示
-   * 等于凭猜测把两个人的关系连起来 —— 不报错，只是答错。
-   *
-   * `null` = 还没选过 → 取"当前连着的那个"（只连一个时就是它，见 `graphChannel`）。
-   */
-  const channels = useChannels()
-  /**
-   * 已授权的渠道（切换器只列它们 —— 没连的渠道图库是空的）。
-   *
-   * ★ 类型由 `channels.data` 推出来，**不写行内标注**：rebase 合并时那里
-   * 一度带着 `(c: { available: boolean; status: { state: string } })` ——
-   * 手写的结构类型会在 `ChannelSummary` 加字段时**静默过时**
-   * （它只是"至少有这些键"，不会因为契约变了而报错）。
-   */
-  const authorizedChannels = useMemo(
-    () =>
-      (channels.data ?? [])
-        .filter((c) => c.available && c.status.state === "authorized")
-        .map((c) => c.id),
-    [channels.data],
-  )
-  /**
-   * 生效的渠道：页头选了就用它，否则取**第一个已授权**的。
-   *
-   * ★ 于是"只连了飞书"时整页默认展示飞书的数据，而不是一个空的钉钉视图。
-   * 图谱这一侧**没有"混合"档** —— 同一个人在两个渠道是两个 external_id，
-   * 没有安全的映射（同名同姓实测 6 个），合并会凭猜测把两个人连起来。
-   * （搜索那边保留混合档：事实带来源徽章，不会混。）
-   */
-  const graphChannel = activeChannelId ?? authorizedChannels[0] ?? undefined
-  const ego = useKlGraphEgo(building, graphChannel)
-  const overview = useKlGraphOverview(building, graphChannel)
   const { resolved: mode } = useTheme()
   /** 实体类型名要翻译 —— 与 ego 图的图例共用 `graph` 那一份 key。 */
   const { t: tg } = useDynamicTranslation("graph")
+  const { t: tp } = useDynamicTranslation("persona")
   /**
    * 图里点一个人 → 事实面板筛到他。
    *
@@ -248,60 +212,16 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
   })()
 
   /**
-   * 渠道现在连上了吗 —— 给「以下是历史数据」那句提示用。
+   * ★ `scope.channelConnected` —— 渠道现在连上了吗（给「以下是历史数据」用）。
    *
-   * ★ 这与文件上方那句"曾经读 useChannels 是为了渠道筹码"不冲突：
-   * 那枚筹码归 `AppHeader` 了，而这里要的是**另一个**判据 ——
-   * 「这些数字还在增长吗」。引导走完之后应用不再判授权
-   * （`onboarding.isDismissed()` 只看四步走过没有），所以登录态过期时
-   * 仪表盘会一直显示历史数据而不给任何说明。见 `readIngest` 的 `staleData`。
-   *
-   * `undefined`（还在查）传 `null`：那时不下结论，免得已连接的账号
-   * 首帧闪一下"历史数据"。
+   * rebase 时 main 上新加了这个判据（原来写在这个组件里，读 `useChannels()`
+   * 自己算）。而这一版的重构正是把"渠道作用域"整个收进 hook —— 那里已经有
+   * `useChannels()`（算 `authorizedChannelIds`），所以判据也归它，
+   * 免得同一个查询在两处各读一遍、而两处的结论可能不一致。
    */
-  // ★ 复用上面那个 `channels`（第 126 行附近）—— rebase 时双方各加了一次
-  //   `useChannels()`，而它们在同一个函数作用域里，于是重复声明。
-  const dingtalkState = channels.data?.find((item) => item.id === "dingtalk")?.status.state
-  const channelConnected = dingtalkState === undefined ? null : dingtalkState === "authorized"
-
-  /**
-   * ★★ 采集数字按**选中的渠道**取。
-   *
-   * 顶层快照来自主进程的 `snapshotIngest()`，它返回**主渠道**那一份。
-   * 直接用它的话切到飞书之后那六个数一动不动 —— 而用户以为自己在看
-   * 飞书的数据。
-   *
-   * `perChannel` 里有那个渠道就用它的数；没有（单渠道 / 还没挂上）就用顶层。
-   */
-  const scopedSnapshot = (() => {
-    const snap = ingest.data ?? null
-    if (snap === null || graphChannel === undefined) return snap
-    const row = (snap.perChannel ?? []).find((item) => item.channelId === graphChannel)
-    if (row === undefined) return snap
-    return {
-      ...snap,
-      messages: row.messages,
-      conversations: row.conversations,
-      mediaAssets: row.mediaAssets,
-      ftsIndexed: row.ftsIndexed,
-      ftsLag: row.ftsLag,
-      unjudged: row.unjudged,
-      outboxHead: row.outboxHead,
-      minutes: row.minutes,
-      running: row.running,
-      lastError: row.lastError,
-      blockedReason: row.blockedReason,
-    }
-  })()
-  /**
-   * ★ 两个判据叠加：**按渠道取的**快照 + 渠道连接状态。
-   *
-   * 前者决定"显示谁的数字"，后者决定"要不要说这些是历史数据"——
-   * 两件独立的事，rebase 时双方各加了一个，都要保留。
-   */
-  const ing = readIngest(scopedSnapshot, channelConnected)
-  const per = readPersona(persona.data ?? null)
-  const processing = readProcessing({ feed: feed.data ?? null, distill: distill.data ?? null })
+  const ing = readIngest(scope.ingest, scope.channelConnected)
+  const per = readPersona(scope.persona)
+  const processing = readProcessing({ feed: scope.feed, distill: scope.distill })
   const klView = describeKl(kl)
   const graph = overview.data ?? null
   /**
@@ -348,7 +268,7 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
   const identity = readIdentityBar({
     channels: [],
     personaName: personaIdentity.name,
-    selfConfirmed: ingest.data?.selfConfirmed ?? null,
+    selfConfirmed: scope.ingest?.selfConfirmed ?? null,
   })
 
   /**
@@ -362,7 +282,7 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
     selfState: identity.selfState,
     adoptable: adoptable.data,
     // ★ 把原因带上：没有它「真的同名歧义」与「只是还没解析」无法区分
-    identityState: ingest.data?.selfIdentityState,
+    identityState: scope.ingest?.selfIdentityState,
   })
 
   /**
@@ -569,7 +489,30 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           六个清点数**共用同一套线**（段 2 第 3 项 = 段 3 第 1 个卡片）。
         */}
         <div className="col-span-12">
-          <PersonaCard persona={personaIdentity} snapshot={persona.data ?? null} cards={per} />
+          {/*
+            ★★ 数字分身只在主渠道工作 —— 其余渠道是**只读**接入
+            （不进自动回复/发消息链路，结构上就没挂 personaSupervisor）。
+            
+            不支持时必须换成一句说明，而不是显示**另一个渠道的**草稿数：
+            后者会让用户以为"这 3 条草稿会发到飞书"，而它们其实是钉钉的。
+          */}
+          {scope.personaSupported ? (
+            <PersonaCard persona={personaIdentity} snapshot={scope.persona} cards={per} />
+          ) : (
+            <div className="radius-lg border border-[var(--border-divider-light)] px-4 py-3">
+              <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
+                {tp("unsupportedChannel", {
+                  defaultValue: "数字分身功能暂未开通这个渠道",
+                })}
+              </p>
+              <p className="typography-caption-400 mt-1 text-[var(--text-base-tertiary)]">
+                {tp("unsupportedChannelHint", {
+                  defaultValue:
+                    "这个渠道是只读接入：数据只用于建图与搜索，不会进入自动回复或发消息链路。",
+                })}
+              </p>
+            </div>
+          )}
         </div>
 
         {/*
@@ -606,7 +549,7 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           <div className="col-span-12">
             <ProblemLine
               text={ing.problem}
-              tone={ingest.data?.blockedReason === null ? "warn" : "bad"}
+              tone={scope.ingest?.blockedReason === null ? "warn" : "bad"}
             />
           </div>
         )}

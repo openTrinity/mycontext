@@ -167,12 +167,92 @@ export function extractLarkJson(text: string): unknown {
   })
 }
 
+/**
+ * 把 CLI 的错误信封翻成**人话**。
+ *
+ * ## ★★ 为什么必须有这一层
+ *
+ * CLI 的错误是这个形状（实测）：
+ * ```json
+ * { "ok": false, "identity": "user", "error": {
+ *     "type": "api", "subtype": "invalid_parameters", "code": 9499,
+ *     "message": "too many request", "log_id": "2026…",
+ *     "troubleshooter": "排查建议查看…https://open.feishu.cn/search?…" } }
+ * ```
+ * 而 `unwrapLarkEnvelope` 原来取的是 `row.message`（不存在，错误在
+ * `row.error` 里），于是它落到"飞书 CLI 请求失败"；更糟的是 CLI 非零退出
+ * 那条路把**整份 stdout** 当成了 message —— 于是那一大坨 JSON（含 log_id
+ * 与一条排查链接）**原样糊在了用户界面上**。用户完全看不懂，也不知道该做什么。
+ *
+ * 这里按 `code` 给出"发生了什么 + 该做什么"。
+ * ★ 认不出的 code 回落到 CLI 给的 `message`（英文短句，至少比整份 JSON 好），
+ * 而**不是**回落到整份 JSON。
+ */
+export function describeLarkError(payload: unknown): {
+  detail: string
+  code: number | null
+  retryable: boolean
+} | null {
+  if (typeof payload !== "object" || payload === null) return null
+  const row = payload as Record<string, unknown>
+  if (row["ok"] !== false) return null
+  const err = typeof row["error"] === "object" && row["error"] !== null
+    ? (row["error"] as Record<string, unknown>)
+    : {}
+  const code = typeof err["code"] === "number" ? err["code"] : null
+  const raw = typeof err["message"] === "string" ? err["message"] : null
+
+  /**
+   * ★ 按 code 给人话。判据是"用户看完知不知道该做什么"。
+   *
+   * 9499（too many request）实测是**飞书服务端侧**的配额，不是我们调太频
+   * （两小时里只跑了 7 次采集）。所以文案不能说"我们请求太多"——
+   * 那会让用户去改采集周期，而那没用。
+   */
+  const HUMAN: Record<number, { detail: string; retryable: boolean }> = {
+    9499: { detail: "飞书接口限流（服务端配额），稍后会自动重试", retryable: true },
+    403: {
+      detail: "飞书接口被拒（403）。若在办公网内，可能是域名未在安全策略里放行",
+      retryable: true,
+    },
+  }
+  const known = code === null ? undefined : HUMAN[code]
+  if (known !== undefined) return { detail: known.detail, code, retryable: known.retryable }
+
+  /**
+   * ★ 权限不足单独认：它**不可重试**，而且有明确的用户动作（重新授权）。
+   * 把它当成可重试的话采集会一直失败刷日志，而用户不知道要去点授权。
+   */
+  if (typeof err["subtype"] === "string" && err["subtype"] === "missing_scope") {
+    const missing = Array.isArray(err["missing_scopes"])
+      ? (err["missing_scopes"] as unknown[]).map(String).join("、")
+      : ""
+    return {
+      detail: `飞书授权缺少权限${missing === "" ? "" : `（${missing}）`}，请重新授权`,
+      code,
+      retryable: false,
+    }
+  }
+
+  return {
+    detail: raw ?? "飞书接口调用失败",
+    code,
+    retryable: true,
+  }
+}
+
 export function unwrapLarkEnvelope(payload: unknown): unknown {
   if (typeof payload !== "object" || payload === null) return payload
   const row = payload as Record<string, unknown>
   if (row["ok"] === false) {
-    const detail = typeof row["message"] === "string" ? row["message"] : "飞书 CLI 请求失败"
-    throw new AppError("PROCESS_FAILED", detail, { retryable: true })
+    // ★ 走 describeLarkError：错误在 `row.error` 里，而不是 `row.message`
+    const described = describeLarkError(payload)
+    throw new AppError("PROCESS_FAILED", described?.detail ?? "飞书接口调用失败", {
+      retryable: described?.retryable ?? true,
+      ...(described?.code === null || described?.code === undefined
+        ? {}
+        : { context: { larkCode: described.code } }),
+    })
   }
   return row["data"] ?? row["body"] ?? payload
 }
@@ -283,12 +363,33 @@ export class LarkCli {
     })
     const combined = result.stdout.trim() !== "" ? result.stdout : result.stderr
     if (result.exitCode !== 0) {
+      /**
+       * ★★ 非零退出时**先试着当错误信封解析** —— 不要把整份 stdout 当 message。
+       *
+       * CLI 在业务错误时也会非零退出，而它的 stdout 是一份完整 JSON
+       * （含 log_id 与一条排查链接）。原来直接塞进 message，于是那一大坨
+       * 原样糊在了界面上（实测：用户截图里就是那一坨）。
+       */
+      const described = (() => {
+        try {
+          return describeLarkError(extractLarkJson(combined))
+        } catch {
+          // 连 JSON 都不是（比如进程崩了）→ 下面回落到退出码
+          return null
+        }
+      })()
       throw new AppError(
         "PROCESS_FAILED",
-        combined.trim() || `飞书 CLI 退出码 ${String(result.exitCode)}`,
+        described?.detail ?? `飞书 CLI 退出码 ${String(result.exitCode)}`,
         {
-          retryable: true,
-          context: { exitCode: result.exitCode, command: commandPath(args) },
+          retryable: described?.retryable ?? true,
+          context: {
+            exitCode: result.exitCode,
+            command: commandPath(args),
+            ...(described?.code === null || described?.code === undefined
+              ? {}
+              : { larkCode: described.code }),
+          },
         },
       )
     }

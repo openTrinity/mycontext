@@ -931,8 +931,22 @@ export class DataPlaneService {
     return { backfilled, mentionsBackfilled }
   }
 
-  feedInfo(): FeedInfo {
-    return this.options.feed.info()
+  /**
+   * 知识加工（Outbox → 图谱）的进度。
+   *
+   * ★ `channelId` 给了就读**那个渠道自己的** `FeedService` —— 每条采集管线
+   * 有自己的库与自己的 Outbox 游标，所以"落后多少条"是渠道级的数字。
+   *
+   * 不带的话界面上会出现「飞书采了 8 条 · 知识加工落后 **11,309** 条」——
+   * 那 11309 是钉钉的水位，与飞书毫无关系。实测就是这个形态。
+   */
+  feedInfo(channelId?: string): FeedInfo {
+    if (channelId === undefined || channelId === this.options.plugin.meta.id) {
+      return this.options.feed.info()
+    }
+    const source = this.sourceOptions().find((item) => item.plugin.meta.id === channelId)
+    // 那个渠道没挂管线 → 落回主渠道（它是唯一能读的），而不是编一个 0
+    return source === undefined ? this.options.feed.info() : source.feed.info()
   }
 
   export(): ExportResultView {

@@ -702,7 +702,15 @@ export function registerIpc(deps: IpcDependencies): void {
     attempt(() => dataPlane.intervalsSave(parse(saveIngestIntervalsInputSchema, payload))),
   )
 
-  ipcMain.handle(IPC_CHANNELS.pipelineFeedInfo, () => attempt(() => dataPlane.feedInfo()))
+  ipcMain.handle(IPC_CHANNELS.pipelineFeedInfo, (_event, payload: unknown) =>
+    attempt(() =>
+      dataPlane.feedInfo(
+        typeof (payload as { channelId?: unknown } | null)?.channelId === "string"
+          ? (payload as { channelId: string }).channelId
+          : undefined,
+      ),
+    ),
+  )
   ipcMain.handle(IPC_CHANNELS.pipelineExport, () => attempt(() => dataPlane.export()))
 
   // ---------------- 搜索模块 ----------------

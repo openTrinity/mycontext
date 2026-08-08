@@ -147,7 +147,7 @@ const api: MyContextApi = {
     },
   },
   pipeline: {
-    feedInfo: () => ipcRenderer.invoke(IPC_CHANNELS.pipelineFeedInfo),
+    feedInfo: (input) => ipcRenderer.invoke(IPC_CHANNELS.pipelineFeedInfo, input ?? {}),
     export: () => ipcRenderer.invoke(IPC_CHANNELS.pipelineExport),
   },
   search: {
