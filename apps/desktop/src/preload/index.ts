@@ -169,7 +169,28 @@ const api: MyContextApi = {
     serverStatus: () => ipcRenderer.invoke(IPC_CHANNELS.klServerStatus),
     serverStart: (input) => ipcRenderer.invoke(IPC_CHANNELS.klServerStart, input ?? {}),
     serverStop: (input) => ipcRenderer.invoke(IPC_CHANNELS.klServerStop, input ?? {}),
-    graphBuild: (fresh?: boolean) => ipcRenderer.invoke(IPC_CHANNELS.klGraphBuild, fresh ?? false),
+    /**
+     * ★★ `channelId` 必须转发 —— 少了它，"给谁建图"这件事就丢了。
+     *
+     * 这里原来是 `(fresh?: boolean) => invoke(channel, fresh ?? false)`：
+     * 渲染层传了两个参数、主进程 handler 也收两个（`register.ts` 那条
+     * `(_event, fresh, channelId)`），但**这一层只转发第一个** ——
+     * 于是 `channelId` 恒为 undefined，走进"不指定渠道就全建"那条路。
+     *
+     * 实测后果（本机日志）：在飞书那栏点一次「建图」，
+     * `[Main:KlServer] graph build started` 与
+     * `[Main:KlServer:feishu] graph build started` **各来一条** ——
+     * 建了两个渠道。而 `fresh=true` 走同一条路，也就是在飞书那栏点「重建」
+     * 会把主渠道那份图一起删了重烧（不可逆、几小时、出网烧 LLM）。
+     *
+     * ★ 为什么 typecheck 没拦住：契约里是
+     * `graphBuild(fresh?: boolean, channelId?: string)`，而 TS 允许把
+     * **少参数**的函数赋给多参数的类型（刻意的规则，不是 bug）。
+     * 所以这一层的漏参是类型系统天然看不见的一类 ——
+     * 门禁在 `tests/unit/desktop/preload-arity.test.ts`。
+     */
+    graphBuild: (fresh?: boolean, channelId?: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.klGraphBuild, fresh ?? false, channelId),
     graphOverview: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphOverview, input ?? {}),
     graphOptimize: (channelId) => ipcRenderer.invoke(IPC_CHANNELS.klGraphOptimize, channelId),
     graphEgo: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphEgo, input ?? {}),

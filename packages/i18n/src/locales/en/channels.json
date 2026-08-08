@@ -83,9 +83,9 @@
     "feishuCredentialNote": "Lark credentials are isolated inside this app's user directory and do not reuse your terminal CLI session. To clear them, run <1>{{command}}</1> in the app's isolated environment."
   },
   "progress": {
-    "browserOpened": "DingTalk sign-in opened — scan the code to continue",
-    "enterCode": "Enter the code in your browser to finish",
-    "scopeAuthorization": "Signed in — confirm the DWS authorization scope in the newly opened page",
+    "browserOpened": "{{channel}} sign-in opened — scan the code to continue",
+    "enterCode": "Enter the code in your browser to finish {{channel}} authorization",
+    "scopeAuthorization": "Signed in — confirm the {{channel}} authorization scope in the newly opened page",
     "manualUrl": "Browser didn't open? Visit this URL: {{url}}"
   },
   "feishuScope": {

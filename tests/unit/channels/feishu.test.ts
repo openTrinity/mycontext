@@ -140,7 +140,21 @@ describe("Feishu auth and ingest parsing", () => {
     expect(calls.map((args) => args.join(" "))).toEqual([
       expect.stringContaining("auth login --scope"),
       "config keychain-downgrade",
-      "auth login --device-code device-1",
+      /**
+       * ★★ `--json` 是必须的，而这条测试原来锁的是**漏掉它**的那一版。
+       *
+       * 不带 `--json` 时这条命令的 stdout 是给人看的：先一整段以
+       * `[AI agent] ` 开头的使用提示（里面有括号）、再一行「等待用户授权...」、
+       * 最后才是 JSON。而 `extractLarkJson` 逐个候选起点试 parse，
+       * 提示文本里的括号会先命中 → 抛「飞书 CLI 返回了无法解析的内容」。
+       *
+       * 实测（本机 CLI 日志 2026-08-08 17:16）：那一刻 `/oauth/token`
+       * 已经 status=200、`auth status --verify` 显示 tokenStatus valid ——
+       * **授权真的成功了**，我们却给用户弹了一条红字。
+       *
+       * 也就是说这条断言当时把一个 bug 锁成了"期望行为"。
+       */
+      "auth login --device-code device-1 --json",
       "auth status --json --verify",
     ])
     expect(events.indexOf("open browser")).toBeLessThan(events.indexOf("config keychain-downgrade"))

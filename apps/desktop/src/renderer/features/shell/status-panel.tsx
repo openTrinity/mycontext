@@ -403,7 +403,25 @@ function KlPanel({ channelId }: { channelId: string | null }) {
   const badgeStyle = KL_STATE_STYLE[state]
 
   return (
-    <Section title={t("status.sections.kl")}>
+    /**
+     * ★★ 分区标题带上**当前渠道** —— 否则这一块的按钮不知道在管谁。
+     *
+     * 这一页只有**一个**渠道选择器，而它在最上面「数据面」那一栏的标题行里。
+     * 图谱这一块离它一屏多，用户看到「启动 / 停止 / 建图 / 重建」时那个
+     * picker **已经滚出视野** —— 于是"点停止不知道停谁、点建图不知道给谁建"
+     * （用户原话）。而这几个动作里有一个是不可逆的（重建会删图重烧）。
+     *
+     * 不在这里再放一个 picker：两个选择器会让人在"数据面选了飞书、
+     * 图谱这块却停在钉钉"的状态里点下去，那比看不见更糟。
+     * 标题里写清渠道名是最省的解法 —— 它跟着同一个 state 走，不可能不一致。
+     */
+    <Section
+      title={
+        channelId === null
+          ? t("status.sections.kl")
+          : `${t("status.sections.kl")}·${t(`status.kl.channel.${channelId}`, { defaultValue: channelId })}`
+      }
+    >
       <div className="flex flex-col gap-4 radius-lg border border-[var(--border-light)] p-4">
         {/* —— 图谱服务 —— */}
         <div className="flex flex-col gap-2">

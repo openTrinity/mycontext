@@ -127,7 +127,19 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
 
   return (
     <Disclosure
-      title={t("status.scope.title", { defaultValue: "采集范围" })}
+      /**
+       * ★ 标题带渠道 —— 与 `KlPanel` 同一条理由（这一页只有一个 picker，
+       * 而它在最上面；这里保存的白名单是**按渠道**写库的，写错渠道那批
+       * 会话就永远不会被采，且不报错）。
+       */
+      title={
+        channelId === null
+          ? t("status.scope.title", { defaultValue: "采集范围" })
+          : `${t("status.scope.title", { defaultValue: "采集范围" })}·${t(
+              `status.kl.channel.${channelId}`,
+              { defaultValue: channelId },
+            )}`
+      }
       hint={t("status.scope.description", {
         defaultValue: "改「采多久、采哪些会话」。保存后立刻生效：越界的消息会被清掉。",
       })}

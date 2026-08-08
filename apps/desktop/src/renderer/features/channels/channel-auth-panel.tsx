@@ -29,7 +29,6 @@ import { StepSection } from "../onboarding/step-section.js"
 import { DwsSourceDisclosure } from "./dws-source-disclosure.js"
 import {
   CHANNEL_BRAND_ICONS,
-  DINGTALK_BRAND,
   KeyIcon,
   ShieldIcon,
   SpinnerIcon,
@@ -398,6 +397,8 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
 
       {running ? (
         <ProgressBlock
+          channelId={channel.id}
+          channelLabel={t(channel.labelKey)}
           deviceCode={deviceCode}
           browserUrl={browserUrl}
           scopeAuthorizationUrl={scopeAuthorizationUrl}
@@ -760,11 +761,17 @@ function InfoRow({
 }
 
 function ProgressBlock({
+  channelId,
+  channelLabel,
   deviceCode,
   browserUrl,
   scopeAuthorizationUrl,
   onCancel,
 }: {
+  /** 这次在授权**哪个**渠道 —— 文案与配色都跟着它，不能写死主渠道。 */
+  channelId: string
+  /** 已翻译好的渠道名（「钉钉」/「飞书」），插进文案里。 */
+  channelLabel: string
   deviceCode: Extract<AuthProgress, { phase: "device-code" }> | undefined
   browserUrl: string | undefined
   scopeAuthorizationUrl: string | undefined
@@ -780,12 +787,20 @@ function ProgressBlock({
       <div className="flex items-center gap-2">
         <SpinnerIcon className="size-4 animate-spin text-[var(--text-accent-normal)]" />
         <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+          {/*
+            ★★ 渠道名走插值，**不写死**。
+
+            这三句原来是写死「钉钉」的（`已打开钉钉登录页，请扫码确认`）——
+            于是在飞书那张卡上授权时，界面让用户去扫**另一个应用**的码。
+            实测截图就是这个：飞书卡片 + 一句关于钉钉的话。
+          */}
           {t(
             showingScopeAuthorization
               ? "progress.scopeAuthorization"
               : showingDeviceCode
                 ? "progress.enterCode"
                 : "progress.browserOpened",
+            { channel: channelLabel },
           )}
         </span>
       </div>
@@ -793,8 +808,20 @@ function ProgressBlock({
       {showingDeviceCode ? (
         <>
           <code
-            className="typography-title-base-600 select-all text-center font-mono-token tracking-[0.2em] text-[var(--text-base-primary)]"
-            style={{ color: DINGTALK_BRAND }}
+            /**
+             * ★ 配色用**语义 token**，不用渠道品牌色。
+             *
+             * 这里原来是 `style={{ color: DINGTALK_BRAND }}`（写死 #0074FF）
+             * —— 在飞书卡上就是"用另一个品牌的颜色强调这串码"。
+             * 而这个强调的语义是「这是要你复制的关键内容」，与品牌无关；
+             * 走 token 还能跟随暗色主题（硬编码那个不会）。
+             *
+             * 不换成"按渠道取品牌色"是刻意的：飞书那侧我们只有一张 png
+             * 徽标、拿不到官方色值，而自己描一个近似值会与徽标有色差
+             * （见 `channel-icons.tsx` 头注释里同一条理由）。
+             */
+            className="typography-title-base-600 select-all text-center font-mono-token tracking-[0.2em] text-[var(--text-accent-normal)]"
+            data-channel={channelId}
           >
             {deviceCode.userCode}
           </code>

@@ -83,9 +83,9 @@
     "feishuCredentialNote": "飞书凭据隔离保存在本应用用户目录，不复用你终端的默认 CLI 登录态。如需清除，请在应用对应的隔离环境执行 <1>{{command}}</1>。"
   },
   "progress": {
-    "browserOpened": "已打开钉钉登录页，请扫码确认",
-    "enterCode": "在浏览器中输入授权码完成授权",
-    "scopeAuthorization": "登录成功，请在新打开的页面确认 DWS 授权范围",
+    "browserOpened": "已打开{{channel}}登录页，请扫码确认",
+    "enterCode": "在浏览器中输入授权码完成{{channel}}授权",
+    "scopeAuthorization": "登录成功，请在新打开的页面确认{{channel}}的授权范围",
     "manualUrl": "浏览器未自动打开？手动访问：{{url}}"
   },
   "feishuScope": {

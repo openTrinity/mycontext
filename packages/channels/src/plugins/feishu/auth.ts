@@ -121,10 +121,33 @@ export class FeishuAuth implements ChannelAuth {
        * 经过的公共段上，不能挂在初始化分支里。
        */
       await this.cli.ensureAutomationCredentialAccess({ signal: ctx.signal })
-      await this.cli.json<unknown>(["auth", "login", "--device-code", grant.deviceCode], {
-        signal: ctx.signal,
-        timeoutMs: LOGIN_TIMEOUT_MS,
-      })
+      /**
+       * ★★ 必须带 `--json` —— 不带的话一次**成功的**授权会被判成失败。
+       *
+       * 不带 `--json` 时这条命令的 stdout 是给人看的（实测，依次是）：
+       * ① 一整段以 `[AI agent] ` 开头的使用提示（讲"本命令最长阻塞 10 分钟"
+       *    以及要怎么生成二维码，几百字，里面**有括号**）；
+       * ② 一行 `等待用户授权...`；
+       * ③ 最后才是那份 JSON。
+       *
+       * 而 `extractLarkJson` 是"逐个候选起点试到能整段 parse 为止"的贪心 ——
+       * 提示文本里的括号会先命中，于是抛「飞书 CLI 返回了无法解析的内容」。
+       *
+       * 实测证据（本机 CLI 日志 2026-08-08 17:16）：这一步之前
+       * `/open-apis/authen/v2/oauth/token` 已经 **status=200**，
+       * `auth status --verify` 也显示 `grantedAt 17:16:32` / `tokenStatus valid`
+       * / scope 里带上了 `im:message.reactions:read` —— 也就是**授权真的成功了**，
+       * 只是我们把它的输出读错，然后给用户弹了一条红字。
+       *
+       * 带 `--json` 之后 stdout 就是干净的一份 JSON（同一条命令对比过）。
+       */
+      await this.cli.json<unknown>(
+        ["auth", "login", "--device-code", grant.deviceCode, "--json"],
+        {
+          signal: ctx.signal,
+          timeoutMs: LOGIN_TIMEOUT_MS,
+        },
+      )
       const status = await this.status()
       if (status.state !== "authorized") {
         throw new AppError("CHANNEL_AUTH_FAILED", "授权完成，但没有检测到所需的飞书只读权限")

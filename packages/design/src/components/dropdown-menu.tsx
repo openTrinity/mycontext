@@ -232,11 +232,29 @@ export function DropdownMenu({
                     Math.max(rect.triggerWidth, 280),
                     window.innerWidth - 24,
                   ),
+                  /**
+                   * ★★ 最小宽度**跟着触发器**，而不是恒定 220px。
+                   *
+                   * 类名里原来写死 `min-w-[220px]`（给账号菜单那种"头像 + 名字 +
+                   * 邮箱"的宽菜单定的）。而渠道选择器的触发器只有 ~90px：
+                   * 菜单被强行撑到 220px，`align=end` 又把右边缘对齐到触发器
+                   * 右缘，于是它整体向**左**溢出一大截 —— 而触发器本身贴着
+                   * 窗口右上角，看上去就是"下拉框被切了一刀"（用户截图）。
+                   *
+                   * 判据改成"不窄于触发器，且至少能放下一行短文本"：
+                   * 宽触发器（账号菜单）行为不变，窄触发器（图标 picker）
+                   * 得到一个与自己同宽的菜单 —— 那也是对齐上最自然的结果。
+                   *
+                   * 140px 这个下限是给"图标 + 两字渠道名 + 勾选标记"留的：
+                   * 再窄会让「钉钉」和右侧的勾挤在一起。
+                   */
+                  minWidth: Math.max(rect.triggerWidth, 140),
                 }
           }
           className={cn(
             // ★ fixed 而不是 absolute —— 见上面 `rect` 的注释（overflow 裁剪）
-            "fixed z-50 min-w-[220px] radius-lg p-1",
+            // ★ 不写 min-w：宽度由 style 里的 minWidth 按触发器算（见那段注释）
+            "fixed z-50 radius-lg p-1",
             "border border-[var(--border-light)] bg-[var(--bg-pop)] shadow-[var(--shadow-lg)]",
             className,
           )}
