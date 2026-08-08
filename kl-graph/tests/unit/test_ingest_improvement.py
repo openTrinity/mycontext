@@ -13,6 +13,7 @@ from kl_graph.ingest.improvement import (
     resolve_improve_mode,
     run_improvement,
 )
+from kl_graph.ingest.strategies.community import CommunityChanges
 from kl_graph.storage.sqlite_store import SQLiteStore
 
 
@@ -89,10 +90,88 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
     assert result.applied_mode == "incremental"
     similarity.compute_similarity_edges.assert_called_once()
     communities.assign_communities.assert_called_once()
-    # Projection is called with community_ids keyword (None when no communities
-    # changed on a fresh run — the self-healing full-rebuild fallback).
-    proj_mock.assert_called_once()
-    assert "community_ids" in proj_mock.call_args.kwargs
+    # No community changes means no projection work, not a full rebuild.
+    proj_mock.assert_not_called()
+    store.close()
+
+
+def test_incremental_projection_receives_reversible_community_keys(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "graph.db")
+    _add_community_columns(store)
+    similarity = MagicMock()
+    similarity.compute_similarity_edges.return_value = []
+    changes = CommunityChanges()
+    changes.record("entity", "L0", 7)
+    communities = MagicMock()
+    communities.assign_communities.return_value = changes
+
+    with (
+        patch(
+            "kl_graph.ingest.improvement.get_similarity_strategy",
+            return_value=similarity,
+        ),
+        patch(
+            "kl_graph.ingest.improvement.get_community_strategy",
+            return_value=communities,
+        ),
+        patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj,
+        patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
+    ):
+        run_improvement(
+            "incremental",
+            store=store,
+            qdrant=MagicMock(),
+            targets=ImprovementTargets(entity_ids=("e1",)),
+            batch_id="batch-1",
+        )
+
+    proj.assert_called_once_with(
+        store,
+        community_ids=set(changes),
+        community_keys={("entity", "L0", 7)},
+    )
+    store.close()
+
+
+def test_incremental_projection_recovers_keys_from_checkpoint(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "graph.db")
+    _add_community_columns(store)
+    changes = CommunityChanges()
+    changes.record("entity", "L0", 7)
+    checkpoint = MagicMock()
+    checkpoint.is_done.side_effect = lambda step, params=None: step in {
+        "improve.incremental_similarity",
+        "improve.incremental_leiden",
+    }
+    checkpoint._data = {
+        "steps": {
+            "improve.incremental_leiden": {
+                "changed_communities": ",".join(changes),
+                "changed_community_keys": [["entity", "L0", 7]],
+            }
+        }
+    }
+
+    with (
+        patch("kl_graph.ingest.improvement.get_similarity_strategy"),
+        patch("kl_graph.ingest.improvement.get_community_strategy"),
+        patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj,
+        patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
+    ):
+        run_improvement(
+            "incremental",
+            store=store,
+            qdrant=MagicMock(),
+            targets=ImprovementTargets(entity_ids=("e1",)),
+            checkpoint=checkpoint,
+            batch_id="batch-1",
+        )
+
+    proj.assert_called_once_with(
+        store,
+        community_ids=set(changes),
+        community_keys={("entity", "L0", 7)},
+    )
     store.close()
 
 

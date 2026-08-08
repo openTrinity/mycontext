@@ -206,13 +206,6 @@ async def run_ingestion(
             )
         )
 
-        # Optimization 1: apply the batch's newly created structural edges
-        # (MENTIONS/AUTHORED_BY/ABOUT) to the in-memory StructuralCache so the
-        # O(K) improvement_targets lookup and the next incremental similarity
-        # run see this batch's edges without re-scanning the store.
-        if structural_cache is not None and hasattr(pipeline, "_batch_edges") and pipeline._batch_edges:
-            structural_cache.apply_delta(pipeline._batch_edges)
-
         if improve_mode != "off":
             targets = pipeline.improvement_targets()
             report(

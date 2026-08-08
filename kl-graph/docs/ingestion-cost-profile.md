@@ -2,7 +2,11 @@
 
 Normal ingestion always uses the same unit-incremental Phase A/Phase B runner.
 `N` below is the current batch size; `V`/`E` are total graph nodes/edges; `K` is
-the number of entities/facts affected by the batch; and `D` is embedding width.
+the number of entities/facts affected by the batch; `P`/`E_P` are frontier
+nodes/induced edges; `I_K` is structural incidence traversed for affected nodes;
+`Q_P` is structural candidate pairs enumerated in the frontier; `C` is
+changed-community membership rows; `S` is cached structural edges; and `D` is
+embedding width.
 
 | Stage | Scope | Typical weight | Main scaling / bottleneck |
 |---|---|---:|---|
@@ -15,7 +19,8 @@ the number of entities/facts affected by the batch; and `D` is embedding width.
 | Fact construction | Batch | Light–medium | Linear fact normalization and inserts |
 | Entity/fact embedding | New graph nodes | Heavy | Remote embedding latency, approximately `O((entities + facts) × D)` |
 | Structural edge construction | Batch | Medium | Linear in extracted mentions/facts, plus chat temporal/reply relationships |
-| Structural cache delta | Batch | Light | Updates in-memory entity↔chunk and entity↔fact mappings from new edges, approximately `O(K)` |
+| Structural cache startup | Whole structural graph | Medium | One server-start scan plus resident bidirectional sets, `O(S)` time and memory |
+| Structural cache delta | Batch structural edges | Light | Updates in-memory entity↔chunk and entity↔fact mappings, linear in new structural edges; it is part of the edge-construction checkpoint |
 | Server index hot-swap | Whole graph | Medium–heavy | Rebuilds in-memory adjacency by scanning all graph edges, `O(E)` |
 
 ## Improvement modes
@@ -33,27 +38,28 @@ while `full` remains available for intentional global re-clustering.
 
 ### Incremental improvement
 
-The incremental path is `O(K)` in all steps except server finalization. A
-`StructuralCache` (server-level in-memory mirror of entity↔chunk and
-entity↔fact edges) eliminates global structural scans; `scan_edges_for_nodes`
-(backend-level indexed edge query) eliminates full graph loading for Leiden;
-and scoped COMM_MEMBER projection avoids the `O(V)` delete-rebuild cycle.
+The incremental path avoids recurring full-graph improvement scans, but it is
+not strictly `O(K)`: structural work depends on affected-node degrees and
+community work depends on the emitted frontier and changed memberships. A
+server-level `StructuralCache`, indexed endpoint reads on both SQLite and
+Ladybug, and keyed COMM_MEMBER projection keep that work output-sensitive.
 
 | Step | Typical weight | Cost characteristics |
 |---|---:|---|
-| Recover affected IDs | Light | Reverse lookups on StructuralCache (`chunk→entities`, `fact→entities`), approximately `O(K)`. Falls back to `O(E)` store scan when cache is absent. |
+| Recover affected IDs | Light | Reverse lookups over admitted chunks/facts, `O(N + output IDs)`. Falls back to `O(E)` when no StructuralCache is supplied. |
 | ANN similarity | Medium | One bounded ANN search per affected node plus vector retrieval; approximately `O(K × A)` where A is the ANN result limit (50) |
 | Intra-batch similarity | Medium–heavy for large batches | Dense pairwise cosine, `O(K² × D)` compute and `O(K²)` score matrices |
-| Structural feature load | Light | Served from StructuralCache (`entity→chunks`, `entity→facts`); no store scan. Delta-applied per batch in `O(K)`. |
-| Frontier communities | Medium | Queries only frontier edges via `scan_edges_for_nodes` (`O(frontier edges)`), builds frontier-only igraph, runs four Leiden resolutions on the subgraph (3 iterations each). No full graph load. |
-| Community projection | Light | Scoped rebuild: only deletes and rebuilds `COMM_MEMBER` edges for communities whose membership changed, approximately `O(changed × avg_community_size)`. Full rebuild only on first seed or `full` mode. |
+| Structural feature/frontier load | Light–heavy for hubs | Cache lookups avoid a store scan but traverse incident chunk/fact sets, `O(I_K)` plus set-intersection/pair-generation work. |
+| Frontier communities | Medium | Indexed equality lookups cost `O(P + incident similarity edges)`; structural projection enumerates `Q_P` candidate pairs; Leiden runs four 3-iteration resolutions over `P`/`E_P`. Dense shared chunks/entities can dominate. |
+| Community projection | Light | Exact `(node type, level, ID)` keys drive indexed reads and scoped `COMM_MEMBER` replacement, `O(C)`. Empty changes are a no-op. Legacy index creation is a one-time `O(V)` cost; UUID-only custom strategies use an `O(V)` compatibility scan. |
 | Summary invalidation | Light | Marks affected summaries stale using local metadata updates. No LLM calls. |
 
-Incremental improvement is `O(K + frontier)` overall. The only remaining
-graph-wide cost is server finalization (`O(E)` adjacency hot-swap), which is
-a local in-memory scan independent of the improvement pipeline. For mature
-graphs with small incoming batches, the bottleneck is now LLM extraction and
-embedding API latency rather than local graph operations.
+Excluding ANN and dense cosine work itemized above, local incremental graph work
+is approximately `O(K + I_K + P + Q_P + E_P + C)`. After one-time index/counter
+initialization, server finalization is the recurring graph-wide operation
+(`O(E)` adjacency hot-swap). Cacheless standalone runs retain their explicit
+`O(E)` fallback. For mature graphs with small, non-hub batches, LLM extraction
+and embedding latency normally dominate.
 
 ### Checkpoint semantics
 
@@ -61,14 +67,16 @@ The incremental improvement checkpoint is split into two independently
 resumable steps:
 
 - `improve.incremental_leiden` — runs Leiden on the frontier subgraph,
-  stores the changed community UUID set in checkpoint metadata.
+  stores both changed UUIDs and reversible `(node type, level, cluster ID)` keys.
 - `improve.incremental_projection` — scoped COMM_MEMBER projection for the
-  changed communities. On retry after a mid-step crash, recovers the changed
-  set from checkpoint metadata.
+  changed communities. On retry, it recovers both scope representations from
+  checkpoint metadata, so reads as well as writes remain scoped.
 
-The similarity step (`improve.incremental_similarity`) is unchanged: a single
-checkpoint key covers ANN search, intra-batch cosine, edge insertion, and
-structural cache delta.
+`improve.incremental_similarity` covers ANN search, intra-batch cosine, and
+similarity-edge insertion. The structural-cache delta belongs to
+`phase_b.create_edges`: persisted structural edges are applied to the cache
+before that checkpoint is marked complete, so an interrupted retry cannot skip
+the cache update.
 
 ### Full improvement
 

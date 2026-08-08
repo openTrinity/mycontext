@@ -470,9 +470,9 @@ class KnowledgeStore(ABC):
 
         Frontier-scoped edge scan: returns only edges where the source_id OR
         target_id is in ``node_ids``. This lets the incremental community
-        strategy build a frontier-only subgraph without loading all edges
-        (O(frontier) instead of O(E) for the SQLite backend, which pushes the
-        filter into the SQL WHERE clause against indexed columns).
+        strategy build a frontier-only subgraph without loading all edges.
+        Indexed implementations scale with requested IDs plus incident output
+        edges rather than total graph edges.
 
         Args:
             edge_types: Edge type names to scan (e.g. ``["ENTITY_SIMILAR"]``).

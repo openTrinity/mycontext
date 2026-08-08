@@ -443,9 +443,14 @@ def test_incremental_projection_only_touches_specified_communities() -> None:
     # In a real run both old + new community IDs would be in the set; this test
     # isolates the scoped community to prove non-matching edges survive.
     target_cid = community_id_from("entity", "L0", 0)
+    statements: list[str] = []
+    store.conn.set_trace_callback(statements.append)
     n_communities, n_edges = project_community_membership_edges(
-        store, community_ids={target_cid}
+        store,
+        community_ids={target_cid},
+        community_keys={("entity", "L0", 0)},
     )
+    store.conn.set_trace_callback(None)
 
     # entity-L0-0 now has 1 member (e2; e1 left).
     assert n_communities == 1
@@ -466,6 +471,48 @@ def test_incremental_projection_only_touches_specified_communities() -> None:
     # e1's new L0-2 edge was NOT projected (community not in the scoped set).
     new_cid = community_id_from("entity", "L0", 2)
     assert not any(r[3] == new_cid for r in rows), "un-scoped new community should not appear"
+    assignment_reads = [
+        sql
+        for sql in statements
+        if sql.startswith("SELECT id, community_")
+    ]
+    assert assignment_reads == [
+        "SELECT id, community_L0 FROM entities WHERE community_L0 IN (0)"
+    ]
+    store.close()
+
+
+def test_empty_incremental_projection_scope_is_noop() -> None:
+    """An empty changed set never falls through to a full delete/rebuild."""
+    store = _store()
+    _seed_assignments(store)
+    project_community_membership_edges(store)
+    before = _comm_member_rows(store)
+
+    assert project_community_membership_edges(
+        store, community_ids=set(), community_keys=set()
+    ) == (0, 0)
+    assert _comm_member_rows(store) == before
+    store.close()
+
+
+def test_incremental_projection_zeroes_emptied_community() -> None:
+    """A community that loses its last member does not retain a stale count."""
+    store = _store()
+    _seed_assignments(store)
+    project_community_membership_edges(store)
+    store.conn.execute("UPDATE entities SET community_L0 = 2 WHERE community_L0 = 0")
+    store.conn.commit()
+    target_id = community_id_from("entity", "L0", 0)
+
+    assert project_community_membership_edges(
+        store,
+        community_ids={target_id},
+        community_keys={("entity", "L0", 0)},
+    ) == (1, 0)
+    community = store.get_community(target_id)
+    assert community is not None and community.member_count == 0
+    assert not any(row[3] == target_id for row in _comm_member_rows(store))
     store.close()
 
 

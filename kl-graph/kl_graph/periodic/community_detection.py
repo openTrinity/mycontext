@@ -33,6 +33,10 @@ RESOLUTIONS = {
     "L3": 10.0,  # Conversation/component-level (many small communities)
 }
 
+_SQL_IN_BATCH = 500
+_COMMUNITY_NEXT_ID_META_PREFIX = "community.next_id"
+CommunityKey = tuple[str, str, int]
+
 
 def _build_entity_graph(sqlite: SQLiteStore):
     """Build the entity graph from ENTITY_SIMILAR + co-mention edges.
@@ -610,6 +614,25 @@ def store_multi_resolution_communities(
         sqlite.sql_conn.commit()
         print(f"  Stored {len(fact_topic_clusters)} fact topic cluster assignments (HDBSCAN)")
 
+    # Scoped incremental projection relies on these indexes, and incremental
+    # community allocation relies on counters that the full rebuild can seed
+    # directly from its in-memory mappings without another table scan.
+    for node_type, table, mappings in (
+        ("entity", "entities", entity_communities),
+        ("fact", "facts", fact_communities),
+    ):
+        for level in RESOLUTIONS:
+            col = f"community_{level}"
+            sqlite.sql_conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_{col} ON {table}({col})"
+            )
+            next_id = max(mappings.get(level, {}).values(), default=-1) + 1
+            sqlite.set_meta(
+                f"{_COMMUNITY_NEXT_ID_META_PREFIX}.{node_type}.{level}",
+                str(next_id),
+            )
+    sqlite.sql_conn.commit()
+
 
 def _existing_community_columns(sqlite, table: str) -> list[str]:
     """Levels whose ``community_{level}`` column exists on ``table``.
@@ -628,7 +651,9 @@ def _existing_community_columns(sqlite, table: str) -> list[str]:
     return [lvl for lvl in RESOLUTIONS if f"community_{lvl}" in cols]
 
 
-def _summary_lookup(sqlite) -> dict[tuple[str, str, int], tuple[str, list[str]]]:
+def _summary_lookup(
+    sqlite, community_keys: set[CommunityKey] | None = None
+) -> dict[tuple[str, str, int], tuple[str, list[str]]]:
     """Best-effort (node_type, level, cluster_id) -> (summary, tags) map.
 
     Reconciles the pre-existing ``community_summaries`` table onto the reified
@@ -640,9 +665,31 @@ def _summary_lookup(sqlite) -> dict[tuple[str, str, int], tuple[str, list[str]]]
     Community upsert + ``COMM_MEMBER`` rebuild.
     """
     out: dict[tuple[str, str, int], tuple[str, list[str]]] = {}
-    rows = sqlite.sql_conn.execute(
-        "SELECT node_type, level, community_id, summary, tags FROM community_summaries"
-    ).fetchall()
+    if community_keys is not None and not community_keys:
+        return out
+
+    if community_keys is None:
+        rows = sqlite.sql_conn.execute(
+            "SELECT node_type, level, community_id, summary, tags "
+            "FROM community_summaries"
+        ).fetchall()
+    else:
+        rows = []
+        grouped: dict[tuple[str, str], list[int]] = defaultdict(list)
+        for node_type, level, cluster_id in sorted(community_keys):
+            grouped[(node_type, level)].append(cluster_id)
+        for (node_type, level), cluster_ids in grouped.items():
+            for start in range(0, len(cluster_ids), _SQL_IN_BATCH):
+                batch = cluster_ids[start : start + _SQL_IN_BATCH]
+                placeholders = ",".join("?" for _ in batch)
+                rows.extend(
+                    sqlite.sql_conn.execute(
+                        "SELECT node_type, level, community_id, summary, tags "
+                        "FROM community_summaries WHERE node_type = ? AND level = ? "
+                        f"AND community_id IN ({placeholders})",
+                        (node_type, level, *batch),
+                    ).fetchall()
+                )
     for r in rows:
         try:
             key = (r[0], r[1], int(r[2]))
@@ -660,7 +707,11 @@ def _summary_lookup(sqlite) -> dict[tuple[str, str, int], tuple[str, list[str]]]
 
 
 def project_community_membership_edges(
-    sqlite, *, batch_size: int = 5000, community_ids: set[str] | None = None
+    sqlite,
+    *,
+    batch_size: int = 5000,
+    community_ids: set[str] | None = None,
+    community_keys: set[CommunityKey] | None = None,
 ):
     """Derive Community rows + ``COMM_MEMBER`` edges from the assignment columns.
 
@@ -680,41 +731,85 @@ def project_community_membership_edges(
     Args:
         sqlite: Store to read assignments from and write the projection to.
         batch_size: Edge rows per executemany/insert batch.
-        community_ids: When not None, only project memberships for communities
-            whose UUID (``community_id_from``) is in this set. The DELETE is
-            similarly scoped to those ``target_id`` values so unchanged
-            communities keep their edges. When None (default), full rebuild.
+        community_ids: UUIDs whose existing projection edges should be replaced.
+            Retained for callers that do not have reversible assignment keys.
+        community_keys: Exact ``(node_type, level, cluster_id)`` identities to
+            read. Supplying this avoids graph-wide assignment and summary scans.
+            When both scope arguments are None, perform a full rebuild. Empty
+            scope sets are a no-op, never a full rebuild.
 
     Returns:
         ``(n_communities, n_edges)`` actually projected.
     """
     member_counts: dict[tuple[str, str, int], int] = defaultdict(int)
     edges: list[Edge] = []
+    scoped = community_ids is not None or community_keys is not None
+    scope_ids = set(community_ids or ())
+    normalized_keys = {
+        (node_type, level, int(cluster_id))
+        for node_type, level, cluster_id in (community_keys or set())
+        if node_type in {"entity", "fact"} and level in RESOLUTIONS
+    }
+    scope_ids.update(community_id_from(*key) for key in normalized_keys)
 
-    for node_type, table in (("entity", "entities"), ("fact", "facts")):
-        for level in _existing_community_columns(sqlite, table):
-            col = f"community_{level}"
-            rows = sqlite.sql_conn.execute(
-                f"SELECT id, {col} FROM {table} WHERE {col} IS NOT NULL"
-            ).fetchall()
-            for node_id, cid in rows:
-                cid = int(cid)
-                comm_uuid = community_id_from(node_type, level, cid)
-                if community_ids is not None and comm_uuid not in community_ids:
-                    continue
-                member_counts[(node_type, level, cid)] += 1
-                edges.append(
-                    Edge(
-                        source_type=node_type,
-                        source_id=node_id,
-                        target_type="community",
-                        target_id=comm_uuid,
-                        edge_type=EdgeType.COMM_MEMBER,
-                        properties={"level": level},
-                    )
+    if scoped and not scope_ids and not normalized_keys:
+        return 0, 0
+
+    def _append_rows(node_type: str, level: str, rows) -> None:
+        for node_id, raw_cid in rows:
+            cid = int(raw_cid)
+            comm_uuid = community_id_from(node_type, level, cid)
+            if scoped and comm_uuid not in scope_ids:
+                continue
+            member_counts[(node_type, level, cid)] += 1
+            edges.append(
+                Edge(
+                    source_type=node_type,
+                    source_id=node_id,
+                    target_type="community",
+                    target_id=comm_uuid,
+                    edge_type=EdgeType.COMM_MEMBER,
+                    properties={"level": level},
                 )
+            )
 
-    summaries = _summary_lookup(sqlite)
+    if normalized_keys:
+        grouped_keys: dict[tuple[str, str], list[int]] = defaultdict(list)
+        for node_type, level, cluster_id in sorted(normalized_keys):
+            grouped_keys[(node_type, level)].append(cluster_id)
+        for (node_type, level), cluster_ids in grouped_keys.items():
+            table = "entities" if node_type == "entity" else "facts"
+            if level not in _existing_community_columns(sqlite, table):
+                continue
+            col = f"community_{level}"
+            sqlite.sql_conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_{col} ON {table}({col})"
+            )
+            for start in range(0, len(cluster_ids), _SQL_IN_BATCH):
+                batch = cluster_ids[start : start + _SQL_IN_BATCH]
+                placeholders = ",".join("?" for _ in batch)
+                rows = sqlite.sql_conn.execute(
+                    f"SELECT id, {col} FROM {table} "
+                    f"WHERE {col} IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                _append_rows(node_type, level, rows)
+    else:
+        # Full rebuild, or compatibility mode for UUID-only scoped callers.
+        # UUIDs are intentionally one-way, so those legacy callers cannot avoid
+        # scanning assignments; the incremental strategy supplies exact keys.
+        for node_type, table in (("entity", "entities"), ("fact", "facts")):
+            for level in _existing_community_columns(sqlite, table):
+                col = f"community_{level}"
+                rows = sqlite.sql_conn.execute(
+                    f"SELECT id, {col} FROM {table} WHERE {col} IS NOT NULL"
+                ).fetchall()
+                _append_rows(node_type, level, rows)
+
+    summaries = _summary_lookup(sqlite, normalized_keys if normalized_keys else None)
+    projected_keys = set(member_counts)
+    if normalized_keys:
+        projected_keys.update(normalized_keys)
     communities = [
         Community(
             id=community_id_from(node_type, level, cid),
@@ -722,14 +817,17 @@ def project_community_membership_edges(
             node_type=node_type,
             summary=summaries.get((node_type, level, cid), ("", []))[0],
             tags=summaries.get((node_type, level, cid), ("", []))[1],
-            member_count=count,
+            member_count=member_counts.get((node_type, level, cid), 0),
         )
-        for (node_type, level, cid), count in member_counts.items()
+        for node_type, level, cid in sorted(projected_keys)
     ]
     sqlite.insert_communities(communities)
 
     _rebuild_comm_member_edges(
-        sqlite, edges, batch_size=batch_size, community_ids=community_ids
+        sqlite,
+        edges,
+        batch_size=batch_size,
+        community_ids=scope_ids if scoped else None,
     )
     print(
         f"  Projected {len(communities)} communities and "
@@ -777,10 +875,13 @@ def _rebuild_comm_member_edges(
         Exception: Whatever the backend raises on delete/insert, re-raised as-is
             (fallback path) so a partial rebuild is never reported as success.
     """
+    if community_ids is not None and not community_ids:
+        return
+
     if isinstance(sqlite, SQLiteStore):
         conn = sqlite.sql_conn
         with conn:  # single transaction: no window without memberships
-            if community_ids is not None and community_ids:
+            if community_ids is not None:
                 ordered = list(community_ids)
                 for start in range(0, len(ordered), 500):
                     batch = ordered[start : start + 500]
@@ -814,7 +915,7 @@ def _rebuild_comm_member_edges(
     # Non-atomic fallback: the delete is already committed once we get here, so an
     # insert failure leaves a partial projection. Let it propagate — a loud error
     # plus a re-run of improve is safer than pretending the rebuild succeeded.
-    if community_ids is not None and community_ids:
+    if community_ids is not None:
         for cid in community_ids:
             sqlite.delete_edges(edge_type=EdgeType.COMM_MEMBER.value, target_id=cid)
     else:

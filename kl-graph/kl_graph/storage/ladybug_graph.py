@@ -1033,22 +1033,54 @@ class LadybugGraphDB(GraphDB):
         source_type: str | None = None,
         target_type: str | None = None,
     ) -> Iterator[tuple[str, str, dict]]:
-        """Stream ``(source_id, target_id, properties)`` for edges touching ``node_ids``.
+        """Stream edges touching ``node_ids`` via indexed endpoint lookups.
 
-        Delegates to :meth:`scan_edges_typed` and filters in Python, since
-        Kuzu's Cypher dialect does not reliably support ``IN``-list filtering
-        on node properties. This is O(E) per edge type on the LadybugDB
-        backend, but the frontier optimization still wins by not loading all
-        node IDs and using the StructuralCache for co-mention computation.
-
-        TODO: optimize with a Cypher ``WHERE a.id IN $ids OR b.id IN $ids``
-        parameterised query when Kuzu adds list-parameter binding support.
+        Ladybug/Kuzu does not reliably bind list parameters, so issue bounded
+        equality lookups for each requested source and target ID. This trades
+        ``O(E)`` Python filtering for ``O(K + E_incident)`` graph work, where K
+        is the requested node count. Edges matching both endpoints are deduped.
         """
-        for src, tgt, props in self.scan_edges_typed(
-            edge_types, source_type=source_type, target_type=target_type
-        ):
-            if src in node_ids or tgt in node_ids:
-                yield (src, tgt, props)
+        if not edge_types or not node_ids:
+            return
+
+        src_pattern = (
+            f"(a:{_type_to_label(source_type)})" if source_type else "(a)"
+        )
+        tgt_pattern = (
+            f"(b:{_type_to_label(target_type)})" if target_type else "(b)"
+        )
+        seen: set[tuple[str, str, str]] = set()
+
+        for etype in edge_types:
+            for node_id in sorted(node_ids):
+                for endpoint in ("a", "b"):
+                    cypher = (
+                        f"MATCH {src_pattern}-[r:{etype}]->{tgt_pattern} "
+                        f"WHERE {endpoint}.id = $id "
+                        "RETURN a.id AS aid, b.id AS bid, "
+                        "r.confidence AS conf, r.properties AS props"
+                    )
+                    try:
+                        result = self._conn.execute(
+                            cypher, parameters={"id": node_id}
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "LadybugDB scan_edges_for_nodes(%s, %s) failed: %s",
+                            etype,
+                            endpoint,
+                            exc,
+                        )
+                        continue
+                    while result.has_next():
+                        aid, bid, conf, props = result.get_next()
+                        if not (aid and bid):
+                            continue
+                        key = (etype, aid, bid)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        yield (aid, bid, _merge_edge_props(props, conf))
 
     def close(self) -> None:
         """Close connection and database."""

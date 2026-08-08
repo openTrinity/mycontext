@@ -67,12 +67,14 @@ class IncrementalCommunityStrategy(Protocol):
                 Example: {"L0": 0.3, "L1": 1.0, "L2": 3.0, "L3": 10.0}
             fact_resolutions: Resolution parameters per level for fact graph.
                 Example: {"L0": 0.3, "L1": 1.0, "L2": 3.0, "L3": 10.0}
-            structural_cache: Optional StructuralCache for O(K) co-mention and
-                shared-entity computation among frontier nodes without scanning
-                all structural edges. Typed as ``object`` here to avoid importing
-                the concrete class in this protocol module.
+            structural_cache: Optional StructuralCache for degree-scoped
+                co-mention/shared-entity computation without graph-wide scans.
+                Typed as ``object`` here to avoid importing the concrete class.
 
         Returns:
-            Set of community UUIDs whose membership changed (for summary invalidation).
+            Set of community UUIDs whose membership changed. Implementations
+            should expose a ``community_keys`` set of reversible
+            ``(node_type, level, cluster_id)`` tuples when available so
+            projection reads can remain scoped.
         """
         ...

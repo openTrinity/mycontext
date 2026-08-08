@@ -5,6 +5,8 @@ Tests skip if `ladybug` is not installed.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 try:
@@ -154,6 +156,59 @@ def test_scan_edges_typed_filters_by_endpoint_type(tmp_path):
     # ABOUT fact→entity
     about = list(db.scan_edges_typed(["ABOUT"], source_type="fact", target_type="entity"))
     assert [g[:2] for g in about] == [("F1", "E1")]
+
+
+def test_scan_edges_for_nodes_uses_endpoint_lookups():
+    """Frontier reads do not delegate to the graph-wide typed scan."""
+    from kl_graph.storage.ladybug_graph import LadybugGraphDB
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = list(rows)
+
+        def has_next(self):
+            return bool(self.rows)
+
+        def get_next(self):
+            return self.rows.pop(0)
+
+    class _Connection:
+        edges = [("A", "B"), ("B", "C")]
+
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, cypher, parameters=None):
+            self.queries.append(cypher)
+            node_id = parameters["id"]
+            endpoint = 0 if "WHERE a.id" in cypher else 1
+            rows = [
+                (source, target, 0.9, "{}")
+                for source, target in self.edges
+                if (source, target)[endpoint] == node_id
+            ]
+            return _Result(rows)
+
+    db = object.__new__(LadybugGraphDB)
+    db._conn = _Connection()
+
+    with patch.object(
+        db, "scan_edges_typed", side_effect=AssertionError("full scan used")
+    ):
+        rows = list(
+            db.scan_edges_for_nodes(
+                ["ENTITY_SIMILAR"],
+                {"A", "B"},
+                source_type="entity",
+                target_type="entity",
+            )
+        )
+
+    assert [(source, target) for source, target, _props in rows] == [
+        ("A", "B"),
+        ("B", "C"),
+    ]
+    assert len(db._conn.queries) == 4
 
 
 @skip_no_ladybug

@@ -9,8 +9,11 @@ Tests verify:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from kl_graph.ingest.pipeline import IngestionPipeline, entity_id_from_name
 from kl_graph.ingest.structural_cache import StructuralCache
 from kl_graph.models.types import Edge, EdgeType
 
@@ -323,3 +326,46 @@ class TestFromStoreAndDeltaIntegration:
 
         assert cache.entity_to_chunks["entity-A"] == {"chunk-1", "chunk-2"}
         assert cache.entities_for_chunks({"chunk-1", "chunk-2"}) == {"entity-A"}
+
+
+def test_edge_checkpoint_applies_cache_delta_before_done() -> None:
+    """A completed edge checkpoint always includes its in-memory cache delta."""
+    cache = StructuralCache()
+    entity_id = entity_id_from_name("Alice")
+    pipeline = object.__new__(IngestionPipeline)
+    pipeline.structural_cache = cache
+    pipeline.extraction_results = {
+        "chunk-1": {"entities": [{"name": "Alice"}], "facts": []}
+    }
+    pipeline.all_entities = {entity_id: object()}
+    pipeline.messages = []
+    pipeline.store = MagicMock()
+    pipeline.store.count_edges_by_type.return_value = {"MENTIONS": 1}
+    pipeline.store.count_edges.return_value = 1
+    pipeline._ensure_extraction_loaded = MagicMock()
+    pipeline._ensure_entities_loaded = MagicMock()
+    pipeline._ensure_facts_loaded = MagicMock()
+    pipeline._persist_scopes = MagicMock(return_value=[])
+    chunk = SimpleNamespace(
+        id="chunk-1", timestamp=0, source_type="document", metadata={}
+    )
+    pipeline.all_chunks = MagicMock(return_value=[chunk])
+
+    done = {"value": False}
+
+    @contextmanager
+    def _step(_name):
+        guard = SimpleNamespace(skip=False)
+
+        def _done(**_meta):
+            assert cache.entities_for_chunks({"chunk-1"}) == {entity_id}
+            done["value"] = True
+
+        guard.done = _done
+        yield guard
+
+    pipeline.step = _step
+    pipeline._create_edges()
+
+    assert done["value"]
+    pipeline.store.insert_edges.assert_called_once()

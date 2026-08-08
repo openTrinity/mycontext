@@ -232,6 +232,7 @@ def run_incremental_improvement(
             )
 
     changed: set[str] = set()
+    changed_keys: set[tuple[str, str, int]] = set()
     stale_count = 0
 
     # Step 2a: Leiden — assign_communities, checkpoint the changed set.
@@ -239,7 +240,7 @@ def run_incremental_improvement(
         "improve.incremental_leiden", params=params
     )
     if not leiden_done:
-        changed = communities.assign_communities(
+        community_changes = communities.assign_communities(
             store,
             list(targets.entity_ids),
             list(targets.fact_ids),
@@ -247,11 +248,14 @@ def run_incremental_improvement(
             fact_resolutions=RESOLUTIONS,
             structural_cache=structural_cache,
         )
+        changed = set(community_changes)
+        changed_keys = set(getattr(community_changes, "community_keys", set()))
         if checkpoint is not None:
             checkpoint.mark_done(
                 "improve.incremental_leiden",
                 params=params,
                 changed_communities=",".join(sorted(changed)),
+                changed_community_keys=[list(key) for key in sorted(changed_keys)],
             )
     else:
         # Recover the changed-community set from the checkpoint meta so the
@@ -262,6 +266,15 @@ def run_incremental_improvement(
             )
             changed_str = entry.get("changed_communities", "")
             changed = set(changed_str.split(",")) if changed_str else set()
+            for raw_key in entry.get("changed_community_keys", []):
+                if not isinstance(raw_key, list) or len(raw_key) != 3:
+                    continue
+                try:
+                    changed_keys.add(
+                        (str(raw_key[0]), str(raw_key[1]), int(raw_key[2]))
+                    )
+                except (TypeError, ValueError):
+                    continue
 
     # Step 2b: Projection — rebuild COMM_MEMBER edges scoped to the changed
     # communities, then invalidate stale summaries.
@@ -269,9 +282,18 @@ def run_incremental_improvement(
         "improve.incremental_projection", params=params
     )
     if not projection_done:
-        # If changed is empty (e.g. Leiden reported nothing on a fresh run),
-        # pass None for a full rebuild — the self-healing fallback.
-        project_community_membership_edges(store, community_ids=changed or None)
+        # Exact assignment keys keep projection reads and writes scoped;
+        # an empty change set intentionally performs no projection work.
+        if changed_keys:
+            project_community_membership_edges(
+                store,
+                community_ids=changed,
+                community_keys=changed_keys,
+            )
+        elif changed:
+            # Compatibility path for strategies that return UUIDs but not
+            # reversible assignment keys. An empty change set is a no-op.
+            project_community_membership_edges(store, community_ids=changed)
         changed.update(_current_community_ids(store, targets))
         stale_count = _invalidate_summaries(
             store,

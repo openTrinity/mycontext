@@ -402,6 +402,38 @@ def test_scan_edges_for_nodes_empty_node_ids(tmp_path: pathlib.Path) -> None:
     store.close()
 
 
+def test_scan_edges_for_nodes_respects_portable_bind_limit(tmp_path: pathlib.Path) -> None:
+    """Large frontiers stay below 999 binds and dedupe cross-batch matches."""
+    store = _make_store(tmp_path)
+    store.insert_edges(
+        [
+            Edge(
+                source_type="entity",
+                source_id="n0000",
+                target_type="entity",
+                target_id="n0999",
+                edge_type=EdgeType.ENTITY_SIMILAR,
+                properties={"hybrid_score": 0.9},
+            )
+        ]
+    )
+    node_ids = {f"n{i:04d}" for i in range(1000)}
+
+    results = list(
+        store.scan_edges_for_nodes(
+            ["ENTITY_SIMILAR"],
+            node_ids,
+            source_type="entity",
+            target_type="entity",
+        )
+    )
+
+    assert [(source, target) for source, target, _props in results] == [
+        ("n0000", "n0999")
+    ]
+    store.close()
+
+
 # ── find_paths parity with SQLiteGraphDB ──────────────────────────────────────
 
 

@@ -669,13 +669,10 @@ class IngestionPipeline:
         self._graph_build_ran = False
         self._sources_loaded = False
         # In-memory structural relationship cache (Optimization 1). When set,
-        # improvement_targets uses O(K) cache lookups instead of O(E) edge
-        # scans. Deltas are applied by the runner after each batch's edges are
-        # created (see _batch_edges).
+        # improvement_targets uses cache lookups instead of graph-wide edge
+        # scans. Structural deltas are applied inside the edge checkpoint after
+        # persistence and before that checkpoint is marked complete.
         self.structural_cache = structural_cache
-        # Edges created in the most recent _create_edges call, captured so the
-        # runner can apply a structural-cache delta after the batch commits.
-        self._batch_edges: list[Edge] = []
 
         # Accept injected store (new interface) or legacy sqlite param for
         # backward compatibility (e.g. kl-server injecting a SQLiteStore directly).
@@ -2104,10 +2101,6 @@ class IngestionPipeline:
                 )
             edges = unique_edges
 
-            # Capture the final edge list for structural-cache delta application
-            # (the runner applies the delta after the batch commits to the store).
-            self._batch_edges = edges
-
             # Bulk insert
             # TODO: Edge weight adjustment — currently INSERT OR IGNORE silently
             # drops duplicate edges. An edge (e.g. chunk→entity MENTIONS) appearing
@@ -2122,6 +2115,12 @@ class IngestionPipeline:
             batch_size = 10000
             for i in range(0, len(edges), batch_size):
                 self.store.insert_edges(edges[i : i + batch_size])
+
+            # Keep this inside the checkpoint boundary. If persistence succeeds
+            # but cache application fails, the step remains incomplete and an
+            # idempotent retry reconstructs and reapplies the same delta.
+            if self.structural_cache is not None:
+                self.structural_cache.apply_delta(edges)
 
             print(f"  Edge counts by type: {self.store.count_edges_by_type()}")
             s.done(count=self.store.count_edges())

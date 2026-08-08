@@ -16,6 +16,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from kl_graph.ingest.structural_cache import StructuralCache
 from kl_graph.ingest.strategies.community import DynamicFrontierLeiden
 from kl_graph.storage.sqlite_store import SQLiteStore
 
@@ -175,7 +176,6 @@ def test_new_node_inherits_frontier_community(tmp_path) -> None:
     store.sql_conn.execute("UPDATE entities SET community_L0 = 7 WHERE id = 'existing'")
     store.sql_conn.execute("UPDATE entities SET community_L0 = 99 WHERE id = 'isolated'")
     store.sql_conn.commit()
-
     strategy = DynamicFrontierLeiden()
     fake_leiden = _make_fake_leiden([0, 0])
 
@@ -193,6 +193,121 @@ def test_new_node_inherits_frontier_community(tmp_path) -> None:
     assert assignments["existing"] == 7
     assert assignments["new"] == 7
     assert assignments["isolated"] == 99
+    store.close()
+
+
+def test_structural_only_neighbor_enters_frontier(tmp_path) -> None:
+    """A co-mention-only neighbor participates in incremental Leiden."""
+    store = SQLiteStore(tmp_path / "graph.db")
+    store.sql_conn.execute("ALTER TABLE entities ADD COLUMN community_L0 INTEGER")
+    _add_entity(store.sql_conn, "existing")
+    _add_entity(store.sql_conn, "new")
+    for chunk_id in ("c1", "c2"):
+        _add_edge(store.sql_conn, "chunk", chunk_id, "entity", "existing", "MENTIONS")
+        _add_edge(store.sql_conn, "chunk", chunk_id, "entity", "new", "MENTIONS")
+    store.sql_conn.execute(
+        "UPDATE entities SET community_L0 = 7 WHERE id = 'existing'"
+    )
+    store.sql_conn.commit()
+    structural_cache = StructuralCache.from_store(store)
+
+    strategy = DynamicFrontierLeiden()
+    fake_leiden = _make_fake_leiden([0, 0])
+    with patch.dict(sys.modules, {"leidenalg": fake_leiden, "igraph": _FakeIgModule()}):
+        changes = strategy.assign_communities(
+            store,
+            ["new"],
+            [],
+            entity_resolutions={"L0": 0.3},
+            fact_resolutions={},
+            structural_cache=structural_cache,
+        )
+
+    assigned = store.sql_conn.execute(
+        "SELECT community_L0 FROM entities WHERE id = 'new'"
+    ).fetchone()[0]
+    assert assigned == 7
+    assert ("entity", "L0", 7) in changes.community_keys
+    store.close()
+
+
+def test_frontier_includes_edges_between_discovered_neighbors(tmp_path) -> None:
+    """The final frontier graph is induced, not just a seed-edge star."""
+    store = SQLiteStore(tmp_path / "graph.db")
+    store.sql_conn.execute("ALTER TABLE entities ADD COLUMN community_L0 INTEGER")
+    for entity_id in ("a", "b", "new"):
+        _add_entity(store.sql_conn, entity_id)
+    for source_id, target_id in (("new", "a"), ("new", "b"), ("a", "b")):
+        _add_edge(
+            store.sql_conn,
+            "entity",
+            source_id,
+            "entity",
+            target_id,
+            "ENTITY_SIMILAR",
+            {"hybrid_score": 0.9},
+        )
+    store.sql_conn.commit()
+
+    captured_graphs: list[_FakeGraph] = []
+
+    def _find_partition(graph, _partition_type, **kwargs):
+        captured_graphs.append(graph)
+        return SimpleNamespace(membership=[0, 0, 0])
+
+    fake_leiden = SimpleNamespace(
+        RBConfigurationVertexPartition=object(), find_partition=_find_partition
+    )
+    with patch.dict(sys.modules, {"leidenalg": fake_leiden, "igraph": _FakeIgModule()}):
+        DynamicFrontierLeiden().assign_communities(
+            store,
+            ["new"],
+            [],
+            entity_resolutions={"L0": 0.3},
+            fact_resolutions={},
+        )
+
+    assert len(captured_graphs) == 1
+    assert len(captured_graphs[0]._edges) == 3
+    store.close()
+
+
+def test_new_community_id_is_unique_outside_frontier(tmp_path) -> None:
+    """A new-only cluster cannot reuse an ID held outside the frontier."""
+    store = SQLiteStore(tmp_path / "graph.db")
+    store.sql_conn.execute("ALTER TABLE entities ADD COLUMN community_L0 INTEGER")
+    for entity_id in ("new-a", "new-b", "outside"):
+        _add_entity(store.sql_conn, entity_id)
+    _add_edge(
+        store.sql_conn,
+        "entity",
+        "new-a",
+        "entity",
+        "new-b",
+        "ENTITY_SIMILAR",
+        {"hybrid_score": 0.9},
+    )
+    store.sql_conn.execute(
+        "UPDATE entities SET community_L0 = 0 WHERE id = 'outside'"
+    )
+    store.sql_conn.commit()
+
+    fake_leiden = _make_fake_leiden([0, 0])
+    with patch.dict(sys.modules, {"leidenalg": fake_leiden, "igraph": _FakeIgModule()}):
+        DynamicFrontierLeiden().assign_communities(
+            store,
+            ["new-a", "new-b"],
+            [],
+            entity_resolutions={"L0": 0.3},
+            fact_resolutions={},
+        )
+
+    rows = store.sql_conn.execute(
+        "SELECT id, community_L0 FROM entities"
+    ).fetchall()
+    assignments = {row[0]: row[1] for row in rows}
+    assert assignments == {"new-a": 1, "new-b": 1, "outside": 0}
+    assert store.get_meta("community.next_id.entity.L0") == "2"
     store.close()
 
 

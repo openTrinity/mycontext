@@ -526,9 +526,9 @@ class LadybugStore(KnowledgeStore):
     ) -> Iterator[tuple[str, str, dict]]:
         """Stream ``(source_id, target_id, properties)`` from LadybugDB edges touching ``node_ids``.
 
-        Delegates to the graph's frontier-scoped scan. See the ABC for the
-        contract and :meth:`LadybugGraphDB.scan_edges_for_nodes` for the
-        implementation (Python-side filter over ``scan_edges_typed``).
+        Delegates to the graph's indexed per-endpoint lookups. See the ABC for
+        the contract and :meth:`LadybugGraphDB.scan_edges_for_nodes` for the
+        equality-query implementation.
         """
         yield from self._graph.scan_edges_for_nodes(
             edge_types, node_ids, source_type=source_type, target_type=target_type

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from kl_graph.models.types import community_id_from
@@ -24,6 +25,27 @@ logger = logging.getLogger(__name__)
 
 # Leiden iterations for incremental run (fewer than full rebuild for speed).
 _N_ITERATIONS = 3
+_SQL_IN_BATCH = 500
+_COMMUNITY_NEXT_ID_META_PREFIX = "community.next_id"
+
+CommunityKey = tuple[str, str, int]
+
+
+class CommunityChanges(set[str]):
+    """Changed community UUIDs plus their reversible assignment identities."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.community_keys: set[CommunityKey] = set()
+
+    def record(self, node_type: str, level: str, cluster_id: int) -> None:
+        key = (node_type, level, cluster_id)
+        self.community_keys.add(key)
+        self.add(community_id_from(*key))
+
+    def merge(self, other: CommunityChanges) -> None:
+        self.update(other)
+        self.community_keys.update(other.community_keys)
 
 
 class DynamicFrontierLeiden:
@@ -52,12 +74,11 @@ class DynamicFrontierLeiden:
         """Assign community memberships incrementally using frontier Leiden.
 
         Internal algorithm per (node_type, level):
-        1. Query similarity edges (ENTITY_SIMILAR/FACT_SIMILAR) touching the
-           new node IDs only — O(frontier) via ``scan_edges_for_nodes``.
-        2. Build frontier node set = new IDs + similarity-edge endpoints.
-        3. Build a small igraph from the frontier only (no full-graph load):
-           similarity edges + co-mention (entities) or shared-entity (facts)
-           projection computed among frontier nodes only.
+        1. Discover similarity and structural-projection neighbors of the
+           affected node IDs.
+        2. Query all similarity edges induced by that complete one-hop frontier.
+        3. Build a small igraph from the induced similarity, co-mention, and
+           shared-entity edges without loading the whole graph.
         4. Load existing community_L{level} assignments for frontier nodes
            only (WHERE id IN (...) — O(K) via primary-key index).
         5. Run leidenalg.find_partition(graph, RBConfigurationVertexPartition,
@@ -73,16 +94,16 @@ class DynamicFrontierLeiden:
             new_fact_ids: Fact IDs from this incremental run.
             entity_resolutions: Dict mapping level name to resolution parameter for entities.
             fact_resolutions: Dict mapping level name to resolution parameter for facts.
-            structural_cache: Optional StructuralCache for O(K) co-mention/shared-entity
-                computation among frontier nodes without scanning all structural edges.
+            structural_cache: Optional StructuralCache that avoids graph-wide
+                structural scans; work remains proportional to incident sets.
 
         Returns:
             Set of community UUIDs whose membership changed.
         """
-        changed_communities: set[str] = set()
+        changed_communities = CommunityChanges()
 
         if new_entity_ids:
-            changed_communities.update(
+            changed_communities.merge(
                 self._process_node_type(
                     store, "entity", new_entity_ids, entity_resolutions,
                     structural_cache=structural_cache,
@@ -90,7 +111,7 @@ class DynamicFrontierLeiden:
             )
 
         if new_fact_ids:
-            changed_communities.update(
+            changed_communities.merge(
                 self._process_node_type(
                     store, "fact", new_fact_ids, fact_resolutions,
                     structural_cache=structural_cache,
@@ -109,54 +130,72 @@ class DynamicFrontierLeiden:
         resolutions: dict[str, float],
         *,
         structural_cache: StructuralCache | None = None,
-    ) -> set[str]:
+    ) -> CommunityChanges:
         """Run frontier Leiden for one node type across all levels.
 
-        Builds a frontier-only igraph (new IDs + similarity-edge neighbors)
-        instead of loading all nodes and extracting an induced subgraph.
-        This eliminates the O(V+E) full-graph construction.
+        Builds an induced one-hop igraph (affected IDs plus similarity and
+        structural neighbors) instead of loading all graph nodes and edges.
+        This eliminates recurring O(V+E) full-graph construction; legacy
+        assignment indexes are built once on first use.
 
         Args:
             store: KnowledgeStore for graph reads and community column updates.
             node_type: "entity" or "fact".
             new_ids: IDs of newly ingested nodes.
             resolutions: Level-to-resolution parameter mapping.
-            structural_cache: Optional StructuralCache for O(K) structural edge
-                computation among frontier nodes.
+            structural_cache: Optional StructuralCache for degree-scoped
+                structural edge computation among frontier nodes.
 
         Returns:
             Set of changed community UUIDs across all levels.
         """
         import leidenalg
 
-        changed: set[str] = set()
+        changed = CommunityChanges()
         table = "entities" if node_type == "entity" else "facts"
         conn = store.sql_conn
 
-        if not new_ids:
+        seed_ids = self._existing_node_ids(conn, table, set(new_ids))
+        if not seed_ids:
             return changed
 
-        # 1. Query similarity edges for new node IDs only — O(frontier)
+        # 1. Discover similarity neighbors of the affected IDs.
         sim_edge_type = "ENTITY_SIMILAR" if node_type == "entity" else "FACT_SIMILAR"
-        sim_edges = list(
+        seed_sim_edges = list(
             store.scan_edges_for_nodes(
                 [sim_edge_type],
-                set(new_ids),
+                seed_ids,
                 source_type=node_type,
                 target_type=node_type,
             )
         )
 
-        # 2. Build frontier node set from sim edges + new IDs
-        frontier_set: set[str] = set(new_ids)
-        for src, tgt, _ in sim_edges:
+        # 2. Add structural-projection neighbors to complete the one-hop set.
+        frontier_set = set(seed_ids)
+        for src, tgt, _ in seed_sim_edges:
             frontier_set.add(src)
             frontier_set.add(tgt)
+        frontier_set.update(
+            self._structural_neighbors(
+                store, node_type, seed_ids, structural_cache=structural_cache
+            )
+        )
+        frontier_set = self._existing_node_ids(conn, table, frontier_set)
 
-        if not frontier_set:
-            return changed
+        # Fetch every similarity edge induced by the completed frontier. The
+        # seed query alone omits edges between two discovered neighbors.
+        sim_edges = self._dedupe_edges(
+            edge
+            for edge in store.scan_edges_for_nodes(
+                [sim_edge_type],
+                frontier_set,
+                source_type=node_type,
+                target_type=node_type,
+            )
+            if edge[0] in frontier_set and edge[1] in frontier_set
+        )
 
-        # 3. Build frontier-only igraph
+        # 3. Build the graph induced by the complete frontier.
         frontier_list = sorted(frontier_set)
         id_to_idx: dict[str, int] = {
             nid: i for i, nid in enumerate(frontier_list)
@@ -198,16 +237,10 @@ class DynamicFrontierLeiden:
                 )
                 continue
 
-            # Load assignments ONLY for frontier nodes (O(K) via primary key)
-            placeholders = ",".join("?" for _ in frontier_list)
-            assign_rows = conn.execute(
-                f"SELECT id, {col} FROM {table} WHERE id IN ({placeholders})",
-                frontier_list,
-            ).fetchall()
-            existing_assignment: dict[str, int] = {}
-            for row in assign_rows:
-                if row[1] is not None:
-                    existing_assignment[row[0]] = int(row[1])
+            self._ensure_community_index(conn, table, col)
+            existing_assignment = self._load_assignments(
+                conn, table, col, frontier_list
+            )
 
             # ``leidenalg`` requires dense integer membership labels. Persisted
             # community IDs can be sparse, so map them to dense labels and give
@@ -245,28 +278,44 @@ class DynamicFrontierLeiden:
                 )
                 continue
 
-            # Map Leiden's dense output labels back onto stable persisted IDs.
-            # A cluster containing existing nodes inherits their most common ID;
-            # a new-only cluster receives the next unused persisted ID.
+            # Map dense output labels onto globally unique persisted IDs. An
+            # existing ID may be inherited by only one output cluster.
             dense_members: dict[int, list[int]] = defaultdict(list)
             for idx, dense_id in enumerate(partition.membership):
                 dense_members[dense_id].append(idx)
-            next_persisted = max(persisted_ids, default=-1) + 1
-            persisted_for_dense: dict[int, int] = {}
+
+            candidate_links: list[tuple[int, int, int]] = []
             for dense_id, indices in dense_members.items():
                 candidates = Counter(
                     existing_assignment[frontier_list[idx]]
                     for idx in indices
                     if frontier_list[idx] in existing_assignment
                 )
-                if candidates:
-                    persisted_for_dense[dense_id] = min(
-                        candidates,
-                        key=lambda cid: (-candidates[cid], cid),
-                    )
-                else:
-                    persisted_for_dense[dense_id] = next_persisted
-                    next_persisted += 1
+                candidate_links.extend(
+                    (-count, community_id, dense_id)
+                    for community_id, count in candidates.items()
+                )
+
+            persisted_for_dense: dict[int, int] = {}
+            claimed_ids: set[int] = set()
+            for _negative_count, community_id, dense_id in sorted(candidate_links):
+                if dense_id in persisted_for_dense or community_id in claimed_ids:
+                    continue
+                persisted_for_dense[dense_id] = community_id
+                claimed_ids.add(community_id)
+
+            new_dense_ids = sorted(set(dense_members) - set(persisted_for_dense))
+            first_reserved = self._reserve_community_ids(
+                store,
+                conn,
+                table,
+                col,
+                node_type,
+                level,
+                len(new_dense_ids),
+            )
+            for offset, dense_id in enumerate(new_dense_ids):
+                persisted_for_dense[dense_id] = first_reserved + offset
 
             new_assignment = [
                 persisted_for_dense[dense_id]
@@ -282,8 +331,8 @@ class DynamicFrontierLeiden:
                     changed_updates.append((new_cid, node_id))
                     # Record both old and new community as changed
                     if old_cid >= 0:
-                        changed.add(community_id_from(node_type, level, old_cid))
-                    changed.add(community_id_from(node_type, level, new_cid))
+                        changed.record(node_type, level, old_cid)
+                    changed.record(node_type, level, new_cid)
 
             if changed_updates:
                 conn.executemany(
@@ -301,6 +350,197 @@ class DynamicFrontierLeiden:
         return changed
 
     # ── Frontier-only edge construction ────────────────────────────────────
+
+    @staticmethod
+    def _existing_node_ids(conn, table: str, node_ids: set[str]) -> set[str]:
+        """Return only requested IDs that exist, using bounded SQL batches."""
+
+        found: set[str] = set()
+        ordered = sorted(node_ids)
+        for start in range(0, len(ordered), _SQL_IN_BATCH):
+            batch = ordered[start : start + _SQL_IN_BATCH]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT id FROM {table} WHERE id IN ({placeholders})", batch
+            ).fetchall()
+            found.update(str(row[0]) for row in rows)
+        return found
+
+    @staticmethod
+    def _load_assignments(
+        conn, table: str, column: str, node_ids: list[str]
+    ) -> dict[str, int]:
+        """Load frontier assignments without exceeding SQLite bind limits."""
+
+        assignments: dict[str, int] = {}
+        for start in range(0, len(node_ids), _SQL_IN_BATCH):
+            batch = node_ids[start : start + _SQL_IN_BATCH]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT id, {column} FROM {table} WHERE id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            assignments.update(
+                (str(node_id), int(cluster_id))
+                for node_id, cluster_id in rows
+                if cluster_id is not None
+            )
+        return assignments
+
+    @staticmethod
+    def _ensure_community_index(conn, table: str, column: str) -> None:
+        """Create the assignment index needed by scoped projection and MAX."""
+
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_{column} ON {table}({column})"
+        )
+        conn.commit()
+
+    @staticmethod
+    def _reserve_community_ids(
+        store: KnowledgeStore,
+        conn,
+        table: str,
+        column: str,
+        node_type: str,
+        level: str,
+        count: int,
+    ) -> int:
+        """Reserve globally unused IDs before writing any new assignments."""
+
+        if count <= 0:
+            return 0
+        meta_key = f"{_COMMUNITY_NEXT_ID_META_PREFIX}.{node_type}.{level}"
+        raw_next = store.get_meta(meta_key)
+        try:
+            next_id = int(raw_next) if raw_next is not None else -1
+        except (TypeError, ValueError):
+            next_id = -1
+        if next_id < 0:
+            row = conn.execute(f"SELECT MAX({column}) FROM {table}").fetchone()
+            next_id = int(row[0]) + 1 if row and row[0] is not None else 0
+
+        # Reserve first. A crash can leave a harmless gap but cannot cause a
+        # retry to reuse an ID that may already have been committed.
+        store.set_meta(meta_key, str(next_id + count))
+        return next_id
+
+    @staticmethod
+    def _dedupe_edges(
+        edges: Iterable[tuple[str, str, dict]],
+    ) -> list[tuple[str, str, dict]]:
+        """Remove duplicates produced when both endpoints match query batches."""
+
+        unique: list[tuple[str, str, dict]] = []
+        seen: set[tuple[str, str]] = set()
+        for src, tgt, props in edges:
+            key = (src, tgt)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((src, tgt, props))
+        return unique
+
+    def _structural_neighbors(
+        self,
+        store: KnowledgeStore,
+        node_type: str,
+        seed_ids: set[str],
+        *,
+        structural_cache: StructuralCache | None,
+    ) -> set[str]:
+        """Return structural-projection neighbors of the affected seed nodes."""
+
+        if node_type == "entity":
+            entity_chunks: dict[str, set[str]] = defaultdict(set)
+            chunk_entities: dict[str, set[str]] = defaultdict(set)
+            if structural_cache is not None:
+                for entity_id in seed_ids:
+                    entity_chunks[entity_id].update(
+                        structural_cache.entity_to_chunks.get(entity_id, set())
+                    )
+                relevant_chunks = (
+                    set().union(*entity_chunks.values()) if entity_chunks else set()
+                )
+                for chunk_id in relevant_chunks:
+                    chunk_entities[chunk_id].update(
+                        structural_cache.chunk_to_entities.get(chunk_id, set())
+                    )
+            else:
+                for chunk_id, entity_id, _props in store.scan_edges_for_nodes(
+                    ["MENTIONS", "AUTHORED_BY"],
+                    seed_ids,
+                    source_type="chunk",
+                    target_type="entity",
+                ):
+                    if entity_id in seed_ids:
+                        entity_chunks[entity_id].add(chunk_id)
+                relevant_chunks = (
+                    set().union(*entity_chunks.values()) if entity_chunks else set()
+                )
+                for chunk_id, entity_id, _props in store.scan_edges_for_nodes(
+                    ["MENTIONS", "AUTHORED_BY"],
+                    relevant_chunks,
+                    source_type="chunk",
+                    target_type="entity",
+                ):
+                    if chunk_id in relevant_chunks:
+                        chunk_entities[chunk_id].add(entity_id)
+
+            neighbors: set[str] = set()
+            for entity_id, chunk_ids in entity_chunks.items():
+                counts: Counter[str] = Counter()
+                for chunk_id in chunk_ids:
+                    counts.update(chunk_entities.get(chunk_id, set()))
+                neighbors.update(
+                    other_id
+                    for other_id, shared_count in counts.items()
+                    if other_id != entity_id and shared_count >= 2
+                )
+            return neighbors
+
+        fact_entities: dict[str, set[str]] = defaultdict(set)
+        entity_facts: dict[str, set[str]] = defaultdict(set)
+        if structural_cache is not None:
+            for fact_id in seed_ids:
+                fact_entities[fact_id].update(
+                    structural_cache.fact_to_entities.get(fact_id, set())
+                )
+            relevant_entities = (
+                set().union(*fact_entities.values()) if fact_entities else set()
+            )
+            for entity_id in relevant_entities:
+                entity_facts[entity_id].update(
+                    structural_cache.entity_to_facts.get(entity_id, set())
+                )
+        else:
+            for fact_id, entity_id, _props in store.scan_edges_for_nodes(
+                ["ABOUT"],
+                seed_ids,
+                source_type="fact",
+                target_type="entity",
+            ):
+                if fact_id in seed_ids:
+                    fact_entities[fact_id].add(entity_id)
+            relevant_entities = (
+                set().union(*fact_entities.values()) if fact_entities else set()
+            )
+            for fact_id, entity_id, _props in store.scan_edges_for_nodes(
+                ["ABOUT"],
+                relevant_entities,
+                source_type="fact",
+                target_type="entity",
+            ):
+                if entity_id in relevant_entities:
+                    entity_facts[entity_id].add(fact_id)
+
+        neighbors: set[str] = set()
+        for fact_id, entity_ids in fact_entities.items():
+            for entity_id in entity_ids:
+                facts = entity_facts.get(entity_id, set())
+                if len(facts) <= 200:
+                    neighbors.update(facts - {fact_id})
+        return neighbors
 
     def _build_frontier_edges(
         self,
@@ -323,7 +563,7 @@ class DynamicFrontierLeiden:
             frontier_ids: Sorted list of frontier node IDs.
             id_to_idx: Mapping from frontier node ID to igraph vertex index.
             sim_edges: Pre-queried similarity edges touching the frontier.
-            structural_cache: Optional cache for O(K) structural computation.
+            structural_cache: Optional cache for degree-scoped structural work.
 
         Returns:
             ``(edge_list, weights)`` — may be empty.
@@ -363,15 +603,15 @@ class DynamicFrontierLeiden:
         """Add co-mention edges among frontier entities (>= 2 shared chunks).
 
         If ``structural_cache`` is provided, uses the in-memory entity↔chunk
-        mappings for O(K) computation. Otherwise falls back to
+        mappings for incident-set computation. Otherwise falls back to
         ``scan_edges_for_nodes`` which loads only MENTIONS/AUTHORED_BY edges
-        touching frontier entities (still O(frontier) on the SQLite backend).
+        touching frontier entities through indexed endpoint lookups.
         """
         frontier_set = set(frontier_ids)
         chunk_entities: dict[str, set[str]] = defaultdict(set)
 
         if structural_cache is not None:
-            # O(K): for each frontier entity, walk its chunks and collect
+            # Walk each frontier entity's incident chunks and collect
             # frontier co-mentioners from the cache.
             for eid in frontier_ids:
                 chunks = structural_cache.entity_to_chunks.get(eid, set())
@@ -420,7 +660,7 @@ class DynamicFrontierLeiden:
         """Add shared-entity projection edges among frontier facts.
 
         If ``structural_cache`` is provided, uses the in-memory fact↔entity
-        mappings for O(K) computation, including the >200-facts hub skip.
+        mappings for incident-set computation, including the >200-facts hub skip.
         Otherwise falls back to ``scan_edges_for_nodes`` which loads only
         ABOUT edges touching frontier facts.
         """
@@ -429,7 +669,7 @@ class DynamicFrontierLeiden:
         max_facts_per_entity = 200
 
         if structural_cache is not None:
-            # O(K): for each frontier fact, walk its entities and build the
+            # Walk each frontier fact's entities and build the
             # entity→frontier-facts map, applying the hub-entity skip using
             # the cache's total fact count per entity.
             for fid in frontier_ids:
@@ -440,10 +680,10 @@ class DynamicFrontierLeiden:
                         continue
                     entity_to_facts.setdefault(eid, []).append(fid)
         else:
-            # O(frontier): scan only ABOUT edges touching frontier facts.
-            # Note: the >200 hub check is approximated using frontier fact
-            # counts per entity (the true total requires scanning all ABOUT
-            # edges). For small incremental frontiers this is adequate.
+            # First find the entities attached to frontier facts, then query all
+            # facts attached to only those entities. This preserves the full
+            # projection's >200-fact hub rule without a graph-wide scan.
+            relevant_entities: set[str] = set()
             for fact_id, entity_id, _props in store.scan_edges_for_nodes(
                 ["ABOUT"],
                 frontier_set,
@@ -451,6 +691,14 @@ class DynamicFrontierLeiden:
                 target_type="entity",
             ):
                 if fact_id in frontier_set:
+                    relevant_entities.add(entity_id)
+            for fact_id, entity_id, _props in store.scan_edges_for_nodes(
+                ["ABOUT"],
+                relevant_entities,
+                source_type="fact",
+                target_type="entity",
+            ):
+                if entity_id in relevant_entities:
                     entity_to_facts.setdefault(entity_id, []).append(fact_id)
 
         projection_counts: dict[tuple[str, str], int] = defaultdict(int)

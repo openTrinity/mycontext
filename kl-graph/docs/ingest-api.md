@@ -126,6 +126,12 @@ Variables used below:
 - `T`: extraction input tokens;
 - `K_e`, `K_f`: affected entities and new facts in the batch;
 - `V`, `V_e`, `E`: total graph nodes, entities, and edges;
+- `S`: structural edges held by the server-level cache;
+- `P`, `E_P`: nodes and induced edges in the one-hop community frontier;
+- `I_K`: structural incidences traversed for affected/frontier nodes;
+- `Q_P`: structural candidate pairs enumerated inside the frontier (for example,
+  the sum of entity pairs per shared chunk);
+- `C`: membership rows in communities whose assignments changed;
 - `D`: embedding vector width;
 - `F`: total facts in the graph;
 - `A`: the ANN result limit per affected node (currently 50).
@@ -146,11 +152,11 @@ RAM, disk I/O, and graph/Qdrant operations.
 | B4. Build facts | Batch | Light–medium | Linear normalization, deterministic IDs, and inserts. No separate LLM call beyond extraction. |
 | B5. Embed entities and facts | New graph nodes | Heavy | Remote embedding work approximately `O((K_e + K_f) × D)`. Existing deterministic vector IDs are skipped. |
 | B6. Build structural edges | Batch | Medium | Local work linear in extracted mentions/facts plus chat temporal/reply relationships. Graph writes can dominate for edge-rich batches. |
-| I1. Recover improvement targets | Batch | Light | Reverse lookups on StructuralCache (`chunk→entities`, `fact→entities`), approximately `O(K)`. Falls back to `O(E)` store scan when cache is absent (e.g. standalone scripts). |
-| I2. Incremental ANN similarity | Affected nodes + graph | Medium | Bounded ANN search and vector retrieval, roughly `O((K_e + K_f) × A)`. Structural features for hybrid scoring served from StructuralCache (no store scan). |
+| I1. Recover improvement targets | Batch | Light | Reverse cache lookups over admitted chunk/fact IDs, `O(N + output IDs)`. Without the server cache, standalone callers fall back to `O(E)` structural scans. |
+| I2. Incremental ANN similarity | Affected nodes + graph | Medium | Bounded ANN search and vector retrieval, roughly `O((K_e + K_f) × A)`. Hybrid structural scoring is degree/set-size sensitive and adds work proportional to candidate sets traversed. |
 | I3. Intra-batch similarity | Affected nodes | Medium–very heavy | Dense cosine matrices: `O((K_e² + K_f²) × D)` compute and `O(K_e² + K_f²)` score memory. Large backfills are the risk case. |
-| I4. Incremental communities | Frontier only | Medium | Queries only edges touching new nodes via `scan_edges_for_nodes` (`O(frontier edges)`), builds frontier-only igraph, runs four Leiden resolutions (3 iterations each). No full graph load. |
-| I5. Community projection | Changed communities | Light | Scoped rebuild: deletes and rebuilds `COMM_MEMBER` edges only for communities whose membership changed, approximately `O(changed × avg_community_size)`. Full `O(V)` rebuild only on first seed or `full` mode. |
+| I4. Incremental communities | One-hop frontier | Medium | Discovers structural neighbors in `O(K + I_K)`, performs indexed similarity lookups in `O(P + incident edges)`, enumerates `Q_P` structural pairs, then runs four 3-iteration Leiden resolutions over `P` nodes/`E_P` edges. Dense shared chunks/entities can dominate without a graph-wide scan. |
+| I5. Community projection | Changed communities | Light | Indexed reads plus scoped `COMM_MEMBER` replacement, `O(C)` rows. A legacy database pays a one-time `O(V)` assignment-index build; UUID-only custom strategies retain an `O(V)` compatibility fallback. Empty-change runs do no projection. |
 | I6. Summary invalidation | Touched communities | Light | Marks affected stored summaries stale using local metadata updates. It does not regenerate summaries or call an LLM. |
 | F1. Full fact similarity | Whole graph | Very heavy | Loads all fact vectors and performs chunked all-pairs cosine: `O(F² × D)` compute and `O(F × D)` resident vectors. The implementation estimates about 1.1 GB for 17k facts at 4096 dimensions. |
 | F2. Full entity similarity | Whole graph | Heavy | Graph-wide all-pairs vector prefilter, approximately `O(V_e² × D)`, plus structural hybrid scoring for retained candidates. |
@@ -162,13 +168,15 @@ RAM, disk I/O, and graph/Qdrant operations.
 
 - For ordinary incremental requests, extraction LLM calls are normally the
   largest external cost; chunk and graph embeddings are second.
-- Incremental improvement is `O(K + frontier)`: a server-level
-  `StructuralCache` eliminates structural-edge rescans, `scan_edges_for_nodes`
-  eliminates full-graph loading for Leiden, and scoped COMM_MEMBER projection
-  avoids the `O(V)` delete-rebuild cycle.
-- The only remaining graph-wide cost is server finalization (`O(E)` adjacency
-  hot-swap), which is a local in-memory scan independent of the improvement
-  pipeline.
+- Excluding ANN and dense cosine work shown in I2/I3, local incremental graph
+  work is approximately `O(K + I_K + P + Q_P + E_P + C)`. High-degree entities
+  can make a small batch locally expensive without causing a whole-graph scan.
+- The structural cache costs `O(S)` startup reads and resident memory. Batch
+  deltas are applied inside the durable edge-construction checkpoint.
+- After the one-time legacy assignment-index build, the recurring graph-wide
+  operation is server finalization (`O(E)` adjacency hot-swap). Standalone runs
+  without the cache and UUID-only custom strategies retain compatibility
+  fallbacks documented above.
 - Full improvement is the primary CPU/RAM risk. Do not select `full` merely
   because a batch is large; use it when global re-clustering is intentionally
   required.
