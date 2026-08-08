@@ -53,6 +53,16 @@ export interface ChannelPickerProps {
   ariaLabel: string
   /** 左侧前缀文字（如「检索范围」）。不给则只显示当前值。 */
   prefix?: string
+  /**
+   * 浮层往哪边开。**默认往下**（`"bottom"`）。
+   *
+   * ★★ 必须显式传：`DropdownMenu` 自己的默认是 `"top"`（那是给页面**底部**
+   * 的触发器准备的），而这个 picker 全部在页面上半部 —— 不传就会向上开，
+   * 表现是"菜单往标题栏方向飞出去"。
+   *
+   * 只有触发器贴着视口底部时才该给 `"top"`。
+   */
+  side?: "top" | "bottom"
   className?: string
 }
 
@@ -79,6 +89,7 @@ export function ChannelPicker({
   onChange,
   ariaLabel,
   prefix,
+  side = "bottom",
   className,
 }: ChannelPickerProps) {
   if (options[0] === undefined) return null
@@ -107,7 +118,8 @@ export function ChannelPicker({
     <span className={cn("inline-flex items-center gap-1.5", className)}>
       {prefixNode}
       <DropdownMenu
-        align="end"
+        align="start"
+        side={side}
         trigger={({ "aria-expanded": expanded, ...props }) => (
           <button
             {...props}
@@ -127,8 +139,13 @@ export function ChannelPicker({
           >
             <ChannelFace option={active} />
             {/*
-              chevron 而不是实心三角：后者在这个尺寸下是一个黑点。
-              `rotate` 跟随展开态 —— 那是"这个面板是我打开的"最便宜的反馈。
+              chevron 而不是实心三角（后者在这个尺寸下是一个黑点），
+              `rotate` 跟随展开态 —— "这个面板是我打开的"最便宜的反馈。
+
+              ★ 路径要**在 viewBox 里居中**，不然看着像朝上的。
+              前一版是 `M3 4.5 6 7.5 9 4.5`：y 只落在 4.5~7.5，也就是在 12px
+              的框里画一个 3px 高的 V —— 视觉重心明显偏上，读起来是个上箭头。
+              现在 y 走 4.5→8（高度 3.5、中心 6.25≈框心），且横向留 2.5 边距。
             */}
             <svg
               viewBox="0 0 12 12"
@@ -140,10 +157,10 @@ export function ChannelPicker({
               aria-hidden="true"
             >
               <path
-                d="M3 4.5 6 7.5 9 4.5"
+                d="M2.5 4.75 6 8.25 9.5 4.75"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="1.4"
+                strokeWidth="1.5"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />

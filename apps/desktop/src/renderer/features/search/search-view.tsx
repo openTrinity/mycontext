@@ -76,19 +76,6 @@ export function SearchView({
         <GreetingName name={userName} />
       </WelcomeHeader>
 
-      {/*
-        检索范围 —— 下拉而不是平铺（见 `ChannelPicker` 文件头）。
-        ★ 这里保留「混合」一项：搜索**可以**跨渠道找一件事（每条结果带来源
-        徽章，不会混），而知识图谱展示不行（同一个人在两渠道没有安全的 id 映射）。
-      */}
-      <ChannelPicker
-        options={scopes.map((option) => ({ id: option.id, label: option.label }))}
-        activeId={activeScope}
-        onChange={setScope}
-        ariaLabel={t("scope.label")}
-        prefix={t("scope.label")}
-      />
-
       <Composer
         variant="hero"
         value={draft}
@@ -99,6 +86,27 @@ export function SearchView({
         attachLabel={t("composer.attach")}
         sendLabel={t("composer.send")}
         stopLabel={t("composer.stop")}
+        /**
+         * ★★ 检索范围放**输入框内的底部工具条**（与发送按钮同一行），
+         * 而不是浮在输入框上方。
+         *
+         * 上一版在上方独占一行，读起来像"页面的一个设置"；而它其实是
+         * **这一次提问的参数** —— 与"发送"同属一个动作。放进输入框之后，
+         * "我在问什么范围 → 我按发送"在视线上是连着的一件事，
+         * 这也是多数 AI 产品把模型/工具选择器放在输入框里的理由。
+         *
+         * `toolbarExtra` 是 `Composer` 已有的槽（左侧，附件按钮旁），
+         * 所以不用改设计系统。
+         */
+        toolbarExtra={
+          <ChannelPicker
+            options={scopes.map((option) => ({ id: option.id, label: option.label }))}
+            activeId={activeScope}
+            onChange={setScope}
+            ariaLabel={t("scope.label")}
+            prefix={t("scope.label")}
+          />
+        }
       />
 
       {degradedNotice !== null && degradedNotice !== undefined && (

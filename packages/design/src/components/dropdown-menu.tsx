@@ -103,6 +103,52 @@ export function DropdownMenu({
     return () => document.removeEventListener("pointerdown", onPointerDown)
   }, [open])
 
+  /**
+   * ★★ 浮层坐标。**`fixed` 定位挂在视口坐标系上**，而不是 `absolute` 贴容器。
+   *
+   * ## 为什么必须这样
+   *
+   * `absolute` 的浮层会被任何 `overflow: hidden` 的祖先裁掉。实测：搜索的
+   * 输入框（Composer）外框正是 `overflow: hidden`，而菜单展开后底部 69px
+   * 直接被切掉 —— 看起来就是"输入框渲染错乱"。
+   *
+   * 换 `fixed` 之后它脱离所有滚动/裁剪容器，代价是要自己算坐标（下面那段）
+   * 并在窗口尺寸/滚动变化时重算。
+   */
+  const [rect, setRect] = useState<{ top: number; left: number; right: number } | null>(null)
+
+  /**
+   * 每次打开都按触发器的**实测**位置算一遍。
+   *
+   * ★ 不缓存：触发器可能因为布局变化挪位（侧栏折叠、窗口缩放），
+   * 而一个记在 state 里的旧坐标会让菜单飘在别处。
+   */
+  useEffect(() => {
+    if (!open) {
+      setRect(null)
+      return
+    }
+    const measure = () => {
+      const node = triggerRef.current
+      if (node === null) return
+      const box = node.getBoundingClientRect()
+      setRect({
+        // side=top 时用触发器上缘（下面按 translateY(-100%) 反推），否则用下缘
+        top: side === "top" ? box.top : box.bottom,
+        left: box.left,
+        right: window.innerWidth - box.right,
+      })
+    }
+    measure()
+    // 滚动用捕获阶段：触发器可能在某个内部滚动容器里
+    window.addEventListener("resize", measure)
+    window.addEventListener("scroll", measure, true)
+    return () => {
+      window.removeEventListener("resize", measure)
+      window.removeEventListener("scroll", measure, true)
+    }
+  }, [open, side])
+
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
       event.preventDefault()
@@ -150,11 +196,22 @@ export function DropdownMenu({
            * （也就是全部菜单项）仍在拖拽区上。
            */
           data-no-drag
+          style={
+            rect === null
+              ? // 还没量到（首帧）：先藏起来，避免在左上角闪一下
+                { visibility: "hidden" }
+              : {
+                  top: rect.top,
+                  ...(align === "start" ? { left: rect.left } : { right: rect.right }),
+                  // side=top：把自己整体上移一个身高，从而贴在触发器上方
+                  transform: side === "top" ? "translateY(calc(-100% - 4px))" : undefined,
+                  marginTop: side === "top" ? undefined : 4,
+                }
+          }
           className={cn(
-            "absolute z-50 min-w-[220px] radius-lg p-1",
+            // ★ fixed 而不是 absolute —— 见上面 `rect` 的注释（overflow 裁剪）
+            "fixed z-50 min-w-[220px] radius-lg p-1",
             "border border-[var(--border-light)] bg-[var(--bg-pop)] shadow-[var(--shadow-lg)]",
-            side === "top" ? "bottom-full mb-1" : "top-full mt-1",
-            align === "start" ? "left-0" : "right-0",
             className,
           )}
         >
