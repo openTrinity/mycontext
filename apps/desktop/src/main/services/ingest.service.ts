@@ -312,6 +312,34 @@ const ACTIVE_SCAN_PER_ROUND = 5
  */
 const CONVERSATION_DIRECTORY_TTL_MS = 2 * 60_000
 /**
+ * 睡眠标志的自愈时限：suspend 之后最多认它这么久。
+ *
+ * ## ★★ 为什么必须有这个兜底
+ *
+ * `powerMonitor` 的 `resume` 不是保证送达的（进程在睡眠中被换出、
+ * 事件在某些机型/虚拟化环境下丢失都发生过）。而 `suspended` 卡在 true
+ * 就是**永久静默停采** —— 正是本次修复要消灭的那个形状，不能自己再造一个。
+ *
+ * 2 小时：远大于任何一次正常的"合盖-开盖"，又不会让真丢事件的机器
+ * 停采一整天。超时之后按"醒着"处理，最坏情况只是多一批失败请求，
+ * 而它们已被 `recordError` 的复核归成瞬时故障。
+ */
+const SUSPEND_SELF_HEAL_MS = 2 * 60 * 60_000
+/**
+ * 「本轮被闸住」这条日志的最小间隔。
+ *
+ * ## ★ 为什么必须节流
+ *
+ * 闸门在**每一轮**都会命中，而最密的那一路是探针（默认 10s）。不节流的话
+ * 一小时能刷 360 条一模一样的 warn —— 那会把真正的错误淹掉，
+ * 等于用一个噪音问题换掉一个静默问题。
+ *
+ * 5 分钟：足够让"采集为什么不动"在日志里**有痕迹**（这是它唯一的目的），
+ * 又不会盖住别的行。按「原因 + 哪一路」分别计时，
+ * 所以睡眠与 blocked 不会互相顶掉对方的名额。
+ */
+const GATE_LOG_THROTTLE_MS = 5 * 60_000
+/**
  * 回填的单轮翻页预算。
  *
  * ## ★ 为什么比增量的 600 小得多
@@ -550,6 +578,48 @@ export class IngestService {
   private inFlightDocuments: Promise<unknown> | null = null
   private running = false
   private busy = false
+  /**
+   * 系统是否处于睡眠（由 `powerMonitor` 的 suspend/resume 驱动）。
+   *
+   * ## ★★ 为什么需要它
+   *
+   * macOS 睡眠期间会周期性 DarkWake（实测约每 16-18 分钟一次，
+   * 窗口只有 2-4 秒）来跑维护任务。定时器在那几秒里**照样触发** ——
+   * 于是采集 tick 被唤起，而网络还没起来、token 刷新也做不了。
+   * 实测 2026-08-08：13:11:01 DarkWake → 13:11:05 `Entering Sleep`，
+   * 那 4 条命令就夹在这中间，全部 `auth_token_present:false`。
+   *
+   * 结果是每一轮睡眠都稳定产出一批注定失败的请求 —— 白烧子进程、
+   * 污染 `lastError`、把退避计数推上去。挡住它比事后归类便宜得多。
+   *
+   * ## ★ 只挡"发起新一轮"，不打断在途的那一轮
+   *
+   * 在途的 tick 让它自己收尾（它可能正 await 一个子进程，硬断会留孤儿）。
+   * suspend 只保证**不再新起**。
+   *
+   * ## ★★ 卡住的方向是刻意选的
+   *
+   * 若 resume 事件因故没来（进程在睡眠中被换出、事件丢失），这个标志会
+   * 一直是 true —— 那就是"永久停采"，正是本次要修的那个 bug 的形状。
+   * 所以它**必须能自愈**：`resumeAt` 记下预期恢复时刻，超过
+   * `SUSPEND_SELF_HEAL_MS` 没收到 resume 就自己放行（见 `suspendedNow`）。
+   *
+   * 两个方向的代价不对称，所以宁可放行：
+   * · 误判成"醒着"→ 多一批失败请求，而它们已被 `recordError` 的复核
+   *   归成瞬时故障（不再进 blocked）—— 可恢复；
+   * · 误判成"睡着"→ 永久停采且完全静默 —— 不可恢复。
+   */
+  private suspended = false
+  /** 进入睡眠的时刻；用于 `suspendedNow` 的自愈判断。null = 没在睡。 */
+  private suspendedAt: number | null = null
+  /**
+   * 「本轮被闸住」日志的上次输出时刻，按 `<原因>:<哪一路>` 记。
+   *
+   * 见 `GATE_LOG_THROTTLE_MS`：这条日志的作用是让"采集为什么不动"
+   * 在日志里留痕 —— 在此之前，被闸住与真的没有新消息**长得一模一样**
+   * （导出照跑、条数不变、一条错都没有），只能靠翻 `pmset` 反推。
+   */
+  private gateLoggedAt = new Map<string, number>()
   private lastError: string | null = null
   private blockedReason: IngestSnapshot["blockedReason"] = null
   private pendingHints = new Set<string>()
@@ -951,7 +1021,15 @@ export class IngestService {
   async tickProbe(): Promise<number> {
     const ingest = this.options.plugin.ingest
     // `running` 复查与 tickPull 同理：stop 之后不该再起新的子进程。
-    if (ingest === undefined || !this.running || this.blockedReason !== null) return 0
+    if (ingest === undefined || !this.running) return 0
+    if (this.blockedReason !== null) {
+      this.noteGated("blocked", "probe")
+      return 0
+    }
+    if (this.suspendedNow()) {
+      this.noteGated("suspended", "probe")
+      return 0
+    }
 
     const startedAt = this.options.clock.now()
     try {
@@ -988,7 +1066,7 @@ export class IngestService {
       await this.refreshResidents()
       return hints.length
     } catch (error) {
-      this.recordError(error)
+      await this.recordError(error)
       return 0
     } finally {
       this.probeInterval.observe(this.options.clock.now() - startedAt)
@@ -1034,7 +1112,15 @@ export class IngestService {
   async tickMinutes(): Promise<{ listed: number; changed: number; bodies: number }> {
     const minutes = this.options.plugin.minutes
     const empty = { listed: 0, changed: 0, bodies: 0 }
-    if (minutes === undefined || !this.running || this.blockedReason !== null) return empty
+    if (minutes === undefined || !this.running) return empty
+    if (this.blockedReason !== null) {
+      this.noteGated("blocked", "minutes")
+      return empty
+    }
+    if (this.suspendedNow()) {
+      this.noteGated("suspended", "minutes")
+      return empty
+    }
     if (this.inFlightMinutes !== null) return empty
     /**
      * ★ 尊重用户在引导里对「听记」那一栏的勾选。
@@ -1159,7 +1245,15 @@ export class IngestService {
   async tickDocuments(): Promise<{ listed: number; changed: number; bodies: number }> {
     const documents = this.options.plugin.documents
     const empty = { listed: 0, changed: 0, bodies: 0 }
-    if (documents === undefined || !this.running || this.blockedReason !== null) return empty
+    if (documents === undefined || !this.running) return empty
+    if (this.blockedReason !== null) {
+      this.noteGated("blocked", "documents")
+      return empty
+    }
+    if (this.suspendedNow()) {
+      this.noteGated("suspended", "documents")
+      return empty
+    }
     if (this.inFlightDocuments !== null) return empty
     // ★ 尊重用户在引导里对「文档」那一栏的勾选（见 documentsEnabled）。
     if (!this.documentsEnabled()) return empty
@@ -1358,7 +1452,15 @@ export class IngestService {
   ): Promise<number> {
     const ingest = this.options.plugin.ingest
     if (ingest === undefined || ingest.pullConversation === undefined) return 0
-    if (!this.running || this.blockedReason !== null) return 0
+    if (!this.running) return 0
+    if (this.blockedReason !== null) {
+      this.noteGated("blocked", "refreshConversation")
+      return 0
+    }
+    if (this.suspendedNow()) {
+      this.noteGated("suspended", "refreshConversation")
+      return 0
+    }
 
     /**
      * ★★ 范围闸：不在用户勾选范围内的会话**一次定向请求都不发**。
@@ -1717,7 +1819,15 @@ export class IngestService {
   async tickPull(): Promise<{ changed: number; unchanged: number }> {
     const ingest = this.options.plugin.ingest
     // ★ `running` 也要查：stop 之后起新一轮 = 往已关闭的库上写。
-    if (ingest === undefined || !this.running || this.busy || this.blockedReason !== null) {
+    if (ingest === undefined || !this.running || this.busy) {
+      return { changed: 0, unchanged: 0 }
+    }
+    if (this.blockedReason !== null) {
+      this.noteGated("blocked", "pull")
+      return { changed: 0, unchanged: 0 }
+    }
+    if (this.suspendedNow()) {
+      this.noteGated("suspended", "pull")
       return { changed: 0, unchanged: 0 }
     }
     this.busy = true
@@ -2012,7 +2122,7 @@ export class IngestService {
       }
     } catch (error) {
       this.scheduler.failWindow(error instanceof Error ? error.message : String(error))
-      this.recordError(error)
+      await this.recordError(error)
       this.applyBackoff(true)
     }
     // busy 的复位在 `tickPull` 的 finally 里（与 in-flight 记账放在一处）。
@@ -2307,7 +2417,15 @@ export class IngestService {
   async tickActiveScan(): Promise<number> {
     const ingest = this.options.plugin.ingest
     if (ingest?.pullConversation === undefined) return 0
-    if (!this.running || this.busy || this.blockedReason !== null) return 0
+    if (!this.running || this.busy) return 0
+    if (this.blockedReason !== null) {
+      this.noteGated("blocked", "activeScan")
+      return 0
+    }
+    if (this.suspendedNow()) {
+      this.noteGated("suspended", "activeScan")
+      return 0
+    }
 
     this.busy = true
     try {
@@ -3072,15 +3190,74 @@ export class IngestService {
    *
    * 登录过期与缺授权靠重试永远好不了 —— 继续重试只会反复弹窗骚扰用户。
    * 因此这两类进入 blocked 状态，由 UI 引导用户处理后手动恢复。
+   *
+   * ## ★★ `SESSION_EXPIRED` 必须先复核，不能直接判终态
+   *
+   * 渠道 CLI 的 token 刷新是**懒惰**的：access token 只活 2 小时，
+   * 到点后由"下一条命令"就地走 refresh（二进制里那串
+   * `access_token expired, trying refresh_token` → `refreshing token
+   * (dual-locked)`），而 refresh 要抢锁**并且要发网络请求**。
+   *
+   * 于是有一个不归我们控制的窗口：**刷新恰好撞上睡眠或断网**。
+   * 这时 CLI 拿不到 token，报的是 `not_authenticated` + exit 2 ——
+   * 与"refresh token 真的过期了"**完全同形**（同一个 reason、同一个 code）。
+   *
+   * 实测（2026-08-08 本机）：
+   * · 系统 `Entering Sleep` 与那 4 条失败命令**同一秒**（13:11:05）；
+   * · CLI 侧 `auth_token_present:false` 在 6756 条命令里**只出现过这 4 次**；
+   * · 那 4 条的 `command_start`→`command_end` 墙上钟只差 26µs，
+   *   而 `duration` 报 503ms —— 单调钟走了半秒，是进程被冻结的指纹。
+   *
+   * 直接判终态的后果（已实测）：`blockedReason` 一置位，6 处闸门全部
+   * 静默 return，采集**停了 2.5 小时**直到用户手动重新登录 ——
+   * 而登录从头到尾都是好的。UI 还显示「登录已过期，去重新授权」，
+   * 把用户指向一件不需要做的事。
+   *
+   * 所以这里去问**权威来源**：`auth status` 说仍然 authorized，
+   * 就说明这是瞬时故障，按可重试处理（退避会自然消化掉）。
+   * 不猜、不看时间窗、不试图识别"是不是在睡眠" —— 那些都是间接证据。
+   *
+   * 复核本身失败（网络还没恢复 / 命令超时）时**保持 blocked**：
+   * 那时我们无法证明登录是好的，而误判成可重试会退回到无限重试风暴
+   * （见 `classifyDwsError` 的注释）。宁可要求用户介入一次。
    */
-  private recordError(error: unknown): void {
+  private async recordError(error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error)
     this.lastError = message
     if (isAppError(error)) {
-      if (error.code === "SESSION_EXPIRED") this.blockedReason = "session_expired"
-      else if (error.code === "PERMISSION_REQUIRED") this.blockedReason = "permission_required"
+      if (error.code === "SESSION_EXPIRED") {
+        if (await this.sessionStillValid()) {
+          /**
+           * 登录是好的 —— 这次失败是 token 刷新被打断。不置 blocked，
+           * 让退避去消化。日志要留痕：否则"采集少了一轮"完全不可见。
+           */
+          this.options.logger.warn("ingest transient auth failure; session still valid", {
+            detail: message,
+          })
+          return
+        }
+        this.blockedReason = "session_expired"
+      } else if (error.code === "PERMISSION_REQUIRED") this.blockedReason = "permission_required"
     }
     this.options.logger.warn("ingest tick failed", { detail: message, blocked: this.blockedReason })
+  }
+
+  /**
+   * 复核登录态：`true` = CLI 说仍然 authorized（那次失败是瞬时的）。
+   *
+   * ★ 复核**不抛**：它只是"能不能证明登录是好的"这一个问题的答案。
+   * 拿不到答案（命令失败/超时）返回 false，让调用方保持原本的终态判定。
+   */
+  private async sessionStillValid(): Promise<boolean> {
+    try {
+      const status = await this.options.plugin.auth.status()
+      return status.state === "authorized"
+    } catch (error) {
+      this.options.logger.debug("ingest session recheck failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
   }
 
   /**
@@ -3088,11 +3265,16 @@ export class IngestService {
    *
    * 一并清退避：用户点「重试」时期望的是**立刻**再试一次，
    * 而不是"还要再等 5 轮"（后者表现为点了没反应）。
+   *
+   * ★ 也清闸门日志的节流表：不清的话"恢复之后又被闸住"的**第一轮**
+   * 会落在上一次的 5 分钟窗口里被吞掉 —— 而那一条恰好是最该看到的
+   * （它说明用户以为修好了，其实没修好）。
    */
   clearBlocked(): void {
     this.blockedReason = null
     this.lastError = null
     this.backoffRounds = 0
+    this.gateLoggedAt.clear()
   }
 
   /**
@@ -3104,6 +3286,102 @@ export class IngestService {
    */
   clearBackoff(): void {
     this.backoffRounds = 0
+  }
+
+  /**
+   * 系统进入睡眠：不再发起新一轮采集。
+   *
+   * 由 `powerMonitor` 的 `suspend` 驱动。**不动定时器**（不 clearInterval）——
+   * 睡眠期间 timer 本来就只在 DarkWake 那几秒里零星触发，而重建定时器要复制
+   * `start()` 里那一整段条件装配（听记/文档/轮转扫描各有各的启用条件），
+   * 复制一份就是两处会分叉。用一个闸门表达"现在别起新的"更小且不会漏。
+   *
+   * 在途的那一轮不打断：它可能正 await 一个子进程，硬断会留孤儿进程。
+   */
+  suspend(): void {
+    if (this.suspended) return
+    this.suspended = true
+    this.suspendedAt = this.options.clock.now()
+    this.options.logger.info("ingest suspended (system sleep)")
+  }
+
+  /**
+   * 系统醒来：放行并**清掉退避**。
+   *
+   * ★ 清退避是这件事的重点。睡眠期间那几次 DarkWake 已经把
+   * `backoffRounds` 推上去了（每次失败 +1），不清的话开盖之后还要空转
+   * 好几轮才恢复 —— 用户看到的是"打开电脑后好一会儿没有新消息"。
+   *
+   * ★ **不清 `blockedReason`**：那是"需要用户去别处处理"的终态，
+   * 与睡醒无关（refresh token 真过期了，睡一觉也不会好）。
+   * 与 `clearBackoff`/`clearBlocked` 的分工保持一致。
+   */
+  resume(): void {
+    if (!this.suspended) return
+    this.suspended = false
+    this.suspendedAt = null
+    this.backoffRounds = 0
+    // 同 clearBlocked：下一次被闸住时那条日志要能立刻出来（见那里的注释）。
+    this.gateLoggedAt.clear()
+    this.options.logger.info("ingest resumed (system wake)")
+  }
+
+  /**
+   * 现在是否该按"睡眠中"处理。
+   *
+   * ★ 带自愈：`resume` 丢了的话不能永久停采（见 `suspended` 字段注释里
+   * 那段"两个方向代价不对称"）。超过 `SUSPEND_SELF_HEAL_MS` 就自己放行，
+   * 并且**把状态真的复位**（而不是每次都重新算一遍）——
+   * 否则日志会在之后每一轮都重复报一次自愈。
+   */
+  private suspendedNow(): boolean {
+    if (!this.suspended) return false
+    const since = this.suspendedAt
+    if (since !== null && this.options.clock.now() - since > SUSPEND_SELF_HEAL_MS) {
+      this.options.logger.warn("ingest suspend flag self-healed; resume event never arrived", {
+        suspendedForMs: this.options.clock.now() - since,
+      })
+      this.suspended = false
+      this.suspendedAt = null
+      return false
+    }
+    return true
+  }
+
+  /**
+   * 「本轮被闸住」——**唯一**该由闸门调用的记录入口。
+   *
+   * ## ★ 为什么需要它
+   *
+   * 6 处闸门原本是静默 `return`。于是 blocked / 睡眠期间的日志长这样：
+   * 导出照跑、`messages` 一小时纹丝不动、**一条错误都没有** ——
+   * 与"真的没人说话"完全无法区分（实测那 2.5 小时就是这么过去的，
+   * 定位它得去翻 `pmset -g log`）。这正是本仓库第 4 节说的静默降级形状。
+   *
+   * ## ★ 只记「被闸住」，不记 `!running` / `busy`
+   *
+   * 那两个是**正常状态**：停机后不该再采（`stop()` 之后起新一轮 =
+   * 往已关闭的库上写），而 `busy` 只是上一轮还没跑完（下一轮自然会跟上）。
+   * 把它们也记下来会让这条日志失去信号价值 —— 它要回答的是
+   * "为什么该采而没采"。
+   *
+   * @param reason 闸住的原因（进日志，要能直接读懂）
+   * @param route 哪一路（probe/pull/…）。与 reason 一起做节流键，
+   *   所以睡眠与 blocked 不会互相顶掉对方的名额。
+   */
+  private noteGated(reason: "suspended" | "blocked", route: string): void {
+    const key = `${reason}:${route}`
+    const now = this.options.clock.now()
+    const last = this.gateLoggedAt.get(key)
+    if (last !== undefined && now - last < GATE_LOG_THROTTLE_MS) return
+    this.gateLoggedAt.set(key, now)
+    this.options.logger.info("ingest round skipped", {
+      reason,
+      route,
+      // blocked 的具体类型要带上：session_expired 与 permission_required
+      // 的处置完全不同（前者重新扫码、后者去来源应用授权）。
+      ...(reason === "blocked" ? { blockedReason: this.blockedReason } : {}),
+    })
   }
 
   /**

@@ -480,6 +480,20 @@ export class DataPlaneService {
   }
 
   /**
+   * 系统睡眠 / 唤醒（由 `powerMonitor` 驱动，见 `IngestService.suspend`）。
+   *
+   * 未 attach（未登录）时静默 no-op —— 与这一层其它转发方法一致。
+   * 不推快照：睡眠不改变库里的任何数字，而 `snapshot()` 有 9 个全表 COUNT。
+   */
+  suspendIngest(): void {
+    this.ingest?.suspend()
+  }
+
+  resumeIngest(): void {
+    this.ingest?.resume()
+  }
+
+  /**
    * 定向补拉一个会话（发送后 / 事件叫醒），并推快照让 UI 立刻刷新。
    *
    * ★ 为什么在数据面这一层暴露：`PersonaService` 不该依赖 `IngestService`

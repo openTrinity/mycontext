@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto"
 import { rmSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { app, shell, type BrowserWindow } from "electron"
+import { app, powerMonitor, shell, type BrowserWindow } from "electron"
 import { resolveLanguage } from "@mycontext/i18n"
 import { createLogger, systemClock, type Logger } from "@mycontext/kernel"
 import {
@@ -971,6 +971,39 @@ export function bootstrapApp(mainDir: string): AppContext {
   })
 
   /**
+   * ★★ 睡眠感知：合盖期间不发起新一轮采集。
+   *
+   * ## 为什么需要
+   *
+   * macOS 睡眠期间每 16-18 分钟会 DarkWake 一次（窗口 2-4 秒）跑维护任务，
+   * 而 `setInterval` 在那几秒里**照样触发**。于是采集 tick 被唤起，
+   * 但网络还没起来 —— 渠道 CLI 的 token 刷新（懒惰刷新，access token 只活
+   * 2 小时）恰好撞在这里就会拿不到 token，报 `not_authenticated` + exit 2。
+   *
+   * 实测 2026-08-08：13:11:01 DarkWake → 13:11:05 `Entering Sleep`，
+   * 4 条命令夹在中间全部失败；那批命令的 `command_start`→`command_end`
+   * 墙上钟只差 26µs 而 `duration` 报 503ms（进程被冻结的指纹）。
+   *
+   * ## ★ 与 `recordError` 那道复核是**两道独立的防线**
+   *
+   * 这一道是省成本的：不发那批注定失败的请求（子进程 + 污染 lastError
+   * + 推高退避）。而复核那道是保正确的：万一还是发了并失败了，
+   * 也不会被误判成"登录过期"这个终态。少任何一道都还会犯错 ——
+   * 只有这一道时，睡眠边界上仍可能漏进一次失败而永久 blocked；
+   * 只有复核那道时，每轮睡眠仍会稳定烧掉一批子进程。
+   *
+   * ## ★ 用 `powerMonitor` 而不是"判断上次 tick 距今多久"
+   *
+   * 后者是间接证据（长间隔也可能是机器卡、也可能是退避），而
+   * `suspend`/`resume` 是系统直接告诉我们的事实。本仓库吃过够多
+   * "拿间接信号猜状态"的亏了。
+   */
+  const onSystemSuspend = (): void => dataPlane.suspendIngest()
+  const onSystemResume = (): void => dataPlane.resumeIngest()
+  powerMonitor.on("suspend", onSystemSuspend)
+  powerMonitor.on("resume", onSystemResume)
+
+  /**
    * 卸载当前 vault：停掉一切在跑的东西，然后关库。
    *
    * ## ★★ 顺序是刻意的，每一步都对应一个真实踩过的坑
@@ -1463,6 +1496,14 @@ export function bootstrapApp(mainDir: string): AppContext {
        * 退出问题，而且是 unhandledRejection（退出码可能变）。
        */
       const runner = { logger: logger.child("Shutdown"), clock: systemClock }
+      /**
+       * 先摘掉电源监听：dispose 期间 `dataPlane` 会被 detach，而
+       * `powerMonitor` 的监听是**进程级**的（不随 context 走）。不摘的话
+       * 合盖会调到一个已经 detach 的数据面上 —— 现在只是 no-op，
+       * 但它是个悬着的引用，下次装配就会有两份监听同时在跑。
+       */
+      powerMonitor.off("suspend", onSystemSuspend)
+      powerMonitor.off("resume", onSystemResume)
       // 同步且无外部依赖的两个不值得单独计时
       distillSources.detach()
       media.detach()
