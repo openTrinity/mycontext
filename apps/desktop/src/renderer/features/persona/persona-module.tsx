@@ -34,7 +34,7 @@ import {
 import { useErrorText } from "../../lib/use-error-text.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { ConversationRail } from "./conversation-rail.js"
-import { PersonaHeaderControls } from "./persona-header-controls.js"
+import { PERSONA_SUPPORTED_CHANNEL, PersonaHeaderControls } from "./persona-header-controls.js"
 import { useHeaderSlot } from "../shell/header-slot.js"
 import { ReplyDock } from "./reply-dock.js"
 import { ChatHeader } from "./chat-header.js"
@@ -234,6 +234,29 @@ export function PersonaModule() {
    * 顺序跟随列表（按最后消息时间排），所以"最近在用的渠道"排在前面。
    */
   const channelIds = useMemo(() => [...new Set(list.map((item) => item.channelId))], [list])
+  /**
+   * 已授权的**全部**渠道 —— 与 `channelIds`（列表里出现过的）不同。
+   * 选择器要列这个：飞书连上了却在这一页看不到入口的话，
+   * "为什么它不在这里"就成了一个没有答案的问题。
+   */
+  const channels = useChannels()
+  const authorizedChannelIds = useMemo(
+    () =>
+      (channels.data ?? [])
+        .filter((c) => c.available && c.status.state === "authorized")
+        .map((c) => c.id),
+    [channels.data],
+  )
+  /**
+   * 这一页当前在看哪个渠道。`null` = 没选过 → 主渠道。
+   *
+   * ★ 选中一个**不支持**的渠道时不切数据，只把整页换成一句说明
+   * （见下面 `unsupportedChannel`）—— 数字分身只在主渠道工作，
+   * 那是一条刻意的边界而不是"还没做"。
+   */
+  const [pickedChannel, setPickedChannel] = useState<string | null>(null)
+  const personaChannel = pickedChannel ?? PERSONA_SUPPORTED_CHANNEL
+  const unsupportedChannel = personaChannel === PERSONA_SUPPORTED_CHANNEL ? null : personaChannel
   const activeDrafts = allDrafts.filter(
     (draft) => activeId === null || draft.conversationId === activeId,
   )
@@ -261,6 +284,9 @@ export function PersonaModule() {
       <PersonaHeaderControls
         snapshot={snapshot.data}
         channelIds={channelIds}
+        authorizedChannelIds={authorizedChannelIds}
+        activeChannelId={personaChannel}
+        onChannelChange={setPickedChannel}
         killSwitchBusy={killSwitch.isPending}
         onToggleRunning={(running) => killSwitch.mutate({ active: !running })}
       />
@@ -271,6 +297,31 @@ export function PersonaModule() {
     [snapshot.data, channelIds, killSwitch.isPending, killSwitch.mutate],
   )
   useHeaderSlot(headerControls)
+
+  /**
+   * ★★ 选了一个数字分身**不支持**的渠道 → 整页换成一句说明。
+   *
+   * 不显示会话列表与草稿：那些数据来自主渠道，摆在"当前是飞书"的标题下面
+   * 就是一句错话（用户会以为那些草稿会发到飞书）。
+   *
+   * 这不是"还没做"，而是一条刻意的边界：非主渠道是**只读**接入
+   * （不进自动回复/发消息链路），只读渠道不该能替用户说话。
+   */
+  if (unsupportedChannel !== null) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 p-8">
+        <p className="typography-title-small-500 text-[var(--text-base-primary)]">
+          {t("unsupportedChannelTitle", { defaultValue: "数字分身暂不支持这个渠道" })}
+        </p>
+        <p className="typography-body-small-400 max-w-md text-center text-[var(--text-base-tertiary)]">
+          {t("unsupportedChannelHint", {
+            defaultValue:
+              "这个渠道是只读接入：数据只用于建图与搜索，不会进入自动回复或发消息链路，也没有申请任何写权限。",
+          })}
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">

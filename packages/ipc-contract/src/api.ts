@@ -415,7 +415,7 @@ export interface MyContextApi {
   ingest: {
     snapshot(): Promise<Result<IngestSnapshot>>
     /** 手动触发一轮采集（状态页的「立即同步」按钮） */
-    runOnce(): Promise<Result<{ changed: number; unchanged: number }>>
+    runOnce(input?: { channelId?: string }): Promise<Result<{ changed: number; unchanged: number }>>
     /** 用户处理完终态（重新扫码 / 完成授权）后清除 blocked */
     clearBlocked(): Promise<Result<true>>
     /** 解析本人身份（歧义时返回失败，由 UI 引导手动确认） */
@@ -493,7 +493,7 @@ export interface MyContextApi {
      * 建图**期间**也能调：它读的是本机 SQLite，不经 kl 的 HTTP
      * （那时 server 在忙，`/entity` 实测直接 500）。
      */
-    graphOverview(): Promise<Result<KlGraphOverview>>
+    graphOverview(input?: { channelId?: string }): Promise<Result<KlGraphOverview>>
     /**
      * 以「我」为中心的关系子图（ego graph）。
      *

@@ -1077,10 +1077,15 @@ export function useIngestProgress(): void {
   }, [queryClient])
 }
 
+/**
+ * 立即同步。★ 收 `channelId`：状态页按渠道分区，按钮该只作用于用户正在看的
+ * 那个渠道（不带的话在飞书那栏点它会跑钉钉那 1600 条的一轮）。
+ */
 export function useRunIngestOnce() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async () => unwrap(await window.mycontext.ingest.runOnce()),
+    mutationFn: async (input?: { channelId?: string }) =>
+      unwrap(await window.mycontext.ingest.runOnce(input)),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.ingest }),
   })
 }
@@ -1506,10 +1511,20 @@ export function useKlGraphBuild() {
  * 5s 而不是 1s：这几个 COUNT 走的是只读连接，但建图时 SQLite 正在被写，
  * 拉太勤会跟写者抢锁。
  */
-export function useKlGraphOverview(building: boolean) {
+/**
+ * @param channelId 看哪个渠道的图谱规模。与 `useKlGraphEgo` 同一个取值范围
+ *   —— 仪表盘那六个数与下面那张图必须说同一个渠道，否则读者会把两边对不上
+ *   的数字当成 bug。★ 进 queryKey，否则切渠道命中同一份缓存（点了没反应）。
+ */
+export function useKlGraphOverview(building: boolean, channelId?: string) {
   return useQuery({
-    queryKey: ["kl", "graph-overview"],
-    queryFn: async () => unwrap(await window.mycontext.kl.graphOverview()),
+    queryKey: ["kl", "graph-overview", channelId ?? "primary"],
+    queryFn: async () =>
+      unwrap(
+        await window.mycontext.kl.graphOverview(
+          channelId === undefined ? undefined : { channelId },
+        ),
+      ),
     refetchInterval: building ? 5_000 : false,
     staleTime: 3_000,
   })

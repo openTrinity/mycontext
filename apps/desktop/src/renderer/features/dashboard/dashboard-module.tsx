@@ -155,7 +155,7 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    */
   const graphChannel = activeChannelId ?? authorizedChannels[0] ?? undefined
   const ego = useKlGraphEgo(building, graphChannel)
-  const overview = useKlGraphOverview(building)
+  const overview = useKlGraphOverview(building, graphChannel)
   const { resolved: mode } = useTheme()
   /** 实体类型名要翻译 —— 与 ego 图的图例共用 `graph` 那一份 key。 */
   const { t: tg } = useDynamicTranslation("graph")
@@ -281,6 +281,7 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
       ...snap,
       messages: row.messages,
       conversations: row.conversations,
+      mediaAssets: row.mediaAssets,
       running: row.running,
       lastError: row.lastError,
       blockedReason: row.blockedReason,
@@ -538,37 +539,6 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
             <MiniStat label={item.label} value={item.value} />
           </div>
         ))}
-
-        {/*
-          ★★ 逐渠道的消息/会话数。
-
-          上面那六个数只是**其中一个渠道**的：顶层快照来自主进程的
-          `snapshotIngest()`，它挑一个渠道返回（主渠道活跃就只返回主渠道）。
-          于是飞书采了多少条在界面上完全看不出来 —— 而那正是"接了飞书却
-          看不见它"的直接表现。
-
-          ★ 只在多渠道时出现（单渠道时与上面说的是同一件事）。
-        */}
-        {(ingest.data?.perChannel ?? []).length > 1 && (
-          <div className="col-span-12 flex flex-wrap items-center gap-x-4 gap-y-1">
-            {(ingest.data?.perChannel ?? []).map((row) => (
-              <span
-                key={row.channelId}
-                className="typography-caption-400 text-[var(--text-base-tertiary)]"
-              >
-                {tg(`channel.${row.channelId}`, { defaultValue: row.channelId })}
-                {"　"}
-                {formatCount(row.messages)} 条消息 · {formatCount(row.conversations)} 个会话
-                {row.blockedReason === null ? null : (
-                  <span className="text-[var(--status-warning)]">（已暂停）</span>
-                )}
-                {row.lastError === null ? null : (
-                  <span className="text-[var(--status-error)]">（有错误）</span>
-                )}
-              </span>
-            ))}
-          </div>
-        )}
 
         {/*
           ── 段 3：它现在怎么样（数字分身） ────────────────

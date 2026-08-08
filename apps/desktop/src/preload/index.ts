@@ -133,7 +133,7 @@ const api: MyContextApi = {
   },
   ingest: {
     snapshot: () => ipcRenderer.invoke(IPC_CHANNELS.ingestSnapshot),
-    runOnce: () => ipcRenderer.invoke(IPC_CHANNELS.ingestRunOnce),
+    runOnce: (input) => ipcRenderer.invoke(IPC_CHANNELS.ingestRunOnce, input ?? {}),
     clearBlocked: () => ipcRenderer.invoke(IPC_CHANNELS.ingestClearBlocked),
     resolveSelf: () => ipcRenderer.invoke(IPC_CHANNELS.ingestResolveSelf),
     confirmSelf: () => ipcRenderer.invoke(IPC_CHANNELS.ingestConfirmSelf),
@@ -170,7 +170,7 @@ const api: MyContextApi = {
     serverStart: () => ipcRenderer.invoke(IPC_CHANNELS.klServerStart),
     serverStop: () => ipcRenderer.invoke(IPC_CHANNELS.klServerStop),
     graphBuild: (fresh?: boolean) => ipcRenderer.invoke(IPC_CHANNELS.klGraphBuild, fresh ?? false),
-    graphOverview: () => ipcRenderer.invoke(IPC_CHANNELS.klGraphOverview),
+    graphOverview: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphOverview, input ?? {}),
     graphOptimize: () => ipcRenderer.invoke(IPC_CHANNELS.klGraphOptimize),
     graphEgo: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphEgo, input ?? {}),
     graphFacts: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphFacts, input),

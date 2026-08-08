@@ -31,11 +31,9 @@
  *
  * `onChange` 的接口现在就留好，第二个渠道接上时**不需要改这个组件**。
  */
-import { cn } from "@mycontext/design"
 import type { ChannelSummary } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
-import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
-import { ChannelBadge } from "../persona/channel-badge.js"
+import { ChannelPicker } from "../shell/channel-picker.js"
 import { readIdentityBar } from "./dashboard-data.js"
 
 export interface ScopeChipProps {
@@ -58,68 +56,21 @@ export function ScopeChip({ channels, activeChannelId, onChannelChange }: ScopeC
   // 一个渠道都没连：什么都不画（页头不该出现一个空的范围）
   if (connected[0] === undefined) return null
 
-  if (!view.showChannelPicker) {
-    /**
-     * 单渠道：一枚静态标识。
-     *
-     * ★ 仍然显示（而不是"只有一个就不显示"）—— 它回答的是
-     * "这些数字是**哪来的**"，那个问题在只有一个渠道时同样存在。
-     */
-    return <ChannelBadge channelId={connected[0].id} />
-  }
-
   /**
-   * 多渠道：原生 `<select>`。
+   * 多渠道：下拉选择器（见 `ChannelPicker` 文件头为什么不是分段平铺）。
    *
-   * 这是一个"从 N 个里选一个"的动作，原生控件自带键盘、读屏器语义与
-   * 系统外观。自己写一个下拉要几十行才追上，而这里没有任何原生做不到的需求。
-   *
-   * ★ 选项文字用 i18n 的渠道名，不用 `item.id`。
-   * `dingtalk` 这种内部 id 出现在用户界面上是"漏出实现"的典型形态，
-   * 而 `channels` 那份 i18n 里本来就有 `<id>.label`（`ChannelBadge` 在用）。
+   * ★ 这里不做"只有一个就不显示"的判断 —— `ChannelPicker` 自己在单选项时
+   * 退化成静态标识。判断放在一处，两边不会漂。
    */
-  /**
-   * 多渠道：**分段切换**。
-   *
-   * ★ `role="radiogroup"` + `role="radio"`：这是"从 N 个里选一个"的语义。
-   * 用 button 而不是原生 radio 是为了能放品牌图标并控制视觉，
-   * 但 ARIA 角色必须补上 —— 否则读屏器会把它读成一排普通按钮，
-   * 用户不知道它们是互斥的。
-   */
-  const active = activeChannelId ?? connected[0].id
   return (
-    <div
-      role="radiogroup"
-      aria-label={t("switcherLabel", { defaultValue: "选择渠道" })}
-      className={cn(
-        "inline-flex items-center gap-0.5 rounded-[var(--radius-md)] p-0.5",
-        "border border-[var(--border-divider-light)] bg-[var(--bg-card-z0)]",
-      )}
-    >
-      {connected.map((item) => {
-        const Icon = CHANNEL_BRAND_ICONS[item.id]
-        const selected = item.id === active
-        return (
-          <button
-            key={item.id}
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            onClick={() => onChannelChange(item.id)}
-            className={cn(
-              "typography-caption-400 inline-flex items-center gap-1.5 rounded-[var(--radius-sm)]",
-              "px-2 py-1 transition-colors",
-              selected
-                ? "bg-[var(--bg-base-primary)] text-[var(--text-base-primary)] shadow-sm"
-                : "text-[var(--text-base-tertiary)] hover:text-[var(--text-base-secondary)]",
-            )}
-          >
-            {/* 品牌图标保留官方色 —— 不套 currentColor（见 ChannelBadge 的注释） */}
-            {Icon === undefined ? null : <Icon className="size-3.5 rounded-[3px]" />}
-            {t(`${item.id}.label`, { defaultValue: item.id })}
-          </button>
-        )
-      })}
-    </div>
+    <ChannelPicker
+      options={connected.map((item) => ({
+        id: item.id,
+        label: t(`${item.id}.label`, { defaultValue: item.id }),
+      }))}
+      activeId={activeChannelId}
+      onChange={onChannelChange}
+      ariaLabel={t("switcherLabel", { defaultValue: "选择渠道" })}
+    />
   )
 }

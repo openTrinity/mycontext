@@ -8,6 +8,7 @@
  */
 import { Composer, GreetingName, WelcomeHeader, greetingKeyForHour } from "@mycontext/design"
 import { useMemo, useState } from "react"
+import { ChannelPicker } from "../shell/channel-picker.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
 /** 一个可选的检索档位。`id` 是 `graph_scope` 存的值。 */
@@ -75,29 +76,18 @@ export function SearchView({
         <GreetingName name={userName} />
       </WelcomeHeader>
 
-      {scopes.length > 1 && (
-        <div className="flex items-center gap-2" role="radiogroup" aria-label={t("scope.label")}>
-          <span className="typography-body-small-400 text-[var(--text-base-tertiary)]">
-            {t("scope.label")}
-          </span>
-          {scopes.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              role="radio"
-              aria-checked={option.id === activeScope}
-              onClick={() => setScope(option.id)}
-              className={
-                option.id === activeScope
-                  ? "typography-body-small-400 rounded-full bg-[var(--bg-base-secondary)] px-3 py-1 text-[var(--text-base-primary)]"
-                  : "typography-body-small-400 rounded-full px-3 py-1 text-[var(--text-base-tertiary)] hover:text-[var(--text-base-primary)]"
-              }
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      )}
+      {/*
+        检索范围 —— 下拉而不是平铺（见 `ChannelPicker` 文件头）。
+        ★ 这里保留「混合」一项：搜索**可以**跨渠道找一件事（每条结果带来源
+        徽章，不会混），而知识图谱展示不行（同一个人在两渠道没有安全的 id 映射）。
+      */}
+      <ChannelPicker
+        options={scopes.map((option) => ({ id: option.id, label: option.label }))}
+        activeId={activeScope}
+        onChange={setScope}
+        ariaLabel={t("scope.label")}
+        prefix={t("scope.label")}
+      />
 
       <Composer
         variant="hero"

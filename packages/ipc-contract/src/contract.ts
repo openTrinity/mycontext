@@ -1824,6 +1824,8 @@ export const ingestSnapshotSchema = z.object({
         running: z.boolean(),
         messages: z.number(),
         conversations: z.number(),
+        /** 图片与文件条数 —— 与 messages/conversations 一起构成"这个渠道采到了什么" */
+        mediaAssets: z.number(),
         lastError: z.string().nullable(),
         /**
          * ★ 与顶层同一个枚举，不是裸 string：它们是**同一个字段**

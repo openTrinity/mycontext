@@ -99,10 +99,16 @@ export interface IpcDependencies {
   preferences: PreferencesService
   dataPlane: DataPlaneService
   search: SearchService
+  /**
+   * ★ `graphOverview` 的签名比 `KlServerService` 的宽一个可选参数（渠道 id）——
+   * 装配层传的是 `MultiKlServerService`，它按 id 路由到对应的图库。
+   */
   klServer: Pick<
     KlServerService,
-    "status" | "ensureReady" | "stop" | "rebuildGraph" | "optimizeGraph" | "graphOverview"
-  >
+    "status" | "ensureReady" | "stop" | "rebuildGraph" | "optimizeGraph"
+  > & {
+    graphOverview(channelId?: string): ReturnType<KlServerService["graphOverview"]>
+  }
   /**
    * 图谱只读查询。
    *
@@ -666,7 +672,19 @@ export function registerIpc(deps: IpcDependencies): void {
   // ---------------- 数据面：采集与知识管道 ----------------
 
   ipcMain.handle(IPC_CHANNELS.ingestSnapshot, () => attempt(() => dataPlane.snapshot()))
-  ipcMain.handle(IPC_CHANNELS.ingestRunOnce, () => attempt(() => dataPlane.runOnce()))
+  /**
+   * 立即同步。带 `channelId` 时只跑那一个渠道 —— 状态页按渠道分区，
+   * 按钮该只作用于用户正在看的那个（见 `DataPlaneService.runOnce`）。
+   */
+  ipcMain.handle(IPC_CHANNELS.ingestRunOnce, (_event, payload: unknown) =>
+    attempt(() =>
+      dataPlane.runOnce(
+        typeof (payload as { channelId?: unknown } | null)?.channelId === "string"
+          ? (payload as { channelId: string }).channelId
+          : undefined,
+      ),
+    ),
+  )
   ipcMain.handle(IPC_CHANNELS.ingestClearBlocked, () =>
     attempt(() => {
       dataPlane.clearBlocked()
@@ -776,8 +794,20 @@ export function registerIpc(deps: IpcDependencies): void {
    * 同步读一次只读 SQLite —— 建图**期间**也要能看（那正是用户最想看的
    * 时刻），而那时 kl 的 HTTP 端点在忙（实测 `/entity` 直接 500）。
    */
-  ipcMain.handle(IPC_CHANNELS.klGraphOverview, () =>
-    attempt(() => Promise.resolve(klServer.graphOverview())),
+  /**
+   * 图谱规模。带 `channelId` 时只看那一个渠道 —— 仪表盘上那六个数与下面
+   * 那张关系图必须说同一个渠道（见 `MultiKlServerService.graphOverview`）。
+   */
+  ipcMain.handle(IPC_CHANNELS.klGraphOverview, (_event, payload: unknown) =>
+    attempt(() =>
+      Promise.resolve(
+        klServer.graphOverview(
+          typeof (payload as { channelId?: unknown } | null)?.channelId === "string"
+            ? (payload as { channelId: string }).channelId
+            : undefined,
+        ),
+      ),
+    ),
   )
 
   /**

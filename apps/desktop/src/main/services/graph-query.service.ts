@@ -115,6 +115,26 @@ export interface GraphAggregates {
   chunksByDay: Array<{ at: number; count: number }>
 }
 
+/**
+ * 主渠道 id。ego 图只在它上面成立 —— 见 `ego()` 里那段注释。
+ */
+const PRIMARY_CHANNEL_ID = "dingtalk"
+
+/**
+ * 渠道显示名。
+ *
+ * ★ 主进程里为什么可以有中文：这一层产出的 `reason` 是**直接上屏**的人话
+ * （契约里就是 `reason: string`，不是 i18n key）。整条链路都这样 ——
+ * 见这个文件里其余的 `empty("还没建过图…")`。要做多语言得先把 reason
+ * 改成 key + params，那是另一件事。
+ *
+ * 查不到就回落到 id：新渠道少一行不该变成"undefined 里叫什么"。
+ */
+const CHANNEL_LABELS: Record<string, string> = {
+  dingtalk: "钉钉",
+  feishu: "飞书",
+}
+
 export interface GraphQueryOptions {
   logger: Logger
   /**
@@ -287,7 +307,24 @@ export class GraphQueryService {
     }
     const selfNames = this.options.getSelfNames()
     if (selfNames.length === 0) {
-      return empty("还不知道你在钉钉里叫什么 —— 先在设置里确认本人身份")
+      /**
+       * ★ 渠道名不能写死。
+       *
+       * 这个服务是**按渠道**实例化的（一渠道一个图库，见 `sourceChannelId`），
+       * 而写死"钉钉"之后飞书那个实例会说"你在钉钉里叫什么" —— 用户切到飞书
+       * 看到的是一句关于另一个渠道的话，而它还指向一个不存在的设置项。
+       *
+       * ★ 非主渠道**没有**身份行（`getSelfNames` 恒返回空数组，见
+       * `startup.ts` 里那个 `() => []`）—— 所以它走到这里是**常态**而不是
+       * 用户漏配了什么。那时不该让人去"确认本人身份"，而要说清
+       * ego 图只在主渠道成立（两个渠道的人 id 没有安全映射）。
+       */
+      const channelId = this.options.sourceChannelId ?? PRIMARY_CHANNEL_ID
+      return empty(
+        channelId === PRIMARY_CHANNEL_ID
+          ? `还不知道你在${CHANNEL_LABELS[channelId] ?? channelId}里叫什么 —— 先在设置里确认本人身份`
+          : `关系图只在${CHANNEL_LABELS[PRIMARY_CHANNEL_ID] ?? PRIMARY_CHANNEL_ID}上可用：${CHANNEL_LABELS[channelId] ?? channelId}是只读接入，两个渠道的人物标识无法安全对应`,
+      )
     }
 
     let db: GraphReadHandle | null = null

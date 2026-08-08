@@ -137,6 +137,19 @@ export function DropdownMenu({
           id={menuId}
           role="menu"
           onKeyDown={onKeyDown}
+          /**
+           * ★★ 必需：本组件可能位于窗口**拖拽区**内（页头就是）。
+           *
+           * 拖拽区里的鼠标事件由系统窗口管理器接管 —— 于是浮层虽然画出来了，
+           * 但**点不动**（实测：菜单能展开，点任何一项都没反应）。
+           * `globals.css` 里那条 `[data-window-drag] [data-no-drag]` 规则
+           * 会把它退出拖拽区。
+           *
+           * ★ 触发器有 `no-drag` 是不够的：它只覆盖按钮自己那几十像素，
+           * 而浮层是 `absolute` 定位、超出触发器的范围 —— 超出的那部分
+           * （也就是全部菜单项）仍在拖拽区上。
+           */
+          data-no-drag
           className={cn(
             "absolute z-50 min-w-[220px] radius-lg p-1",
             "border border-[var(--border-light)] bg-[var(--bg-pop)] shadow-[var(--shadow-lg)]",

@@ -123,8 +123,23 @@ export class MultiKlServerService {
     }
   }
 
-  graphOverview(): KlGraphOverview {
+  /**
+   * 图谱规模。
+   *
+   * ★ `channelId` 给了就**只看那一个渠道** —— 与 `MultiGraphQueryService.ego`
+   * 同一个取值范围：仪表盘上那六个数与下面那张关系图必须说同一个渠道，
+   * 否则读者会把两边对不上的数字当成 bug。
+   *
+   * 不给 = 合并全部（状态页那一块要的是"一共多大"）。
+   */
+  graphOverview(channelId?: string): KlGraphOverview {
+    if (channelId !== undefined && channelId !== this.primaryChannelId) {
+      const source = this.sources.find((item) => item.channelId === channelId)
+      // 那个渠道没挂管线 → 落回主渠道（它是唯一能读的）
+      if (source !== undefined) return source.service.graphOverview()
+    }
     const primary = this.primary.graphOverview()
+    if (channelId === this.primaryChannelId) return primary
     const results = [
       primary,
       ...this.sources

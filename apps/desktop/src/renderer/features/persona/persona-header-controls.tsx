@@ -29,12 +29,30 @@
 import { Switch } from "@mycontext/design"
 import type { PersonaSnapshotView } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
+import { ChannelPicker } from "../shell/channel-picker.js"
 import { ChannelBadge } from "./channel-badge.js"
+
+/**
+ * 数字分身**只**在这个渠道上工作。
+ *
+ * 其余渠道是只读接入：不进自动回复、不进发消息链路（结构上就没挂
+ * `personaSupervisor`，见 `DataPlaneService.attach` 里非主渠道那个分支）。
+ * 所以这不是"还没做"，而是一条刻意的边界 —— 只读渠道不该能替用户说话。
+ */
+export const PERSONA_SUPPORTED_CHANNEL = "dingtalk"
 
 export interface PersonaHeaderControlsProps {
   snapshot: PersonaSnapshotView | undefined
   /** 出现在会话列表里的渠道（从数据推，不写死 —— 见 persona-module） */
   channelIds: readonly string[]
+  /**
+   * 已授权的**全部**渠道 —— 与 `channelIds` 不同：那个是"列表里有哪些"，
+   * 这个是"用户连了哪些"。选择器要列后者，否则飞书连上了却看不到入口，
+   * 而"为什么飞书不在这里"就成了一个没有答案的问题。
+   */
+  authorizedChannelIds?: readonly string[]
+  activeChannelId?: string | null
+  onChannelChange?: (id: string) => void
   killSwitchBusy: boolean
   onToggleRunning: (running: boolean) => void
 }
@@ -42,20 +60,43 @@ export interface PersonaHeaderControlsProps {
 export function PersonaHeaderControls({
   snapshot,
   channelIds,
+  authorizedChannelIds = [],
+  activeChannelId = null,
+  onChannelChange,
   killSwitchBusy,
   onToggleRunning,
 }: PersonaHeaderControlsProps) {
   const { t } = useDynamicTranslation("persona")
+  const { t: tc } = useDynamicTranslation("channels")
   const stopped = snapshot?.killSwitch === true
   const running = !stopped
   const drafts = snapshot?.pendingDrafts ?? 0
 
   return (
     <div className="flex items-center gap-3">
-      {/* 渠道徽章：后面那些数字的限定词（"钉钉上有 6 个能自动发"） */}
-      {channelIds.map((id) => (
-        <ChannelBadge key={id} channelId={id} />
-      ))}
+      {/*
+        渠道：多个已授权时给**选择器**（后面那些数字的限定词），
+        否则退回静态徽章。
+
+        ★ 非主渠道标「暂未支持」：数字分身只在主渠道上工作 —— 飞书是**只读**
+        接入（不进自动回复/发消息链路，结构上就没挂 personaSupervisor）。
+        让它可选中而不是藏起来：藏起来的话"飞书连上了为什么这里没有"
+        是一个没有答案的问题，而选中后页面会说清原因。
+      */}
+      {authorizedChannelIds.length > 1 && onChannelChange !== undefined ? (
+        <ChannelPicker
+          options={authorizedChannelIds.map((id) => ({
+            id,
+            label: tc(`${id}.label`, { defaultValue: id }),
+            unsupported: id !== PERSONA_SUPPORTED_CHANNEL,
+          }))}
+          activeId={activeChannelId}
+          onChange={onChannelChange}
+          ariaLabel={t("channelPickerLabel", { defaultValue: "选择渠道" })}
+        />
+      ) : (
+        channelIds.map((id) => <ChannelBadge key={id} channelId={id} />)
+      )}
 
       {/*
         三个数字，inline 轻量式。

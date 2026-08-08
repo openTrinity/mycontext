@@ -639,13 +639,25 @@ export class DataPlaneService {
     }
   }
 
-  async runOnce(): Promise<{ changed: number; unchanged: number }> {
+  /**
+   * 手动跑一轮采集（状态页的「立即同步」）。
+   *
+   * ★ `channelId` 给了就**只跑那一个** —— 状态页现在按渠道分区展示，
+   * 而那里的按钮就该只作用于用户正在看的那个渠道。不带的话用户在飞书
+   * 那一栏点「立即同步」，跑的却是全部（含钉钉那 1600 条的一轮），
+   * 而界面上看不出发生了什么。
+   *
+   * 不给 = 全部活跃渠道（存量行为）。
+   */
+  async runOnce(channelId?: string): Promise<{ changed: number; unchanged: number }> {
     const ingest = this.ingest
     if (ingest === null) return { changed: 0, unchanged: 0 }
+    const primaryId = this.options.plugin.meta.id
+    const wanted = (id: string): boolean => channelId === undefined || channelId === id
     const active = [
-      ...(this.activeChannels.has(this.options.plugin.meta.id) ? [ingest] : []),
+      ...(this.activeChannels.has(primaryId) && wanted(primaryId) ? [ingest] : []),
       ...[...this.sourceIngest.entries()]
-        .filter(([channelId]) => this.activeChannels.has(channelId))
+        .filter(([id]) => this.activeChannels.has(id) && wanted(id))
         .map(([, source]) => source),
     ]
     const results = await Promise.all(
@@ -992,6 +1004,7 @@ export class DataPlaneService {
           running: this.activeChannels.has(channelId) && snap.running,
           messages: snap.messages,
           conversations: snap.conversations,
+          mediaAssets: snap.mediaAssets,
           lastError: snap.lastError,
           blockedReason: snap.blockedReason,
         })
@@ -1001,6 +1014,7 @@ export class DataPlaneService {
           running: false,
           messages: 0,
           conversations: 0,
+          mediaAssets: 0,
           lastError: error instanceof Error ? error.message : String(error),
           blockedReason: null,
         })

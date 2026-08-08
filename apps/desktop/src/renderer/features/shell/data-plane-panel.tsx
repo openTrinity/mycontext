@@ -10,6 +10,7 @@
  * 3. **离线消费者告警**。某个消费者心跳超期意味着它的数据已经不完整了，
  *    用户有权知道，而不是让它静默降级。
  */
+import { useState } from "react"
 import { Button } from "@mycontext/design"
 import type { IngestSnapshot } from "@mycontext/ipc-contract"
 import { SelfIdentityPanel } from "../settings/self-identity-panel.js"
@@ -19,6 +20,7 @@ import {
   useIngestSnapshot,
   useRunIngestOnce,
 } from "../../lib/queries.js"
+import { ChannelPicker } from "./channel-picker.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
 function formatBytes(bytes: number): string {
@@ -36,8 +38,40 @@ export function DataPlanePanel({ enabled }: { enabled: boolean }) {
   // 订阅主进程推来的快照：入库后立刻更新，不轮询
   useIngestProgress()
 
-  const data = snapshot.data
-  if (data === undefined) return null
+  /**
+   * 当前在看哪个渠道。`null` = 没选过 → 第一个（主渠道排在前）。
+   *
+   * ★ 这一页的每个数字都跟着它走，而「立即同步」也只跑它 ——
+   * 不然用户在飞书那栏点同步，跑的却是钉钉那 1600 条的一轮。
+   */
+  const [pickedChannel, setPickedChannel] = useState<string | null>(null)
+
+  const raw = snapshot.data
+  if (raw === undefined) return null
+
+  const perChannel = raw.perChannel ?? []
+  const channel = pickedChannel ?? perChannel[0]?.channelId ?? raw.channelId
+  /**
+   * ★★ 按渠道取数 —— 顶层快照只是**其中一个**渠道的。
+   *
+   * 顶层来自主进程的 `snapshotIngest()`，它挑一个渠道返回（主渠道活跃就只
+   * 返回主渠道）。直接用它的话切到飞书之后这一页一动不动，
+   * 而用户以为自己在看飞书的采集情况。
+   */
+  const row = perChannel.find((item) => item.channelId === channel)
+  const data =
+    row === undefined
+      ? raw
+      : {
+          ...raw,
+          channelId: row.channelId,
+          messages: row.messages,
+          conversations: row.conversations,
+          mediaAssets: row.mediaAssets,
+          running: row.running,
+          lastError: row.lastError,
+          blockedReason: row.blockedReason,
+        }
 
   return (
     <section className="flex flex-col gap-[var(--gap-section-sm)]">
@@ -45,14 +79,31 @@ export function DataPlanePanel({ enabled }: { enabled: boolean }) {
         <h2 className="typography-title-small-500 text-[var(--text-base-primary)]">
           {t("status.sections.dataPlane")}
         </h2>
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={!data.running || runOnce.isPending}
-          onClick={() => runOnce.mutate()}
-        >
-          {t("status.dataPlane.syncNow")}
-        </Button>
+        <div className="flex items-center gap-2">
+          {/*
+            ★ 渠道选择器：这一页的每个数字都跟着它，而「立即同步」也只跑它。
+            单渠道时 `ChannelPicker` 自己退化成静态标识（判断在它那一处）。
+          */}
+          <ChannelPicker
+            options={perChannel.map((item) => ({
+              id: item.channelId,
+              label: t(`status.dataPlane.channel.${item.channelId}`, {
+                defaultValue: item.channelId,
+              }),
+            }))}
+            activeId={channel}
+            onChange={setPickedChannel}
+            ariaLabel={t("status.dataPlane.channelPickerLabel", { defaultValue: "选择渠道" })}
+          />
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!data.running || runOnce.isPending}
+            onClick={() => runOnce.mutate({ channelId: channel })}
+          >
+            {t("status.dataPlane.syncNow")}
+          </Button>
+        </div>
       </div>
 
       {data.blockedReason !== null && (
@@ -165,51 +216,6 @@ export function DataPlanePanel({ enabled }: { enabled: boolean }) {
         <p className="typography-caption-400 font-mono-token break-all text-[var(--status-error)]">
           {data.lastError}
         </p>
-      )}
-
-      {/*
-        ★★ 逐渠道的采集数字 —— 上面那一份**只是其中一个渠道**。
-
-        顶层快照来自 `snapshotIngest()`，它挑**一个**渠道返回（主渠道活跃就
-        只返回主渠道）。于是另一个渠道采集彻底停了、blocked 了、或一条都没采到，
-        界面上完全看不出来：显示的数字看起来很正常，只是它不是那个渠道的。
-
-        ★ 只在真有多个渠道时渲染（单渠道时与上面说的是同一件事）。
-      */}
-      {(data.perChannel ?? []).length > 1 && (
-        <div className="flex flex-col gap-1">
-          {(data.perChannel ?? []).map((row) => (
-            <div key={row.channelId} className="flex flex-wrap items-center gap-2">
-              <span className="typography-caption-400 min-w-16 text-[var(--text-base-tertiary)]">
-                {t(`status.dataPlane.channel.${row.channelId}`, { defaultValue: row.channelId })}
-              </span>
-              <span
-                className={`typography-caption-400 ${
-                  row.running ? "text-[var(--status-success)]" : "text-[var(--text-base-tertiary)]"
-                }`}
-              >
-                {t(row.running ? "status.dataPlane.running" : "status.dataPlane.idle")}
-              </span>
-              <span className="typography-caption-400 font-mono-token text-[var(--text-base-tertiary)]">
-                {t("status.dataPlane.messages")} {row.messages.toLocaleString()} ·{" "}
-                {t("status.dataPlane.conversations")} {row.conversations.toLocaleString()}
-              </span>
-              {/* ★ blocked / lastError 逐渠道给 —— 顶层那份只是一个渠道的 */}
-              {row.blockedReason !== null && (
-                <span className="typography-caption-400 text-[var(--status-warning)]">
-                  {t(`status.dataPlane.blocked.${row.blockedReason}`, {
-                    defaultValue: row.blockedReason,
-                  })}
-                </span>
-              )}
-              {row.lastError !== null && (
-                <span className="typography-caption-400 break-all text-[var(--status-error)]">
-                  {row.lastError}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
       )}
 
       {/*
