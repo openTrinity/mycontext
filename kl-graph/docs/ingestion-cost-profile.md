@@ -9,6 +9,10 @@ changed-community membership rows; `S` is cached structural edges; and `D` is
 embedding width. `Z`/`I_Z` are dirty serving-index keys and their incident
 edges; `E_R`/`J` are facts-only entity-projection edges and PageRank iterations.
 
+For producer/consumer relationships, checkpoint invalidation, deletion
+semantics, and live-server publication, see
+[Ingestion Artifact Dependencies](ingestion-artifact-dependencies.md).
+
 | Stage | Scope | Typical weight | Main scaling / bottleneck |
 |---|---|---:|---|
 | Source scan, parse, chunk | Batch/input tree | Light–medium | Local file I/O and parsing, approximately linear in source bytes |
@@ -54,7 +58,7 @@ Ladybug, and keyed COMM_MEMBER projection keep that work output-sensitive.
 | Structural feature/frontier load | Light–heavy for hubs | Cache lookups avoid a store scan but traverse incident chunk/fact sets, `O(I_K)` plus set-intersection/pair-generation work. |
 | Frontier communities | Medium | Indexed equality lookups cost `O(P + incident similarity edges)`; structural projection enumerates `Q_P` candidate pairs; Leiden runs four 3-iteration resolutions over `P`/`E_P`. Dense shared chunks/entities can dominate. |
 | Community projection | Light | Exact `(node type, level, ID)` keys drive indexed reads and scoped `COMM_MEMBER` replacement, `O(C)`. Empty changes are a no-op. Legacy index creation is a one-time `O(V)` cost; UUID-only custom strategies use an `O(V)` compatibility scan. |
-| Summary invalidation | Light | Marks affected summaries stale using local metadata updates. No LLM calls. |
+| Summary invalidation | Light | Records a stale signal on affected reified community rows. It does not regenerate summaries/vectors or stop current `community_summaries`/Qdrant consumers from serving them; see the dependency guide. |
 
 Excluding ANN and dense cosine work itemized above, local incremental graph work
 is approximately `O(K + I_K + P + Q_P + E_P + C)`, followed by an
