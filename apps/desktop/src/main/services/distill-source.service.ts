@@ -119,6 +119,84 @@ export class DistillSourceService {
     this.db = db
     this.sourceDbs.clear()
     for (const source of sources) this.sourceDbs.set(source.channelId, source.db)
+    this.syncTimeWindowToSources()
+  }
+
+  /**
+   * 把主库的**时间窗**播到各渠道库。
+   *
+   * ## ★★ 为什么必须在挂载时做
+   *
+   * `readCollectionScope` 是逐库读的，而它对"表里没有 chat 行"的处理是
+   * **不设限**（那对老库是对的：从没配过范围就别挡着采）。于是一个从没走过
+   * 引导流程的渠道（飞书就是）会**按全量采** —— 实测飞书库的
+   * `distill_sources` 是 0 行。那违反 CLAUDE.md 第 5 节。
+   *
+   * ★ 只播 `since`/`until`/`chatKinds`（渠道无关的语义），**不播
+   * `conversationIds`** —— 那是某个渠道的 external_id，复制过去等于让它按
+   * 一批不存在的 id 过滤，结果恒为零（那比超采更糟：静默一条都不采）。
+   *
+   * ★ 已经有 chat 行的渠道库**不覆盖**：用户可能已经在运行状态页给它单独
+   * 设过范围，而挂载时拿主渠道的去盖会把那次设置无声抹掉。
+   */
+  private syncTimeWindowToSources(): void {
+    const db = this.db
+    if (db === null || this.sourceDbs.size === 0) return
+    let primary
+    try {
+      primary = new DistillSourceRepository(db).list().find((row) => row.kind === "chat")
+    } catch {
+      // 表还没建（迁移没跑完）→ 这一轮不同步，下次挂载再来
+      return
+    }
+    if (primary === undefined) {
+      this.options.logger.info("collection scope sync skipped (no primary chat row)", {
+        sources: [...this.sourceDbs.keys()],
+      })
+      return
+    }
+
+    for (const [channelId, sourceDb] of this.sourceDbs) {
+      try {
+        /**
+         * ★★ 判"已经设过"必须查**表里有没有那一行**，不能用 `repo.list()`。
+         *
+         * `DistillSourceRepository.list()` 对**每一个** kind 都返回一行
+         * （表里没有就给一个默认对象）—— 那对 UI 是对的（九个源都要显示），
+         * 但用它判"设过没有"**恒为真**。实测踩到：日志说"已经设过了"，
+         * 而库里 `SELECT` 出来是 0 行。
+         */
+        const exists =
+          sourceDb
+            .prepare<[], { n: number }>(
+              "SELECT count(*) AS n FROM distill_sources WHERE kind = 'chat'",
+            )
+            .get()?.n ?? 0
+        if (exists > 0) continue
+        const repo = new DistillSourceRepository(sourceDb)
+        repo.upsert(
+          "chat",
+          {
+            enabled: primary.enabled,
+            scope: {
+              ...(primary.scope.since === undefined ? {} : { since: primary.scope.since }),
+              ...(primary.scope.until === undefined ? {} : { until: primary.scope.until }),
+              ...(primary.scope.chatKinds === undefined
+                ? {}
+                : { chatKinds: [...primary.scope.chatKinds] }),
+              // ★ 刻意不带 conversationIds —— 见方法注释
+            },
+          },
+          this.options.clock.now(),
+        )
+        this.options.logger.info("collection time window synced to channel", { channelId })
+      } catch (error) {
+        this.options.logger.error("collection scope sync failed", {
+          channelId,
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
   }
 
   detach(): void {

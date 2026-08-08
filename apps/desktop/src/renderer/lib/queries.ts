@@ -1476,13 +1476,28 @@ export function useKlServerStatus(): KlServerStatus | null {
 }
 
 /** 启动 kl-server（懒启动；warmup 期间状态经 onStatus 推 UI）。 */
+/**
+ * 起 kl-server。★ 收 `channelId`：`failed` 之后不自动重起（刻意的），
+ * 所以必须能精确地对某一个渠道重试。不给 = 全部。
+ */
 export function useKlServerStart() {
-  return useMutation({ mutationFn: async () => unwrap(await window.mycontext.kl.serverStart()) })
+  return useMutation({
+    mutationFn: async (channelId?: string) =>
+      unwrap(
+        await window.mycontext.kl.serverStart(channelId === undefined ? undefined : { channelId }),
+      ),
+  })
 }
 
 /** 停止 kl-server。 */
+/** 停止 kl-server。★ 与 `useKlServerStart` 同款按渠道。 */
 export function useKlServerStop() {
-  return useMutation({ mutationFn: async () => unwrap(await window.mycontext.kl.serverStop()) })
+  return useMutation({
+    mutationFn: async (channelId?: string) =>
+      unwrap(
+        await window.mycontext.kl.serverStop(channelId === undefined ? undefined : { channelId }),
+      ),
+  })
 }
 
 /** 触发建图（export→ingest，长任务、出网）。完成后 server 会重载新图。 */

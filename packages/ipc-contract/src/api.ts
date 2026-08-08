@@ -482,9 +482,9 @@ export interface MyContextApi {
     /** 当前 kl-server 状态快照 */
     serverStatus(): Promise<Result<KlServerStatus>>
     /** 懒启动（若未起）；返回是否 ready */
-    serverStart(): Promise<Result<boolean>>
+    serverStart(input?: { channelId?: string }): Promise<Result<boolean>>
     /** 停止 kl-server（无孤儿） */
-    serverStop(): Promise<Result<true>>
+    serverStop(input?: { channelId?: string }): Promise<Result<true>>
     /** 触发建图（export→ingest，长任务、出网）。跑完返回图规模；期间 server 会重载。 */
     graphBuild(fresh?: boolean, channelId?: string): Promise<Result<KlGraphBuildResult>>
     /**

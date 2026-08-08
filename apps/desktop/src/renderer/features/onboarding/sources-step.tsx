@@ -107,9 +107,17 @@ export interface SourcesStepProps {
   onChange: (next: SourcesDraft) => void
   /** 全部资料源（含采集器状态），由主进程给 */
   sources: readonly { kind: DistillSourceId; status: "ready" | "planned" }[]
+  /**
+   * 只列这个渠道的会话。`undefined` = 不过滤（引导流程走这条）。
+   *
+   * ★ 运行状态页的采集范围面板一次只管一个渠道，而会话列表是混着两个渠道的
+   * （每项带 `channelId`）。不过滤的话用户会在飞书面板里勾到钉钉的会话 ——
+   * 那批 id 存进飞书库就是"按不存在的 id 过滤"，结果恒为零且不报错。
+   */
+  channelFilter?: string
 }
 
-export function SourcesStep({ value, onChange, sources }: SourcesStepProps) {
+export function SourcesStep({ value, onChange, sources, channelFilter }: SourcesStepProps) {
   const { t } = useDynamicTranslation("onboarding")
   const errorText = useErrorText()
   /**
@@ -149,12 +157,20 @@ export function SourcesStep({ value, onChange, sources }: SourcesStepProps) {
    * 却在蒸馏时被算进去。现在两组都显示，选中与否只看 `conversationIds`。
    */
   const groups = useMemo(() => {
-    const items = conversations.data?.items ?? []
+    const all = conversations.data?.items ?? []
+    /**
+     * ★ 按渠道过滤（见 `channelFilter`）。**没有 channelId 的项保留** ——
+     * 那是存量数据的形状（旧记录不带它），丢掉会让用户的历史勾选看不见。
+     */
+    const items =
+      channelFilter === undefined
+        ? all
+        : all.filter((item) => item.channelId === undefined || item.channelId === channelFilter)
     return {
       direct: items.filter((item) => item.kind === "direct"),
       group: items.filter((item) => item.kind === "group"),
     }
-  }, [conversations.data])
+  }, [conversations.data, channelFilter])
 
   /** 一组的全选/全不选。已经全选了就变成全不选（同一个按钮两个方向）。 */
   const toggleAll = (items: readonly ChannelConversationView[]) => {

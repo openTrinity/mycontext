@@ -103,7 +103,9 @@ export interface IpcDependencies {
    * ★ `graphOverview` 的签名比 `KlServerService` 的宽一个可选参数（渠道 id）——
    * 装配层传的是 `MultiKlServerService`，它按 id 路由到对应的图库。
    */
-  klServer: Pick<KlServerService, "status" | "ensureReady" | "stop"> & {
+  klServer: Pick<KlServerService, "status"> & {
+    ensureReady(channelId?: string): ReturnType<KlServerService["ensureReady"]>
+    stop(channelId?: string): ReturnType<KlServerService["stop"]>
     graphOverview(channelId?: string): ReturnType<KlServerService["graphOverview"]>
     rebuildGraph(fresh?: boolean, channelId?: string): ReturnType<KlServerService["rebuildGraph"]>
     optimizeGraph(channelId?: string): ReturnType<KlServerService["optimizeGraph"]>
@@ -770,10 +772,26 @@ export function registerIpc(deps: IpcDependencies): void {
   // ---------------- 知识图谱（kl）子进程 ----------------
 
   ipcMain.handle(IPC_CHANNELS.klServerStatus, () => attempt(() => klServer.status()))
-  ipcMain.handle(IPC_CHANNELS.klServerStart, () => attempt(() => klServer.ensureReady()))
-  ipcMain.handle(IPC_CHANNELS.klServerStop, () =>
+  /**
+   * 起 kl。★ 带渠道：`failed` 之后不自动重起（刻意的），所以必须能精确地
+   * 对某一个渠道重试 —— 见 `MultiKlServerService.ensureReady`。
+   */
+  ipcMain.handle(IPC_CHANNELS.klServerStart, (_event, payload: unknown) =>
+    attempt(() =>
+      klServer.ensureReady(
+        typeof (payload as { channelId?: unknown } | null)?.channelId === "string"
+          ? (payload as { channelId: string }).channelId
+          : undefined,
+      ),
+    ),
+  )
+  ipcMain.handle(IPC_CHANNELS.klServerStop, (_event, payload: unknown) =>
     attempt(async () => {
-      await klServer.stop()
+      await klServer.stop(
+        typeof (payload as { channelId?: unknown } | null)?.channelId === "string"
+          ? (payload as { channelId: string }).channelId
+          : undefined,
+      )
       return true as const
     }),
   )

@@ -151,6 +151,12 @@
         "dingtalk": "DingTalk",
         "feishu": "Feishu"
       }
+    },
+    "scope": {
+      "title": "Collection scope",
+      "description": "Choose how far back and which conversations to collect. Saving takes effect immediately: out-of-scope messages are purged.",
+      "save": "Save scope",
+      "savedHint": "Saved. Out-of-scope messages are being purged and the graph will rebuild (minutes)."
     }
   },
   "advancedAi": {

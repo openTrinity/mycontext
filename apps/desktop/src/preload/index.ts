@@ -167,8 +167,8 @@ const api: MyContextApi = {
   },
   kl: {
     serverStatus: () => ipcRenderer.invoke(IPC_CHANNELS.klServerStatus),
-    serverStart: () => ipcRenderer.invoke(IPC_CHANNELS.klServerStart),
-    serverStop: () => ipcRenderer.invoke(IPC_CHANNELS.klServerStop),
+    serverStart: (input) => ipcRenderer.invoke(IPC_CHANNELS.klServerStart, input ?? {}),
+    serverStop: (input) => ipcRenderer.invoke(IPC_CHANNELS.klServerStop, input ?? {}),
     graphBuild: (fresh?: boolean) => ipcRenderer.invoke(IPC_CHANNELS.klGraphBuild, fresh ?? false),
     graphOverview: (input) => ipcRenderer.invoke(IPC_CHANNELS.klGraphOverview, input ?? {}),
     graphOptimize: (channelId) => ipcRenderer.invoke(IPC_CHANNELS.klGraphOptimize, channelId),

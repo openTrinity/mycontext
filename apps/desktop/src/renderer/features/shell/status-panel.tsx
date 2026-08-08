@@ -30,6 +30,7 @@ import {
   useKlServerStop,
   useKlGraphBuild,
 } from "../../lib/queries.js"
+import { CollectionScopePanel } from "./collection-scope-panel.js"
 import { DataPlanePanel } from "./data-plane-panel.js"
 import { IngestIntervalsPanel } from "../settings/ingest-intervals-panel.js"
 import { useErrorText } from "../../lib/use-error-text.js"
@@ -100,6 +101,16 @@ export function StatusPanel() {
         采集频率：紧跟数据面 —— 用户看到"探针周期 10s"这个数字之后，
         下一步想做的就是改它。放到别的分区里等于让人去找。
       */}
+      {/*
+        ★★ 采集范围 —— 改动前这个入口**只在引导流程里**，而飞书压根没走过
+        引导，于是它的范围从来没被设置过 → `readCollectionScope` 判"不设限"
+        → **按全量采**（实测飞书库的 distill_sources 是 0 行）。
+        那是隐私问题，不是"少个入口"。
+
+        放在采集周期**之前**：先回答"采什么"，再回答"多久采一次"。
+      */}
+      <CollectionScopePanel channelId={statusChannel} />
+
       <IngestIntervalsPanel />
 
       {/*
@@ -330,7 +341,16 @@ function KlPanel({ channelId }: { channelId: string | null }) {
   const stop = useKlServerStop()
   const build = useKlGraphBuild()
 
-  const state = status?.state ?? "stopped"
+  /**
+   * ★★ 服务状态按**选中的渠道**取 —— 顶层那个 `state` 是主渠道的。
+   *
+   * 不按渠道取的后果（实测）：选了飞书、而飞书的 kl 是 failed，界面上那个
+   * 徽章却显示「就绪」（钉钉的），按钮也是「停止」而不是「重试」——
+   * 于是**失败的那个渠道没有任何重试入口**（`failed` 之后不自动重起，
+   * 那是刻意的，所以必须有入口）。
+   */
+  const row = (status?.perChannel ?? []).find((item) => item.channelId === channelId)
+  const state = row?.state ?? status?.state ?? "stopped"
   /**
    * 数据动作是否在跑 —— 只用来**互斥禁用那三个按钮**（别同时建两次）。
    *
@@ -347,6 +367,8 @@ function KlPanel({ channelId }: { channelId: string | null }) {
    * 「建图占用中」：那会把一个可用的服务显示成不可用。
    */
   const stateLabel = t(klServiceStateKey(state))
+  /** 失败原因也按渠道取（顶层那个只是主渠道的）。 */
+  const reason = row?.reason ?? status?.reason ?? null
   const badgeStyle = KL_STATE_STYLE[state]
 
   return (
@@ -370,9 +392,9 @@ function KlPanel({ channelId }: { channelId: string | null }) {
             >
               {stateLabel}
             </span>
-            {status?.port !== null && status?.port !== undefined && (
+            {(row?.port ?? status?.port) !== null && (row?.port ?? status?.port) !== undefined && (
               <span className="typography-caption-400 font-mono-token text-[var(--text-base-tertiary)]">
-                {t("status.kl.port")} {status.port}
+                {t("status.kl.port")} {row?.port ?? status?.port}
               </span>
             )}
             {status?.networkEgress === true && (
@@ -382,8 +404,8 @@ function KlPanel({ channelId }: { channelId: string | null }) {
             )}
           </div>
 
-          {state === "failed" && status?.reason !== null && status?.reason !== undefined && (
-            <p className="typography-body-small-400 text-[var(--status-error)]">{status.reason}</p>
+          {state === "failed" && reason !== null && (
+            <p className="typography-body-small-400 text-[var(--status-error)]">{reason}</p>
           )}
 
           {/*
@@ -438,16 +460,17 @@ function KlPanel({ channelId }: { channelId: string | null }) {
               把按钮整个藏掉，理由是"服务由数据流程收尾拉起"；那对旧实现成立
               （建图确实先 stop），现在只会让用户在几十分钟里没有任何可操作项。
             */}
+            {/* ★ 三个按钮都带渠道 —— 见上面 `row` 的注释 */}
             {state === "ready" ? (
-              <Button size="sm" variant="secondary" onClick={() => stop.mutate()}>
+              <Button size="sm" variant="secondary" onClick={() => stop.mutate(channelId ?? undefined)}>
                 {t("status.kl.stop")}
               </Button>
             ) : state === "failed" ? (
-              <Button size="sm" variant="secondary" onClick={() => start.mutate()}>
+              <Button size="sm" variant="secondary" onClick={() => start.mutate(channelId ?? undefined)}>
                 {t("status.kl.retry")}
               </Button>
             ) : (
-              <Button size="sm" variant="secondary" onClick={() => start.mutate()}>
+              <Button size="sm" variant="secondary" onClick={() => start.mutate(channelId ?? undefined)}>
                 {t("status.kl.start")}
               </Button>
             )}

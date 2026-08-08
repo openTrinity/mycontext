@@ -14,6 +14,11 @@ import { useState } from "react"
 import { Button } from "@mycontext/design"
 import type { IngestSnapshot } from "@mycontext/ipc-contract"
 import { SelfIdentityPanel } from "../settings/self-identity-panel.js"
+
+/**
+ * 主渠道 id。本人身份、数字分身这些只在它上面成立 —— 其余渠道是只读接入。
+ */
+const PRIMARY_CHANNEL_ID = "dingtalk"
 import {
   useClearIngestBlocked,
   useIngestProgress,
@@ -156,7 +161,8 @@ export function DataPlanePanel({
         </p>
       )}
 
-      {data.unjudged > 0 && (
+      {/* ★ 归属判定同样只对主渠道成立（它依赖身份行）—— 见下面 SelfIdentityPanel */}
+      {channel === PRIMARY_CHANNEL_ID && data.unjudged > 0 && (
         <p className="typography-body-small-400 text-[var(--text-base-tertiary)]">
           {t("status.dataPlane.unjudgedHint", { count: data.unjudged })}
         </p>
@@ -167,7 +173,20 @@ export function DataPlanePanel({
         未确认时蒸馏会拒掉**全部**语料且不报错 —— 这是那类失效的唯一出口，
         所以放在状态页最显眼的位置（就在"未判定 N 条"那行下面）。
       */}
-      <SelfIdentityPanel confirmed={data.selfConfirmed} unjudged={data.unjudged} />
+      {/*
+        ★★ 本人身份**只对主渠道**有意义。
+        
+        `readSelfIdentity()` 返回的是主渠道那一行（主进程里写死
+        `plugin.meta.id`），而非主渠道压根没有身份行。于是选了飞书时这一块
+        会弹出**钉钉的**身份卡（工号/组织/"779 条本人消息"）并要求"解析身份"
+        —— 一个用户按了也不会有正确结果的操作，而它指向的是另一个渠道。
+        
+        非主渠道要有身份确认，得先让 `readSelfIdentity` 支持按渠道取
+        （那需要每个渠道各自的身份行）。在那之前不显示比显示错的好。
+      */}
+      {channel === PRIMARY_CHANNEL_ID ? (
+        <SelfIdentityPanel confirmed={data.selfConfirmed} unjudged={data.unjudged} />
+      ) : null}
 
       {/*
         ★ 九个数字**分两层**，不再一个 3×3 网格平铺。

@@ -85,7 +85,29 @@ export class MultiKlServerService {
     }
   }
 
-  async ensureReady(): Promise<boolean> {
+  /**
+   * 起服务。
+   *
+   * ## ★ `channelId` 给了就**只起那一个**
+   *
+   * 界面上「启动/重试」与渠道选择器同处一页 —— 用户在飞书那栏点「重试」
+   * 的意图是重试飞书的 kl。不带渠道的话会把已经 ready 的主渠道也走一遍
+   * （无害但没用），更要紧的是**失败的那个仍然没被重试**：
+   * `failed` 之后不自动重起（那是刻意的，崩溃循环会刷屏），所以必须能
+   * 精确地对那一个渠道重试。
+   *
+   * 不给 = 全部（登录时那条路走它）。
+   */
+  async ensureReady(channelId?: string): Promise<boolean> {
+    if (channelId !== undefined && channelId !== this.primaryChannelId) {
+      const source = this.sources.find((item) => item.channelId === channelId)
+      return source === undefined ? false : await source.service.ensureReady()
+    }
+    if (channelId === this.primaryChannelId) return await this.primary.ensureReady()
+    return await this.ensureAllReady()
+  }
+
+  private async ensureAllReady(): Promise<boolean> {
     const primaryReady = await this.primary.ensureReady()
     const sourceReady = await Promise.all(
       this.sources
@@ -95,7 +117,17 @@ export class MultiKlServerService {
     return primaryReady && sourceReady.every(Boolean)
   }
 
-  async stop(): Promise<void> {
+  /** 停服务。★ 与 `ensureReady` 同款按渠道分流（见那里的注释）。 */
+  async stop(channelId?: string): Promise<void> {
+    if (channelId !== undefined && channelId !== this.primaryChannelId) {
+      const source = this.sources.find((item) => item.channelId === channelId)
+      if (source !== undefined) await source.service.stop()
+      return
+    }
+    if (channelId === this.primaryChannelId) {
+      await this.primary.stop()
+      return
+    }
     await Promise.all([this.primary.stop(), ...this.sources.map((source) => source.service.stop())])
   }
 
