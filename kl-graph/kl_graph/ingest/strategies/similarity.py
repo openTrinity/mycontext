@@ -52,6 +52,8 @@ class AnnPlusIntraBatch:
         *,
         entity_threshold: float = 0.45,
         fact_threshold: float = 0.85,
+        cached_msg_sets: dict[str, set[str]] | None = None,
+        cached_fact_sets: dict[str, set[str]] | None = None,
     ) -> list[Edge]:
         """Compute similarity edges for the incremental batch.
 
@@ -83,7 +85,11 @@ class AnnPlusIntraBatch:
         edges: list[Edge] = []
 
         if new_entity_ids:
-            msg_sets, fact_sets = self._load_structural_data(store)
+            if cached_msg_sets is not None and cached_fact_sets is not None:
+                msg_sets = cached_msg_sets
+                fact_sets = cached_fact_sets
+            else:
+                msg_sets, fact_sets = self._load_structural_data(store)
             entity_vecs = self._retrieve_vectors(qdrant, "entities", new_entity_ids)
 
             edges.extend(

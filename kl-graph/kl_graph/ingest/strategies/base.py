@@ -22,6 +22,8 @@ class IncrementalSimilarityStrategy(Protocol):
         *,
         entity_threshold: float = 0.45,
         fact_threshold: float = 0.85,
+        cached_msg_sets: dict[str, set[str]] | None = None,
+        cached_fact_sets: dict[str, set[str]] | None = None,
     ) -> list[Edge]:
         """Compute similarity edges for newly ingested nodes.
 
@@ -32,6 +34,8 @@ class IncrementalSimilarityStrategy(Protocol):
             store: KnowledgeStore for structural data (co-occurrence, ABOUT edges).
             entity_threshold: Minimum hybrid score to emit ENTITY_SIMILAR edge (default 0.45).
             fact_threshold: Minimum cosine score to emit FACT_SIMILAR edge (default 0.85).
+            cached_msg_sets: Optional pre-loaded entity→chunk sets; avoids O(E) store scan.
+            cached_fact_sets: Optional pre-loaded entity→fact sets; avoids O(E) store scan.
 
         Returns:
             List of Edge objects (ENTITY_SIMILAR and/or FACT_SIMILAR).
@@ -51,6 +55,7 @@ class IncrementalCommunityStrategy(Protocol):
         *,
         entity_resolutions: dict[str, float],
         fact_resolutions: dict[str, float],
+        structural_cache: object | None = None,
     ) -> set[str]:
         """Assign community memberships to new and affected existing nodes.
 
@@ -62,6 +67,10 @@ class IncrementalCommunityStrategy(Protocol):
                 Example: {"L0": 0.3, "L1": 1.0, "L2": 3.0, "L3": 10.0}
             fact_resolutions: Resolution parameters per level for fact graph.
                 Example: {"L0": 0.3, "L1": 1.0, "L2": 3.0, "L3": 10.0}
+            structural_cache: Optional StructuralCache for O(K) co-mention and
+                shared-entity computation among frontier nodes without scanning
+                all structural edges. Typed as ``object`` here to avoid importing
+                the concrete class in this protocol module.
 
         Returns:
             Set of community UUIDs whose membership changed (for summary invalidation).

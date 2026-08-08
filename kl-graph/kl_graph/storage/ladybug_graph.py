@@ -1025,6 +1025,31 @@ class LadybugGraphDB(GraphDB):
                     continue
                 yield (aid, bid, _merge_edge_props(props, conf))
 
+    def scan_edges_for_nodes(
+        self,
+        edge_types: list[str],
+        node_ids: set[str],
+        *,
+        source_type: str | None = None,
+        target_type: str | None = None,
+    ) -> Iterator[tuple[str, str, dict]]:
+        """Stream ``(source_id, target_id, properties)`` for edges touching ``node_ids``.
+
+        Delegates to :meth:`scan_edges_typed` and filters in Python, since
+        Kuzu's Cypher dialect does not reliably support ``IN``-list filtering
+        on node properties. This is O(E) per edge type on the LadybugDB
+        backend, but the frontier optimization still wins by not loading all
+        node IDs and using the StructuralCache for co-mention computation.
+
+        TODO: optimize with a Cypher ``WHERE a.id IN $ids OR b.id IN $ids``
+        parameterised query when Kuzu adds list-parameter binding support.
+        """
+        for src, tgt, props in self.scan_edges_typed(
+            edge_types, source_type=source_type, target_type=target_type
+        ):
+            if src in node_ids or tgt in node_ids:
+                yield (src, tgt, props)
+
     def close(self) -> None:
         """Close connection and database."""
         if hasattr(self, "_conn") and self._conn and not self._conn.is_closed:

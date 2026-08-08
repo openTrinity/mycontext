@@ -659,7 +659,9 @@ def _summary_lookup(sqlite) -> dict[tuple[str, str, int], tuple[str, list[str]]]
     return out
 
 
-def project_community_membership_edges(sqlite, *, batch_size: int = 5000):
+def project_community_membership_edges(
+    sqlite, *, batch_size: int = 5000, community_ids: set[str] | None = None
+):
     """Derive Community rows + ``COMM_MEMBER`` edges from the assignment columns.
 
     The ``community_L0..L3`` columns on entities/facts stay the source of truth;
@@ -678,6 +680,10 @@ def project_community_membership_edges(sqlite, *, batch_size: int = 5000):
     Args:
         sqlite: Store to read assignments from and write the projection to.
         batch_size: Edge rows per executemany/insert batch.
+        community_ids: When not None, only project memberships for communities
+            whose UUID (``community_id_from``) is in this set. The DELETE is
+            similarly scoped to those ``target_id`` values so unchanged
+            communities keep their edges. When None (default), full rebuild.
 
     Returns:
         ``(n_communities, n_edges)`` actually projected.
@@ -693,13 +699,16 @@ def project_community_membership_edges(sqlite, *, batch_size: int = 5000):
             ).fetchall()
             for node_id, cid in rows:
                 cid = int(cid)
+                comm_uuid = community_id_from(node_type, level, cid)
+                if community_ids is not None and comm_uuid not in community_ids:
+                    continue
                 member_counts[(node_type, level, cid)] += 1
                 edges.append(
                     Edge(
                         source_type=node_type,
                         source_id=node_id,
                         target_type="community",
-                        target_id=community_id_from(node_type, level, cid),
+                        target_id=comm_uuid,
                         edge_type=EdgeType.COMM_MEMBER,
                         properties={"level": level},
                     )
@@ -719,7 +728,9 @@ def project_community_membership_edges(sqlite, *, batch_size: int = 5000):
     ]
     sqlite.insert_communities(communities)
 
-    _rebuild_comm_member_edges(sqlite, edges, batch_size=batch_size)
+    _rebuild_comm_member_edges(
+        sqlite, edges, batch_size=batch_size, community_ids=community_ids
+    )
     print(
         f"  Projected {len(communities)} communities and "
         f"{len(edges)} COMM_MEMBER edges from the assignment columns"
@@ -727,8 +738,15 @@ def project_community_membership_edges(sqlite, *, batch_size: int = 5000):
     return len(communities), len(edges)
 
 
-def _rebuild_comm_member_edges(sqlite, edges: list[Edge], *, batch_size: int) -> None:
-    """Delete every ``COMM_MEMBER`` edge and re-insert ``edges``.
+def _rebuild_comm_member_edges(
+    sqlite, edges: list[Edge], *, batch_size: int, community_ids: set[str] | None = None
+) -> None:
+    """Delete ``COMM_MEMBER`` edges and re-insert ``edges``.
+
+    When ``community_ids`` is None (default), **all** ``COMM_MEMBER`` edges are
+    deleted before the rebuild — the full projection replace. When it is a set,
+    only edges whose ``target_id`` is in the set are deleted, so unchanged
+    communities keep their membership edges across an incremental re-clustering.
 
     For the SQLite backend the whole delete+rebuild runs as one transaction on the
     raw connection: the store's own ``delete_edges``/``insert_edges`` commit per
@@ -749,8 +767,11 @@ def _rebuild_comm_member_edges(sqlite, edges: list[Edge], *, batch_size: int) ->
 
     Args:
         sqlite: Store to rewrite the projection in.
-        edges: The full fresh ``COMM_MEMBER`` edge set.
+        edges: The fresh ``COMM_MEMBER`` edge set for the targeted communities.
         batch_size: Rows per batch.
+        community_ids: When not None, only delete ``COMM_MEMBER`` edges whose
+            ``target_id`` is in this set (incremental scope). When None, delete
+            all ``COMM_MEMBER`` edges (full rebuild).
 
     Raises:
         Exception: Whatever the backend raises on delete/insert, re-raised as-is
@@ -759,7 +780,18 @@ def _rebuild_comm_member_edges(sqlite, edges: list[Edge], *, batch_size: int) ->
     if isinstance(sqlite, SQLiteStore):
         conn = sqlite.sql_conn
         with conn:  # single transaction: no window without memberships
-            conn.execute("DELETE FROM edges WHERE edge_type = ?", ("COMM_MEMBER",))
+            if community_ids is not None and community_ids:
+                ordered = list(community_ids)
+                for start in range(0, len(ordered), 500):
+                    batch = ordered[start : start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    conn.execute(
+                        f"DELETE FROM edges WHERE edge_type = ? "
+                        f"AND target_id IN ({placeholders})",
+                        ("COMM_MEMBER", *batch),
+                    )
+            else:
+                conn.execute("DELETE FROM edges WHERE edge_type = ?", ("COMM_MEMBER",))
             for i in range(0, len(edges), batch_size):
                 conn.executemany(
                     """INSERT OR IGNORE INTO edges
@@ -782,7 +814,11 @@ def _rebuild_comm_member_edges(sqlite, edges: list[Edge], *, batch_size: int) ->
     # Non-atomic fallback: the delete is already committed once we get here, so an
     # insert failure leaves a partial projection. Let it propagate — a loud error
     # plus a re-run of improve is safer than pretending the rebuild succeeded.
-    sqlite.delete_edges(edge_type=EdgeType.COMM_MEMBER.value)
+    if community_ids is not None and community_ids:
+        for cid in community_ids:
+            sqlite.delete_edges(edge_type=EdgeType.COMM_MEMBER.value, target_id=cid)
+    else:
+        sqlite.delete_edges(edge_type=EdgeType.COMM_MEMBER.value)
     for i in range(0, len(edges), batch_size):
         sqlite.insert_edges(edges[i : i + batch_size])
 

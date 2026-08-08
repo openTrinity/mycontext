@@ -71,6 +71,7 @@ async def run_ingestion(
     progress_callback: ProgressCallback | None = None,
     counts_callback: Callable[[IngestResult], None] | None = None,
     finalize_callback: Callable[[], None] | None = None,
+    structural_cache=None,
 ) -> IngestResult:
     """Run the canonical unit-incremental ingestion workflow."""
 
@@ -106,6 +107,7 @@ async def run_ingestion(
         keep_cache=options.keep_cache,
         source_id=options.source_id,
         incremental_units=True,
+        structural_cache=structural_cache,
     )
     try:
         completion_params = {
@@ -145,6 +147,7 @@ async def run_ingestion(
                         targets=ImprovementTargets(),
                         checkpoint=checkpoint,
                         batch_id=checkpoint.batch_id,
+                        structural_cache=structural_cache,
                     )
                     if finalize_callback is not None:
                         report("finalize", 0.95, "refreshing indexes")
@@ -203,6 +206,13 @@ async def run_ingestion(
             )
         )
 
+        # Optimization 1: apply the batch's newly created structural edges
+        # (MENTIONS/AUTHORED_BY/ABOUT) to the in-memory StructuralCache so the
+        # O(K) improvement_targets lookup and the next incremental similarity
+        # run see this batch's edges without re-scanning the store.
+        if structural_cache is not None and hasattr(pipeline, "_batch_edges") and pipeline._batch_edges:
+            structural_cache.apply_delta(pipeline._batch_edges)
+
         if improve_mode != "off":
             targets = pipeline.improvement_targets()
             report(
@@ -220,6 +230,7 @@ async def run_ingestion(
                     targets=targets,
                     checkpoint=checkpoint,
                     batch_id=checkpoint.batch_id,
+                    structural_cache=structural_cache,
                 )
                 report(
                     "improve",

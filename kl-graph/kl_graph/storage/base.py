@@ -458,6 +458,34 @@ class KnowledgeStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def scan_edges_for_nodes(
+        self,
+        edge_types: list[str],
+        node_ids: set[str],
+        *,
+        source_type: str | None = None,
+        target_type: str | None = None,
+    ) -> Iterator[tuple[str, str, dict]]:
+        """Stream ``(source_id, target_id, properties)`` for edges touching ``node_ids``.
+
+        Frontier-scoped edge scan: returns only edges where the source_id OR
+        target_id is in ``node_ids``. This lets the incremental community
+        strategy build a frontier-only subgraph without loading all edges
+        (O(frontier) instead of O(E) for the SQLite backend, which pushes the
+        filter into the SQL WHERE clause against indexed columns).
+
+        Args:
+            edge_types: Edge type names to scan (e.g. ``["ENTITY_SIMILAR"]``).
+            node_ids: Set of node IDs to filter on (either endpoint).
+            source_type: If set, restrict to edges from this source node type.
+            target_type: If set, restrict to edges to this target node type.
+
+        Returns:
+            Iterator of ``(source_id, target_id, properties_dict)`` tuples.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def find_paths(
         self,
         source_id: str,

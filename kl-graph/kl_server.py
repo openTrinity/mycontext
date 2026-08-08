@@ -99,6 +99,8 @@ class ServerState:
     store: KnowledgeStore | None = (
         None  # unified KnowledgeStore (replaces sqlite + graph_db)
     )
+    # Optimization 1: in-memory structural edge cache for O(K) improvement lookups
+    structural_cache: object | None = None  # StructuralCache
     startup_time: float = 0
     ready: bool = False
     # Background ingestion job (Phase A + B). Only one runs at a time.
@@ -453,6 +455,7 @@ async def _run_single_ingest_job(req: IngestRequest):
             ),
             counts_callback=_set_ingest_counts,
             finalize_callback=_hot_swap_graph,
+            structural_cache=state.structural_cache,
         )
         _set_progress("done", "", 1.0, "ingest complete")
         logger.info("Background ingest complete.")
@@ -539,6 +542,13 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             f"Cannot start with graph backend {cfg.storage.graph.backend!r}: {e}"
         ) from e
+
+    # 1c. StructuralCache — O(E) one-time load of MENTIONS/AUTHORED_BY/ABOUT
+    # edges into memory, so incremental improvement uses O(K) lookups instead
+    # of repeated O(E) store scans.
+    from kl_graph.ingest.structural_cache import StructuralCache
+
+    state.structural_cache = StructuralCache.from_store(state.store)
 
     # 2. Build adjacency index
     state.adjacency = _build_adjacency(state.store)

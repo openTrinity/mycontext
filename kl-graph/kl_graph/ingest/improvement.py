@@ -194,6 +194,7 @@ def run_incremental_improvement(
     targets: ImprovementTargets,
     checkpoint: IngestCheckpoint | None = None,
     batch_id: str | None = None,
+    structural_cache=None,
 ) -> ImprovementResult:
     """Update similarities and communities for nodes affected by one batch."""
 
@@ -212,8 +213,13 @@ def run_incremental_improvement(
         "improve.incremental_similarity", params=params
     )
     if not similarity_done:
+        cached_kwargs: dict = {}
+        if structural_cache is not None:
+            cached_kwargs["cached_msg_sets"] = structural_cache.entity_to_chunks
+            cached_kwargs["cached_fact_sets"] = structural_cache.entity_to_facts
         edges = similarity.compute_similarity_edges(
-            list(targets.entity_ids), list(targets.fact_ids), qdrant, store
+            list(targets.entity_ids), list(targets.fact_ids), qdrant, store,
+            **cached_kwargs,
         )
         if edges:
             store.insert_edges(edges)
@@ -227,20 +233,45 @@ def run_incremental_improvement(
 
     changed: set[str] = set()
     stale_count = 0
-    communities_done = checkpoint is not None and checkpoint.is_done(
-        "improve.incremental_communities", params=params
+
+    # Step 2a: Leiden — assign_communities, checkpoint the changed set.
+    leiden_done = checkpoint is not None and checkpoint.is_done(
+        "improve.incremental_leiden", params=params
     )
-    if not communities_done:
+    if not leiden_done:
         changed = communities.assign_communities(
             store,
             list(targets.entity_ids),
             list(targets.fact_ids),
             entity_resolutions=RESOLUTIONS,
             fact_resolutions=RESOLUTIONS,
+            structural_cache=structural_cache,
         )
-        # Projection is derived state and is deliberately rebuilt even if Leiden
-        # reports no changes, making a retry after a mid-step crash converge.
-        project_community_membership_edges(store)
+        if checkpoint is not None:
+            checkpoint.mark_done(
+                "improve.incremental_leiden",
+                params=params,
+                changed_communities=",".join(sorted(changed)),
+            )
+    else:
+        # Recover the changed-community set from the checkpoint meta so the
+        # projection step can be scoped even when Leiden was already done.
+        if checkpoint is not None:
+            entry = checkpoint._data.get("steps", {}).get(
+                "improve.incremental_leiden", {}
+            )
+            changed_str = entry.get("changed_communities", "")
+            changed = set(changed_str.split(",")) if changed_str else set()
+
+    # Step 2b: Projection — rebuild COMM_MEMBER edges scoped to the changed
+    # communities, then invalidate stale summaries.
+    projection_done = checkpoint is not None and checkpoint.is_done(
+        "improve.incremental_projection", params=params
+    )
+    if not projection_done:
+        # If changed is empty (e.g. Leiden reported nothing on a fresh run),
+        # pass None for a full rebuild — the self-healing fallback.
+        project_community_membership_edges(store, community_ids=changed or None)
         changed.update(_current_community_ids(store, targets))
         stale_count = _invalidate_summaries(
             store,
@@ -251,7 +282,7 @@ def run_incremental_improvement(
         )
         if checkpoint is not None:
             checkpoint.mark_done(
-                "improve.incremental_communities",
+                "improve.incremental_projection",
                 params=params,
                 changed=len(changed),
                 stale=stale_count,
@@ -274,6 +305,7 @@ def run_improvement(
     targets: ImprovementTargets,
     checkpoint: IngestCheckpoint | None = None,
     batch_id: str | None = None,
+    structural_cache=None,
 ) -> ImprovementResult:
     """Resolve and execute post-ingestion improvement."""
 
@@ -301,6 +333,7 @@ def run_improvement(
             targets=targets,
             checkpoint=checkpoint,
             batch_id=batch_id,
+            structural_cache=structural_cache,
         )
         return ImprovementResult(
             requested,

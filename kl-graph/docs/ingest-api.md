@@ -146,11 +146,11 @@ RAM, disk I/O, and graph/Qdrant operations.
 | B4. Build facts | Batch | Light–medium | Linear normalization, deterministic IDs, and inserts. No separate LLM call beyond extraction. |
 | B5. Embed entities and facts | New graph nodes | Heavy | Remote embedding work approximately `O((K_e + K_f) × D)`. Existing deterministic vector IDs are skipped. |
 | B6. Build structural edges | Batch | Medium | Local work linear in extracted mentions/facts plus chat temporal/reply relationships. Graph writes can dominate for edge-rich batches. |
-| I1. Recover improvement targets | Batch + graph | Medium on mature graphs | Reads batch facts and scans structural edges to find affected entities; current implementation is approximately `O(E)`. |
-| I2. Incremental ANN similarity | Affected nodes + graph | Medium | Bounded ANN search and vector retrieval, roughly `O((K_e + K_f) × A)`, plus an `O(E)` structural-edge scan used by entity hybrid scoring. |
+| I1. Recover improvement targets | Batch | Light | Reverse lookups on StructuralCache (`chunk→entities`, `fact→entities`), approximately `O(K)`. Falls back to `O(E)` store scan when cache is absent (e.g. standalone scripts). |
+| I2. Incremental ANN similarity | Affected nodes + graph | Medium | Bounded ANN search and vector retrieval, roughly `O((K_e + K_f) × A)`. Structural features for hybrid scoring served from StructuralCache (no store scan). |
 | I3. Intra-batch similarity | Affected nodes | Medium–very heavy | Dense cosine matrices: `O((K_e² + K_f²) × D)` compute and `O(K_e² + K_f²)` score memory. Large backfills are the risk case. |
-| I4. Incremental communities | One-hop frontier | Medium–heavy | Scans the global graph, constructs co-mention/shared-entity projections (including pair expansion within each chunk/entity), then runs four Leiden resolutions only on affected nodes and their one-hop neighbors. |
-| I5. Community projection | Whole graph | Medium–heavy | Rebuilds the complete derived `COMM_MEMBER` edge set, approximately `O(V)` assignments and writes. |
+| I4. Incremental communities | Frontier only | Medium | Queries only edges touching new nodes via `scan_edges_for_nodes` (`O(frontier edges)`), builds frontier-only igraph, runs four Leiden resolutions (3 iterations each). No full graph load. |
+| I5. Community projection | Changed communities | Light | Scoped rebuild: deletes and rebuilds `COMM_MEMBER` edges only for communities whose membership changed, approximately `O(changed × avg_community_size)`. Full `O(V)` rebuild only on first seed or `full` mode. |
 | I6. Summary invalidation | Touched communities | Light | Marks affected stored summaries stale using local metadata updates. It does not regenerate summaries or call an LLM. |
 | F1. Full fact similarity | Whole graph | Very heavy | Loads all fact vectors and performs chunked all-pairs cosine: `O(F² × D)` compute and `O(F × D)` resident vectors. The implementation estimates about 1.1 GB for 17k facts at 4096 dimensions. |
 | F2. Full entity similarity | Whole graph | Heavy | Graph-wide all-pairs vector prefilter, approximately `O(V_e² × D)`, plus structural hybrid scoring for retained candidates. |
@@ -162,10 +162,13 @@ RAM, disk I/O, and graph/Qdrant operations.
 
 - For ordinary incremental requests, extraction LLM calls are normally the
   largest external cost; chunk and graph embeddings are second.
-- With a warm extraction cache, local graph improvement or finalization can
-  become the wall-time bottleneck.
-- Incremental improvement avoids graph-wide all-pairs similarity, but it is not
-  constant-time because structural scans and community projection remain global.
+- Incremental improvement is `O(K + frontier)`: a server-level
+  `StructuralCache` eliminates structural-edge rescans, `scan_edges_for_nodes`
+  eliminates full-graph loading for Leiden, and scoped COMM_MEMBER projection
+  avoids the `O(V)` delete-rebuild cycle.
+- The only remaining graph-wide cost is server finalization (`O(E)` adjacency
+  hot-swap), which is a local in-memory scan independent of the improvement
+  pipeline.
 - Full improvement is the primary CPU/RAM risk. Do not select `full` merely
   because a batch is large; use it when global re-clustering is intentionally
   required.

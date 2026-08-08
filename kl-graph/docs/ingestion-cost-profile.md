@@ -15,6 +15,7 @@ the number of entities/facts affected by the batch; and `D` is embedding width.
 | Fact construction | Batch | Light–medium | Linear fact normalization and inserts |
 | Entity/fact embedding | New graph nodes | Heavy | Remote embedding latency, approximately `O((entities + facts) × D)` |
 | Structural edge construction | Batch | Medium | Linear in extracted mentions/facts, plus chat temporal/reply relationships |
+| Structural cache delta | Batch | Light | Updates in-memory entity↔chunk and entity↔fact mappings from new edges, approximately `O(K)` |
 | Server index hot-swap | Whole graph | Medium–heavy | Rebuilds in-memory adjacency by scanning all graph edges, `O(E)` |
 
 ## Improvement modes
@@ -26,26 +27,48 @@ the number of entities/facts affected by the batch; and `D` is embedding width.
   exists.
 - `full`: explicit graph-wide periodic improvement.
 
-The state-based `auto` policy replaces timestamp watermarks and “full every N
-runs.” It reflects whether incremental community assignment is actually safe,
+The state-based `auto` policy replaces timestamp watermarks and "full every N
+runs." It reflects whether incremental community assignment is actually safe,
 while `full` remains available for intentional global re-clustering.
 
 ### Incremental improvement
 
+The incremental path is `O(K)` in all steps except server finalization. A
+`StructuralCache` (server-level in-memory mirror of entity↔chunk and
+entity↔fact edges) eliminates global structural scans; `scan_edges_for_nodes`
+(backend-level indexed edge query) eliminates full graph loading for Leiden;
+and scoped COMM_MEMBER projection avoids the `O(V)` delete-rebuild cycle.
+
 | Step | Typical weight | Cost characteristics |
 |---|---:|---|
-| Recover affected IDs | Medium on large graphs | Reads batch facts and scans structural graph edges to find touched entities |
-| ANN similarity | Medium | One bounded ANN search per affected node plus vector retrieval; approximately `O(K × ANN)` |
+| Recover affected IDs | Light | Reverse lookups on StructuralCache (`chunk→entities`, `fact→entities`), approximately `O(K)`. Falls back to `O(E)` store scan when cache is absent. |
+| ANN similarity | Medium | One bounded ANN search per affected node plus vector retrieval; approximately `O(K × A)` where A is the ANN result limit (50) |
 | Intra-batch similarity | Medium–heavy for large batches | Dense pairwise cosine, `O(K² × D)` compute and `O(K²)` score matrices |
-| Structural feature load | Medium on large graphs | Scans MENTIONS/AUTHORED_BY/ABOUT edges, `O(E)` |
-| Frontier communities | Medium | Builds global graph projections (`O(V+E)`), then runs four Leiden resolutions only on new/touched nodes plus one-hop neighbors |
-| Community projection | Medium–heavy | Rewrites the complete derived `COMM_MEMBER` projection, `O(V)` assignments/edges |
+| Structural feature load | Light | Served from StructuralCache (`entity→chunks`, `entity→facts`); no store scan. Delta-applied per batch in `O(K)`. |
+| Frontier communities | Medium | Queries only frontier edges via `scan_edges_for_nodes` (`O(frontier edges)`), builds frontier-only igraph, runs four Leiden resolutions on the subgraph (3 iterations each). No full graph load. |
+| Community projection | Light | Scoped rebuild: only deletes and rebuilds `COMM_MEMBER` edges for communities whose membership changed, approximately `O(changed × avg_community_size)`. Full rebuild only on first seed or `full` mode. |
+| Summary invalidation | Light | Marks affected summaries stale using local metadata updates. No LLM calls. |
 
-Incremental improvement is substantially cheaper than full all-pairs
-similarity when `K << V`, but it is not constant-time: global structural scans
-and the complete membership projection remain. Large backfills can make `K²`
-intra-batch similarity expensive; use `full` deliberately when a global
-re-cluster is desired, not merely because a batch is large.
+Incremental improvement is `O(K + frontier)` overall. The only remaining
+graph-wide cost is server finalization (`O(E)` adjacency hot-swap), which is
+a local in-memory scan independent of the improvement pipeline. For mature
+graphs with small incoming batches, the bottleneck is now LLM extraction and
+embedding API latency rather than local graph operations.
+
+### Checkpoint semantics
+
+The incremental improvement checkpoint is split into two independently
+resumable steps:
+
+- `improve.incremental_leiden` — runs Leiden on the frontier subgraph,
+  stores the changed community UUID set in checkpoint metadata.
+- `improve.incremental_projection` — scoped COMM_MEMBER projection for the
+  changed communities. On retry after a mid-step crash, recovers the changed
+  set from checkpoint metadata.
+
+The similarity step (`improve.incremental_similarity`) is unchanged: a single
+checkpoint key covers ANN search, intra-batch cosine, edge insertion, and
+structural cache delta.
 
 ### Full improvement
 
@@ -53,12 +76,12 @@ re-cluster is desired, not merely because a batch is large.
 |---|---:|---|
 | Fact similarity | Very heavy | Loads all fact vectors and performs chunked all-pairs cosine, `O(F² × D)` compute and `O(F × D)` resident vectors. The implementation notes about 1.1 GB for 17k facts at 4096 dimensions |
 | Entity similarity | Heavy | Same graph-wide all-pairs pattern for entities, followed by structural hybrid scoring |
-| Entity disambiguation | Variable/heavy | Phonetic/hybrid candidate generation plus an LLM judge capped by `llm_max_budget` (default 500) |
+| Entity disambiguation | Variable/heavy | Phonetic/hybrid candidate generation plus an LLM judge capped at `llm_max_budget` (default 500) |
 | Entity communities | Medium–heavy | Four graph-wide Leiden resolutions |
 | Fact communities | Medium–heavy | Four graph-wide Leiden resolutions; the HDBSCAN topic path is currently disabled |
-| Community projection | Medium–heavy | Deletes and rebuilds every `COMM_MEMBER` edge |
+| Community projection | Medium–heavy | Deletes and rebuilds every `COMM_MEMBER` edge (full rebuild path) |
 
 For most incremental server runs, LLM extraction and embeddings dominate wall
-time and external cost. For mature graphs with small incoming batches,
-community projection/index hot-swap can dominate local CPU and I/O. Full
-improvement is the principal RAM/CPU risk because of its all-pairs vector work.
+time and external cost. Full improvement is the principal RAM/CPU risk because
+of its all-pairs vector work. Do not select `full` merely because a batch is
+large; use it when global re-clustering is intentionally required.

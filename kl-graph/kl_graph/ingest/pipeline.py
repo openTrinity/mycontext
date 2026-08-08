@@ -650,6 +650,7 @@ class IngestionPipeline:
         source_id: str = "default",
         incremental_units: bool = False,
         batch_id: str | None = None,
+        structural_cache=None,
     ):
         self.messages_dir = messages_dir
         self.sqlite_path = sqlite_path
@@ -667,6 +668,14 @@ class IngestionPipeline:
         self._workset_chunk_count = 0
         self._graph_build_ran = False
         self._sources_loaded = False
+        # In-memory structural relationship cache (Optimization 1). When set,
+        # improvement_targets uses O(K) cache lookups instead of O(E) edge
+        # scans. Deltas are applied by the runner after each batch's edges are
+        # created (see _batch_edges).
+        self.structural_cache = structural_cache
+        # Edges created in the most recent _create_edges call, captured so the
+        # runner can apply a structural-cache delta after the batch commits.
+        self._batch_edges: list[Edge] = []
 
         # Accept injected store (new interface) or legacy sqlite param for
         # backward compatibility (e.g. kl-server injecting a SQLiteStore directly).
@@ -789,19 +798,25 @@ class IngestionPipeline:
             fact_ids.update(str(row[0]) for row in rows)
 
         entity_ids: set[str] = set()
-        for chunk_id, entity_id, _props in self.store.scan_edges_by_type(
-            ["MENTIONS", "AUTHORED_BY"],
-            source_type="chunk",
-            target_type="entity",
-        ):
-            if chunk_id in chunk_ids:
-                entity_ids.add(entity_id)
-        if fact_ids:
-            for fact_id, entity_id, _props in self.store.scan_edges_by_type(
-                ["ABOUT"], source_type="fact", target_type="entity"
+        if self.structural_cache is not None:
+            # Optimization 1: O(K) cache lookup instead of O(E) edge scans.
+            entity_ids = self.structural_cache.entities_for_chunks(chunk_ids)
+            if fact_ids:
+                entity_ids |= self.structural_cache.entities_for_facts(fact_ids)
+        else:
+            for chunk_id, entity_id, _props in self.store.scan_edges_by_type(
+                ["MENTIONS", "AUTHORED_BY"],
+                source_type="chunk",
+                target_type="entity",
             ):
-                if fact_id in fact_ids:
+                if chunk_id in chunk_ids:
                     entity_ids.add(entity_id)
+            if fact_ids:
+                for fact_id, entity_id, _props in self.store.scan_edges_by_type(
+                    ["ABOUT"], source_type="fact", target_type="entity"
+                ):
+                    if fact_id in fact_ids:
+                        entity_ids.add(entity_id)
 
         return ImprovementTargets(
             entity_ids=tuple(sorted(entity_ids)),
@@ -2088,6 +2103,10 @@ class IngestionPipeline:
                     f"  Deduplicated: {len(edges)} → {len(unique_edges)} edges ({len(edges) - len(unique_edges)} duplicates removed)"
                 )
             edges = unique_edges
+
+            # Capture the final edge list for structural-cache delta application
+            # (the runner applies the delta after the batch commits to the store).
+            self._batch_edges = edges
 
             # Bulk insert
             # TODO: Edge weight adjustment — currently INSERT OR IGNORE silently

@@ -305,6 +305,103 @@ def test_scan_entity_edges_empty_store(tmp_path: pathlib.Path) -> None:
     store.close()
 
 
+# ── scan_edges_by_type / scan_edges_for_nodes ────────────────────────────────
+
+
+def test_scan_edges_for_nodes_is_abstract() -> None:
+    """KnowledgeStore ABC declares scan_edges_for_nodes as an abstract method."""
+    assert hasattr(KnowledgeStore, "scan_edges_for_nodes")
+    method = getattr(KnowledgeStore, "scan_edges_for_nodes")
+    assert getattr(method, "__isabstractmethod__", False)
+
+
+def test_sqlite_store_implements_scan_edges_for_nodes(tmp_path: pathlib.Path) -> None:
+    """SQLiteStore provides a concrete implementation of scan_edges_for_nodes."""
+    store = _make_store(tmp_path)
+    method = getattr(store, "scan_edges_for_nodes")
+    assert not getattr(method, "__isabstractmethod__", False)
+    store.close()
+
+
+def test_scan_edges_for_nodes_returns_only_touching_edges(tmp_path: pathlib.Path) -> None:
+    """scan_edges_for_nodes yields only edges where an endpoint is in node_ids."""
+    store = _make_store(tmp_path)
+    # e1↔e2 (ENTITY_SIMILAR), e3↔e4 (ENTITY_SIMILAR), e1↔e3 (ENTITY_SIMILAR)
+    store.insert_edges(
+        [
+            Edge(
+                source_type="entity",
+                source_id="e1",
+                target_type="entity",
+                target_id="e2",
+                edge_type=EdgeType.ENTITY_SIMILAR,
+                properties={"hybrid_score": 0.9},
+            ),
+            Edge(
+                source_type="entity",
+                source_id="e3",
+                target_type="entity",
+                target_id="e4",
+                edge_type=EdgeType.ENTITY_SIMILAR,
+                properties={"hybrid_score": 0.5},
+            ),
+            Edge(
+                source_type="entity",
+                source_id="e1",
+                target_type="entity",
+                target_id="e3",
+                edge_type=EdgeType.ENTITY_SIMILAR,
+                properties={"hybrid_score": 0.7},
+            ),
+        ]
+    )
+
+    # Query for edges touching {e1, e3}
+    results = list(
+        store.scan_edges_for_nodes(
+            ["ENTITY_SIMILAR"], {"e1", "e3"},
+            source_type="entity", target_type="entity",
+        )
+    )
+    # Should return e1↔e2, e3↔e4, e1↔e3 (all touch e1 or e3)
+    assert len(results) == 3
+    pairs = {(src, tgt) for src, tgt, _ in results}
+    assert ("e1", "e2") in pairs
+    assert ("e3", "e4") in pairs
+    assert ("e1", "e3") in pairs
+
+    # Query for edges touching {e2} only
+    results2 = list(
+        store.scan_edges_for_nodes(
+            ["ENTITY_SIMILAR"], {"e2"},
+            source_type="entity", target_type="entity",
+        )
+    )
+    assert len(results2) == 1
+    assert results2[0][0] == "e1"
+    assert results2[0][1] == "e2"
+    assert results2[0][2]["hybrid_score"] == 0.9
+    store.close()
+
+
+def test_scan_edges_for_nodes_empty_node_ids(tmp_path: pathlib.Path) -> None:
+    """scan_edges_for_nodes with empty node_ids returns nothing."""
+    store = _make_store(tmp_path)
+    store.insert_edges(
+        [
+            Edge(
+                source_type="entity",
+                source_id="e1",
+                target_type="entity",
+                target_id="e2",
+                edge_type=EdgeType.ENTITY_SIMILAR,
+            ),
+        ]
+    )
+    assert list(store.scan_edges_for_nodes(["ENTITY_SIMILAR"], set())) == []
+    store.close()
+
+
 # ── find_paths parity with SQLiteGraphDB ──────────────────────────────────────
 
 

@@ -1538,6 +1538,57 @@ class SQLiteStore(KnowledgeStore):
                     props = {}
             yield (row[0], row[1], props)
 
+    def scan_edges_for_nodes(
+        self,
+        edge_types: list[str],
+        node_ids: set[str],
+        *,
+        source_type: str | None = None,
+        target_type: str | None = None,
+    ) -> Iterator[tuple[str, str, dict]]:
+        """Stream ``(source_id, target_id, properties)`` for edges touching ``node_ids``.
+
+        Frontier-scoped scan: pushes the endpoint filter into the SQL WHERE
+        clause (``source_id IN (...) OR target_id IN (...)``) so only edges
+        touching the frontier are loaded — O(frontier) rather than O(E).
+        Node IDs are batched in groups of 900 to stay within the SQLite
+        variable limit (999).
+
+        See :meth:`scan_edges_by_type` for the property-decoding contract.
+        """
+        if not edge_types or not node_ids:
+            return
+        etype_ph = ",".join("?" for _ in edge_types)
+        conds: list[str] = [f"edge_type IN ({etype_ph})"]
+        params: list = list(edge_types)
+        if source_type is not None:
+            conds.append("source_type = ?")
+            params.append(source_type)
+        if target_type is not None:
+            conds.append("target_type = ?")
+            params.append(target_type)
+        where = " AND ".join(conds)
+        node_list = list(node_ids)
+        batch_size = 900
+        for i in range(0, len(node_list), batch_size):
+            batch = node_list[i : i + batch_size]
+            node_ph = ",".join("?" for _ in batch)
+            cursor = self.conn.execute(
+                f"SELECT source_id, target_id, properties FROM edges "
+                f"WHERE {where} AND (source_id IN ({node_ph}) OR target_id IN ({node_ph}))",
+                params + batch + batch,
+            )
+            for row in cursor:
+                props: dict = {}
+                if row[2]:
+                    try:
+                        parsed = json.loads(row[2])
+                        if isinstance(parsed, dict):
+                            props = parsed
+                    except (TypeError, ValueError):
+                        props = {}
+                yield (row[0], row[1], props)
+
     # ─── Communities (reified clusters; assignments stay in the columns) ──
 
     def insert_communities(self, communities: list[Community]) -> None:

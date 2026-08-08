@@ -90,9 +90,9 @@ def test_embed_with_retry_recovers_then_succeeds(monkeypatch) -> None:
 
     monkeypatch.setattr(emod.litellm, "embedding", fake_embedding)
     monkeypatch.setattr(emod.time, "sleep", lambda *_a, **_k: None)  # no real waits
-    monkeypatch.setattr(emod, "EMBED_MAX_RETRIES", 5)
 
     e = Embedder.__new__(Embedder)
+    e.max_retries = 5
     out = e._embed_with_retry({"model": "x", "input": ["t"]})
     assert out == {"ok": True}
     assert calls["n"] == 3  # failed twice, succeeded on the third
@@ -106,9 +106,9 @@ def test_embed_with_retry_gives_up_after_max(monkeypatch) -> None:
 
     monkeypatch.setattr(emod.litellm, "embedding", always_429)
     monkeypatch.setattr(emod.time, "sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr(emod, "EMBED_MAX_RETRIES", 2)
 
     e = Embedder.__new__(Embedder)
+    e.max_retries = 2
     try:
         e._embed_with_retry({"model": "x", "input": ["t"]})
         raise AssertionError("should have raised after exhausting retries")
@@ -127,9 +127,9 @@ def test_embed_with_retry_does_not_retry_hard_stop(monkeypatch) -> None:
 
     monkeypatch.setattr(emod.litellm, "embedding", quota)
     monkeypatch.setattr(emod.time, "sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr(emod, "EMBED_MAX_RETRIES", 5)
 
     e = Embedder.__new__(Embedder)
+    e.max_retries = 5
     try:
         e._embed_with_retry({"model": "x", "input": ["t"]})
         raise AssertionError("hard stop should raise immediately")

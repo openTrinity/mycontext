@@ -422,6 +422,53 @@ def test_projection_without_community_columns_still_clears_stale_edges() -> None
     store.close()
 
 
+def test_incremental_projection_only_touches_specified_communities() -> None:
+    """When community_ids is set, only those communities' edges are deleted+rebuilt.
+
+    Non-matching COMM_MEMBER edges (for communities outside the set) survive
+    untouched. This is the incremental projection path used by
+    ``improve.incremental_projection`` after Leiden reports a changed set.
+    """
+    store = _store()
+    _seed_assignments(store)
+    # Full projection: 7 edges across 6 communities.
+    project_community_membership_edges(store)
+    assert len(_comm_member_rows(store)) == 7
+
+    # Move e1 out of entity-L0-0 into entity-L0-2.
+    store.conn.execute("UPDATE entities SET community_L0 = 2 WHERE id = 'e1'")
+    store.conn.commit()
+
+    # Incremental projection scoped to only entity-L0-0 (the community e1 left).
+    # In a real run both old + new community IDs would be in the set; this test
+    # isolates the scoped community to prove non-matching edges survive.
+    target_cid = community_id_from("entity", "L0", 0)
+    n_communities, n_edges = project_community_membership_edges(
+        store, community_ids={target_cid}
+    )
+
+    # entity-L0-0 now has 1 member (e2; e1 left).
+    assert n_communities == 1
+    assert n_edges == 1
+
+    rows = _comm_member_rows(store)
+    # The scoped community's old e1 edge was deleted; e2's edge rebuilt.
+    scoped = [r for r in rows if r[3] == target_cid]
+    assert len(scoped) == 1
+    assert scoped[0][1] == "e2"
+
+    # 5 non-scoped COMM_MEMBER edges survived untouched:
+    # e1-L1-3, e2-L1-4, f1-L0-0, f1-L1-3, f2-L0-1.
+    surviving = [r for r in rows if r[3] != target_cid]
+    assert len(surviving) == 5
+    # e1's L1 edge survived (it targets a community outside the scoped set).
+    assert any(r[1] == "e1" for r in surviving), "e1's non-scoped edges should survive"
+    # e1's new L0-2 edge was NOT projected (community not in the scoped set).
+    new_cid = community_id_from("entity", "L0", 2)
+    assert not any(r[3] == new_cid for r in rows), "un-scoped new community should not appear"
+    store.close()
+
+
 # ── (d) readers: graph_walk ──────────────────────────────────────────────────
 
 

@@ -75,7 +75,7 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
             "kl_graph.ingest.improvement.get_community_strategy",
             return_value=communities,
         ),
-        patch("kl_graph.ingest.improvement.project_community_membership_edges"),
+        patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj_mock,
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
     ):
         result = run_improvement(
@@ -89,6 +89,10 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
     assert result.applied_mode == "incremental"
     similarity.compute_similarity_edges.assert_called_once()
     communities.assign_communities.assert_called_once()
+    # Projection is called with community_ids keyword (None when no communities
+    # changed on a fresh run — the self-healing full-rebuild fallback).
+    proj_mock.assert_called_once()
+    assert "community_ids" in proj_mock.call_args.kwargs
     store.close()
 
 
