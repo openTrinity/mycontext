@@ -11,12 +11,10 @@
   },
   "feishu": {
     "label": "Lark",
-    "description": "Connects to Lark conversations as a custom app (planned).",
+    "description": "Read-only access to Lark messages and Drive docs for the local graph and Q&A.",
     "steps": {
-      "createApp": "Create a custom app on the Lark developer console and get its App ID and App Secret",
-      "subscribe": "Enter the credentials here and subscribe to message events",
       "openBrowser": "Click Authorize to open the official Lark CLI authorization page",
-      "confirm": "Approve read-only message search, message and Drive search scopes",
+      "confirm": "Approve message search, message read, reaction read and Drive search",
       "backToApp": "Return to the app; Lark content will enter the local database and knowledge graph"
     }
   },
@@ -74,7 +72,8 @@
     "connectedTitle": "{{channel}} connected",
     "machineSessionHint": "This computer already has a DingTalk session (sessions are shared across logins on the same machine). Authorize once for the current account so we know who you are — otherwise learning would use the wrong identity.",
     "accountTitle": "Connected account",
-    "scopeTitle": "What you're authorizing"
+    "scopeTitle": "What you're authorizing",
+    "machineSessionHintFeishu": "Lark is authorized in this app. Confirm the identity once for this account so learning attributes messages to you."
   },
   "settings": {
     "expiredHint": "Authorization expired — you'll need to scan again",

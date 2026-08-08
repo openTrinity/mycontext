@@ -11,12 +11,10 @@
   },
   "feishu": {
     "label": "飞书",
-    "description": "以自建应用身份接入飞书会话（规划中）。",
+    "description": "只读接入飞书的消息与云文档，用于本地建图与搜索问答。",
     "steps": {
-      "createApp": "在飞书开放平台创建自建应用并获取 App ID 与 App Secret",
-      "subscribe": "在应用内填写凭据并订阅消息事件",
       "openBrowser": "点击「开始授权」，应用会通过飞书官方 CLI 打开授权页面",
-      "confirm": "确认消息搜索、消息只读和云文档搜索权限",
+      "confirm": "确认消息搜索、消息只读、表情回复读取与云文档搜索权限",
       "backToApp": "授权完成后回到应用，飞书内容会进入本地数据库和知识图谱"
     }
   },
@@ -74,7 +72,8 @@
     "connectedTitle": "已连接{{channel}}",
     "machineSessionHint": "这台电脑上已有钉钉登录态（同一台电脑的登录会共用）。为当前账号授权一次，才能确定「你」是谁 —— 否则学习会用错身份。",
     "accountTitle": "已连接的账号",
-    "scopeTitle": "授权范围"
+    "scopeTitle": "授权范围",
+    "machineSessionHintFeishu": "已在本应用完成飞书授权。为当前账号确认一次身份，才能确定「你」是谁 —— 否则学习会用错身份。"
   },
   "settings": {
     "expiredHint": "授权已过期，需要重新扫码",

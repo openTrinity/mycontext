@@ -94,6 +94,21 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const status = channel.status
   const authorized = status.state === "authorized"
   const scopePrefix = channel.id === "feishu" ? "feishuScope" : "scope"
+  /**
+   * 「本机已有登录态」这句话的 i18n key —— **按渠道分**。
+   *
+   * ★ 钉钉那句说的是"这台电脑上已有登录态（同一台电脑共用）"，
+   * 而那是 dws 特有的事实：它的 token 按**系统用户**存在钥匙串里，
+   * `DWS_CONFIG_DIR` 隔离不了（见 plugins/dingtalk/auth.ts 文件头）。
+   *
+   * 飞书**不共享** —— 凭据整个关在 vault 内（`LarkCli.env()` 重定向
+   * HOME/XDG + 钥匙串降级成文件）。所以对它说"与终端共用"是错的，
+   * 而用户据此去终端找登录态会一无所获。
+   */
+  const machineSessionKey =
+    channel.id === "feishu"
+      ? "onboarding.machineSessionHintFeishu"
+      : "onboarding.machineSessionHint"
 
   /**
    * 渠道侧的昵称（钉钉叫花名）。
@@ -470,7 +485,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
                 <>
                   <span className="shrink-0">{status.corpName}</span>
                   <span aria-hidden="true">·</span>
-                  <span className="truncate">{t("onboarding.machineSessionHint")}</span>
+                  <span className="truncate">{t(machineSessionKey)}</span>
                 </>
               ) : (
                 t(channel.descriptionKey)
@@ -561,7 +576,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
                 : `${status.corpName} · ${status.userName}（${channelNick}）`
               : authorized && !identityPending
                 ? // 机器级登录态：不冒充成"你的"身份，说清要为当前账号确认一次
-                  t("onboarding.machineSessionHint")
+                  t(machineSessionKey)
                 : status.state === "expired"
                   ? t("settings.expiredHint")
                   : t(channel.descriptionKey)}

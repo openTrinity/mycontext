@@ -102,24 +102,69 @@ export function assertAllowedLarkCommand(args: readonly string[]): void {
   })
 }
 
+/**
+ * 从 CLI 的输出里抽出 JSON。
+ *
+ * ## ★★ 为什么不能"找到第一个 `{` 或 `[` 就切"
+ *
+ * CLI 会往输出里混**给 agent 的使用提示**，而那些提示以 `[AI agent] ` 开头
+ * （实测：`auth login` 那条打了一整段"这个命令会阻塞 10 分钟…"）。
+ * 前一版按"先试对象、再试数组"的顺序切，于是 `[AI agent] …` 命中了数组分支
+ * → `JSON.parse("[AI agent] …")` 抛**原生 SyntaxError**，一路冒到界面上变成
+ * `授权失败：Unexpected token 'A', "[AI agent] "... is not valid JSON`。
+ *
+ * 两个错都在那一版里：
+ * ① 切的位置错（`[` 是提示文本的一部分，不是 JSON 的开头）；
+ * ② 失败时抛的不是我们的 AppError —— 于是既没有 i18n key，
+ *    也把 CLI 的原始输出片段直接糊在了用户界面上。
+ *
+ * 现在的判据：把**每一个**可能的起点（`{` 与 `[` 的每一次出现）按位置从前往后
+ * 试一遍，第一个能整段 parse 成功的就是答案。多花几次 parse（输出通常几 KB），
+ * 换掉一整类"提示文本里恰好有括号"的失败。
+ */
 export function extractLarkJson(text: string): unknown {
   const trimmed = text.trim()
   if (trimmed === "") throw new AppError("PROCESS_FAILED", "飞书 CLI 未返回 JSON")
   try {
     return JSON.parse(trimmed)
   } catch {
-    const objectStart = trimmed.indexOf("{")
-    const objectEnd = trimmed.lastIndexOf("}")
-    if (objectStart >= 0 && objectEnd > objectStart) {
-      return JSON.parse(trimmed.slice(objectStart, objectEnd + 1))
-    }
-    const arrayStart = trimmed.indexOf("[")
-    const arrayEnd = trimmed.lastIndexOf("]")
-    if (arrayStart >= 0 && arrayEnd > arrayStart) {
-      return JSON.parse(trimmed.slice(arrayStart, arrayEnd + 1))
-    }
-    throw new AppError("PROCESS_FAILED", "飞书 CLI 返回了无法解析的内容")
+    // 落到这里说明有前后缀噪音（提示文本 / notice 行 / 进度输出）
   }
+
+  /**
+   * 候选起点：`{` 与 `[` 的每一次出现，按位置排序。
+   *
+   * ★ 与之对应的结束位置取**最后一个**同类闭括号：JSON 内部也有括号，
+   * 取第一个会把对象截断。噪音一般在前面（提示）或后面（notice），
+   * 所以"从这个起点到最后一个闭括号"是对的贪心。
+   */
+  const starts: { index: number; close: string }[] = []
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i]
+    if (ch === "{") starts.push({ index: i, close: "}" })
+    else if (ch === "[") starts.push({ index: i, close: "]" })
+  }
+
+  for (const start of starts) {
+    const end = trimmed.lastIndexOf(start.close)
+    if (end <= start.index) continue
+    try {
+      return JSON.parse(trimmed.slice(start.index, end + 1))
+    } catch {
+      // 这个起点不是真的 JSON 开头（多半是提示文本里的括号）—— 试下一个
+    }
+  }
+
+  /**
+   * ★ 一律抛 AppError（带 i18n key），**不要**让原生 SyntaxError 冒出去：
+   * 那个 message 会把 CLI 的原始输出片段糊在界面上，而用户完全看不懂。
+   *
+   * ★ context 里只放**长度**不放内容：输出里可能有会话标题、人名、token。
+   */
+  throw new AppError("PROCESS_FAILED", "飞书 CLI 返回了无法解析的内容", {
+    messageKey: "errors:byCode.PROCESS_FAILED",
+    context: { outputLength: trimmed.length, candidates: starts.length },
+  })
 }
 
 export function unwrapLarkEnvelope(payload: unknown): unknown {
