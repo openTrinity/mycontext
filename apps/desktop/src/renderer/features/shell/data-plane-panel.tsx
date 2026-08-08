@@ -30,7 +30,19 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`
 }
 
-export function DataPlanePanel({ enabled }: { enabled: boolean }) {
+export function DataPlanePanel({
+  enabled,
+  channelId: controlledChannel = null,
+  onChannelChange,
+}: {
+  enabled: boolean
+  /**
+   * 受控的渠道选择。★ 由 `StatusView` 持有 —— 这一页只有一个取值范围，
+   * 而下面的建图按钮必须跟它说同一个渠道（见 `KlPanel` 的注释）。
+   */
+  channelId?: string | null
+  onChannelChange?: (id: string) => void
+}) {
   const { t } = useDynamicTranslation("settings")
   const snapshot = useIngestSnapshot(enabled)
   const runOnce = useRunIngestOnce()
@@ -44,7 +56,10 @@ export function DataPlanePanel({ enabled }: { enabled: boolean }) {
    * ★ 这一页的每个数字都跟着它走，而「立即同步」也只跑它 ——
    * 不然用户在飞书那栏点同步，跑的却是钉钉那 1600 条的一轮。
    */
-  const [pickedChannel, setPickedChannel] = useState<string | null>(null)
+  /** 非受控时的内部态（独立使用这个组件时用）。 */
+  const [ownChannel, setOwnChannel] = useState<string | null>(null)
+  const pickedChannel = onChannelChange === undefined ? ownChannel : controlledChannel
+  const setPickedChannel = onChannelChange ?? setOwnChannel
 
   const raw = snapshot.data
   if (raw === undefined) return null
@@ -68,6 +83,14 @@ export function DataPlanePanel({ enabled }: { enabled: boolean }) {
           messages: row.messages,
           conversations: row.conversations,
           mediaAssets: row.mediaAssets,
+          ftsIndexed: row.ftsIndexed,
+          ftsLag: row.ftsLag,
+          unjudged: row.unjudged,
+          outboxHead: row.outboxHead,
+          minutes: row.minutes,
+          probeIntervalMs: row.probeIntervalMs,
+          probeThrottled: row.probeThrottled,
+          selfConfirmed: row.selfConfirmed,
           running: row.running,
           lastError: row.lastError,
           blockedReason: row.blockedReason,

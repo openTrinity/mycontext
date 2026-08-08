@@ -1484,8 +1484,15 @@ export function useKlGraphBuild() {
      * `fresh` 由调用方决定：false（默认）增量，true 清空重来（贵，会重烧抽取）。
      * 两个入口在 UI 上分开，避免一次误点就把已建好的图删了重跑。
      */
-    mutationFn: async (fresh?: boolean) =>
-      unwrap(await window.mycontext.kl.graphBuild(fresh ?? false)),
+    /**
+     * ★ 第二个参数是渠道 id：按钮与渠道选择器同处一页，不带的话在飞书那栏
+     * 点「重建」会把钉钉的图一起删了重烧（约 3 小时且出网）。
+     */
+    mutationFn: async (input?: boolean | { fresh?: boolean; channelId?: string }) => {
+      const opts: { fresh?: boolean; channelId?: string } =
+        typeof input === "boolean" ? { fresh: input } : (input ?? {})
+      return unwrap(await window.mycontext.kl.graphBuild(opts.fresh ?? false, opts.channelId))
+    },
     /**
      * 建完立刻重取概览。
      *
@@ -1625,7 +1632,9 @@ export function useKlGraphFacts(input: KlGraphFactsInput) {
 export function useKlGraphOptimize() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async () => unwrap(await window.mycontext.kl.graphOptimize()),
+    /** ★ 与 `useKlGraphBuild` 同款按渠道（见那里的注释）。 */
+    mutationFn: async (channelId?: string) =>
+      unwrap(await window.mycontext.kl.graphOptimize(channelId)),
     // 优化会补边与社群 —— 概览上的边数会变，跑完要重取。
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["kl", "graph-overview"] })

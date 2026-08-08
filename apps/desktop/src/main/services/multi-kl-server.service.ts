@@ -99,7 +99,29 @@ export class MultiKlServerService {
     await Promise.all([this.primary.stop(), ...this.sources.map((source) => source.service.stop())])
   }
 
-  async rebuildGraph(fresh = false): Promise<KlGraphBuildResult> {
+  /**
+   * 建图。
+   *
+   * ## ★ `channelId` 给了就**只建那一个**
+   *
+   * 界面上「建图/重建」按钮与渠道选择器同处一页，而用户在飞书那一栏点
+   * 「重建」时的意图显然是"重建飞书的图" —— 不带渠道的话会把钉钉那
+   * 37826 个 chunk 一起重烧（实测约 3 小时、且出网烧 LLM）。
+   *
+   * ★★ `fresh=true` 尤其危险：它**删数据**。把一次针对飞书的重建变成
+   * "两个渠道的图全删了重来"是不可逆的。
+   *
+   * 不给 = 全部（存量行为，自动建图那条路走它）。
+   */
+  async rebuildGraph(fresh = false, channelId?: string): Promise<KlGraphBuildResult> {
+    if (channelId !== undefined && channelId !== this.primaryChannelId) {
+      const source = this.sources.find((item) => item.channelId === channelId)
+      if (source !== undefined) return await source.service.rebuildGraph(fresh)
+      // 那个渠道没挂管线 → 什么都不做，而不是"顺手建了主渠道的"
+      return { ok: false, reason: `渠道未就绪：${channelId}`, entities: 0, facts: 0, edges: 0 }
+    }
+    if (channelId === this.primaryChannelId) return await this.primary.rebuildGraph(fresh)
+
     const results: KlGraphBuildResult[] = [await this.primary.rebuildGraph(fresh)]
     // 顺序执行：两边同时 embedding/抽取会让桌面机持续高负载。
     for (const source of this.sources) {
@@ -108,7 +130,25 @@ export class MultiKlServerService {
     return combineBuild(results)
   }
 
-  async optimizeGraph(): Promise<KlGraphOptimizeResult> {
+  /** 优化图谱。★ 与 `rebuildGraph` 同款按渠道分流（见那里的注释）。 */
+  async optimizeGraph(channelId?: string): Promise<KlGraphOptimizeResult> {
+    if (channelId !== undefined && channelId !== this.primaryChannelId) {
+      const source = this.sources.find((item) => item.channelId === channelId)
+      if (source !== undefined) return await source.service.optimizeGraph()
+      return {
+        ok: false,
+        reason: `渠道未就绪：${channelId}`,
+        factEdges: 0,
+        entityEdges: 0,
+        entityCommunities: 0,
+        factCommunities: 0,
+      }
+    }
+    if (channelId === this.primaryChannelId) return await this.primary.optimizeGraph()
+    return await this.optimizeAll()
+  }
+
+  private async optimizeAll(): Promise<KlGraphOptimizeResult> {
     const results: KlGraphOptimizeResult[] = [await this.primary.optimizeGraph()]
     for (const source of this.sources) {
       if (source.enabled()) results.push(await source.service.optimizeGraph())
@@ -170,6 +210,8 @@ export class MultiKlServerService {
       // 自动建图调度目前由主数据面统一管理；多图库只合并图数据，
       // 不重新推导水位，避免与 FeedService 的真实触发判据漂移。
       buildSchedule: primary.buildSchedule,
+      // 「这一轮建了多少」取主渠道那份，不求和（见后续提交里那段完整注释）
+      lastBuild: primary.lastBuild,
     }
   }
 }

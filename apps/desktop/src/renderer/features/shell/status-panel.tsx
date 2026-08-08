@@ -20,6 +20,7 @@
  * 六个收起的标题行，而"采集在正常干活吗"要点一下才知道 ——
  * 那比原来更糟，原来至少第一屏就是它。
  */
+import { useState } from "react"
 import { Button, Disclosure } from "@mycontext/design"
 import type { ConfigEntryView, KlServerStatus } from "@mycontext/ipc-contract"
 import {
@@ -51,6 +52,14 @@ export function StatusPanel() {
   const { t } = useDynamicTranslation("settings")
   const { t: tc } = useDynamicTranslation()
   const errorText = useErrorText()
+  /**
+   * 这一页在看哪个渠道。`null` = 还没选过 → 由 `DataPlanePanel` 落到第一个。
+   *
+   * ★ 提到这一层而不是各块自己持有：数据面的数字与下面的建图按钮必须
+   * 说同一个渠道 —— 见 `KlPanel` 那里的注释。
+   */
+  const [statusChannel, setStatusChannel] = useState<string | null>(null)
+
   const status = useStatusReport(true)
 
   if (status.isLoading) {
@@ -81,7 +90,11 @@ export function StatusPanel() {
         ★ 数据面与 kl 摊开，后面四块折叠 —— 见文件头。
         数据面放最上面：这是本阶段最常被查看的一屏（"采到了多少 / 卡在哪"）。
       */}
-      <DataPlanePanel enabled />
+      <DataPlanePanel
+        enabled
+        channelId={statusChannel}
+        onChannelChange={setStatusChannel}
+      />
 
       {/*
         采集频率：紧跟数据面 —— 用户看到"探针周期 10s"这个数字之后，
@@ -89,7 +102,12 @@ export function StatusPanel() {
       */}
       <IngestIntervalsPanel />
 
-      <KlPanel />
+      {/*
+        ★ 与数据面**共用同一个渠道选择** —— 这一页只有一个取值范围。
+        两块各自一个选择器的话，用户会在"数据面选了飞书、建图按钮却在
+        钉钉上"这种状态里点下去，而那一下是不可逆的（fresh 会删图）。
+      */}
+      <KlPanel channelId={statusChannel} />
 
       {/*
         ── 以下是**排查用**的四块 ────────────────────────────
@@ -305,7 +323,7 @@ export function klServiceStateKey(state: KlServerStatus["state"]): string {
  * 而一轮增量建图要跑几十分钟。所以服务徽章只反映服务状态，
  * 建图忙不忙走它自己那一块（带 phase/percent，后端本来就在推）。
  */
-function KlPanel() {
+function KlPanel({ channelId }: { channelId: string | null }) {
   const { t } = useDynamicTranslation("settings")
   const status = useKlServerStatus()
   const start = useKlServerStart()
@@ -468,7 +486,8 @@ function KlPanel() {
               size="sm"
               disabled={busy}
               title={t("status.kl.buildHint")}
-              onClick={() => build.mutate(false)}
+              // ★ 带上渠道：不带的话在飞书那栏点「建图」会把钉钉的也建一遍
+              onClick={() => build.mutate({ fresh: false, ...(channelId === null ? {} : { channelId }) })}
             >
               {/*
                 ★ 文案跟 `disabled` 用**同一个** `busy`，不是 `build.isPending`。
@@ -510,7 +529,12 @@ function KlPanel() {
               variant="secondary"
               disabled={busy}
               title={t("status.kl.rebuildHint")}
-              onClick={() => build.mutate(true)}
+              /**
+               * ★★ `fresh` 会**删图**。必须带渠道 —— 不带的话用户在飞书那栏
+               * 点「重建」会把钉钉那 37826 个 chunk 一起删了重烧（约 3 小时、
+               * 出网烧 LLM），而那是不可逆的。
+               */
+              onClick={() => build.mutate({ fresh: true, ...(channelId === null ? {} : { channelId }) })}
             >
               {t("status.kl.rebuild")}
             </Button>

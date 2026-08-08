@@ -486,7 +486,7 @@ export interface MyContextApi {
     /** 停止 kl-server（无孤儿） */
     serverStop(): Promise<Result<true>>
     /** 触发建图（export→ingest，长任务、出网）。跑完返回图规模；期间 server 会重载。 */
-    graphBuild(fresh?: boolean): Promise<Result<KlGraphBuildResult>>
+    graphBuild(fresh?: boolean, channelId?: string): Promise<Result<KlGraphBuildResult>>
     /**
      * 图谱概览（规模 + 类型分布 + 枢纽实体 + 最近事实）。
      *
@@ -511,7 +511,7 @@ export interface MyContextApi {
     graphFacts(input: KlGraphFactsInput): Promise<Result<KlGraphFacts>>
     /** 优化图谱（kl improve，periodic：SIMILAR_TO 边 + 消歧 + 社群）。出网烧 LLM。
      * 是 `kl entity`/`community` 查询可用的前提（建 community_L* 列）。 */
-    graphOptimize(): Promise<Result<KlGraphOptimizeResult>>
+    graphOptimize(channelId?: string): Promise<Result<KlGraphOptimizeResult>>
     /** 订阅状态变化。返回取消订阅函数。 */
     onStatus(listener: (status: KlServerStatus) => void): () => void
   }

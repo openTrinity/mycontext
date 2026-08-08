@@ -1916,6 +1916,22 @@ export function bootstrapApp(mainDir: string): AppContext {
       await pipelines.mount(vaultId, others)
       // 管线建好之后再让数据面认识它们（IngestService 按 source 起）
       await remountDataPlane()
+      /**
+       * ★★ 起每条管线自己的 kl —— 少了这一步它们**永远是「未启动」**。
+       *
+       * 实测症状：状态页上飞书那一栏恒显示「未启动」，而日志里连一条
+       * `KlServer:feishu` 都没有 —— 因为 `ensureReady()` 一次都没被调过。
+       * 挂载只是把服务**造出来**，起进程是另一件事。
+       *
+       * ★ 那条 `onAuthorized` 里的 `ensureReady` 覆盖不了这条路径：它只在
+       * 「本次会话里刚授权」时跑，而**上次授权、这次重启**走的是这里。
+       *
+       * fire-and-forget：一个 kl 冷启 ~90s（Qdrant warmup），不能阻塞登录。
+       * 失败只降级（那个渠道的图谱查不了），不影响主渠道。
+       */
+      for (const item of pipelines.all()) {
+        void item.parts.klServer.ensureReady().catch(() => undefined)
+      }
     })().catch((error: unknown) => {
       logger.error("channel pipelines mount failed", {
         detail: error instanceof Error ? error.message : String(error),

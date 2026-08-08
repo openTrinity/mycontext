@@ -52,7 +52,6 @@ import {
   useFeedInfo,
   useIngestSnapshot,
   useKlGraphBuild,
-  useChannels,
   useKlGraphEgo,
   useKlGraphOverview,
   useKlServerStatus,
@@ -131,20 +130,21 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    * `null` = 还没选过 → 取"当前连着的那个"（只连一个时就是它，见 `graphChannel`）。
    */
   const channels = useChannels()
-  /** 已授权的渠道（切换器只列它们 —— 没连的渠道图库是空的）。 */
+  /**
+   * 已授权的渠道（切换器只列它们 —— 没连的渠道图库是空的）。
+   *
+   * ★ 类型由 `channels.data` 推出来，**不写行内标注**：rebase 合并时那里
+   * 一度带着 `(c: { available: boolean; status: { state: string } })` ——
+   * 手写的结构类型会在 `ChannelSummary` 加字段时**静默过时**
+   * （它只是"至少有这些键"，不会因为契约变了而报错）。
+   */
   const authorizedChannels = useMemo(
     () =>
       (channels.data ?? [])
-        .filter((c: { available: boolean; status: { state: string } }) => c.available && c.status.state === "authorized")
-        .map((c: { id: string }) => c.id),
+        .filter((c) => c.available && c.status.state === "authorized")
+        .map((c) => c.id),
     [channels.data],
   )
-  /**
-   * 生效的渠道：用户选过就用它，否则取**第一个已授权**的。
-   *
-   * ★ 于是"只连了飞书"时默认就展示飞书的图，不是空的钉钉图。
-   * 而没有任何"混合"档 —— 那正是上面那条 id 映射问题的结论。
-   */
   /**
    * 生效的渠道：页头选了就用它，否则取**第一个已授权**的。
    *
@@ -259,7 +259,8 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    * `undefined`（还在查）传 `null`：那时不下结论，免得已连接的账号
    * 首帧闪一下"历史数据"。
    */
-  const channels = useChannels()
+  // ★ 复用上面那个 `channels`（第 126 行附近）—— rebase 时双方各加了一次
+  //   `useChannels()`，而它们在同一个函数作用域里，于是重复声明。
   const dingtalkState = channels.data?.find((item) => item.id === "dingtalk")?.status.state
   const channelConnected = dingtalkState === undefined ? null : dingtalkState === "authorized"
 
@@ -282,6 +283,11 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
       messages: row.messages,
       conversations: row.conversations,
       mediaAssets: row.mediaAssets,
+      ftsIndexed: row.ftsIndexed,
+      ftsLag: row.ftsLag,
+      unjudged: row.unjudged,
+      outboxHead: row.outboxHead,
+      minutes: row.minutes,
       running: row.running,
       lastError: row.lastError,
       blockedReason: row.blockedReason,
@@ -708,7 +714,17 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
               size="sm"
               variant="secondary"
               disabled={kl === null || building || buildGraph.isPending}
-              onClick={() => buildGraph.mutate(false)}
+              /**
+               * ★ 带上页头选中的渠道 —— 这一页的每个数字都跟着它，
+               * 建图这个动作也必须。不带会把另一个渠道的图一起建
+               * （preload 那层曾经把 channelId 吞掉，见 `preload-arity` 门禁）。
+               */
+              onClick={() =>
+                buildGraph.mutate({
+                  fresh: false,
+                  ...(graphChannel === undefined ? {} : { channelId: graphChannel }),
+                })
+              }
             >
               {/*
               ★★ 这颗按钮**绝不能**叫「重新建图」—— 那是一次真实的语义 bug。
@@ -769,7 +785,12 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           data={ego.data}
           loading={ego.isLoading}
           building={building}
-          onRebuild={() => buildGraph.mutate(false)}
+          onRebuild={() =>
+            buildGraph.mutate({
+              fresh: false,
+              ...(graphChannel === undefined ? {} : { channelId: graphChannel }),
+            })
+          }
           onPickEntity={setEntityFocus}
           focusedName={entityFocus}
         />

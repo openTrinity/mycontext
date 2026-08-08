@@ -1826,6 +1826,25 @@ export const ingestSnapshotSchema = z.object({
         conversations: z.number(),
         /** 图片与文件条数 —— 与 messages/conversations 一起构成"这个渠道采到了什么" */
         mediaAssets: z.number(),
+        /**
+         * 以下这些也是**渠道级**的（各渠道一个物理库，各自一套水位与索引）。
+         *
+         * ★ 少一个的表现是"切了渠道但那个数不动" —— 实测漏了 `ftsIndexed`，
+         * 于是飞书那栏显示「已采集 8 条 · 其中 **1,665** 条已能被搜到」，
+         * 两个数字互相矛盾而没有任何报错。
+         *
+         * ★ 判据是"这个数是从哪个库查出来的"：从渠道库查的就该在这里。
+         * vault 级的（`storage` 是整个 vault 的文件体积、`eventStream` 是
+         * 主渠道特有的长连接）**刻意不放**。
+         */
+        ftsIndexed: z.number(),
+        ftsLag: z.number(),
+        unjudged: z.number(),
+        outboxHead: z.number(),
+        minutes: z.number(),
+        probeIntervalMs: z.number(),
+        probeThrottled: z.boolean(),
+        selfConfirmed: z.boolean(),
         lastError: z.string().nullable(),
         /**
          * ★ 与顶层同一个枚举，不是裸 string：它们是**同一个字段**

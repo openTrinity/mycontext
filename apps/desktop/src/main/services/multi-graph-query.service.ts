@@ -9,7 +9,7 @@ import type { KlGraphEgo, KlGraphFacts, KlGraphFactsInput } from "@mycontext/ipc
 export class MultiGraphQueryService {
   constructor(
     private readonly primary: {
-      ego(): KlGraphEgo
+      ego(): Promise<KlGraphEgo>
       facts(input: KlGraphFactsInput): KlGraphFacts
     },
     /**
@@ -22,14 +22,14 @@ export class MultiGraphQueryService {
       channelId: string
       facts(input: KlGraphFactsInput): KlGraphFacts
       /** 那个渠道自己的 ego 图（切换到它时用）。 */
-      ego?: () => KlGraphEgo
+      ego?: () => Promise<KlGraphEgo>
     }[],
   ) {}
 
   private get sources(): readonly {
     channelId: string
     facts(i: KlGraphFactsInput): KlGraphFacts
-    ego?: () => KlGraphEgo
+    ego?: () => Promise<KlGraphEgo>
   }[] {
     return this.getSources()
   }
@@ -48,7 +48,9 @@ export class MultiGraphQueryService {
    *
    * `channelId` 不给或就是主渠道 → 主渠道（存量行为）。
    */
-  ego(channelId?: string): KlGraphEgo {
+  // ★ async：上游把 `GraphQueryService.ego()` 改成异步了（关系边要问 kl 的
+  //   HTTP —— SQLite 的 `edges` 表在 ladybug 后端下按设计恒空）。
+  async ego(channelId?: string): Promise<KlGraphEgo> {
     if (channelId === undefined) return this.primary.ego()
     const source = this.sources.find((item) => item.channelId === channelId)
     return source?.ego === undefined ? this.primary.ego() : source.ego()

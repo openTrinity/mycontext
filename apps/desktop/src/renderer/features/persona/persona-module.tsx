@@ -239,7 +239,9 @@ export function PersonaModule() {
    * 选择器要列这个：飞书连上了却在这一页看不到入口的话，
    * "为什么它不在这里"就成了一个没有答案的问题。
    */
-  const channels = useChannels()
+  // ★ 复用上面那个 `channels`（第 79 行附近）—— rebase 时双方各加了一次
+  //   `useChannels()`，而它们在**同一个函数作用域**里，于是重复声明。
+  //   两处要的东西不同（一个判连接态、一个列已授权），但数据源是同一个查询。
   const authorizedChannelIds = useMemo(
     () =>
       (channels.data ?? [])

@@ -187,8 +187,15 @@ describe("★ 重建：不弹系统确认框", () => {
       .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
       .replace(/\/\/.*$/gm, "")
     expect(code).not.toContain("window.confirm")
-    // 反证：重建按钮本身还在，且仍然传 fresh=true
-    expect(code).toContain("build.mutate(true)")
+    /**
+     * 反证：重建按钮本身还在，且仍然传 `fresh: true`。
+     *
+     * ★ 不再断言 `build.mutate(true)` 这个**具体写法** —— 参数已经从
+     * 裸 boolean 变成对象（要一起带渠道 id：不带的话在飞书那栏点「重建」
+     * 会把钉钉的图一起删了重烧）。断言写法会让一次正确的重构变红，
+     * 而这条测试要守的是"fresh=true 还在传"这件事。
+     */
+    expect(code).toMatch(/build\.mutate\(\s*\{\s*fresh:\s*true/)
   })
 
   it("★ rebuildConfirm 这个 key 已删（没有消费方的文案不该留着）", () => {

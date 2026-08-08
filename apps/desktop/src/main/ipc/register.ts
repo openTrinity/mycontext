@@ -103,11 +103,10 @@ export interface IpcDependencies {
    * ★ `graphOverview` 的签名比 `KlServerService` 的宽一个可选参数（渠道 id）——
    * 装配层传的是 `MultiKlServerService`，它按 id 路由到对应的图库。
    */
-  klServer: Pick<
-    KlServerService,
-    "status" | "ensureReady" | "stop" | "rebuildGraph" | "optimizeGraph"
-  > & {
+  klServer: Pick<KlServerService, "status" | "ensureReady" | "stop"> & {
     graphOverview(channelId?: string): ReturnType<KlServerService["graphOverview"]>
+    rebuildGraph(fresh?: boolean, channelId?: string): ReturnType<KlServerService["rebuildGraph"]>
+    optimizeGraph(channelId?: string): ReturnType<KlServerService["optimizeGraph"]>
   }
   /**
    * 图谱只读查询。
@@ -770,9 +769,17 @@ export function registerIpc(deps: IpcDependencies): void {
       return true as const
     }),
   )
-  ipcMain.handle(IPC_CHANNELS.klGraphBuild, (_event, fresh: unknown) =>
+  /**
+   * 建图。★ 第二个参数是渠道 id：界面上按钮与渠道选择器同处一页，
+   * 用户在飞书那栏点「重建」的意图是重建飞书的图 —— 不带渠道会把钉钉那
+   * 37826 个 chunk 一起重烧（约 3 小时且出网），而 `fresh` 还会**删数据**。
+   */
+  ipcMain.handle(IPC_CHANNELS.klGraphBuild, (_event, fresh: unknown, channelId: unknown) =>
     attempt(async () => {
-      const result = await klServer.rebuildGraph(fresh === true)
+      const result = await klServer.rebuildGraph(
+        fresh === true,
+        typeof channelId === "string" && channelId !== "" ? channelId : undefined,
+      )
       /**
        * ★ 手动建图成功后把建图水位推到已导出水位。
        *
@@ -786,7 +793,13 @@ export function registerIpc(deps: IpcDependencies): void {
       return result
     }),
   )
-  ipcMain.handle(IPC_CHANNELS.klGraphOptimize, () => attempt(() => klServer.optimizeGraph()))
+  ipcMain.handle(IPC_CHANNELS.klGraphOptimize, (_event, channelId: unknown) =>
+    attempt(() =>
+      klServer.optimizeGraph(
+        typeof channelId === "string" && channelId !== "" ? channelId : undefined,
+      ),
+    ),
+  )
 
   /**
    * 图谱概览（可视化版块）。
