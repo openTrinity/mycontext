@@ -294,6 +294,75 @@ export const REAL_MINUTES_SUMMARY = {
 } as const
 
 /**
+ * `minutes get transcription` 的**真实分页形态**（已脱敏）。
+ *
+ * ## ★★ 这个 fixture 存在的理由是记住**收尾页没有 `hasNext` 键**
+ *
+ * 实测（2026-08-09，开源版 v1.0.57，三场长会共 57 页）：
+ *
+ * | | 中间页 | 最后一页 |
+ * | --- | --- | --- |
+ * | `hasNext` | `true` | **键不出现**（= `undefined`，不是 `false`） |
+ * | `nextToken` | 非空串 | **不出现** |
+ * | `paragraphList` | 恒 **50** 段 | 不足 50（9 / 21 段） |
+ *
+ * 判据因此必须是 `hasNext === true`。写成 `!== false` 的话最后一页会被判成
+ * "还有下一页"，只能靠"没给游标"那条兜底才停 —— 而那意味着每场会都多跑
+ * 一次注定失败的判断，且哪天上游给了非空尾游标就变成死循环。
+ *
+ * ## 规模（决定了 `MAX_TRANSCRIPT_PAGES` / `MAX_TRANSCRIPT_CHARS` 的取值）
+ *
+ * | 会议时长 | 页数 | 段数 | 字符数 |
+ * | --- | --- | --- | --- |
+ * | 106 分钟 | 18 | 859 | 464k |
+ * | 138 分钟 | 21 | 1021 | 551k |
+ * | 343 分钟 | ≥25 | ≥1250 | ≥648k |
+ *
+ * 单页恒 50 段 ≈ **26000 字符**（方差很小：23.6k–28.7k）。也就是
+ * 页数 ≈ 会议时长 / 6 分钟。首版把字符预算定在 200k（≈8 页），
+ * 那会让上面三场会**全部**被砍掉一半以上。
+ */
+export const REAL_MINUTES_TRANSCRIPTION_MIDDLE_PAGE = {
+  result: {
+    hasNext: true,
+    nextToken: "315f325f305f35305f32",
+    paragraphList: [
+      {
+        endTime: 1785079700000,
+        nickName: "小孙",
+        paragraph: "比如说我这是可以加的。",
+        startTime: 1785079695000,
+      },
+      {
+        endTime: 1785079712000,
+        nickName: "小王",
+        paragraph: "那就先这样，我下午同步一下。",
+        startTime: 1785079705000,
+      },
+    ],
+  },
+  success: true,
+} as const
+
+/**
+ * 收尾页。★ **刻意没有 `hasNext` 与 `nextToken` 两个键** —— 那是实测形态，
+ * 不是漏写（见 `REAL_MINUTES_TRANSCRIPTION_MIDDLE_PAGE` 的文件头）。
+ */
+export const REAL_MINUTES_TRANSCRIPTION_LAST_PAGE = {
+  result: {
+    paragraphList: [
+      {
+        endTime: 1785080873000,
+        nickName: "小李",
+        paragraph: "好，那今天就到这里。",
+        startTime: 1785080869000,
+      },
+    ],
+  },
+  success: true,
+} as const
+
+/**
  * `chat list-all-conversations --limit 100` 的**真实形态**（已脱敏）。
  *
  * ★ 这个 fixture 存在的理由是**记住这条命令的分页是坏的**。逐条实测：

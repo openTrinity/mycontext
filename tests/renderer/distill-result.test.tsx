@@ -89,6 +89,8 @@ function ingestSnapshot(backfill: IngestSnapshot["backfill"]): IngestSnapshot {
     selfConfirmed: true,
     mediaAssets: 0,
     minutes: 0,
+    // 这一屏不显示听记覆盖面；给 null（= 还没跑过一轮）而不是造一份假数据
+    minutesCoverage: null,
     storage: { mainBytes: 0, walBytes: 0, rawRecords: 0, rawPruned: 0, vectors: 0 },
     staleConsumers: [],
     eventStream: null,

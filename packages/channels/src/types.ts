@@ -446,19 +446,56 @@ export interface ChannelMinutesPage {
  * 听记采集能力。
  *
  * 与 `ChannelIngest` 分开的理由见 dingtalk/minutes.ts 文件头：
- * 无时间窗过滤、正文二次调用、变更频率低 —— 三点都与消息不同。
+ * 无水位语义、正文二次调用、变更频率低 —— 三点都与消息不同。
  */
 export interface ChannelMinutes {
-  list(spec?: { cursor?: string | null; limit?: number; signal?: AbortSignal }): Promise<{
+  list(spec?: {
+    cursor?: string | null
+    limit?: number
+    /**
+     * 时间下界 / 上界（unix ms）。**范围合规的落点**，不是优化。
+     *
+     * ★ 采集侧必须把用户在引导里选的范围传下来：不传的话抽干历史会把
+     * 用户明确排除掉的时间段整段采回来（CLAUDE.md 第 5 节）。
+     * `undefined`/`null` = 不限（用户没配过范围，或显式选了不限）。
+     *
+     * 渠道侧负责把它翻成自己的格式（钉钉要 ISO-8601 **带偏移**）。
+     */
+    since?: number | null
+    until?: number | null
+    signal?: AbortSignal
+  }): Promise<{
     page: ChannelMinutesPage
     rawPayload: string
   }>
+  /**
+   * 取一场会议的正文（摘要 + 逐句转写）。
+   *
+   * ★ 实现必须**抽干转写的分页**（钉钉侧 `hasNext` + `--cursor`）。
+   * 只取第一页的表现是"一场长会只有开头几分钟"，而那看起来像
+   * "这场会就这么短"—— 又一个静默的数据缺失。
+   */
   body(
     externalId: string,
     signal?: AbortSignal,
   ): Promise<{
     summaryText: string | null
     transcriptJson: string | null
+    /**
+     * 转写实际抽了几页。**恒 ≥ 1**（调用成功就至少跑了一页）。
+     *
+     * 与 `transcriptTruncated` 分开：这个是"抽了多少"，那个是"抽干了吗"。
+     * 排查时第一个要问的是前者（1 页就完 vs 20 页还没完，成因完全不同）。
+     */
+    transcriptPages: number
+    /**
+     * 撞了实现自己的上限、**没有抽干**。
+     *
+     * ★ 必须能表达：不标注的话下游会把它当完整转写用，
+     * 于是"这场会没提过 X"这类结论是错的（与 `ChannelDocuments.list`
+     * 的 `truncated` 同一个理由）。
+     */
+    transcriptTruncated: boolean
     rawPayload: string
   }>
 }

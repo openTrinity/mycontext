@@ -131,9 +131,10 @@ export type { ParsedMedia } from "./plugins/dingtalk/content-extract.js"
 export {
   parseMinutesList,
   parseMinutesSummary,
+  parseMinutesTranscriptionPage,
   createDingTalkMinutes,
 } from "./plugins/dingtalk/minutes.js"
-export type { ParsedMinutes } from "./plugins/dingtalk/minutes.js"
+export type { ParsedMinutes, ParsedTranscriptionPage } from "./plugins/dingtalk/minutes.js"
 
 /**
  * 文档（知识库 wiki + 钉盘）。

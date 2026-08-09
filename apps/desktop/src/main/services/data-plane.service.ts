@@ -433,6 +433,8 @@ export class DataPlaneService {
         selfConfirmed: false,
         mediaAssets: 0,
         minutes: 0,
+        // 未登录时"还没跑过一轮"→ null。给 `drained: true` 会把未知说成没问题。
+        minutesCoverage: null,
         storage: { mainBytes: 0, walBytes: 0, rawRecords: 0, rawPruned: 0, vectors: 0 },
         staleConsumers: [],
         eventStream: null,

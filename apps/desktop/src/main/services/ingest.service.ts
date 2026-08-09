@@ -53,6 +53,7 @@ import {
   MediaAssetRepository,
   MessageRepository,
   MinutesRepository,
+  MinutesCoverageRepository,
   DocumentRepository,
   PersonaRunRepository,
   RetentionRunner,
@@ -84,9 +85,10 @@ const PULL_INTERVAL_MS = 2 * 60_000
 /**
  * 听记轮询周期。
  *
- * 30 分钟：会议是**稀疏**事件（实测 20 条覆盖数周），而 `minutes list all`
- * 不支持时间过滤 —— 每轮都是全量列，成本固定。按消息那样 2 分钟一轮
- * 等于每小时 30 次无谓的全量拉取。
+ * 30 分钟：会议是**稀疏**事件（实测该账号 22 场覆盖数月），而每轮都要把
+ * `minutes list all` 抽干（没有水位可推，见 `tickMinutes`）——
+ * 成本大致固定：实测一页约 0.8s，22 场会 = 2 页 ≈ 1.6s。
+ * 按消息那样 2 分钟一轮等于每小时 30 次无谓的全量抽干。
  */
 const MINUTES_INTERVAL_MS = 30 * 60_000
 /**
@@ -165,8 +167,55 @@ const DOCUMENTS_BODY_PER_ROUND = 5
  * 那是用户能感知的（"消息怎么半天不出现"）。
  */
 const DOCUMENTS_BODY_PER_ROUND_BACKLOG = 20
-/** 单轮最多补几条听记正文。正文是逐条两次 CLI 调用（summary + transcription）。 */
+/**
+ * 单轮最多补几条听记正文。
+ *
+ * ## ★★ 抽干转写之后这个数的成本涨了一个数量级
+ *
+ * 从前一条听记的正文 = 2 次 CLI 调用（summary + 转写第一页）。
+ * 抽干之后是 **1 + N** 次，而 N 按实测是会议时长 / 6 分钟：
+ *
+ * | 会议时长 | 转写页数 | 该条的调用数 | 耗时（每页约 0.7s） |
+ * | --- | --- | --- | --- |
+ * | 106 分钟 | 18 | 19 | 约 13s |
+ * | 138 分钟 | 21 | 22 | 约 15s |
+ * | 343 分钟 | 40（撞上限） | 41 | 约 29s |
+ *
+ * 所以 3 条/轮的最坏情况约 **90 秒**（三场都是马拉松会）。
+ *
+ * ★ 这个开销**不挡消息侧**：听记走 `inFlightMinutes` 这个独立守卫，
+ * 不占 `this.busy`（消息侧的 `tickPull` 与定向补拉抢的是那把锁）。
+ * 所以它跑 90 秒也不会让新消息晚到 —— 这一点是抽干可以做得这么激进的前提。
+ *
+ * 仍然保持 3 而不是调小：会议是稀疏事件（实测 22 场），3 条/轮 ×
+ * 30 分钟一轮 = 约 4 小时补完全部历史，一次性成本，之后每轮只补新增的。
+ */
 const MINUTES_BODY_PER_ROUND = 3
+/**
+ * 听记列表最多翻几页。
+ *
+ * ## ★★ 为什么必须抽干，而首版"只取首页"是一个静默的数据缺失
+ *
+ * 首版注释写的是「一期只取首页：低频任务不必一轮翻完全部历史，
+ * hasMore 的后续页由下一轮的 cursor=null 重新覆盖到最新的那批」——
+ * **后半句是错的**：每一轮都从 `cursor=null` 开始，所以永远只覆盖最新的
+ * 那一页，历史页**一次都不会被访问**。
+ *
+ * 而这个缺失当时没有任何出口（不落库、不上报、不记日志）：状态页的听记
+ * 计数稳定停在一页的量，与"这个账号一共这么多会"完全同形。
+ *
+ * ## 20 页够不够（按实测的页大小算）
+ *
+ * 实测 `--limit` 的**硬顶是 20**（2026-08-09，传 50/100/200/1000 都回 20，
+ * 见 `MINUTES_PAGE_LIMIT` 的注释）。所以 20 页 = **400 场会议**。
+ * 实测那个账号一共 22 场（2 页抽干），400 留了近 20 倍余量。
+ *
+ * 这个上限的主要作用其实是**挡住病态响应**（`nextToken` 不前进导致原地
+ * 打转），与 `conversations.ts` 的 `GROUP_MAX_PAGES` 同一个角色。
+ *
+ * 撞上限时把 `drained: false` 落进 `minutes_coverage` —— 截断必须可见。
+ */
+const MINUTES_MAX_LIST_PAGES = 20
 /**
  * 单页条数。与截断检测的 90% 阈值配合使用。
  *
@@ -504,6 +553,21 @@ export interface IngestSnapshot {
   mediaAssets: number
   /** 听记条数 */
   minutes: number
+  /**
+   * 听记的**覆盖面**（"是不是全部"，不是"有多少"）。null = 还没跑过一轮。
+   *
+   * ★ 上面那个计数在首版会稳定停在 50（列表只取首页），而那与
+   * "这个账号一共 50 场会"在界面上完全同形 —— 这一组是那个静默缺失的出口。
+   * 与 `backfill` 那三个数字同一个思路：把落差摊开才能被看见。
+   */
+  minutesCoverage: {
+    /** 上一轮把列表翻到底了吗。false = 撞了页数预算，覆盖不全。 */
+    drained: boolean
+    /** 已覆盖到的最早会议时间（unix ms）；null = 库里还没有会议。 */
+    earliestStartedAt: number | null
+    /** 有几场会的**转写**没抽干（与 `drained` 是两件事，见契约里的注释）。 */
+    transcriptTruncated: number
+  } | null
   storage: {
     mainBytes: number
     walBytes: number
@@ -1137,25 +1201,32 @@ export class IngestService {
   }
 
   /**
-   * 听记采集：列元信息 → 落库 → 给缺正文的补正文。
+   * 听记采集：**抽干**列表分页 → 落库 → 给缺正文的补正文。
    *
    * ## 为什么"列"与"补正文"在同一轮但分两步
    *
-   * `list` 只给元信息，正文要逐条再调两次（summary + transcription）。
-   * 若在 list 的循环里同步补正文，一次全量（实测 20 条 × 2 = 40 次子进程调用）
-   * 会让这一轮跑很久，而听记轮询本来是低频后台任务 —— 长时间占着
-   * DWS 子进程会拖慢消息侧的采集。
+   * `list` 只给元信息，正文要逐条再调两次以上（summary + 抽干转写的每一页）。
+   * 若在 list 的循环里同步补正文，一次全量会让这一轮跑很久 ——
+   * 而听记轮询本来是低频后台任务，长时间占着 DWS 子进程不划算。
    *
-   * 所以：list 每轮全量（便宜，元信息幂等），正文每轮只补
-   * `MINUTES_BODY_PER_ROUND` 条最新的。几轮之后就补齐了，
-   * 而任何一轮都不会长时间占用子进程。
+   * 所以：list 每轮抽干（元信息便宜且幂等），正文每轮只补
+   * `MINUTES_BODY_PER_ROUND` 条最新的。几轮之后就补齐了。
    *
-   * ## 不做水位
+   * ## 不做水位，但**做范围收窄**（两件事）
    *
-   * `minutes list all` 不支持时间过滤（实测 flag 只有 --limit/--cursor/--query/
-   * --start/--end，而 start/end 是"可选筛选"不是水位语义）。
-   * 幂等靠 `(channel_id, external_id)` 唯一键 + upsert 的正文守卫 ——
-   * 重复列同一条听记不产生 Outbox seq。
+   * · **没有水位**：`--start/--end` 是「可选筛选」而非水位语义
+   *   （它不保证"这之后的都给你"），所以 `IngestScheduler` 那套
+   *   「重叠窗口 + 水位」在这里没有对应物。幂等靠
+   *   `(channel_id, external_id)` 唯一键 + upsert 的正文守卫 ——
+   *   重复列同一条听记不产生 Outbox seq。
+   * · **但要传时间范围**：抽干历史会碰到用户明确排除掉的时间段，
+   *   而那是隐私边界（CLAUDE.md 第 5 节）。见 `minutesTimeRange`。
+   *
+   * ## ★ 抽干的截断要落库
+   *
+   * 撞了页数预算时 `minutes_coverage.drained = 0` —— 状态页据此说
+   * "覆盖可能不全"。只记日志的话用户看不到（见
+   * `MinutesCoverageRepository` 的注释）。
    */
   async tickMinutes(): Promise<{ listed: number; changed: number; bodies: number }> {
     const minutes = this.options.plugin.minutes
@@ -1202,6 +1273,60 @@ export class IngestService {
       .prepare<[string], { enabled: number }>("SELECT enabled FROM distill_sources WHERE kind = ?")
       .get("minutes")
     return row === undefined ? true : row.enabled === 1
+  }
+
+  /**
+   * 听记源的时间范围（用户在引导第 3 步选的）。
+   *
+   * ## ★★ 为什么必须有这个，以及为什么**不能**用 `readCollectionScope`
+   *
+   * 听记采集从前完全不看采集范围。只取首页时这件事被"覆盖面太小"掩盖了；
+   * 一旦抽干历史，就会把用户明确排除掉的时间段整段采回来 ——
+   * 按 CLAUDE.md 第 5 节那是隐私问题，不是"多采点没坏处"。
+   *
+   * `readCollectionScope`（store 的唯一权威）**只读 `kind = 'chat'` 那一行**
+   * （函数名里没有 chat，但实现写死了）。而引导对**每个**源各写一行 scope
+   * （见 `onboarding-view.tsx` 的保存循环：非 chat 源写 `{since, until}`）。
+   * 拿 chat 的范围去卡听记在这个应用里恰好等价（引导给两者写的是同一对
+   * since/until），但那是**巧合而不是契约** —— 用户将来能分源配范围时
+   * 就错了，而错的方向是"采了不该采的"。
+   *
+   * ## 三态与 `minutesEnabled` 保持一致
+   *
+   * 没有这一行（没配过）→ 不限。所以返回的两个值都可能是 undefined，
+   * 渠道层据此决定传不传 `--start/--end`。
+   *
+   * ★ 直接查原始表而不是 `DistillSourceRepository.list()`：同 `minutesEnabled`
+   * 的理由 —— 那个方法对缺失的 kind 会合成一行，于是"没配过"不可辨识。
+   */
+  private minutesTimeRange(): { since?: number; until?: number } {
+    const row = this.options.db
+      .prepare<
+        [string],
+        { scope_json: string | null }
+      >("SELECT scope_json FROM distill_sources WHERE kind = ?")
+      .get("minutes")
+    if (row?.scope_json === undefined || row.scope_json === null || row.scope_json === "") {
+      return {}
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(row.scope_json)
+    } catch {
+      // 坏 JSON 按"没配过"处理（不限）。与 onboarding 仓储的 parseJson 同一个
+      // 口径：一个手改过的库不该让采集整个停下。
+      return {}
+    }
+    if (typeof parsed !== "object" || parsed === null) return {}
+    const scope = parsed as { since?: unknown; until?: unknown }
+    return {
+      ...(typeof scope.since === "number" && Number.isFinite(scope.since)
+        ? { since: scope.since }
+        : {}),
+      ...(typeof scope.until === "number" && Number.isFinite(scope.until)
+        ? { until: scope.until }
+        : {}),
+    }
   }
 
   /**
@@ -1743,32 +1868,80 @@ export class IngestService {
   ): Promise<{ listed: number; changed: number; bodies: number }> {
     const channelId = this.options.plugin.meta.id
     const totals = { listed: 0, changed: 0, bodies: 0 }
+    const deps = {
+      db: this.options.db,
+      clock: this.options.clock,
+      logger: this.options.logger,
+    }
+    /**
+     * ★★ 用户选的时间范围。**每轮现读**（不缓存）——
+     * 用户改了范围下一轮就该生效，而缓存过期的方向恰好是
+     * "继续采已经被排除掉的时间段"。见 `minutesTimeRange` 的注释。
+     */
+    const range = this.minutesTimeRange()
 
     try {
-      // ① 列一页元信息（一期只取首页：低频任务不必一轮翻完全部历史，
-      //    hasMore 的后续页由下一轮的 cursor=null 重新覆盖到最新的那批）。
-      const { page, rawPayload } = await minutes.list({})
-      if (!this.running) return totals
-      totals.listed = page.items.length
+      /**
+       * ① **抽干**列表分页。
+       *
+       * 首版只取首页，而那是一个静默的数据缺失（见 `MINUTES_MAX_LIST_PAGES`
+       * 的注释：第 51 场之前的会议永远采不到，且状态页看不出来）。
+       *
+       * ## ★ 每页各自落库，不攒到最后
+       *
+       * 攒起来的话中途 `stop()`（logout / 退出）会把已经拉到的几页一起丢掉，
+       * 而它们本来是可以保住的。听记的 upsert 是幂等的
+       * （`(channel_id, external_id)` 唯一键 + 正文守卫），所以多次小事务
+       * 与一次大事务在结果上等价，但抗中断。
+       *
+       * ## ★ 每轮都从 `cursor=null` 重新抽干是**有意**的
+       *
+       * 听记没有水位可推（`--start/--end` 是可选筛选而非水位语义），
+       * 而重复列举的代价只有 CLI 调用：upsert 的正文守卫保证未变化的行
+       * **不发 Outbox seq**（见 `MinutesRepository.upsertMany`），
+       * 所以下游不会每轮重算全部听记。
+       *
+       * 20 页 × 约 0.5s ≈ 10s，30 分钟一轮可接受；且听记走的是
+       * `inFlightMinutes` 这个独立守卫（不占 `this.busy`），
+       * 所以它跑多久都不会挡住消息侧的采集。
+       */
+      let cursor: string | null = null
+      let pages = 0
+      let drained = false
 
-      if (page.items.length > 0) {
-        const result = persistMinutes(
-          { db: this.options.db, clock: this.options.clock, logger: this.options.logger },
-          {
+      while (pages < MINUTES_MAX_LIST_PAGES) {
+        const { page, rawPayload } = await minutes.list({
+          cursor,
+          ...(range.since === undefined ? {} : { since: range.since }),
+          ...(range.until === undefined ? {} : { until: range.until }),
+        })
+        // stop 可能在 await 期间发生（logout 撞上正在跑的这一轮）。写库前返回。
+        if (!this.running) return totals
+        pages += 1
+        totals.listed += page.items.length
+
+        if (page.items.length > 0) {
+          const now = this.options.clock.now()
+          const result = persistMinutes(deps, {
             raw: [
               {
-                id: newId(this.options.clock.now()),
+                id: newId(now),
                 channelId,
                 resource: "minutes",
+                /**
+                 * 列举没有单一平台主键（这是第 N 页）→ 空串，幂等靠 payloadHash。
+                 * ★ 空串而不是 null：可空列参与 UNIQUE 时那些行的唯一性
+                 * 完全不生效（见 raw-records.ts 文件头）。
+                 */
                 externalId: "",
                 payload: rawPayload,
                 payloadHash: sha256(rawPayload),
                 source: "dws-cli",
-                fetchedAt: this.options.clock.now(),
+                fetchedAt: now,
               },
             ],
             minutes: page.items.map((item) => ({
-              id: newId(item.startedAt ?? this.options.clock.now()),
+              id: newId(item.startedAt ?? now),
               channelId,
               externalId: item.externalId,
               title: item.title,
@@ -1777,52 +1950,94 @@ export class IngestService {
               summaryText: item.summaryText,
               transcriptJson: item.transcriptJson,
               speakersJson: item.speakersJson,
-              fetchedAt: this.options.clock.now(),
+              fetchedAt: now,
             })),
-          },
-        )
-        totals.changed = result.changed.length
+          })
+          totals.changed += result.changed.length
+        }
+
+        // 服务端说没有下一页 → 抽干了。
+        if (!page.hasMore) {
+          drained = true
+          break
+        }
+        /**
+         * 说还有但没给游标 → 翻不动。`drained` 留 false（确实没抽干）。
+         *
+         * 与「游标没前进」分开判是因为两者的成因不同：前者是响应缺字段，
+         * 后者是服务端回了同一个游标。合成一个 break 的话日志里分不出来。
+         */
+        if (page.nextToken === null) break
+        // 游标没前进 → 停，否则下一轮参数完全相同，必然死循环。
+        if (page.nextToken === cursor) break
+        cursor = page.nextToken
+      }
+
+      /**
+       * ★ 记覆盖面 —— 截断必须**可见**，不能只体现在条数上。
+       *
+       * 落库而不是只记日志：状态页要显示它，而日志用户看不到。
+       * 完整理由见 `MinutesCoverageRepository` 的注释。
+       */
+      const minutesRepo = new MinutesRepository(this.options.db)
+      new MinutesCoverageRepository(this.options.db).record(channelId, {
+        drained,
+        earliestStartedAt: minutesRepo.earliestStartedAt(channelId),
+        listedTotal: totals.listed,
+        at: this.options.clock.now(),
+      })
+      if (!drained) {
+        /**
+         * 撞了页数预算 / 游标异常 —— 这一轮的覆盖面是**不完整**的。
+         *
+         * warn 而不是 info：与 `documents listing truncated` 同一个口径。
+         * 正常情况下会先命中 `hasMore === false` 而走不到这里。
+         */
+        this.options.logger.warn("minutes listing not drained; coverage is partial", {
+          pages,
+          listed: totals.listed,
+        })
       }
 
       // ② 给缺正文的补正文（每轮限量，见方法注释）。
-      const repo = new MinutesRepository(this.options.db)
-      for (const row of repo.listMissingBody(channelId, MINUTES_BODY_PER_ROUND)) {
+      for (const row of minutesRepo.listMissingBody(channelId, MINUTES_BODY_PER_ROUND)) {
         if (!this.running) break
         const body = await minutes.body(row.externalId)
         if (!this.running) break
-        persistMinutes(
-          { db: this.options.db, clock: this.options.clock, logger: this.options.logger },
-          {
-            raw: [
-              {
-                id: newId(this.options.clock.now()),
-                channelId,
-                resource: "minutes.body",
-                // 正文有平台主键 → 用它，让同一条听记的正文重复抓取幂等。
-                externalId: row.externalId,
-                payload: body.rawPayload,
-                payloadHash: sha256(body.rawPayload),
-                source: "dws-cli",
-                fetchedAt: this.options.clock.now(),
-              },
-            ],
-            minutes: [
-              {
-                id: row.id,
-                channelId,
-                externalId: row.externalId,
-                summaryText: body.summaryText,
-                transcriptJson: body.transcriptJson,
-                fetchedAt: this.options.clock.now(),
-              },
-            ],
-          },
-        )
+        const now = this.options.clock.now()
+        persistMinutes(deps, {
+          raw: [
+            {
+              id: newId(now),
+              channelId,
+              resource: "minutes.body",
+              // 正文有平台主键 → 用它，让同一条听记的正文重复抓取幂等。
+              externalId: row.externalId,
+              payload: body.rawPayload,
+              payloadHash: sha256(body.rawPayload),
+              source: "dws-cli",
+              fetchedAt: now,
+            },
+          ],
+          minutes: [
+            {
+              id: row.id,
+              channelId,
+              externalId: row.externalId,
+              summaryText: body.summaryText,
+              transcriptJson: body.transcriptJson,
+              // 转写抽了几页 / 抽干了吗 —— 状态页据此报"N 场会转写不完整"
+              transcriptPages: body.transcriptPages,
+              transcriptTruncated: body.transcriptTruncated,
+              fetchedAt: now,
+            },
+          ],
+        })
         totals.bodies += 1
       }
 
       if (totals.changed > 0 || totals.bodies > 0) {
-        this.options.logger.info("minutes ingested", totals)
+        this.options.logger.info("minutes ingested", { ...totals, pages, drained })
       }
     } catch (error) {
       // 听记失败**不影响消息采集**：分开记录，不进 blockedReason
@@ -3496,16 +3711,19 @@ export class IngestService {
    * 只能由 batch 结束或节流后的推送触发（见 data-plane.service 的 pushSnapshot）。
    */
   snapshot(): IngestSnapshot {
+    const channelId = this.options.plugin.meta.id
     const messages = new MessageRepository(this.options.db)
     const changelog = new ChangelogRepository(this.options.db)
     const consumers = new ConsumerCursorRepository(this.options.db, this.options.clock)
     const stats = collectStorageStats(this.options.db, this.options.dbPath)
-    const self = new SelfIdentityRepository(this.options.db).get(this.options.plugin.meta.id)
+    const self = new SelfIdentityRepository(this.options.db).get(channelId)
     const scope = this.collectionScope()
+    const minutesRepo = new MinutesRepository(this.options.db)
+    const coverage = new MinutesCoverageRepository(this.options.db).get(channelId)
 
     return {
       running: this.running,
-      channelId: this.options.plugin.meta.id,
+      channelId,
       messages: messages.count(),
       conversations: new ConversationRepository(this.options.db).count(),
       unjudged: messages.countUnjudged(),
@@ -3522,7 +3740,22 @@ export class IngestService {
       // 媒体与听记也要可见：不显示的话「采到了但没落库」与「本来就没有」
       // 在面板上完全同形 —— 这正是本轮修复的那一类故障。
       mediaAssets: new MediaAssetRepository(this.options.db).count(),
-      minutes: new MinutesRepository(this.options.db).count(),
+      minutes: minutesRepo.count(),
+      /**
+       * ★ 听记的覆盖面。**光有条数不够** —— 条数回答"有多少"，
+       * 而"是不是全部"是另一个问题（见 `IngestSnapshot.minutesCoverage`）。
+       *
+       * `coverage === null`（还没跑过一轮）时整块给 null，而不是编一个
+       * `drained: true`：那会把"不知道"显示成"没问题"。
+       */
+      minutesCoverage:
+        coverage === null
+          ? null
+          : {
+              drained: coverage.drained,
+              earliestStartedAt: coverage.earliestStartedAt,
+              transcriptTruncated: minutesRepo.countTranscriptTruncated(channelId),
+            },
       storage: {
         mainBytes: stats.mainBytes,
         walBytes: stats.walBytes,

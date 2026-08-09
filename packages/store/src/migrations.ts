@@ -38,6 +38,7 @@ import { VAULT_0020_DOCUMENTS } from "./migrations/vault/v20-documents.js"
 import { VAULT_0021_MEDIA_URL_KIND } from "./migrations/vault/v21-media-url-kind.js"
 import { VAULT_0022_UNWRAP_RICH_CONTENT } from "./migrations/vault/v22-unwrap-rich-content.js"
 import { VAULT_0023_CONVERSATION_UNREADABLE } from "./migrations/vault/v23-conversation-unreadable.js"
+import { VAULT_0024_MINUTES_COVERAGE } from "./migrations/vault/v24-minutes-coverage.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -286,6 +287,11 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
     version: 23,
     name: "conversation-unreadable",
     sql: VAULT_0023_CONVERSATION_UNREADABLE,
+  },
+  {
+    version: 24,
+    name: "minutes-coverage",
+    sql: VAULT_0024_MINUTES_COVERAGE,
   },
 ]
 

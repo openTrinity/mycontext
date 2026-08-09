@@ -73,10 +73,18 @@ export type { SelfExternalIdInference } from "./repositories/conversations.js"
 export { MessageRepository } from "./repositories/messages.js"
 export type { MessageUpsertResult } from "./repositories/messages.js"
 
-export { MediaAssetRepository, MinutesRepository } from "./repositories/media-minutes.js"
+export {
+  MediaAssetRepository,
+  MinutesRepository,
+  MinutesCoverageRepository,
+} from "./repositories/media-minutes.js"
 export { DocumentRepository } from "./repositories/documents.js"
 export type { DocumentUpsertResult } from "./repositories/documents.js"
-export type { MediaAssetRow, MinutesUpsertResult } from "./repositories/media-minutes.js"
+export type {
+  MediaAssetRow,
+  MinutesUpsertResult,
+  MinutesCoverageRow,
+} from "./repositories/media-minutes.js"
 
 export { ContactAvatarRepository, AVATAR_RETRY_AFTER_MS } from "./repositories/contact-avatars.js"
 export type { ContactAvatarRow, AvatarMissReason } from "./repositories/contact-avatars.js"

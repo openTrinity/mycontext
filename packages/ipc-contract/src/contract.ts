@@ -1594,6 +1594,32 @@ export const ingestSnapshotSchema = z.object({
   mediaAssets: z.number(),
   /** 听记条数 */
   minutes: z.number(),
+  /**
+   * 听记的**覆盖面**。`null` = 还没跑过一轮采集。
+   *
+   * ## ★ 为什么需要它（与 `backfill` 那三个数字同一个理由）
+   *
+   * 首版只取列表首页，于是第 51 场之前的会议永远采不到 —— 而那个缺失
+   * **完全静默**：`minutes` 这个计数会稳定停在 50，与"这个账号一共
+   * 50 场会"在界面上无法区分。上面那个数字回答的是"我有多少"，
+   * 而这里回答的是"**是不是全部**"。
+   */
+  minutesCoverage: z
+    .object({
+      /** 上一轮把列表翻到底了吗。false = 撞了页数预算，覆盖不全。 */
+      drained: z.boolean(),
+      /** 已覆盖到的最早会议时间（unix ms）；null = 库里还没有会议。 */
+      earliestStartedAt: z.number().nullable(),
+      /**
+       * 有几场会的**转写**没抽干（撞了渠道侧的页数/字符上限）。
+       *
+       * 与 `drained` 分开：那个说的是"会议列表全不全"，
+       * 这个说的是"某几场会的逐句转写全不全"。两者的处置不同 ——
+       * 前者等下一轮或放宽预算，后者需要用户显式为那几场会补拉。
+       */
+      transcriptTruncated: z.number(),
+    })
+    .nullable(),
   storage: z.object({
     mainBytes: z.number(),
     walBytes: z.number(),

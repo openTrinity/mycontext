@@ -544,9 +544,44 @@ export class ExportMaterializer {
   ): { counts: { scopes: number; records: number; resources: number }; items: number } {
     const dir = join(root, "minutes")
     const writer = new SourceWriter(dir, "minutes")
+    /**
+     * ★ 按用户选的**时间窗**过滤。
+     *
+     * 从前这条 SQL 没有 WHERE —— 而 `readMessages` 那侧一直有
+     * `sent_at >= since` / `< until`。两个口径不一致的后果：用户把范围
+     * 改小之后聊天不再进图谱，而**听记照旧全量进** ——
+     * 那与"选了没用"是同一类问题（见 `ExportOptions.scope` 的注释）。
+     *
+     * ★ 只用时间窗，**不用会话白名单**：`conversationExternalIds` 是会话
+     * 的 external_id，而会议不属于任何会话（`minutes` 表没有会话外键）。
+     * 拿它去过滤会议在语义上不成立。
+     *
+     * ⚠️ 已知的口径问题（**不是本次引入的**）：这个 scope 来自
+     * `FeedService.exportScope()`，而那个函数读的是 `distill_sources` 的
+     * **chat** 那一行。当前引导给每个源写的是同一对 since/until，
+     * 所以两者恰好等价；将来支持分源配范围时这里要改读听记自己那一行。
+     */
+    const clauses: string[] = []
+    const params: number[] = []
+    const scope = this.options.scope
+    if (scope?.since !== undefined) {
+      clauses.push("started_at >= ?")
+      params.push(scope.since)
+    }
+    if (scope?.until !== undefined) {
+      clauses.push("started_at < ?")
+      params.push(scope.until)
+    }
+    /**
+     * ★ `started_at IS NULL` 的行在有时间窗时**被排除**（`>= ?` 对 NULL 是
+     * NULL → 不满足）。那是对的：时间未知的会议无法判断它在不在窗内，
+     * 而"猜它在窗内"会把用户排除掉的数据放进图谱。
+     * 没配时间窗时它们照常导出（没有 WHERE）。
+     */
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`
     const rows = this.options.db
       .prepare<
-        [],
+        number[],
         {
           external_id: string
           title: string | null
@@ -559,9 +594,9 @@ export class ExportMaterializer {
       >(
         `SELECT external_id, title, started_at, duration_sec,
                 summary_text, transcript_json, speakers_json
-           FROM minutes ORDER BY started_at DESC`,
+           FROM minutes${where} ORDER BY started_at DESC`,
       )
-      .all()
+      .all(...params)
 
     let items = 0
     for (const row of rows) {
@@ -602,10 +637,24 @@ export class ExportMaterializer {
         })
       }
 
-      // 转写：`transcript_json` 存的是 `get transcription` 的整个响应
-      // （`{hasNext, nextToken, paragraphList[]}`）→ 转成 loader 要的 segments。
+      /**
+       * 转写 → loader 要的 `segments`。
+       *
+       * `transcript_json` 是渠道层**抽干多页后合并**的结果：
+       * `{hasNext, pages, paragraphList[]}`（见 dingtalk/minutes.ts 的 `body`）。
+       * 老数据是单页响应 `{hasNext, nextToken, paragraphList[]}` ——
+       * 两者的 `paragraphList` 与 `hasNext` 同形，所以这里的读法两种都吃。
+       *
+       * ## ★ 为什么合并存也只发**一条** `page_index: 0` 的 record
+       *
+       * 上游 `minutes_loader.py` 拿到多页之后是按 `page_index` 排序再
+       * `"\n".join` 拼成一整段才切 chunk —— 也就是说"一条含全部段落"与
+       * "N 条各含一页"在图谱侧的结果**完全一致**。发一条更简单，
+       * 也让老数据与新数据走同一条路径。
+       */
       const transcript = parseJson<{
         hasNext?: boolean
+        pages?: number
         paragraphList?: { nickName?: string; paragraph?: string }[]
       }>(row.transcript_json)
       const paragraphs = transcript?.paragraphList ?? []
@@ -623,8 +672,14 @@ export class ExportMaterializer {
             })),
             title: row.title,
             start_time: row.started_at,
-            // ★ 截断必须在数据里可见：一期只取了第一页转写。
-            // 不标的话下游会把它当完整转写用（"会议里没提过 X" 这类结论就会错）。
+            /**
+             * ★ 截断必须在数据里可见。
+             *
+             * 现在 `hasNext` 为 true 的含义是「抽干时撞了渠道侧的页数/字符
+             * 上限」（从前是「只取了第一页」）—— 两种情况下这个标记要表达的
+             * 是同一件事：**这不是完整转写**。不标的话下游会把它当完整的用
+             * （"会议里没提过 X" 这类结论就会错）。
+             */
             has_next: transcript?.hasNext === true,
           },
         })

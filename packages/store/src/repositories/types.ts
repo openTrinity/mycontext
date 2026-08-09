@@ -109,6 +109,13 @@ export interface MinutesInput {
   summaryText?: string | null
   transcriptJson?: string | null
   speakersJson?: string | null
+  /**
+   * 转写实际抽了几页。`undefined` = 这次调用不带正文（只列元信息），
+   * 由 upsert 的 COALESCE 保留已有值。
+   */
+  transcriptPages?: number | null
+  /** 转写撞了渠道侧的上限、没抽干。见 v24 迁移的文件头。 */
+  transcriptTruncated?: boolean | null
   fetchedAt: number
   rawRecordId?: string | null
 }
@@ -123,6 +130,13 @@ export interface MinutesRow {
   summaryText: string | null
   transcriptJson: string | null
   speakersJson: string | null
+  /** NULL = 老数据（那时只取第一页，而"是不是全部"当时没存下来）。 */
+  transcriptPages: number | null
+  /**
+   * `null` = **不知道**（老数据），不是"抽干了"。
+   * 三态是刻意的，见 v24 迁移文件头。
+   */
+  transcriptTruncated: boolean | null
   fetchedAt: number
   rawRecordId: string | null
 }

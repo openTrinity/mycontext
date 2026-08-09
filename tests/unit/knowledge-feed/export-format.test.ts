@@ -558,6 +558,211 @@ describe("★ 听记导出（minutes source）", () => {
     expect(readSource(dir, "minutes").records).toHaveLength(0)
     vault.close()
   })
+
+  /**
+   * ★★ 抽干后的多页转写合并成**一条** `page_index: 0` 的 record。
+   *
+   * 渠道层把多页拼成一个 `paragraphList`（见 dingtalk/minutes.ts 的 `body`）。
+   * 上游 `minutes_loader.py` 拿到多页本来也是按 page_index 排序再 join 才切
+   * chunk —— 所以"一条含全部段落"与"N 条各含一页"在图谱侧等价。
+   */
+  it("★ 抽干后的多页转写：全部段落都在一条 record 里", () => {
+    const vault = openTestVault()
+    const dir = tempDir()
+    new MinutesRepository(vault.db).upsertMany([
+      {
+        id: "min-multi",
+        channelId: "dingtalk",
+        externalId: "uuid-multi",
+        title: "长会",
+        startedAt: 1_785_079_649_000,
+        durationSec: 7200,
+        summaryText: "摘要",
+        // 三页抽干后的形状：pages=3、hasNext=false、段落是三页拼接
+        transcriptJson: JSON.stringify({
+          hasNext: false,
+          pages: 3,
+          paragraphList: [
+            { nickName: "小孙", paragraph: "第一页第一句。" },
+            { nickName: "小王", paragraph: "第一页第二句。" },
+            { nickName: "小孙", paragraph: "第二页。" },
+            { nickName: "小李", paragraph: "第三页。" },
+          ],
+        }),
+        transcriptPages: 3,
+        transcriptTruncated: false,
+        fetchedAt: START,
+      },
+    ])
+    runExport(vault, dir)
+
+    const pages = readSource(dir, "minutes").records.filter(
+      (rec) => (rec["data"] as { kind?: string }).kind === "minutes_transcription_page",
+    )
+    // 一条 record，含全部四段
+    expect(pages).toHaveLength(1)
+    const data = pages[0]?.["data"] as {
+      segments: { nickName: string; paragraph: string }[]
+      has_next: boolean
+    }
+    expect(data.segments).toHaveLength(4)
+    expect(data.segments[3]).toEqual({ nickName: "小李", paragraph: "第三页。" })
+    // 抽干了 → 不是截断
+    expect(data.has_next).toBe(false)
+    vault.close()
+  })
+})
+
+/**
+ * ★★ 听记导出**也要**按时间窗过滤。
+ *
+ * 从前 `materializeMinutes` 的 SQL 没有 WHERE，而 `readMessages` 那侧一直有
+ * `sent_at >= since` —— 两个口径不一致的后果：用户把范围改小之后聊天不再
+ * 进图谱，而**听记照旧全量进**。那与"选了没用"是同一类问题。
+ */
+describe("★★ 听记导出遵守时间窗", () => {
+  /** 两场会：一场在窗内、一场更早。 */
+  function seedTwoMinutes(vault: TestVault) {
+    const inWindow = parseDwsLocalTime("2026-07-20 10:00:00")
+    const before = parseDwsLocalTime("2026-05-01 10:00:00")
+    new MinutesRepository(vault.db).upsertMany([
+      {
+        id: "min-in",
+        channelId: "dingtalk",
+        externalId: "uuid-in",
+        title: "窗内的会",
+        startedAt: inWindow,
+        durationSec: 600,
+        summaryText: "窗内摘要",
+        fetchedAt: START,
+      },
+      {
+        id: "min-before",
+        channelId: "dingtalk",
+        externalId: "uuid-before",
+        title: "更早的会",
+        startedAt: before,
+        durationSec: 600,
+        summaryText: "更早的摘要",
+        fetchedAt: START,
+      },
+    ])
+    return { inWindow, before }
+  }
+
+  /** 导出的会议标题。 */
+  function meetingTitles(exportDir: string): string[] {
+    return readSource(exportDir, "minutes")
+      .scopes.filter((s) => s["type"] === "meeting")
+      .map((s) => (s["data"] as { title: string | null }).title ?? "")
+  }
+
+  it("★★ 范围之前的会议不导出（与聊天那侧同一个口径）", () => {
+    const vault = openTestVault()
+    const dir = tempDir()
+    seedTwoMinutes(vault)
+    new ExportMaterializer({
+      db: vault.db,
+      clock: new ManualClock(START),
+      exportDir: dir,
+      formatTime: formatDwsIsoTime,
+      scope: { since: parseDwsLocalTime("2026-07-01 00:00:00") },
+    }).run()
+
+    const titles = meetingTitles(dir)
+    expect(titles).toContain("窗内的会")
+    expect(titles).not.toContain("更早的会")
+    vault.close()
+  })
+
+  it("★ 上界也卡（选了历史区间的用户不该收到今天的会）", () => {
+    const vault = openTestVault()
+    const dir = tempDir()
+    seedTwoMinutes(vault)
+    new ExportMaterializer({
+      db: vault.db,
+      clock: new ManualClock(START),
+      exportDir: dir,
+      formatTime: formatDwsIsoTime,
+      // 只要 5 月那场
+      scope: { until: parseDwsLocalTime("2026-06-01 00:00:00") },
+    }).run()
+
+    const titles = meetingTitles(dir)
+    expect(titles).toContain("更早的会")
+    expect(titles).not.toContain("窗内的会")
+    vault.close()
+  })
+
+  it("没配时间窗 → 两场都导出（兼容没配范围的老库）", () => {
+    const vault = openTestVault()
+    const dir = tempDir()
+    seedTwoMinutes(vault)
+    runExport(vault, dir)
+    expect(meetingTitles(dir)).toHaveLength(2)
+    vault.close()
+  })
+
+  /**
+   * ★ 会话白名单**不该**影响听记。
+   *
+   * 会议不属于任何会话（`minutes` 表没有会话外键），拿会话 external_id
+   * 去过滤它在语义上不成立。误用的表现是"勾了几个群之后听记全没了"。
+   */
+  it("★ 会话白名单不影响听记（会议不属于任何会话）", () => {
+    const vault = openTestVault()
+    const dir = tempDir()
+    seedTwoMinutes(vault)
+    new ExportMaterializer({
+      db: vault.db,
+      clock: new ManualClock(START),
+      exportDir: dir,
+      formatTime: formatDwsIsoTime,
+      // 一个都不勾（空白名单 = 零个会话）—— 听记仍该照常导出
+      scope: { conversationExternalIds: [] },
+    }).run()
+
+    expect(meetingTitles(dir)).toHaveLength(2)
+    vault.close()
+  })
+
+  /**
+   * ★ `started_at IS NULL` 的会议在**有时间窗**时被排除。
+   *
+   * 时间未知的会议无法判断在不在窗内，而"猜它在窗内"会把用户排除掉的
+   * 数据放进图谱。没配窗时它照常导出。
+   */
+  it("★ 时间未知的会议：有窗时排除，无窗时导出", () => {
+    const vault = openTestVault()
+    const dir = tempDir()
+    new MinutesRepository(vault.db).upsertMany([
+      {
+        id: "min-notime",
+        channelId: "dingtalk",
+        externalId: "uuid-notime",
+        title: "时间未知的会",
+        startedAt: null,
+        summaryText: "摘要",
+        fetchedAt: START,
+      },
+    ])
+
+    // 无窗 → 导出
+    runExport(vault, dir)
+    expect(meetingTitles(dir)).toContain("时间未知的会")
+
+    // 有窗 → 排除
+    const dir2 = tempDir()
+    new ExportMaterializer({
+      db: vault.db,
+      clock: new ManualClock(START),
+      exportDir: dir2,
+      formatTime: formatDwsIsoTime,
+      scope: { since: parseDwsLocalTime("2026-07-01 00:00:00") },
+    }).run()
+    expect(meetingTitles(dir2)).not.toContain("时间未知的会")
+    vault.close()
+  })
 })
 
 /**

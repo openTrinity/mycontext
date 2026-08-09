@@ -801,6 +801,431 @@ describe("★ 听记采集尊重引导里的勾选（distill_sources.minutes.ena
 })
 
 /**
+ * ★★ 听记列表的**抽干**。
+ *
+ * ## 首版只取首页，而那是一个完全静默的数据缺失
+ *
+ * 首版注释写着「后续页由下一轮的 cursor=null 重新覆盖到最新的那批」——
+ * 后半句是错的：每一轮都从 `cursor=null` 开始，所以永远只覆盖最新的
+ * 那 50 条，**历史页一次都不会被访问**。第 51 场之前的会议永久采不到。
+ *
+ * 而当时没有任何出口：不落库、不上报、不记日志。状态页的听记计数
+ * 稳定停在 50，与"这个账号一共 50 场会"在界面上无法区分。
+ *
+ * 下面每一条对应抽干循环的一个停止条件 —— 少一条就是一类病态。
+ */
+describe("★★ 听记列表抽干分页", () => {
+  /**
+   * 造一个按调用序号返回预置页的假 minutes 插件。
+   *
+   * 记下每次 `list` 收到的 spec：范围收窄那一组要断言 since/until 传下去了。
+   */
+  function makePagedMinutesPlugin(pages: readonly { items: string[]; next: string | null }[]) {
+    const specs: { cursor?: string | null; since?: number | null; until?: number | null }[] = []
+    const plugin = {
+      meta: { id: "dingtalk" },
+      ingest: {
+        probe: async () => null,
+        pull: async () => emptyPage({ itemCount: 0, nextCursor: null }),
+      },
+      minutes: {
+        list: async (spec: { cursor?: string | null } = {}) => {
+          const index = specs.length
+          specs.push(spec)
+          // 超出预置页数时继续返回最后一页（模拟"服务端一直说还有"）
+          const page = pages[Math.min(index, pages.length - 1)] ?? { items: [], next: null }
+          return {
+            page: {
+              items: page.items.map((uuid, i) => ({
+                externalId: uuid,
+                title: `会议 ${uuid}`,
+                // 每页的会议时间递减（真实的 list 是新→旧）
+                startedAt: START - (index * 10 + i) * 86_400_000,
+                durationSec: 600,
+                summaryText: null,
+                transcriptJson: null,
+                speakersJson: null,
+              })),
+              nextToken: page.next,
+              hasMore: page.next !== null,
+            },
+            rawPayload: JSON.stringify({ page: index }),
+          }
+        },
+        body: async () => ({
+          summaryText: "摘要",
+          transcriptJson: JSON.stringify({ hasNext: false, pages: 1, paragraphList: [] }),
+          transcriptPages: 1,
+          transcriptTruncated: false,
+          rawPayload: "{}",
+        }),
+      },
+    } as unknown as ChannelPlugin
+    return { plugin, specs }
+  }
+
+  /** 库里的听记条数。 */
+  function minutesCount(vault: ReturnType<typeof openTestVault>): number {
+    return vault.db.prepare<[], { c: number }>("SELECT count(*) AS c FROM minutes").get()?.c ?? 0
+  }
+
+  /** `minutes_coverage` 那一行。 */
+  function coverage(vault: ReturnType<typeof openTestVault>) {
+    return vault.db
+      .prepare<
+        [string],
+        { drained: number; earliest_started_at: number | null; listed_total: number }
+      >("SELECT * FROM minutes_coverage WHERE channel_id = ?")
+      .get("dingtalk")
+  }
+
+  it("★★ 三页全部抽干：三页都落库，coverage 记 drained=1", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makePagedMinutesPlugin([
+      { items: ["m1", "m2"], next: "t1" },
+      { items: ["m3"], next: "t2" },
+      { items: ["m4"], next: null },
+    ])
+    const { vault, service } = makeService(plugin, clock)
+
+    const result = await service.tickMinutes()
+
+    expect(specs).toHaveLength(3)
+    expect(result.listed).toBe(4)
+    // ★ 四条都进库了 —— 首版只会有前两条
+    expect(minutesCount(vault)).toBe(4)
+    expect(coverage(vault)?.drained).toBe(1)
+    expect(coverage(vault)?.listed_total).toBe(4)
+    vault.close()
+  })
+
+  it("★ 首页不传 cursor，之后每页传上一页的 nextToken", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makePagedMinutesPlugin([
+      { items: ["m1"], next: "t1" },
+      { items: ["m2"], next: null },
+    ])
+    const { vault, service } = makeService(plugin, clock)
+
+    await service.tickMinutes()
+
+    expect(specs[0]?.cursor).toBeNull()
+    expect(specs[1]?.cursor).toBe("t1")
+    vault.close()
+  })
+
+  /**
+   * ★★ 撞页数预算 → `drained = 0`。**截断必须落库**。
+   *
+   * 只记 warn 日志（documents 那条链现在的做法）用户看不到，
+   * 而"我的会议怎么只有这些"恰恰是用户会问的。
+   */
+  it("★★ 一直 hasMore=true → 停在页数预算，且 drained=0（截断可见）", async () => {
+    const clock = new ManualClock(START)
+    // 永远给**新**游标（所以不会被"游标没前进"提前挡住）
+    let token = 0
+    const plugin = {
+      meta: { id: "dingtalk" },
+      ingest: {
+        probe: async () => null,
+        pull: async () => emptyPage({ itemCount: 0, nextCursor: null }),
+      },
+      minutes: {
+        list: async () => {
+          token += 1
+          return {
+            page: {
+              items: [
+                {
+                  externalId: `m${String(token)}`,
+                  title: null,
+                  startedAt: START - token * 86_400_000,
+                  durationSec: null,
+                  summaryText: null,
+                  transcriptJson: null,
+                  speakersJson: null,
+                },
+              ],
+              nextToken: `t${String(token)}`,
+              hasMore: true,
+            },
+            rawPayload: "{}",
+          }
+        },
+        body: async () => ({
+          summaryText: null,
+          transcriptJson: null,
+          transcriptPages: 1,
+          transcriptTruncated: false,
+          rawPayload: "{}",
+        }),
+      },
+    } as unknown as ChannelPlugin
+    const { vault, service } = makeService(plugin, clock)
+
+    const result = await service.tickMinutes()
+
+    // MINUTES_MAX_LIST_PAGES = 20（服务侧常量，不导出 —— 这里锁的是行为）
+    expect(token).toBe(20)
+    expect(result.listed).toBe(20)
+    expect(coverage(vault)?.drained, "撞预算 = 没抽干，必须记下来").toBe(0)
+    vault.close()
+  })
+
+  /**
+   * ★ 游标没前进 → 停。
+   *
+   * 不停的话下一轮参数完全相同，必然死循环（烧光预算换回同一页）。
+   * `conversations.ts` 的群列表循环踩过同一个坑。
+   */
+  it("★ nextToken 没前进 → 停（否则原地打转）", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makePagedMinutesPlugin([
+      { items: ["m1"], next: "same" },
+      { items: ["m1"], next: "same" },
+    ])
+    const { vault, service } = makeService(plugin, clock)
+
+    await service.tickMinutes()
+
+    // 第一页拿到 same → 第二页也回 same → 停
+    expect(specs).toHaveLength(2)
+    expect(coverage(vault)?.drained).toBe(0)
+    vault.close()
+  })
+
+  it("★ 说还有但没给游标 → 停，且 drained=0（翻不动 ≠ 抽干了）", async () => {
+    const clock = new ManualClock(START)
+    const plugin = {
+      meta: { id: "dingtalk" },
+      ingest: {
+        probe: async () => null,
+        pull: async () => emptyPage({ itemCount: 0, nextCursor: null }),
+      },
+      minutes: {
+        list: async () => ({
+          // hasMore 说还有，但 nextToken 是 null
+          page: { items: [], nextToken: null, hasMore: true },
+          rawPayload: "{}",
+        }),
+        body: async () => ({
+          summaryText: null,
+          transcriptJson: null,
+          transcriptPages: 1,
+          transcriptTruncated: false,
+          rawPayload: "{}",
+        }),
+      },
+    } as unknown as ChannelPlugin
+    const { vault, service } = makeService(plugin, clock)
+
+    await service.tickMinutes()
+
+    expect(coverage(vault)?.drained).toBe(0)
+    vault.close()
+  })
+
+  it("coverage 记下已覆盖到的最早会议时间（进度条的分母）", async () => {
+    const clock = new ManualClock(START)
+    const { plugin } = makePagedMinutesPlugin([
+      { items: ["m1"], next: "t1" },
+      { items: ["m2"], next: null },
+    ])
+    const { vault, service } = makeService(plugin, clock)
+
+    await service.tickMinutes()
+
+    // 第二页的会议更早（makePagedMinutesPlugin 里时间随页递减）
+    const earliest = coverage(vault)?.earliest_started_at
+    expect(earliest).toBe(START - 10 * 86_400_000)
+    vault.close()
+  })
+
+  /**
+   * ★ 转写的抽干状态要落到 `minutes` 表上。
+   *
+   * 状态页靠 `count(*) WHERE transcript_truncated = 1` 显示
+   * "N 场会的转写不完整" —— 不落库的话那个数字算不出来。
+   */
+  it("★ 转写截断落进 minutes.transcript_truncated", async () => {
+    const clock = new ManualClock(START)
+    const plugin = {
+      meta: { id: "dingtalk" },
+      ingest: {
+        probe: async () => null,
+        pull: async () => emptyPage({ itemCount: 0, nextCursor: null }),
+      },
+      minutes: {
+        list: async () => ({
+          page: {
+            items: [
+              {
+                externalId: "m1",
+                title: "长会",
+                startedAt: START,
+                durationSec: 7200,
+                summaryText: null,
+                transcriptJson: null,
+                speakersJson: null,
+              },
+            ],
+            nextToken: null,
+            hasMore: false,
+          },
+          rawPayload: "{}",
+        }),
+        // 撞了渠道侧的上限
+        body: async () => ({
+          summaryText: "摘要",
+          transcriptJson: JSON.stringify({ hasNext: true, pages: 20, paragraphList: [] }),
+          transcriptPages: 20,
+          transcriptTruncated: true,
+          rawPayload: "{}",
+        }),
+      },
+    } as unknown as ChannelPlugin
+    const { vault, service } = makeService(plugin, clock)
+
+    await service.tickMinutes()
+
+    const row = vault.db
+      .prepare<
+        [string],
+        { transcript_pages: number | null; transcript_truncated: number | null }
+      >("SELECT transcript_pages, transcript_truncated FROM minutes WHERE external_id = ?")
+      .get("m1")
+    expect(row?.transcript_pages).toBe(20)
+    expect(row?.transcript_truncated).toBe(1)
+    vault.close()
+  })
+})
+
+/**
+ * ★★ 听记的**范围收窄** —— CLAUDE.md 第 5 节。
+ *
+ * 听记采集从前完全不看用户选的时间范围。只取首页时这被"覆盖面太小"掩盖了；
+ * 一旦抽干历史，不收窄就会把用户明确排除掉的时间段整段采回来。
+ *
+ * ★ 判据必须读 **minutes 自己那一行**的 scope，不能用 `readCollectionScope`
+ * （它写死了 `kind = 'chat'`）—— 见 `IngestService.minutesTimeRange` 的注释。
+ */
+describe("★★ 听记采集尊重引导里选的时间范围", () => {
+  function makeRecordingPlugin() {
+    const specs: { since?: number | null; until?: number | null }[] = []
+    const plugin = {
+      meta: { id: "dingtalk" },
+      ingest: {
+        probe: async () => null,
+        pull: async () => emptyPage({ itemCount: 0, nextCursor: null }),
+      },
+      minutes: {
+        list: async (spec: { since?: number | null; until?: number | null } = {}) => {
+          specs.push(spec)
+          return { page: { items: [], nextToken: null, hasMore: false }, rawPayload: "[]" }
+        },
+        body: async () => ({
+          summaryText: null,
+          transcriptJson: null,
+          transcriptPages: 1,
+          transcriptTruncated: false,
+          rawPayload: "{}",
+        }),
+      },
+    } as unknown as ChannelPlugin
+    return { plugin, specs }
+  }
+
+  it("★★ 配了 since/until → 传给渠道（否则会采到被排除的时间段）", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makeRecordingPlugin()
+    const { vault, service } = makeService(plugin, clock)
+    const since = START - 30 * 86_400_000
+    const until = START - 86_400_000
+    new DistillSourceRepository(vault.db).upsert(
+      "minutes",
+      { enabled: true, scope: { since, until } },
+      START,
+    )
+
+    await service.tickMinutes()
+
+    expect(specs[0]?.since).toBe(since)
+    expect(specs[0]?.until).toBe(until)
+    vault.close()
+  })
+
+  it("没配过范围（老库）→ 不传时间窗（全量，不因升级突然少采）", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makeRecordingPlugin()
+    const { vault, service } = makeService(plugin, clock)
+
+    await service.tickMinutes()
+
+    expect(specs[0]?.since).toBeUndefined()
+    expect(specs[0]?.until).toBeUndefined()
+    vault.close()
+  })
+
+  it("配了范围但只有 since → 只传 since", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makeRecordingPlugin()
+    const { vault, service } = makeService(plugin, clock)
+    const since = START - 7 * 86_400_000
+    new DistillSourceRepository(vault.db).upsert(
+      "minutes",
+      { enabled: true, scope: { since } },
+      START,
+    )
+
+    await service.tickMinutes()
+
+    expect(specs[0]?.since).toBe(since)
+    expect(specs[0]?.until).toBeUndefined()
+    vault.close()
+  })
+
+  /**
+   * ★ 读的是 **minutes** 那一行，不是 chat 那一行。
+   *
+   * 当前引导给两个源写的是同一对 since/until，所以这两条在生产上恰好
+   * 等价 —— 那是**巧合而不是契约**。这条用例把它们**故意配成不同**，
+   * 锁住"读对了哪一行"。
+   */
+  it("★ 只配 chat 的范围时听记不受影响（读的是 minutes 自己那一行）", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makeRecordingPlugin()
+    const { vault, service } = makeService(plugin, clock)
+    const repo = new DistillSourceRepository(vault.db)
+    // chat 配了一个很窄的窗，minutes 那一行不配 scope
+    repo.upsert("chat", { enabled: true, scope: { since: START - 86_400_000 } }, START)
+    repo.upsert("minutes", { enabled: true, scope: {} }, START)
+
+    await service.tickMinutes()
+
+    // 拿 chat 的范围去卡听记会让这里变成 START - 86_400_000
+    expect(specs[0]?.since).toBeUndefined()
+    vault.close()
+  })
+
+  it("坏 JSON 的 scope 按「没配过」处理（不让手改过的库停采）", async () => {
+    const clock = new ManualClock(START)
+    const { plugin, specs } = makeRecordingPlugin()
+    const { vault, service } = makeService(plugin, clock)
+    vault.db
+      .prepare(
+        "INSERT INTO distill_sources (kind, enabled, scope_json, updated_at) VALUES (?, 1, ?, ?)",
+      )
+      .run("minutes", "{not json", START)
+
+    await service.tickMinutes()
+
+    expect(specs).toHaveLength(1)
+    expect(specs[0]?.since).toBeUndefined()
+    vault.close()
+  })
+})
+
+/**
  * 定向补拉 `refreshConversation` —— 「发出去的消息两分钟才出现」的直接修法，
  * 以及常驻 agent 会话「更勤地轮询」的落点（每探针 tick 补一趟）。
  */
