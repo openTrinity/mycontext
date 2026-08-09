@@ -539,6 +539,8 @@ export function bootstrapApp(mainDir: string): AppContext {
      * ★ 函数：管线是登录后才挂的（见 `ChannelPipelineManager`）。
      */
     sourcePlugins: () => pipelines.all().map((item) => registry.get(item.channelId)),
+    /** 主渠道 id —— `save()` 用它判"写主库还是某个渠道库"。 */
+    primaryChannelId: dingtalk.meta.id,
     /**
      * ★★ 用户改了采集范围 → 立刻把三层派生物对齐到新范围。
      *
@@ -568,8 +570,25 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 每一步各自 catch：清理成功而重建失败时，库已经是干净的（隐私边界
      * 已经收紧），只是图谱暂时陈旧 —— 那是可接受的中间态，而让整条链
      * 因为建图失败而回滚会把"已经删掉的越界数据"重新变成不确定状态。
+     *
+     * ## ★★★ 每一步都必须打在**保存范围的那个渠道**上
+     *
+     * 这个回调原来是无参的，而三个动作全都不带渠道：
+     * `dataPlane.applyScopeChange()` / `feed.export()` /
+     * `klServer.rebuildGraph(true)` —— 而这里的 `klServer` 与 `feed` 是
+     * **主渠道那两个裸实例**（应用级单例，见它们的构造处）。
+     *
+     * 于是"在飞书面板保存范围"会：清主渠道的越界语料、重导出主渠道的四件套、
+     * **删掉并重建主渠道的图**。实测日志坐实：
+     * `[Main:KlServer] graph build started`（没有 `:feishu` 前缀）+
+     * `kl graph data wiped for fresh rebuild {dataDir: …/kl}` ——
+     * 而飞书的图在 `…/kl/feishu`。
+     *
+     * 现在按渠道取那一套服务：主渠道用单例，其余渠道从 `pipelines` 里取它
+     * 自己的 `feed` / `klServer`。取不到就**明确记错并返回** ——
+     * 而不是顺手拿主渠道的（那正是这次事故的形状）。
      */
-    onScopeChanged: () => {
+    onScopeChanged: (channelId: string) => {
       /**
        * ★★ `distill.reset()` 必须**最先**执行，不能排在建图之后。
        *
@@ -586,24 +605,53 @@ export function bootstrapApp(mainDir: string): AppContext {
        * 任务建好又被清空，界面归零，看起来就是"点了没反应"。
        *
        * ★ 提到最前面是安全的：`reset` 是同步且快的（一条 DELETE + 清内存态），
-       * 且**不依赖** purge / export / rebuild 的结果。而反过来的代价是真实的：
-       * 用户的下一个动作会被它吃掉。
+       * 且**不依赖** purge / export / rebuild 的结果。
        *
-       * ★ 顺序变了但语义没变：这四件事都是"范围改了要重来"的一部分，
-       * 彼此之间没有数据依赖（各自 catch，见下）。
+       * ★★ 但要**先判渠道**：蒸馏只在主渠道上跑（其余渠道是只读接入、
+       * 不进画像），所以只有主渠道改范围才需要重蒸。不判的话在飞书面板
+       * 保存一次范围会把主渠道刚建好的蒸馏任务全清掉。
        */
-      try {
-        distill.reset()
-      } catch (error) {
-        logger.warn("scope change distill reset failed", {
-          detail: error instanceof Error ? error.message : String(error),
-        })
+      if (channelId === dingtalk.meta.id) {
+        try {
+          distill.reset()
+        } catch (error) {
+          logger.warn("scope change distill reset failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
       }
       void (async () => {
+        /**
+         * 这个渠道自己的那套服务。
+         *
+         * ★ 主渠道走单例（`feed` / `klServer`），其余渠道走它的管线 ——
+         * 这个差异是既有装配决定的（主渠道那两个是应用级 + rebind，
+         * 非主渠道是每次挂载新建），这里只是按渠道选对象。
+         */
+        const primaryId = dingtalk.meta.id
+        /**
+         * 这一步要么拿到主渠道的单例，要么拿到那个渠道管线里的实例 ——
+         * **没有第三种**。拿不到就退出（见下面那句 error）。
+         */
+        const resolved = ((): { feed: FeedService; kl: typeof klServer } | null => {
+          if (channelId === primaryId) return { feed, kl: klServer }
+          const pipeline = pipelines.all().find((item) => item.channelId === channelId)
+          if (pipeline === undefined) return null
+          return { feed: pipeline.parts.feed, kl: pipeline.parts.klServer }
+        })()
+        if (resolved === null) {
+          // ★ 宁可什么都不做，也不要拿主渠道的顶上（那会删错渠道的图）
+          logger.error("scope change skipped: channel pipeline not mounted", { channelId })
+          return
+        }
+        const channelFeed = resolved.feed
+        const channelKl = resolved.kl
+        logger.info("scope change pipeline start", { channelId })
         try {
-          const report = dataPlane.applyScopeChange()
+          const report = dataPlane.applyScopeChange(channelId)
           if (report !== null && report.messages > 0) {
             logger.info("scope change purged out-of-scope corpus", {
+              channelId,
               messages: report.messages,
               conversations: report.conversations,
               ftsRows: report.ftsRows,
@@ -623,21 +671,24 @@ export function bootstrapApp(mainDir: string): AppContext {
           }
         } catch (error) {
           logger.warn("scope change purge failed", {
+            channelId,
             detail: error instanceof Error ? error.message : String(error),
           })
         }
         try {
-          feed.export()
+          channelFeed.export()
         } catch (error) {
           logger.warn("scope change re-export failed", {
+            channelId,
             detail: error instanceof Error ? error.message : String(error),
           })
         }
         try {
           // fresh = true：见上面第 3 步（增量建图删不掉图里已有的实体/事实）
-          await klServer.rebuildGraph(true)
+          await channelKl.rebuildGraph(true)
         } catch (error) {
           logger.warn("scope change graph rebuild failed", {
+            channelId,
             detail: error instanceof Error ? error.message : String(error),
           })
         }

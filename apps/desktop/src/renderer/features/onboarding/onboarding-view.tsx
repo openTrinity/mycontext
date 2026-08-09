@@ -343,50 +343,52 @@ export function OnboardingView() {
             : Date.now() - sources.rangeDays * 86_400_000
       const until = custom === null ? undefined : new Date(`${custom.to}T23:59:59.999`).getTime()
       /**
-       * ★★ 会话白名单要**按渠道分桶**。
+       * ★★ 会话白名单要**按渠道分桶**，而且现在**逐渠道各存一次**。
        *
-       * 勾选列表是混着两个渠道的（每项带 `channelId`），而白名单存的是
+       * 勾选列表是混着多个渠道的（每项带 `channelId`），而白名单存的是
        * external_id —— 各渠道的 id 体系完全不同。整批塞给每个渠道等于让
        * 它按一批不存在的 id 过滤，**结果恒为零**且不报错。
        *
-       * 主渠道那份走 `scope.conversationIds`（存量形状不动），
-       * 其余渠道走 `perChannelConversationIds`。
+       * ★ 存法从"一次调用写所有库"改成"每个渠道调一次"：`save()` 现在收
+       * 必填的 `channelId` 且只写那一个库。旧形状（主渠道走 `scope`、
+       * 其余走 `perChannelConversationIds` 映射）造成过一次数据丢失 ——
+       * 采集范围面板在飞书那栏保存时把钉钉的白名单清空了（详见
+       * `distillSourceSaveInputSchema.channelId` 的注释）。
        */
       const conversationItems = conversationList.data?.items ?? []
       const channelOf = new Map(conversationItems.map((item) => [item.externalId, item.channelId]))
-      const buckets = new Map<string, string[]>()
-      const primaryIds: string[] = []
+      /** `channelId → 该渠道被勾选的 externalId`。主渠道也是其中一桶。 */
+      const buckets = new Map<string, string[]>([[PRIMARY_CHANNEL_ID, []]])
       for (const id of sources.conversationIds) {
-        const channelId = channelOf.get(id)
         /**
          * ★ 查不到渠道 → 归给主渠道。那是存量数据的形状（旧的引导记录里
          * 没有 channelId），归错的代价是"主渠道多了一个不存在的 id"
          * （过滤时无害），而丢掉它会让用户的选择静默消失。
          */
-        if (channelId === undefined || channelId === PRIMARY_CHANNEL_ID) primaryIds.push(id)
-        else buckets.set(channelId, [...(buckets.get(channelId) ?? []), id])
+        const channelId = channelOf.get(id) ?? PRIMARY_CHANNEL_ID
+        buckets.set(channelId, [...(buckets.get(channelId) ?? []), id])
       }
       for (const source of distillSources.data ?? []) {
-        saveSource.mutate({
-          kind: source.kind,
-          enabled: sources.enabledSources.includes(source.kind),
-          // 只有 chat 源有会话白名单（其余源不按会话切）
-          ...(source.kind === "chat" && buckets.size > 0
-            ? { perChannelConversationIds: Object.fromEntries(buckets) }
-            : {}),
-          scope:
-            source.kind === "chat"
-              ? {
-                  ...(since === undefined ? {} : { since }),
-                  ...(until === undefined ? {} : { until }),
-                  chatKinds: sources.chatKinds,
-                  conversationIds: primaryIds,
-                }
-              : {
-                  ...(since === undefined ? {} : { since }),
-                  ...(until === undefined ? {} : { until }),
-                },
-        })
+        for (const [channelId, ids] of buckets) {
+          saveSource.mutate({
+            channelId,
+            kind: source.kind,
+            enabled: sources.enabledSources.includes(source.kind),
+            scope:
+              source.kind === "chat"
+                ? {
+                    ...(since === undefined ? {} : { since }),
+                    ...(until === undefined ? {} : { until }),
+                    chatKinds: sources.chatKinds,
+                    // ★ 只给**这个渠道自己的** id（其余源不按会话切）
+                    conversationIds: ids,
+                  }
+                : {
+                    ...(since === undefined ? {} : { since }),
+                    ...(until === undefined ? {} : { until }),
+                  },
+          })
+        }
       }
       completeStep.mutate({ step: "sources", payload: sources })
     } else if (activeId === "channel") {

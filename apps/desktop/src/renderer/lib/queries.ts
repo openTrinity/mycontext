@@ -329,6 +329,12 @@ function useDistillMutation<TInput>(perform: (input: TInput) => Promise<unknown>
 
 export function useSaveDistillSource() {
   return useDistillMutation<{
+    /**
+     * 存哪个渠道的范围。★★★ 必填 —— 见
+     * `distillSourceSaveInputSchema.channelId`（旧形状造成过一次数据丢失：
+     * 在飞书那栏保存把钉钉的会话白名单清空了）。
+     */
+    channelId: string
     kind: DistillSourceId
     enabled: boolean
     scope: DistillScopeInput

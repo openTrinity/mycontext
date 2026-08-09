@@ -761,10 +761,29 @@ export class DataPlaneService {
    * （`startup.ts` 的 `distillSources.onScopeChanged`）在这之后接着调，
    * 否则 ingest/dataPlane 会反向依赖 feed 而成环。
    */
-  applyScopeChange(options: { dryRun?: boolean } = {}): PurgeReport | null {
-    const ingest = this.ingest
-    if (ingest === null) return null
-    return ingest.applyScopeChange(options)
+  /**
+   * 清掉**某个渠道**越界的语料。
+   *
+   * ## ★★ `channelId` 决定动哪个库
+   *
+   * 这个方法原来只认主渠道（`this.ingest`），于是"在飞书面板改小范围"会去清
+   * **主渠道**的越界消息 —— 而飞书那边一条都不清。两个后果都真实发生过：
+   * 主渠道被误清（它的范围没变，那些消息本来是合规的），
+   * 飞书的越界数据留着继续喂给图谱。
+   *
+   * ★ 那个渠道没在跑 → 返回 null（调用方按"没什么可清"处理）。
+   * 不落回主渠道 —— 那正是上面那个 bug 的形状。
+   */
+  applyScopeChange(
+    channelId: string = this.options.plugin.meta.id,
+    options: { dryRun?: boolean } = {},
+  ): PurgeReport | null {
+    const source =
+      channelId === this.options.plugin.meta.id
+        ? this.ingest
+        : (this.sourceIngest.get(channelId) ?? null)
+    if (source === null) return null
+    return source.applyScopeChange(options)
   }
 
   /**

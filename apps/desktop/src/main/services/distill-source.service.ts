@@ -80,6 +80,14 @@ export interface DistillSourceServiceOptions {
    */
   sourcePlugins?: () => readonly ChannelPlugin[]
   /**
+   * 主渠道的 id —— `save()` 用它判"这次要写主库还是某个渠道库"。
+   *
+   * ★ 不从 `plugin.meta.id` 取：那个语义是"这一层默认操作哪个插件"，
+   * 而这里要的是"哪个 channelId 对应主库"。两者今天同值，但把它写成
+   * 一个显式参数之后，`save()` 的判据就不依赖另一个字段的巧合。
+   */
+  primaryChannelId: string
+  /**
    * 用户改了采集范围之后的回调（清越界语料 + 重建图谱，装配处注入）。
    *
    * ★ 为什么是回调而不是在这里做：清语料要碰 `DataPlaneService`、
@@ -87,9 +95,20 @@ export interface DistillSourceServiceOptions {
    * 只管 `distill_sources` 那张表。把那三件事塞进来等于让一个配置读写
    * 服务持有半个应用。
    *
+   * ## ★★★ 必须带 `channelId`
+   *
+   * 它原来是无参的，而接线那侧（`startup.ts` 的 `onScopeChanged`）只能对
+   * **主渠道**动手：`dataPlane.applyScopeChange()` / `feed.export()` /
+   * `klServer.rebuildGraph(true)` 三个都不带渠道，且那个 `klServer` 是主渠道
+   * 的裸实例。于是"保存飞书的范围"会删掉并重建**钉钉**的图。
+   *
+   * 实测日志：`[Main:KlServer] graph build started` +
+   * `kl graph data wiped for fresh rebuild {dataDir: …/kl}` ——
+   * 而飞书的图在 `…/kl/feishu`。
+   *
    * 不给 = 只存范围、不做后续清理（单测与未接线路径）。
    */
-  onScopeChanged?: () => void
+  onScopeChanged?: (channelId: string) => void
 }
 
 export class DistillSourceService {
@@ -230,30 +249,52 @@ export class DistillSourceService {
   }
 
   /**
-   * 存范围。写主库 **+ 每个渠道库各一份**（见 `sourceDbs` 的注释）。
+   * 存**一个渠道**的范围。
    *
-   * ## ★★ `conversationIds` 按渠道各存一份，其余字段共享
+   * ## ★★★ `channelId` 是必填的，而且它决定写哪个库
    *
-   * `since` / `until` / `chatKinds` 是渠道无关的语义，全量复制是对的。
-   * 而 `conversationIds` 里装的是**某个渠道的** `external_id` —— 把钉钉那批
-   * 复制到飞书库，等于让飞书按一批不存在的 ID 过滤，**结果恒为零**：
-   * 采集一条都不进，而日志里一个错都没有。
+   * 这个方法原来一次写**所有**库：主库拿 `input.scope` 原样，其余渠道库拿
+   * `scope` + 各自的 `perChannelConversationIds[channelId]`。而采集范围面板
+   * 一次只编辑**一个**渠道 —— 于是在飞书面板点保存时：
    *
-   * ★ 那个渠道没勾选过时给 **`undefined`** 而不是 `[]`。两者当前行为相同
-   * （都当"不限"），但语义不同：`[]` 是"明确选了零个"。判据一改就分道扬镳，
-   * 而那时 `[]` 会变成"一个都不采"—— 一个静默的全量数据缺失。
+   * · 渲染层判 `isPrimary=false`，`scope` 里**不带** `conversationIds`；
+   * · 这里把那个 scope 原样 upsert 进**主库** → 钉钉的白名单被覆盖掉。
+   *
+   * 实测后果（本机）：钉钉的 `conversationIds` 从 9 个变成**字段整个消失**，
+   * 之后按「不设限」重采，消息从 1730 涨到 3921（92 个会话全采）。
+   * 那是超范围采集（CLAUDE.md 第 5 节），不是"多存了一份"。
+   *
+   * 所以判据改成"只动这一个渠道的库"。`perChannelConversationIds` 那个
+   * 映射参数一并删除 —— 它存在的唯一理由是"一次写多个库"，而那正是 bug。
+   *
+   * ★ 白名单现在**统一**放在 `scope.conversationIds`，不再分主/非主两种形状。
+   * 原来那个分叉（主渠道走 `scope`、其余走映射）要求调用方记住自己是谁，
+   * 而它记错的表现就是上面那次数据丢失。
+   *
+   * ★ `conversationIds` 里装的是**这个渠道的** `external_id`，所以它天然
+   * 不该跨库复制 —— 而这个签名让"复制到别的库"变成一件做不到的事。
    */
   save(input: {
+    /** 存哪个渠道的范围。**必填** —— 见上面那段。 */
+    channelId: string
     kind: DistillSourceKind
     enabled: boolean
     scope: DistillScopeInput
-    /**
-     * 其余渠道各自的会话白名单（`channelId → externalIds`）。
-     * 某个渠道缺席 = 那个渠道不限会话（见上面关于 undefined 与 [] 的段落）。
-     */
-    perChannelConversationIds?: Readonly<Record<string, readonly string[]>> | undefined
   }): true {
-    const db = this.requireDb()
+    /**
+     * ★ 主库 = 主渠道自己的库；其余渠道各有一个。
+     *
+     * 拿不到就抛：那说明调用方指了一个没挂管线的渠道，而"静默写到主库上"
+     * 正是这次事故的形状。宁可报错让 UI 显示失败。
+     */
+    const primaryId = this.options.primaryChannelId
+    const db =
+      input.channelId === primaryId ? this.requireDb() : this.sourceDbs.get(input.channelId)
+    if (db === undefined) {
+      throw new AppError("CHANNEL_UNSUPPORTED", `渠道未就绪：${input.channelId}`, {
+        messageKey: "errors:channel.notReady",
+      })
+    }
     const repo = new DistillSourceRepository(db)
     /**
      * ★ 存之前先读旧值 —— 判"范围**实质**变了没有"要拿两边比。
@@ -303,37 +344,14 @@ export class DistillSourceService {
      *
      * 采集闸（`readCollectionScope`）只读 chat 那一行 —— 其余源的范围
      * 目前不参与采集，为它们清语料/重建图谱是纯浪费。
+     *
+     * ★★ 回调**带上渠道** —— 不带的话接线那侧只能对主渠道动手，
+     * 于是"保存飞书的范围"会删掉并重建**钉钉**的图（实测日志：
+     * `[Main:KlServer] graph build started` + `dataDir: …/kl`，
+     * 而飞书的是 `…/kl/feishu`）。
      */
-    /**
-     * 逐渠道库各写一份。★ 失败**不抛**：主库已经写成了，而抛出去会让 UI
-     * 显示"保存失败"，于是用户再点一次 —— 而主库那边每次都会触发一轮
-     * 清语料 + 重建图谱（分钟级）。这里记 error 就够：状态页看得见。
-     */
-    for (const [channelId, sourceDb] of this.sourceDbs) {
-      try {
-        const ids = input.perChannelConversationIds?.[channelId]
-        new DistillSourceRepository(sourceDb).upsert(
-          input.kind,
-          {
-            enabled: input.enabled,
-            scope: {
-              ...input.scope,
-              // ★ 那个渠道自己的白名单；没给就是"不限"（undefined，不是 []）
-              ...(ids === undefined ? { conversationIds: undefined } : { conversationIds: [...ids] }),
-            },
-          },
-          this.options.clock.now(),
-        )
-      } catch (error) {
-        this.options.logger.error("distill scope save failed for channel", {
-          channelId,
-          detail: error instanceof Error ? error.message : String(error),
-        })
-      }
-    }
-
     if (input.kind === "chat" && scopeChanged(before, input)) {
-      this.options.onScopeChanged?.()
+      this.options.onScopeChanged?.(input.channelId)
     }
     return true
   }

@@ -180,17 +180,22 @@ export interface MyContextApi {
   }
   distill: {
     sources(): Promise<Result<DistillSourceView[]>>
+    /**
+     * 存**一个渠道**的资料源范围。
+     *
+     * ★★★ `channelId` 必填。旧签名多一个 `perChannelConversationIds` 映射、
+     * 由服务层一次写所有库 —— 那个形状造成过一次数据丢失（在飞书那栏保存
+     * 把钉钉的白名单清空了）。完整分析见
+     * `distillSourceSaveInputSchema.channelId` 的注释。
+     *
+     * 白名单统一放 `scope.conversationIds`，里面就是**这个渠道自己的**
+     * external_id。
+     */
     sourceSave(input: {
+      channelId: string
       kind: DistillSourceId
       enabled: boolean
       scope: DistillScopeInput
-      /**
-       * 其余渠道各自的会话白名单。`scope.conversationIds` 是**主渠道**那份。
-       *
-       * ★ 必须分开：白名单存的是 external_id，而各渠道的 id 体系不同 ——
-       * 复制过去等于按一批不存在的 id 过滤，结果恒为零（见契约里的注释）。
-       */
-      perChannelConversationIds?: Record<string, string[]>
     }): Promise<Result<true>>
     /** 清某个源的蒸馏水位 —— 下一轮从头再蒸（facet 幂等合并，不删已有结论） */
     sourceReset(input: { kind: DistillSourceId }): Promise<Result<true>>

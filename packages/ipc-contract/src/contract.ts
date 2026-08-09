@@ -546,23 +546,31 @@ export const distillSourceViewSchema = z.object({
 export type DistillSourceView = z.infer<typeof distillSourceViewSchema>
 
 export const distillSourceSaveInputSchema = z.object({
+  /**
+   * 存**哪个渠道**的范围。★★★ 必填。
+   *
+   * ## 为什么必填，以及为什么删掉了 `perChannelConversationIds`
+   *
+   * 原来这里没有渠道、而是多一个 `perChannelConversationIds` 映射：
+   * 主渠道的白名单走 `scope.conversationIds`，其余渠道走那个映射，
+   * 服务层**一次写所有库**。
+   *
+   * 那个形状要求调用方"记住自己是哪个渠道，并把白名单放进对应的位置"，
+   * 而它记错的后果是数据丢失：采集范围面板在飞书那栏保存时判
+   * `isPrimary=false`，于是 `scope` 里不带 `conversationIds`，
+   * 而服务层把这个 scope 原样写进**主库** → 钉钉的白名单被清空。
+   *
+   * 实测（本机）：钉钉的 `conversationIds` 从 9 个变成字段整个消失，
+   * 之后按「不设限」重采，消息从 1730 涨到 3921（92 个会话全采）——
+   * 超范围采集，CLAUDE.md 第 5 节。
+   *
+   * 现在：一次只存一个渠道，白名单**统一**放 `scope.conversationIds`
+   * （里面就是那个渠道自己的 external_id，不存在跨库复制的可能）。
+   */
+  channelId: z.string().min(1),
   kind: distillSourceKindSchema,
   enabled: z.boolean(),
   scope: distillScopeSchema,
-  /**
-   * 其余渠道各自的会话白名单（`channelId → externalIds`）。**可选**。
-   *
-   * ## ★★ 为什么不能只有一份 `scope.conversationIds`
-   *
-   * 那里面装的是**某个渠道的** external_id，而两个渠道的 id 体系完全不同。
-   * 把主渠道那批复制到另一个渠道的库里，等于让它按一批不存在的 id 过滤
-   * —— **结果恒为零**（一条都不采），而日志里一个错都没有。
-   *
-   * ★ 某个渠道**缺席** = 那个渠道不限会话（`undefined`），不是"选了零个"
-   * （`[]`）。两者当前行为相同但语义不同，判据一改就分道扬镳 ——
-   * 而那时 `[]` 会变成"一个都不采"。见 `DistillSourceService.save`。
-   */
-  perChannelConversationIds: z.record(z.string(), z.array(z.string())).optional(),
 })
 
 export const distillSourceResetInputSchema = z.object({ kind: distillSourceKindSchema })

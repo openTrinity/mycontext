@@ -99,27 +99,35 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
     const draft = effective
     const since =
       draft.rangeDays === null ? undefined : Date.now() - draft.rangeDays * 86_400_000
-    const isPrimary = channelId === null || channelId === PRIMARY_CHANNEL_ID
+    /**
+     * ★★★ 白名单**统一**放 `scope.conversationIds`，并把渠道显式告诉主进程。
+     *
+     * ## 这里原来分两种形状，而那个分叉造成了一次数据丢失
+     *
+     * 旧代码判 `isPrimary`：主渠道的白名单放 `scope.conversationIds`，
+     * 其余渠道放 `perChannelConversationIds[channelId]`，而服务层
+     * **一次写所有库**。于是在飞书那栏保存时 `scope` 里**不带**
+     * `conversationIds` —— 服务层把它原样写进主库，钉钉那 9 个 id 被清空。
+     *
+     * 实测后果：钉钉的 `conversationIds` 字段整个消失 → 按「不设限」重采
+     * → 消息从 1730 涨到 3921（92 个会话全采）。那是超范围采集。
+     *
+     * 现在一次只存一个渠道，`scope.conversationIds` 里就是**这个渠道自己的**
+     * external_id —— 跨库复制在结构上不可能发生。
+     *
+     * ★ `channelId` 为 null（还没选过）时落到主渠道：这一页的 picker 初值是
+     * null，而那时用户看到的列表也是主渠道的（见 `channelFilter`）。
+     */
     save.mutate(
       {
+        channelId: channelId ?? PRIMARY_CHANNEL_ID,
         kind: "chat",
         enabled: true,
         scope: {
           ...(since === undefined ? {} : { since }),
           chatKinds: draft.chatKinds,
-          /**
-           * ★★ 白名单按渠道分开存。
-           *
-           * 主渠道走 `scope.conversationIds`（存量形状不动），其余渠道走
-           * `perChannelConversationIds` —— 那里面装的是**这个渠道的**
-           * external_id，复制到另一个渠道就是"按不存在的 id 过滤"，
-           * 结果恒为零且不报错。
-           */
-          ...(isPrimary ? { conversationIds: draft.conversationIds } : {}),
+          conversationIds: draft.conversationIds,
         },
-        ...(isPrimary || channelId === null
-          ? {}
-          : { perChannelConversationIds: { [channelId]: draft.conversationIds } }),
       },
       { onSuccess: () => setSaved(true) },
     )
