@@ -121,7 +121,7 @@ export class GraphQueryService {
     })
 
     if (!existsSync(this.dbPath)) {
-      return empty("还没建过图（点「重新建图」开始，需要几分钟且会出网）")
+      return empty("还没建过图（点「重新建图」开始，它会出网）")
     }
     const selfNames = this.options.getSelfNames()
     if (selfNames.length === 0) {
@@ -309,7 +309,7 @@ export class GraphQueryService {
       facts: [],
     })
     if (!existsSync(this.dbPath)) {
-      return empty("还没建过图（点「重新建图」开始，需要几分钟且会出网）")
+      return empty("还没建过图（点「重新建图」开始，它会出网）")
     }
 
     let db: GraphReadHandle | null = null

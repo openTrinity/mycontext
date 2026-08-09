@@ -163,3 +163,37 @@ describe("★ 「自动构建已关闭」要说出原因", () => {
     expect(text?.text).toMatch(/配置模型|配模型/)
   })
 })
+
+describe("★★ 建图文案不许承诺时长", () => {
+  /**
+   * ★★ 原来写着「正在建图（第一次要几分钟）」，而耗时**不可预测**。
+   *
+   * 实测同一台机器上跨两个数量级：
+   * · 全量 Phase A **17 分钟**；
+   * · 增量 Phase A **46.8 秒**（units_skipped 27651 / processed 3703）；
+   * · 而 Phase B 的 LLM 抽取完全取决于网关 —— 有一轮整批被
+   *   `Error 524: A timeout occurred` 打挂。
+   *
+   * ★ 承诺一个数字的后果不是"估得不准"，而是**它会引导错误操作**：
+   * 超过那个数字之后用户认为卡住了，于是去点「重新建图」——
+   * 那会把正在建的这一轮连同已建好的部分再删一遍，于是永远建不完。
+   * 这与 `describeGraphStage` 那几句假警告是同一类代价。
+   *
+   * 判据锁在 `describeGraphStage` 的输出上（那是导出的纯函数）。
+   * 建图中那两句在 `graphOverview` 里，由 `kl-graph-overview.test.ts` 覆盖。
+   */
+  it("★★ 空图那句只说会出网，不说要多久", () => {
+    const reason = describeGraphStage({ entities: 0, facts: 0, edges: undefined })
+    expect(reason).not.toBeNull()
+    // ★ 代价仍要预告 —— 出网是用户该知道的（隐私 + 花钱）
+    expect(reason).toContain("出网")
+    // ★ 但不许出现任何时长承诺
+    expect(reason).not.toMatch(/分钟|小时|秒/)
+  })
+
+  /** ★ 其余几档同样不许带时长。 */
+  it("★ facts=0 那句也不带时长", () => {
+    const reason = describeGraphStage({ entities: 60, facts: 0, edges: undefined })
+    expect(reason).not.toMatch(/分钟|小时|秒/)
+  })
+})

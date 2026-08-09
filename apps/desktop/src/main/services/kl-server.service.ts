@@ -1126,11 +1126,18 @@ export class KlServerService {
        * ★ 判据用 `this.building` 而不是"文件存不存在"：前者是我们自己的
        * 状态机（`rebuildGraph` 进出时置位），后者在 fresh 那个窗口里
        * 恰好给出相反的答案。
+       *
+       * ★★ **不许在文案里承诺时长**（原来写着"第一次要几分钟"）。
+       * 耗时差两个数量级且不可预测 —— 实测同一台机器上：
+       * 全量 Phase A 17 分钟、增量 Phase A 46.8 秒，而 Phase B 的 LLM 抽取
+       * 完全取决于网关（那次被 524 超时打挂过一整批）。
+       * 承诺一个数字的后果是：超过那个数字之后用户认为"卡住了"，
+       * 于是去点重新建图 —— 而那正是这一整段要避免的动作。
        */
       return empty(
         this.building
-          ? "正在建图（第一次要几分钟）—— 这一轮完成后就会有内容，不用重新点"
-          : "还没建过图（点「重新建图」开始，需要几分钟且会出网）",
+          ? "正在建图 —— 这一轮完成后就会有内容，不用重新点"
+          : "还没建过图（点「重新建图」开始，它会出网）",
       )
     }
 
@@ -1230,7 +1237,7 @@ export class KlServerService {
        * 而把它说成需要用户处理的问题会让人去点重新建图。
        */
       const reason = this.building
-        ? "正在建图（第一次要几分钟）—— 数字会随进度增长"
+        ? "正在建图 —— 数字会随进度增长"
         : describeGraphStage({ entities, facts, edges: knownEdges ?? undefined })
 
       return {
@@ -2168,7 +2175,7 @@ export function describeGraphStage(input: {
    * 而"最后一步"这种说法会让用户什么都不做。
    */
   if (entities === 0 && facts === 0) {
-    return "图是空的 —— 建图没有成功跑过（点「重新建图」，注意它要几分钟且出网）"
+    return "图是空的 —— 建图没有成功跑过（点「重新建图」，注意它会出网）"
   }
   if (facts === 0) {
     return "实体已建好，但事实一条都没抽出来 —— Phase B 的 LLM 抽取没成功（多为网关超时/限流，可重试或换网关）"
