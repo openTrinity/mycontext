@@ -333,6 +333,36 @@ export const DWS_COMMAND_ALLOWLIST = {
  *   单聊里取值完全相同，根本不是对端标识）。改用消息里的
  *   `senderOpenDingTalkId` 后 30 个单聊里 29 个不再需要任何授权。
  *   所以看到这个码先怀疑 ID，别急着让用户去授权。
+ * · `ENTERPRISE_NOT_AUTHORIZED` —— **当前这份渠道 CLI 的 OAuth 客户端对这个
+ *   企业没开通对应能力**。不是登录问题、也不是我们调错了参数。
+ *
+ *   ## ★★ 为什么它必须在这张表里（这是一次实测过的刷屏事故）
+ *
+ *   不认它的话它落到兜底的 `PROCESS_FAILED{retryable:true}` → 采集每 10 秒
+ *   重试一次、`blockedReason` 永不置位。实测用户日志：8 分钟里刷了约 50 条
+ *   同一个错（`chat/unread_message_conversation_list`、`im/list_all_conversations`、
+ *   `chat/search_messages_by_time_range` 轮着报），而界面上什么都不说 ——
+ *   用户只看到"没有新消息"。
+ *
+ *   这与本文件下面记的那次 `not_authenticated` 事故是**同一个形状**：
+ *   分类漏了一个码 → 终态被当成可重试 → 无限重试 + 界面无感。
+ *
+ *   ## ★ 归 `PERMISSION_REQUIRED` 而不是 `SESSION_EXPIRED`
+ *
+ *   与 `PAT_ERROR_CODES` 同一条理由：让用户重新扫码对"客户端没这个能力"
+ *   永远无效，他会反复扫而问题一动不动。正确出路是**换一份有权限的
+ *   渠道客户端**（设置里的自备路径），文案必须指向那里。
+ *
+ *   ## ★ 实测：两份客户端的 scope 是**互补**的，不是一份更全
+ *
+ *   同一个身份、同一个企业（2026-08-09）：
+ *   · 随包的那份 → `contact user get-self` 报 `ENTERPRISE_NOT_AUTHORIZED`，
+ *     而听记（`minutes/list_by_keyword_and_time_range`）正常；
+ *   · 用户自备的那份 → 通讯录正常，而听记报同一个码（见 `minutes.ts` 文件头）。
+ *
+ *   所以**不能**据此推荐"换成另一份就好了" —— 只能把失败的那一路说清楚，
+ *   让用户自己按需要选。这也是为什么这里只给"没有权限"这个事实，
+ *   而不替用户决定该用哪份。
  */
 const SERVER_ERROR_CODES: Readonly<
   Record<
@@ -349,6 +379,15 @@ const SERVER_ERROR_CODES: Readonly<
     code: "PERMISSION_REQUIRED",
     message: "跨组织会话需要在来源应用中授权",
     messageKey: "errors:byCode.PERMISSION_REQUIRED",
+  },
+  /**
+   * ★ 文案刻意**不提"重新授权/重新扫码"**：那对"客户端缺能力"无效。
+   * 也不替用户断言"换成另一份就好"—— 两份的 scope 是互补的（见上面的实测）。
+   */
+  ENTERPRISE_NOT_AUTHORIZED: {
+    code: "PERMISSION_REQUIRED",
+    message: "当前渠道客户端对这个企业没有开通该能力，请在设置里换一份客户端",
+    messageKey: "errors:byCode.CHANNEL_CLIENT_NOT_AUTHORIZED",
   },
 }
 

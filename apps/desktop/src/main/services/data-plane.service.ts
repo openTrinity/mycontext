@@ -172,6 +172,13 @@ function pickDefined(patch: IngestIntervalsPatch): Partial<IngestIntervals> {
   if (patch.minutesMs !== undefined) out.minutesMs = patch.minutesMs
   if (patch.documentsMs !== undefined) out.documentsMs = patch.documentsMs
   if (patch.activeScanMs !== undefined) out.activeScanMs = patch.activeScanMs
+  /**
+   * ★ 漏掉这一行的后果是**保存静默不生效**：面板上选了新值、请求成功、
+   * 界面回显也对（乐观更新），但落库时这个字段被丢掉，下次读回来还是旧值。
+   * 而"保存了没生效"是最难查的一类 —— 没有任何报错。
+   */
+  if (patch.graphBuildMinIntervalMs !== undefined)
+    out.graphBuildMinIntervalMs = patch.graphBuildMinIntervalMs
   return out
 }
 

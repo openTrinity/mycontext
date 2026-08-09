@@ -27,7 +27,19 @@ import {
 
 const NOW = 1_785_000_000_000
 
-/** 一个"图已建好、刚建完、没有新数据"的基线 —— 每条用例只改它关心的那一维。 */
+/**
+ * 一个"图已建好、刚建完、没有新数据"的基线 —— 每条用例只改它关心的那一维。
+ *
+ * ★ `minIntervalMs: 0` —— **刻意关掉冷却**。
+ *
+ * 这个基线里 `lastBuiltAt` 是"1 分钟前"，而建图有一道默认 1 小时的最小间隔
+ * （见 `AUTO_BUILD_MIN_INTERVAL_MS`）。不关掉的话下面每一条用例都会先撞
+ * 冷却而 return，于是它们**测不到自己想测的那一维**（阈值、maxAge、forecast）
+ * —— 全红，而且红的原因与用例名毫无关系。
+ *
+ * 冷却本身由 `auto-build-min-interval.test.ts` 专门覆盖：那一组的基线
+ * 反过来（显式给冷却），因为它测的正是这一维。
+ */
 function base(over: Partial<AutoBuildInput> = {}): AutoBuildInput {
   return {
     ackedSeq: 1000,
@@ -37,6 +49,7 @@ function base(over: Partial<AutoBuildInput> = {}): AutoBuildInput {
     graphExists: true,
     enabled: true,
     ready: true,
+    minIntervalMs: 0,
     ...over,
   }
 }

@@ -60,6 +60,18 @@ export const AUTO_BUILD_LAG_THRESHOLD = 500
 export const AUTO_BUILD_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
 /**
+ * 两次自动建图之间**至少**隔多久。默认 1 小时。
+ *
+ * ★ 与 `AUTO_BUILD_MAX_AGE_MS` 是相反方向的两条闸：那条说"最久多久必须建"，
+ * 这条说"最快多久才允许建"。前者防旧，后者防频。
+ *
+ * ★ 用户可在设置里改（`ingestIntervals.graphBuildMinIntervalMs`，15min–6h）。
+ * 这个常量是缺省值，**必须与 `data-plane.service.ts` 的 `INTERVAL_DEFAULTS`
+ * 同源** —— 那边直接 import 它，就不会出现"设置页显示 1h、实际跑 30min"。
+ */
+export const AUTO_BUILD_MIN_INTERVAL_MS = 60 * 60 * 1000
+
+/**
  * 连续失败 n 次之后至少等多久再试。
  *
  * 索引 = 已经连续失败的次数（1 起）。超出长度取最后一档（2h 封顶）——
@@ -105,6 +117,13 @@ export interface AutoBuildInput {
   lastFailureAt?: number | null
   lagThreshold?: number
   maxAgeMs?: number
+  /**
+   * 两次建图之间至少隔多久（ms）。缺省 `AUTO_BUILD_MIN_INTERVAL_MS`（1h）。
+   *
+   * 装配层传的是一个**现读**的值（从 `dataPlane.intervals()` 取），
+   * 这样用户在设置里改完下一轮就生效，不用重启。
+   */
+  minIntervalMs?: number
 }
 
 export type AutoBuildDecision =
@@ -137,6 +156,14 @@ export type AutoBuildSkipReason =
   | "build-in-progress"
   | "no-new-data"
   | "below-threshold"
+  /**
+   * 距上次成功建图不足最小间隔（默认 1h，设置里可配）。
+   *
+   * ★ 与 `below-threshold` **必须分开**：那句话的意思是"新消息攒得不够"，
+   * 而这里恰恰是**攒够了但还在冷却**。用同一个原因码会让状态面板说假话，
+   * 而用户据此去等更多消息 —— 等来的仍然是不建。
+   */
+  | "min-interval"
   /** 上一次（或连续几次）建图失败了，正在退避 —— 与"攒得不够"是两件事 */
   | "backoff"
 
@@ -188,6 +215,39 @@ export function decideAutoBuild(input: AutoBuildInput): AutoBuildDecision {
 
   // 图已经在了 → 下面两条都要求**真有新数据**
   if (newMessages === 0) return { build: false, reason: "no-new-data" }
+
+  /**
+   * ★★ 成功之后的冷却：距上次建图不足最小间隔就不建。
+   *
+   * ## 为什么必须在 `lag-threshold` **之前**
+   *
+   * 放在后面等于没写：`newMessages >= threshold` 会先 return true，
+   * 于是这道闸永远不生效。而"生效不了"在界面上完全看不出来 ——
+   * 建图照常跑，只是比预期频繁。所以这个顺序本身要有断言锁着。
+   *
+   * ## 为什么需要它
+   *
+   * 原有三条判据只有"攒够 500 条"和"24h 兜底"，缺的正是冷却。
+   * 活跃群里 500 条可能十几分钟就攒够，而每次建图的固定成本与
+   * "新增了多少"基本无关：全量解析导出目录、把全库结构边读进内存、
+   * **improve 阶段对全图重算相似度与社区划分**（上游目前仍是全量）。
+   * 也就是说频繁触发付的几乎是全价。
+   *
+   * ## `max-age` 刻意排在它**后面**
+   *
+   * 冷却挡住的是"数据够但太勤"，而 `max-age`（24h）回答的是完全不同的
+   * 问题："低频用户也不该一直看一张旧图"。24h 天然大于冷却上界（6h），
+   * 所以两者不冲突 —— 但顺序反了会让冷却把兜底也压掉。
+   *
+   * ★ `lastBuiltAt === null` 不在这里判：那种情况上面 `graphExists`
+   * 分支已经接走了（首次建图不受任何阈值约束）。这里再判一次是冗余的，
+   * 但**留着那个 null 检查**是必要的 —— 图存在而 `lastBuiltAt` 为空
+   * 是可能的（游标被清过），那时不该把 `now - null` 算成一个巨大的负数。
+   */
+  const minInterval = input.minIntervalMs ?? AUTO_BUILD_MIN_INTERVAL_MS
+  if (input.lastBuiltAt !== null && input.now - input.lastBuiltAt < minInterval) {
+    return { build: false, reason: "min-interval" }
+  }
 
   const threshold = input.lagThreshold ?? AUTO_BUILD_LAG_THRESHOLD
   if (newMessages >= threshold) {

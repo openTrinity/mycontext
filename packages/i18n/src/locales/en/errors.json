@@ -65,6 +65,7 @@
     "FORBIDDEN": "That action isn't allowed",
     "FTS_QUERY_INVALID": "Couldn't process that search — try rewording it",
     "DISTILL_NO_EVIDENCE": "No source evidence for this conclusion; not written to the profile",
-    "INTERNAL": "Something unexpected went wrong"
+    "INTERNAL": "Something unexpected went wrong",
+    "CHANNEL_CLIENT_NOT_AUTHORIZED": "The current channel client is not authorized for this enterprise (not a login problem — re-scanning will not help). Switch clients in Settings: the bundled one and your own have different capabilities."
   }
 }

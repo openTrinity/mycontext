@@ -65,6 +65,7 @@
     "FORBIDDEN": "该操作不被允许",
     "FTS_QUERY_INVALID": "搜索条件无法处理，请换个说法试试",
     "DISTILL_NO_EVIDENCE": "该结论没有原文依据，已拒绝写入画像",
-    "INTERNAL": "出现了未预期的问题"
+    "INTERNAL": "出现了未预期的问题",
+    "CHANNEL_CLIENT_NOT_AUTHORIZED": "当前渠道客户端对这个企业没有开通所需能力（不是登录问题，重新扫码无效）。请到设置里换一份客户端：内置那份与自备那份开通的能力不同。"
   }
 }

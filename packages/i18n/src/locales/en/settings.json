@@ -337,7 +337,8 @@
       "activeScanMs": "Full-directory rotation scan interval",
       "pullMs": "Full pagination sweep interval",
       "minutesMs": "Meeting notes poll interval",
-      "documentsMs": "Document poll interval"
+      "documentsMs": "Document poll interval",
+      "graphBuildMinIntervalMs": "Min. graph rebuild gap"
     },
     "hints": {
       "probeBaseMs": "Fetches conversation-level change markers only (unread counts and last-message timestamps); roughly 0.7s per round. This is the base interval, not the effective one: adaptive backoff halves the rate when a round exceeds half the interval, so observed values may exceed what you set.",
@@ -345,7 +346,8 @@
       "activeScanMs": "Walks the full conversation directory in descending activity order, compares against local watermarks, and issues targeted top-ups only for those behind. The incremental probe returns only conversations with unread markers (~13% coverage measured); this tier covers its blind spot. Fixed cost per round is one cached directory call plus one aggregate query — independent of conversation count.",
       "pullMs": "Paginates a time window across all conversations to cover the probe's blind spot (read conversations don't appear in the unread list). A round can reach hundreds of pages and holds the collection lock exclusively, so short intervals crowd out sending and targeted top-ups.",
       "minutesMs": "This endpoint has no time filter, so every round is a full enumeration at fixed cost — shorter intervals only add waste. Meetings are sparse events and don't warrant high frequency.",
-      "documentsMs": "A round covers workspace enumeration, recursive node traversal, and body backfill — substantially heavier than the message channel. Documents change slowly and carry no second-level visibility requirement."
+      "documentsMs": "A round covers workspace enumeration, recursive node traversal, and body backfill — substantially heavier than the message channel. Documents change slowly and carry no second-level visibility requirement.",
+      "graphBuildMinIntervalMs": "At least this long between two graph builds. NOT a fixed schedule — it will not build without enough new data, and enough data still waits out this gap. A build recomputes the whole graph, so keep it sparse."
     },
     "note": "Second-level visibility for new messages comes from the event stream and probe-triggered targeted top-ups, not from raising the full-pagination rate."
   }

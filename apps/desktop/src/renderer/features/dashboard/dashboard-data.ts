@@ -141,7 +141,23 @@ export function readIngest(
     snapshot.blockedReason === "session_expired"
       ? "钉钉登录已过期，去设置里重新授权"
       : snapshot.blockedReason === "permission_required"
-        ? "钉钉侧需要一次授权确认"
+        ? /**
+           * ★★ 这句话**不能**说"去授权" —— 它原来写的是「钉钉侧需要一次授权
+           * 确认」，而权限类终态里最常见的那个成因**不是**授权缺失：
+           *
+           * 实测（一次真实刷屏事故）：`ENTERPRISE_NOT_AUTHORIZED` 表示
+           * **当前这份渠道客户端**对这个企业没开通所需能力。用户按提示去
+           * 重新扫码，扫完问题一动不动 —— 因为要换的是客户端而不是登录态。
+           *
+           * ★ `lastError` 优先：`classifyDwsError` 已经按具体错误码给了
+           * 精确文案（比如"请到设置里换一份客户端"），比这里的通用兜底
+           * 有信息量得多。只有在它缺失时才退回这句。
+           *
+           * 兜底那句刻意用"需要处理"而不是"需要授权"：权限类终态有多种成因
+           * （客户端缺能力、跨组织未确认、PAT 缺 scope），而说错方向比
+           * 说得笼统更糟 —— 用户会按错误的指引反复尝试。
+           */
+          (snapshot.lastError ?? "钉钉侧的权限不足，采集已暂停 —— 去设置里看详情")
         : snapshot.lastError !== null
           ? snapshot.lastError
           : /**

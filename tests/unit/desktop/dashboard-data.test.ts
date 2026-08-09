@@ -151,6 +151,45 @@ describe("采集这一组", () => {
     expect(cards?.problem).not.toContain("exit 1")
   })
 
+  /**
+   * ★★ 权限类终态**不能**提示"去授权" —— 这句原来说的是
+   * 「钉钉侧需要一次授权确认」，而它把用户指向了一个无效动作。
+   *
+   * 实测（一次真实刷屏事故）：`ENTERPRISE_NOT_AUTHORIZED` 的含义是
+   * **当前这份渠道客户端**对这个企业没开通能力。按提示重新扫码，
+   * 扫完问题一动不动 —— 要换的是客户端而不是登录态。
+   *
+   * ★ 与上面 `session_expired` 那条**相反**：那里 `lastError` 必须输，
+   * 这里 `lastError` 必须赢。因为分类器已经按具体错误码给了精确文案
+   * （"请到设置里换一份客户端"），比任何通用兜底都有信息量。
+   */
+  it("★★ 权限终态优先用分类器的精确文案（它知道该换客户端）", () => {
+    const cards = readIngest(
+      ingestSnapshot({
+        blockedReason: "permission_required",
+        lastError: "当前渠道客户端对这个企业没有开通该能力，请在设置里换一份客户端",
+      }),
+    )
+    expect(cards?.problem).toContain("客户端")
+    // ★ 反面：绝不能是那句会把人带去反复扫码的话
+    expect(cards?.problem).not.toContain("需要一次授权确认")
+  })
+
+  /**
+   * ★ 没有 `lastError` 时的兜底也不能说"授权"。
+   *
+   * 权限类终态有多种成因（客户端缺能力、跨组织未确认、PAT 缺 scope），
+   * 说错方向比说得笼统更糟 —— 用户会按错误的指引反复尝试。
+   */
+  it("★ 权限终态无 lastError → 兜底文案不提「授权」", () => {
+    const cards = readIngest(
+      ingestSnapshot({ blockedReason: "permission_required", lastError: null }),
+    )
+    expect(cards?.problem).not.toBeNull()
+    expect(cards?.problem).not.toContain("授权")
+    expect(cards?.problem).toContain("权限")
+  })
+
   it("退避中要在探针提示里说出来（否则「15 秒」是假的）", () => {
     const cards = readIngest(ingestSnapshot({ probeThrottled: true, probeIntervalMs: 120_000 }))
     expect(cards?.probeHint).toContain("2 分钟")

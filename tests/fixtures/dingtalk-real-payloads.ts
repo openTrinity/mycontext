@@ -624,6 +624,39 @@ export const REAL_ERR_PAT_NO_PERMISSION = `{
 export const REAL_ERR_PAT_SCOPE_REQUIRED = `{"code":"PAT_SCOPE_AUTH_REQUIRED","data":{"missingScope":"chat.message:read","openBrowser":true},"success":false}`
 
 /**
+ * ★★ 客户端对该企业没开通能力：`server_error_code: ENTERPRISE_NOT_AUTHORIZED`。
+ *
+ * ## 这一段是从真实刷屏事故里抓的
+ *
+ * 来源：一次真实会话的日志 —— 8 分钟内约 50 条同一个错，三个 operation
+ * 轮着报（`chat/unread_message_conversation_list`、`im/list_all_conversations`、
+ * `chat/search_messages_by_time_range`），而界面上什么都不说。
+ *
+ * 成因：这个码原来**不在** `SERVER_ERROR_CODES` 里 → 落到兜底的
+ * `PROCESS_FAILED{retryable:true}` → 采集每 10 秒重试一次、`blockedReason`
+ * 永不置位。与本文件开头记的那次 `not_authenticated` 事故**同一个形状**。
+ *
+ * ★ 注意 `category` 是 **api**、`code` 是 **1** —— 又一次印证"category 不可信"：
+ * 它既不是 `auth` 也不是 `internal`，而 `reason` 是笼统的 `business_error`
+ * （那个值本身区分不了任何东西）。唯一可靠的判据就是 `server_error_code`。
+ *
+ * 值按 CLAUDE.md §1.2 脱敏：`trace_id` 换成假值，长度与字符集保持一致。
+ */
+export const REAL_ERR_ENTERPRISE_NOT_AUTHORIZED = `{
+  "error": {
+    "category": "api",
+    "code": 1,
+    "hint": "The API returned a business-level error. Check required parameters and values.",
+    "message": "[UNCLASSIFIED] business error: code ENTERPRISE_NOT_AUTHORIZED (operation: chat/unread_message_conversation_list)\\n  hint: Use --verbose for detailed error logs",
+    "operation": "tools/call",
+    "reason": "business_error",
+    "server_error_code": "ENTERPRISE_NOT_AUTHORIZED",
+    "server_key": "chat",
+    "trace_id": "0bFAKE00011786000000000000e00000"
+  }
+}`
+
+/**
  * ★★ `--profile` 钉住的身份在本机不存在 —— 三种真实形态，全是 exit 3。
  *
  * 复现（不碰真实登录态、不改全局 profile）：拿一个编造的 profile 值去跑

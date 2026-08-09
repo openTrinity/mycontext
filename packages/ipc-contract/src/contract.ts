@@ -1796,6 +1796,38 @@ export const ingestIntervalsSchema = z.object({
    * 所以下界给到 15s —— 比全量分页便宜得多，允许比 `pullMs` 更勤。
    */
   activeScanMs: z.number().min(15_000).max(300_000),
+  /**
+   * 建图**最小间隔**（毫秒）。默认 1h，可配 15min–6h。
+   *
+   * ## ★★ 它是「至少隔多久」，不是「每隔多久」
+   *
+   * 自动建图原有三条判据（`packages/knowledge-feed/src/auto-build.ts`）：
+   * 攒够 500 条新消息 → 建；24h 没建过 → 建；否则不建。
+   * 缺的正是**成功之后的冷却** —— 活跃群里 500 条可能十几分钟就攒够，
+   * 于是建图被反复触发。
+   *
+   * 而每次建图的固定成本与"新增了多少"基本无关：
+   * · 全量解析四件套导出（本机 chat 目录 21MB）；
+   * · 把全库 MENTIONS/ABOUT 边一次性读进内存算结构相似度；
+   * · **improve 阶段目前仍是全量** —— 对全图重算相似边与社区划分，
+   *   这是最吃 CPU 的一段（上游注释原文 "Scroll all entity points"）。
+   *
+   * 所以这一项限的是**触发频率**，而不是"多久必须建一次"。数据不够时
+   * 到点也不会建；数据够了也要等冷却过去。
+   *
+   * ## 为什么放进 `ingestIntervals` 而不是新开一组
+   *
+   * 这一组已经有完整的存取链（schema → vault 的 `dh_settings` → IPC → 面板），
+   * 而"多久建一次图"与"多久拉一次数据"对用户是同一类心智（后台多勤）。
+   * 新开一组要把五层各重复一遍。
+   *
+   * ★ 区间与 `documentsMs` 同（15min–6h）：下界 15min 是因为再短就等于没有
+   * 冷却；上界 6h 留在 `max-age`（24h）之下 —— 那条兜底必须仍然能生效。
+   *
+   * ★ **只管自动触发**：用户手动点「建图」按钮不受它限制。挡住一次明确的
+   * 点击就是"点了没反应"，而那比多跑一次建图糟得多。
+   */
+  graphBuildMinIntervalMs: z.number().min(900_000).max(21_600_000),
 })
 
 export type IngestIntervals = z.infer<typeof ingestIntervalsSchema>

@@ -25,6 +25,7 @@ import {
   REAL_ERR_NOT_AUTHENTICATED_TABLE,
   REAL_ERR_PAT_NO_PERMISSION,
   REAL_ERR_PAT_SCOPE_REQUIRED,
+  REAL_ERR_ENTERPRISE_NOT_AUTHORIZED,
   REAL_ERR_PROFILE_ACCOUNT_NOT_FOUND,
   REAL_ERR_PROFILE_NOT_FOUND,
   REAL_ERR_PROFILE_ORG_NOT_FOUND,
@@ -126,10 +127,34 @@ describe("错误归类：区分终态与可重试", () => {
     // 判据：PAT 裸 JSON 顶层 code
     ["PAT 权限不足", REAL_ERR_PAT_NO_PERMISSION],
     ["PAT 缺 scope", REAL_ERR_PAT_SCOPE_REQUIRED],
+    /**
+     * ★★ 判据：`server_error_code`。这一条锁的是一次**真实刷屏事故**：
+     * 这个码原来不在 `SERVER_ERROR_CODES` 里 → 终态被当成可重试 →
+     * 采集每 10 秒一次、8 分钟约 50 条，而界面上什么都不说。
+     */
+    ["客户端对该企业没开通能力", REAL_ERR_ENTERPRISE_NOT_AUTHORIZED],
   ])("真实输出 %s → PERMISSION_REQUIRED 且不可重试", (_label, output) => {
     const error = classifyDwsError(output)
     expect(error?.code).toBe("PERMISSION_REQUIRED")
     expect(error?.retryable).toBe(false)
+  })
+
+  /**
+   * ★★ `ENTERPRISE_NOT_AUTHORIZED` 绝不能被判成 `SESSION_EXPIRED`。
+   *
+   * 这条与上面那组分开，因为它锁的是**另一件事**：上面只要求"归成权限类"，
+   * 而这里要求"**不要**归成登录失效"。两者都绿才说明分类是对的 ——
+   * 提示用户重新扫码对"客户端缺能力"永远无效，他会反复扫而问题一动不动
+   * （`PAT_ERROR_CODES` 的注释里记着同一条教训）。
+   *
+   * ★ 它很容易被误判：这段真实输出里 `reason` 是 `business_error`、
+   * `category` 是 `api`、`code` 是 1 —— 三个字段都指不出"权限"，
+   * 唯一可靠的判据只有 `server_error_code`。
+   */
+  it("★★ ENTERPRISE_NOT_AUTHORIZED 不是 SESSION_EXPIRED（重新扫码对它无效）", () => {
+    const error = classifyDwsError(REAL_ERR_ENTERPRISE_NOT_AUTHORIZED)
+    expect(error?.code).not.toBe("SESSION_EXPIRED")
+    expect(error?.messageKey).toBe("errors:byCode.CHANNEL_CLIENT_NOT_AUTHORIZED")
   })
 
   /**

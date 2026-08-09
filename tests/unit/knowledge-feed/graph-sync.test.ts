@@ -354,6 +354,9 @@ describe("★★ 攒批自动建图的接线", () => {
           graphExists: true,
           enabled: true,
           ready: true,
+          // ★ 关掉建图冷却：这几条测的是接线与退避，不是冷却那一维。
+          // 不关的话 lastBuiltAt===now → 必然先撞 min-interval 而 return。
+          minIntervalMs: 0,
         }),
       })
       const result = await sync.runOnce()
@@ -414,6 +417,9 @@ describe("★★ 攒批自动建图的接线", () => {
           graphExists: built,
           enabled: true,
           ready: true,
+          // ★ 关掉建图冷却：这条测的是"判据每轮重新取"，
+          // 而冷却会在第二轮先命中并盖住 below-threshold 这个结论。
+          minIntervalMs: 0,
         }),
       })
       const first = await sync.runOnce()
@@ -539,6 +545,8 @@ describe("★★ 建图被主动打断（退出应用 / 停服务）不进退避
     graphExists: true,
     enabled: true,
     ready: true,
+    // ★ 关掉建图冷却 —— 这一组测退避，而冷却会先于退避挡住判定。
+    minIntervalMs: 0,
   })
 
   it('★ 返回 "cancelled" → 不算失败，下一轮照常建', async () => {

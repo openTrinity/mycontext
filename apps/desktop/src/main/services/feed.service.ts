@@ -117,6 +117,14 @@ export interface FeedServiceOptions {
      *   见 `KlGraphBuildResult.cancelled` 的注释。
      */
     trigger: () => Promise<boolean | "cancelled">
+    /**
+     * 两次建图之间至少隔多久（ms）。不给 = 用 `AUTO_BUILD_MIN_INTERVAL_MS`（1h）。
+     *
+     * ★ 是**函数**而不是数值：用户在设置里改完应当下一轮就生效。
+     * 传静态值的话改完要重启，而"改了没反应"会被当成功能坏了
+     * （`RuntimeEnv` 的 `dwsChannel` / `dwsBinOverride` 同一个理由）。
+     */
+    minIntervalMs?: () => number
   }
 }
 
@@ -201,12 +209,15 @@ export class FeedService {
         : {
             autoBuild: () => {
               const mark = this.graphSync?.buildWatermark() ?? { seq: 0, at: null }
+              const minIntervalMs = auto.minIntervalMs?.()
               return {
                 lastBuiltSeq: mark.seq,
                 lastBuiltAt: mark.at,
                 graphExists: auto.graphExists(),
                 enabled: auto.enabled(),
                 ready: auto.ready(),
+                // 现读：设置里改完下一轮生效（见 options 里的注释）
+                ...(minIntervalMs === undefined ? {} : { minIntervalMs }),
               }
             },
             triggerIngest: async () => {

@@ -35,6 +35,7 @@ const CURRENT = {
   pullMs: 120_000,
   minutesMs: 1_800_000,
   documentsMs: 3_600_000,
+  graphBuildMinIntervalMs: 3_600_000,
 }
 
 function wrap() {
@@ -106,6 +107,8 @@ describe("★ 档位必须落在 schema 的区间内", () => {
       pullMs: [60_000, 120_000, 300_000, 600_000],
       minutesMs: [600_000, 1_800_000, 3_600_000],
       documentsMs: [900_000, 1_800_000, 3_600_000, 10_800_000, 21_600_000],
+      // 建图最小间隔：15min / 30min / 1h / 2h / 6h（与面板 OPTIONS 同源）
+      graphBuildMinIntervalMs: [900_000, 1_800_000, 3_600_000, 7_200_000, 21_600_000],
     }
     for (const [key, values] of Object.entries(options)) {
       for (const value of values) {

@@ -18,6 +18,7 @@ export {
   autoBuildBackoffMs,
   AUTO_BUILD_LAG_THRESHOLD,
   AUTO_BUILD_MAX_AGE_MS,
+  AUTO_BUILD_MIN_INTERVAL_MS,
   AUTO_BUILD_BACKOFF_MS,
 } from "./auto-build.js"
 export type {

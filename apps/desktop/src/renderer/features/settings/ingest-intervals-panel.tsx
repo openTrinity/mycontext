@@ -31,6 +31,7 @@ type IntervalKey =
   | "pullMs"
   | "minutesMs"
   | "documentsMs"
+  | "graphBuildMinIntervalMs"
 
 /**
  * 各项的档位（毫秒）。范围与 `ingestIntervalsSchema` 的 min/max 对齐 ——
@@ -46,6 +47,15 @@ const OPTIONS: Record<IntervalKey, readonly number[]> = {
   minutesMs: [600_000, 1_800_000, 3_600_000],
   // 文档：15min–6h（schema 的区间）。比听记宽 —— 知识库重度用户想更勤。
   documentsMs: [900_000, 1_800_000, 3_600_000, 10_800_000, 21_600_000],
+  /**
+   * ★ 建图最小间隔：15min–6h。**语义与上面几项相反** ——
+   * 那些是"多久跑一次"，这一项是"**至少**隔多久才允许再建一次"。
+   *
+   * 建图是这个产品里最贵的一次操作（改一次图要重算全图的相似度与社区），
+   * 而"攒够 500 条"在活跃群里十几分钟就达标 —— 所以需要一道冷却。
+   * 下界 15min 是因为再短就等于没有冷却；上界 6h 留在 24h 兜底之下。
+   */
+  graphBuildMinIntervalMs: [900_000, 1_800_000, 3_600_000, 7_200_000, 21_600_000],
 }
 
 /** 毫秒 → 人能读的档位文案（`10s` / `2min` / `1h`）。 */
