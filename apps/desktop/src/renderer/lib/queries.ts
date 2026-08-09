@@ -1161,6 +1161,13 @@ export function useSelfIdentity(enabled = true) {
  */
 export function useFeedInfo(enabled: boolean, channelId?: string) {
   return useQuery({
+    /**
+     * ★★ 与 `useKlGraphEgo` 同一类问题：渠道未定（渠道列表还没加载）时
+     * 发一次"不带渠道"的请求会把**主渠道**那份存进 `"primary"` key，
+     * 而界面已经在按另一个渠道渲染 —— 见那里的完整分析。
+     *
+     * ★ 这里的 `enabled` 是调用方给的（登录前不查），所以要 `&&` 而不是覆盖。
+     */
     queryKey: [...QUERY_KEYS.feed, channelId ?? "primary"],
     queryFn: async () =>
       unwrap(
@@ -1168,7 +1175,7 @@ export function useFeedInfo(enabled: boolean, channelId?: string) {
           channelId === undefined ? undefined : { channelId },
         ),
       ),
-    enabled,
+    enabled: enabled && channelId !== undefined,
   })
 }
 
@@ -1643,6 +1650,31 @@ export function useKlGraphEgo(building: boolean, channelId?: string) {
      * ★ 建图中 5s 轮询（用户正等着看图长出来）；平时不轮询 ——
      * 图只在建图后才变，秒级重取是白花主进程的查询。
      */
+    /**
+     * ★★★ 渠道还没定下来时**别发请求**。
+     *
+     * ## 这一条修的是"切回钉钉后图谱错乱，再切一次又好了"
+     *
+     * `useDashboardScope` 的 `channelId` 是
+     * `pickedChannelId ?? authorizedChannelIds[0] ?? undefined` —— 而
+     * `authorizedChannelIds` 来自 `useChannels()`，**首帧是空数组**。于是：
+     *
+     * · 首帧 `channelId === undefined` → 发一次"不带渠道"的请求，
+     *   而主进程那侧不带渠道 = **主渠道**（`MultiGraphQueryService.ego()`），
+     *   结果存进 `["kl","graph-ego","primary"]`；
+     * · 渠道列表加载完 → `channelId` 变成第一个已授权渠道（可能是飞书）
+     *   → 换了 queryKey、发新请求；
+     * · 而这中间界面已经在按**新**渠道渲染标签，显示的却是那份主渠道的数据。
+     *
+     * 表现正是"第一次进入错乱、切走再切回就好了"（第二次缓存里已经有对的那份）。
+     *
+     * ★ 判据是"渠道未定就不查"而不是"查了之后丢弃" —— 后者仍然会往缓存里
+     * 塞一份属于别人的数据，而那份数据会被下一次 `"primary"` 命中。
+     *
+     * ★ `channelId === undefined` 只在**渠道列表还没加载**时出现（选过就有值、
+     * 有已授权渠道就有值），所以这个门不会让图谱在正常状态下不显示。
+     */
+    enabled: channelId !== undefined,
     refetchInterval: building ? 5_000 : false,
     /**
      * ★★ 但**失败要重试**：上面把"服务没起来"抛成了错误，

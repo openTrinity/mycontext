@@ -780,13 +780,28 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           事实检索：从消息里抽出来的陈述句。
           它与上面那张图共用 `entityFocus` —— 那正是"合成一块"的意义。
         */}
-        <FactsExplorer
-          typeCounts={graph?.factTypes ?? []}
-          channelId={graphChannel}
-          entityFocus={entityFocus}
-          onEntityFocusChange={setEntityFocus}
-          onTotalChange={setFocusCount}
-        />
+        {/*
+          ★★ 渠道还没定下来时**不渲染**这一块。
+
+          `FactsExplorer` 收到 `channelId: undefined` 的语义是"**合并全部渠道**"
+          （搜索那条路要它，见 `klGraphFactsInputSchema`）。而仪表盘是
+          "看某一个渠道的图谱" —— 渠道列表还没加载完的那一瞬间
+          `graphChannel` 是 undefined，于是这里会显示**两个渠道合并**的事实，
+          而标题与上面那张图已经在按某个具体渠道渲染。
+
+          与 `useKlGraphEgo` 的 `enabled` 是同一类问题（见那里的完整分析），
+          只是这一处不能靠 `enabled` 解决：`undefined` 在那一层是合法语义，
+          关掉它会把搜索的合并检索一起关掉。所以门开在调用方。
+        */}
+        {graphChannel === undefined ? null : (
+          <FactsExplorer
+            typeCounts={graph?.factTypes ?? []}
+            channelId={graphChannel}
+            entityFocus={entityFocus}
+            onEntityFocusChange={setEntityFocus}
+            onTotalChange={setFocusCount}
+          />
+        )}
       </Section>
     </div>
   )
