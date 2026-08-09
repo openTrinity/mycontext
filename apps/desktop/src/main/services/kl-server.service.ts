@@ -2121,7 +2121,35 @@ export class KlServerService {
    * `graph-query` 那侧的 catch 会给"图谱服务还没起来"这句真话。
    */
   async factsOfEntity(entityId: string, limit = 500): Promise<ReadonlySet<string>> {
-    if (this.state !== "ready") {
+    /**
+     * ★★★ **等它起来**，而不是"没就绪就报错"。
+     *
+     * ## 这一行是"面板一直空"的真正修法
+     *
+     * kl 是懒启动的：挂载时 `void klServer.ensureReady()` 是 fire-and-forget，
+     * 实测 warmup 约 10s（`kl-server ready {warmupMs: 10815}`）。而界面在
+     * 那之前就查了 ego 图 —— 于是第一次必然失败。
+     *
+     * 更要紧的是**那一次失败不会被重试**：渲染层的
+     * `refetchInterval: building ? 5_000 : false`（`useKlGraphEgo`）只在
+     * 建图时轮询，平时是 `false`。所以启动后那一次失败的结果被缓存住，
+     * 面板就一直空着 —— 而图里其实有 26558 条边。
+     *
+     * 实测两个状态的差别（同一份数据、同一段代码）：
+     *
+     * ```
+     * kl 没在跑 → reason='读图谱失败：fetch failed'，nodes 0    ← 面板空
+     * kl 在跑   → available=true，nodes 25 / edges 64          ← 面板有内容
+     * ```
+     *
+     * ★ `ensureReady()` 是幂等且带 in-flight 合流的（并发调用等同一个
+     * Promise），所以 ego 图那 600 多次调用只会触发一次启动。
+     *
+     * ★ 仍然会抛：`ensureReady` 返回 false 是**真的起不来**（缺 Python /
+     * 端口被占 / failed 态不自动重起）。那时抛出去让上层给一句
+     * "服务还没起来"，比静默返回空集好 —— 后者会被读成"这个人没有关联"。
+     */
+    if (!(await this.ensureReady())) {
       /**
        * ★ 用裸 `Error` 而不是 `AppError`：`ErrorCode` 是封闭联合，
        * 而这条只被 `graph-query` 内部 catch 掉换成一句降级文案，

@@ -1510,8 +1510,50 @@ export function useKlGraphOverview(building: boolean) {
 export function useKlGraphEgo(building: boolean) {
   return useQuery({
     queryKey: ["kl", "graph-ego"],
-    queryFn: async () => unwrap(await window.mycontext.kl.graphEgo()),
+    queryFn: async () => {
+      const view = unwrap(await window.mycontext.kl.graphEgo())
+      /**
+       * ★★★ 「图谱服务还没起来」要当成**失败**抛出去，让 react-query 重试。
+       *
+       * ## 为什么必须抛
+       *
+       * 关系数据要问 kl 的 HTTP（`edges` 表在 ladybug 下恒空，见主进程侧
+       * `GraphQueryOptions.factsOfEntity`），而 kl 是懒启动的 ——
+       * 实测 warmup 约 10s。界面在那之前就查了，于是第一次拿到的是
+       * `available: false`。
+       *
+       * 而 `available: false` 在 react-query 看来是**成功**（拿到了数据），
+       * 于是它被缓存住、`refetchInterval` 平时又是 `false` ——
+       * **那一次失败就是最终答案**，面板从此一直空着。
+       *
+       * 实测同一份数据的两个状态：kl 没跑 → nodes 0；kl 在跑 → nodes 25
+       * / edges 64。也就是面板空与数据无关，只跟"查得早了几秒"有关。
+       *
+       * ★ 只对"服务没起来"这一类抛。其余的 `available: false`
+       * （身份没确认 / 图里没有你 / 真的没抽到关联）是**稳定结论**，
+       * 重试一百次也一样 —— 那些要原样返回，让面板显示那句话。
+       */
+      if (
+        view.available === false &&
+        view.reason !== null &&
+        /图谱服务|还没就绪/.test(view.reason)
+      ) {
+        throw new Error(view.reason)
+      }
+      return view
+    },
+    /**
+     * ★ 建图中 5s 轮询（用户正等着看图长出来）；平时不轮询 ——
+     * 图只在建图后才变，秒级重取是白花主进程的查询。
+     */
     refetchInterval: building ? 5_000 : false,
+    /**
+     * ★★ 但**失败要重试**：上面把"服务没起来"抛成了错误，
+     * 而 kl 的 warmup 实测约 10s，所以退避几次一定能等到。
+     * 不重试的话就回到了那个 bug —— 早查一次，从此空着。
+     */
+    retry: 5,
+    retryDelay: (attempt) => Math.min(2_000 * 2 ** attempt, 15_000),
     staleTime: 30_000,
   })
 }

@@ -25,9 +25,11 @@ import { existsSync, readdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import Database from "better-sqlite3"
-import { describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it } from "vitest"
 import { systemClock, type Logger } from "@mycontext/kernel"
 import { GraphQueryService } from "@main/services/graph-query.service"
+import { KlServerService } from "@main/services/kl-server.service"
+import { ProcessRunner } from "@mycontext/runtime-env"
 
 /**
  * 开发态 userData 目录名的候选，**含改名前的旧名字**。
@@ -140,7 +142,58 @@ const noopLogger: Logger = {
   child: () => noopLogger,
 }
 
-function makeService(): GraphQueryService {
+/** 仓库根 —— 端到端那组要用它找 kl-graph 与内置 venv。 */
+const REPO_ROOT = join(import.meta.dirname, "..", "..")
+
+/**
+ * 造一个真的 `KlServerService`（含懒启动）。
+ *
+ * ★ `preparePython` 手工拼激活后的环境，而不是调 `ensurePythonEnv` ——
+ * 后者在 vitest 里会抛 `A dynamic import callback was not specified.`
+ * （测试宿主的限制，不是产品行为）。与 `scripts/lib/python-env.mjs` 的
+ * `venvEnv` 同语义：VIRTUAL_ENV / PATH 前插 venv/bin / 清 PYTHONHOME。
+ *
+ * ⚠️ 契约是 `{ python, env }` —— `python` 是解释器**路径**。只给 env 会退回
+ * `resolvePython()` 的兜底（裸 `python3`），而那个解释器里没有 litellm，
+ * kl 起不来（我第一版就踩了这个，报的是 `ModuleNotFoundError: litellm`）。
+ */
+function makeKlServer(klRoot: string): KlServerService {
+  const venv = join(REPO_ROOT, "vendor", "python", "darwin-arm64", "venv")
+  return new KlServerService({
+    clock: systemClock,
+    logger: noopLogger,
+    processes: new ProcessRunner(noopLogger),
+    klRoot,
+    dataDir: DATA_DIR,
+    getWindow: () => null,
+    preparePython: () => {
+      const env = { ...process.env }
+      env["VIRTUAL_ENV"] = venv
+      env["PATH"] = `${join(venv, "bin")}:${process.env["PATH"] ?? ""}`
+      delete env["PYTHONHOME"]
+      return Promise.resolve({ python: join(venv, "bin", "python"), env })
+    },
+  })
+}
+
+/**
+ * 整个文件共用一个 kl 实例 —— 起一次约 13s，每个用例各起一个太贵。
+ * `afterAll` 里停掉。
+ */
+let sharedKlInstance: KlServerService | null = null
+function sharedKl(): KlServerService {
+  sharedKlInstance ??= makeKlServer(join(REPO_ROOT, "kl-graph"))
+  return sharedKlInstance
+}
+
+afterAll(async () => {
+  await sharedKlInstance?.stop()
+  sharedKlInstance = null
+})
+
+function makeService(
+  extra: Partial<ConstructorParameters<typeof GraphQueryService>[0]> = {},
+): GraphQueryService {
   const vault = new Database(vaultPath ?? "", { readonly: true })
   const names = JSON.parse(
     (
@@ -163,29 +216,24 @@ function makeService(): GraphQueryService {
     getChannelByConversation: () =>
       new Map(conversations.map((row) => [row.external_id, row.channel_id])),
     /**
-     * ★★★ 关系走**真实的** kl `/facts`。
+     * ★★★ 关系走**真实的** `KlServerService.factsOfEntity`（含懒启动）。
      *
      * 关系边（fact↔entity 的 `ABOUT`）在默认后端（ladybug）下不在 SQLite 里
      * —— 上游 `kl_graph/storage/base.py:446` 明写那张 `edges` 表是空的，
      * 而 `config.default.yaml:39` 的 `KL_GRAPH_BACKEND` 默认就是 ladybug。
      * 实测同一时刻 `SELECT COUNT(*) FROM edges` → 0，而 `/status` 报 26558。
      *
-     * ★ 这是 externals 测试，本来就要求真 kl 在 8200 上跑着 ——
-     * 所以这里直接打 HTTP，与生产同一条路（生产是 `klServer.factsOfEntity`）。
+     * ## ★★ 为什么走服务而不是直接打 HTTP
+     *
+     * 我第一版这里直接 `fetch("http://127.0.0.1:8200/facts")`，前提是
+     * "externals 本来就要求 kl 在跑着"。而那个前提**正是这个 bug 的形状**：
+     * kl 是懒启动的，谁都没保证它此刻在跑。于是这些用例在 kl 停着时全红，
+     * 而生产里对应的表现就是**面板空着**。
+     *
+     * 走服务之后 `ensureReady()` 会把它拉起来 —— 与生产同一条路。
      */
-    factsOfEntity: async (entityId) => {
-      const response = await fetch("http://127.0.0.1:8200/facts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entity_id: entityId, limit: 500 }),
-        signal: AbortSignal.timeout(10_000),
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const body = (await response.json()) as { facts?: Array<{ id?: string }> }
-      const out = new Set<string>()
-      for (const fact of body.facts ?? []) if (typeof fact.id === "string") out.add(fact.id)
-      return out
-    },
+    factsOfEntity: (entityId) => sharedKl().factsOfEntity(entityId),
+    ...extra,
   })
 }
 
@@ -201,7 +249,8 @@ describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有�
      */
     expect(ego.nodes.length).toBeGreaterThan(3)
     expect(ego.edges.length).toBeGreaterThan(0)
-  })
+    /** ★ kl 冷启动实测约 13s（warmup），5s 默认超时不够。 */
+  }, 60_000)
 
   it("★ 渠道真的归到了钉钉（跨两个库的 join，错了表现是「没有描边」）", async () => {
     const ego = await makeService().ego()
@@ -212,13 +261,15 @@ describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有�
      * 对不上的话 `channels` 全是空数组，而图仍然画得出来（只是没描边）。
      */
     expect(channels.has("dingtalk")).toBe(true)
-  })
+    /** ★ kl 冷启动实测约 13s（warmup），5s 默认超时不够。 */
+  }, 60_000)
 
   it("邻居数不超过上限（全图两千多个实体，不截就是毛线团）", async () => {
     const ego = await makeService().ego()
     // 中心 + 最多 TOP_PEERS 个邻居
     expect(ego.nodes.length).toBeLessThanOrEqual(25)
-  })
+    /** ★ kl 冷启动实测约 13s（warmup），5s 默认超时不够。 */
+  }, 60_000)
 
   it("★ 边的两端都在节点集合里（悬空的边会让 G6 直接报错）", async () => {
     const ego = await makeService().ego()
@@ -227,7 +278,8 @@ describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有�
       expect(ids.has(edge.source)).toBe(true)
       expect(ids.has(edge.target)).toBe(true)
     }
-  })
+    /** ★ kl 冷启动实测约 13s（warmup），5s 默认超时不够。 */
+  }, 60_000)
 
   it("★ 不返回名字之外的原文（fact 正文不进 ego 图 —— 那是大段聊天内容）", async () => {
     const ego = await makeService().ego()
@@ -235,7 +287,8 @@ describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有�
       // 实体名是短词；一旦这里出现长文本说明取错了列
       expect(node.name.length).toBeLessThan(80)
     }
-  })
+    /** ★ kl 冷启动实测约 13s（warmup），5s 默认超时不够。 */
+  }, 60_000)
 })
 
 /**
@@ -395,7 +448,8 @@ describe.skipIf(!ready)("★ 事实检索在真实图库上", () => {
       })
       expect(last.facts.length).toBeGreaterThan(0)
     }
-  })
+    /** ★ kl 冷启动实测约 13s（warmup），5s 默认超时不够。 */
+  }, 60_000)
 
   it("★ 时间范围真的收窄结果（近 7 天 ≤ 全部）", () => {
     const service = makeService()
@@ -417,4 +471,71 @@ describe.skipIf(!ready)("★ 事实检索在真实图库上", () => {
     })
     expect(week.total).toBeLessThanOrEqual(all.total)
   })
+})
+
+/**
+ * ★★★ 端到端：**kl 没在跑**时面板也要有内容。
+ *
+ * ## 这一组锁的是"看不到可视化"的最后一环
+ *
+ * 关系数据要问 kl 的 HTTP（`edges` 表在 ladybug 下恒空），而 kl 是**懒启动**
+ * 的：挂载时 `void klServer.ensureReady()` 是 fire-and-forget，实测 warmup
+ * 约 10s（`kl-server ready {warmupMs: 10815}`）。界面在那之前就查了 ego 图。
+ *
+ * 实测两个状态的差别（同一份数据、同一段代码）：
+ *
+ * ```
+ * kl 没在跑 → reason='读图谱失败：fetch failed'，nodes 0    ← 面板空
+ * kl 在跑   → available=true，nodes 25 / edges 64          ← 面板有内容
+ * ```
+ *
+ * 而那一次失败**不会被重试**：`useKlGraphEgo` 的
+ * `refetchInterval: building ? 5_000 : false` 平时是 false，
+ * 于是空结果被缓存住 —— 面板从此一直空着，而图里有 26558 条边。
+ *
+ * 修法两层：① `factsOfEntity` 里 `await ensureReady()`（等它起来）；
+ * ② 渲染层把"服务没起来"抛成错误让 react-query 退避重试。
+ * 这一组锁第①层 —— 它是能在这里端到端验的那层。
+ */
+describe.skipIf(!ready)("★★★ 端到端：kl 冷启动时 ego 图仍然有内容", () => {
+  it("★★★ kl 没在跑 → factsOfEntity 自己拉起它并返回真实关联", async () => {
+    const kl = sharedKl()
+    {
+      // 取一个真实实体（提及最多的那个）
+      const gdb = new Database(GRAPH_DB, { readonly: true })
+      const row = gdb
+        .prepare("SELECT id FROM entities ORDER BY mention_count DESC LIMIT 1")
+        .get() as { id: string } | undefined
+      gdb.close()
+      expect(row).toBeDefined()
+
+      const facts = await kl.factsOfEntity(row?.id ?? "")
+      // ★ 判据是"真的问到了关联"，而不是"没抛异常"
+      expect(facts.size).toBeGreaterThan(0)
+      expect(kl.status().state).toBe("ready")
+    }
+  }, 180_000)
+
+  /**
+   * ★★★ 走完整生产链一次：`klServer.factsOfEntity` → `graphQuery.ego()`。
+   *
+   * 判据用**面板自己的空态判据**（`ego-graph-panel.tsx`）：
+   * `!available || self === null || nodes.length <= 1` → 显示空态。
+   * 断言它为 false，也就是"面板真的会画出东西"。
+   */
+  it("★★★ 完整链路：面板不会走空态（nodes > 1）", async () => {
+    {
+      const service = makeService()
+      const ego = await service.ego()
+
+      expect(ego.available).toBe(true)
+      expect(ego.reason).toBeNull()
+      expect(ego.self).not.toBeNull()
+      // ★ 面板的空态判据
+      const wouldRenderEmpty = !ego.available || ego.self === null || ego.nodes.length <= 1
+      expect(wouldRenderEmpty).toBe(false)
+      // 渠道描边也要有（那是另一处 edges 表的修复）
+      expect([...new Set(ego.nodes.flatMap((n) => n.channels))].length).toBeGreaterThan(0)
+    }
+  }, 180_000)
 })
