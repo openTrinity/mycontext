@@ -37,6 +37,16 @@ import {
 import type { KlGraphOverview } from "@mycontext/ipc-contract"
 import type { DuplexHandle, ProcessRunner } from "@mycontext/runtime-env"
 
+/**
+ * `/ingest` 的 `source_id`。上游用它给 chunk 加命名空间前缀、也当 unit 去重的
+ * scope（见 `defaultPostIngest` 的注释）。**必填且非空**，缺了直接 422。
+ *
+ * 用渠道 id 而不是 vaultId：vault 已经由 `KL_DATA_DIR` 隔离，
+ * 拿它再当 source_id 是把同一个维度分成两层；而将来同一个 vault 里
+ * 可能有多个渠道的语料，那时按渠道分才是对的。
+ */
+const KL_INGEST_SOURCE_ID = "dingtalk"
+
 /** kl-server 默认端口（可被 KL_SERVER_PORT 覆盖）。绑 127.0.0.1，不对外。 */
 const DEFAULT_KL_PORT = 8200
 
@@ -196,7 +206,7 @@ export interface KlServerServiceOptions {
    * 分开注入而不是塞进一个 `httpClient`：这两个调用的失败含义不同
    * （启动失败 vs 探测失败），测试要能只替其中一个。
    */
-  postIngest?: (port: number, exportDir: string) => Promise<number>
+  postIngest?: (port: number, exportDir: string, sourceId: string) => Promise<number>
   /** 读 `/status` 里的 ingest 段。注入以便测试。 */
   readStatus?: (port: number) => Promise<KlIngestSnapshot | null>
   /** 打开图谱库（只读）。注入以便测试 —— 见 `GraphDbHandle` 的注释。 */
@@ -1166,7 +1176,11 @@ export class KlServerService {
   private async postIngest(exportDir: string): Promise<string | null> {
     const post = this.options.postIngest ?? defaultPostIngest
     try {
-      const status = await post(this.port, exportDir)
+      /**
+       * ★ `source_id` 用渠道 id 而不是 vaultId —— 见 `defaultPostIngest` 的注释。
+       * 目前只有一个渠道，所以是常量；接飞书时这里要按导出物的来源分。
+       */
+      const status = await post(this.port, exportDir, KL_INGEST_SOURCE_ID)
       if (status === 409) {
         this.options.logger.info("ingest already running; following it", {})
         return null
@@ -2034,14 +2048,60 @@ function defaultSleep(ms: number): Promise<void> {
  *
  * 只回状态码：body 里除了 "started" 没有我们用得上的东西（进度要问 `/status`）。
  * 409 = 已有一个在跑，调用方据此改为"跟随那一个"。
+ *
+ * ## ★★ 字段名必须与上游的 `IngestRequest` 完全一致
+ *
+ * 实测（2026-08-09）上游把请求体换成了：
+ *
+ * ```py
+ * class IngestRequest(BaseModel):
+ *     model_config = ConfigDict(extra="forbid")   # ← 多一个字段就 422
+ *     input_dir: str                              # ← 原来我们发的是 export_dir
+ *     source_id: str = Field(min_length=1)        # ← 新增，必填
+ * ```
+ *
+ * 而我们一直发 `{export_dir}`，于是**三条校验一起挂**（实测 curl 复现）：
+ * `input_dir` missing + `source_id` missing + `export_dir` extra_forbidden
+ * → `HTTP 422`。
+ *
+ * ★ 表现是 `graph build failed {reason:"建图启动失败：HTTP 422"}` 每轮重复，
+ * 而**采集、导出、蒸馏全都正常** —— 也就是"只有图谱不长"，
+ * 而 422 这个码本身完全不提示是哪个字段。所以这段注释把三个字段名钉在这里：
+ * 上游再改一次时，比对点在这儿。
+ *
+ * ★ `source_id` 传渠道 id（`"dingtalk"`）而不是 vaultId：上游用它给 chunk 加
+ * 命名空间前缀（`_namespace_chunk_ids`），也用它当 unit 去重的 scope。
+ * 同一个 vault 里将来可能有多个渠道的语料，那时按渠道分开才是对的；
+ * 而 vault 已经由 `KL_DATA_DIR` 隔离了，再拿它当 source_id 是把同一维度分两层。
  */
-async function defaultPostIngest(port: number, exportDir: string): Promise<number> {
+/**
+ * 组装 `/ingest` 的请求体。**提成纯函数是为了能测**。
+ *
+ * 原来 body 直接内联在 `fetch` 调用里，于是唯一能验证它的方式是起一个真
+ * server —— 而测试里的 fake 只看形参（`(port, dir) => 200`），
+ * 字段名换了、少了必填项都一声不响。那正是 422 那个 bug 能上线的原因。
+ *
+ * ★ 键名与上游 `IngestRequest` 一一对应，且**不能多**（`extra="forbid"`）。
+ * 见 `defaultPostIngest` 的注释。
+ */
+export function buildIngestRequestBody(
+  exportDir: string,
+  sourceId: string,
+): Record<string, unknown> {
+  return { input_dir: exportDir, source_id: sourceId }
+}
+
+async function defaultPostIngest(
+  port: number,
+  exportDir: string,
+  sourceId: string,
+): Promise<number> {
   const response = await fetch(`http://127.0.0.1:${port}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // export_dir 显式给：server 侧默认读它自己的 KL_DWS_EXPORT_DIR，
+    // input_dir 显式给：server 侧默认读它自己的 KL_DWS_EXPORT_DIR，
     // 而我们的导出目录按 vault 定 —— 让它跟着我们走，别各有一份真源。
-    body: JSON.stringify({ export_dir: exportDir }),
+    body: JSON.stringify(buildIngestRequestBody(exportDir, sourceId)),
     // 启动是非阻塞的，10s 足够；真正的等待在 /status 轮询里。
     signal: AbortSignal.timeout(10_000),
   })
