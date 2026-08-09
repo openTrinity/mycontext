@@ -13,6 +13,25 @@ from kl_graph.storage.vector_store import VectorPoint, VectorSearchResult, Vecto
 
 _VECTOR_FIELD = "embedding"
 _PAYLOAD_FIELD = "_payload_json"
+_STABLE_ID_FIELD = "_stable_id"
+
+
+def _domain_id(doc) -> str:
+    """Recover the original stable ID from a Zvec doc's fields or payload."""
+
+    fields = doc.fields if hasattr(doc, "fields") else {}
+    raw = fields.get(_STABLE_ID_FIELD)
+    if raw is not None:
+        return str(raw)
+    # Fallback: parse the JSON payload blob for the collection-specific key.
+    try:
+        payload = json.loads(fields.get(_PAYLOAD_FIELD, "{}"))
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    for key in ("chunk_id", "entity_id", "fact_id", "community_id"):
+        if payload.get(key) is not None:
+            return str(payload[key])
+    return str(doc.id)
 
 # Zvec collections have fixed schemas. The JSON field preserves the complete
 # backend-neutral payload; the typed fields below are projections used by
@@ -199,6 +218,13 @@ class ZvecVectorStore(VectorStore):
             )
         fields.append(
             self._zvec.FieldSchema(
+                name=_STABLE_ID_FIELD,
+                data_type=self._zvec.DataType.STRING,
+                nullable=False,
+            )
+        )
+        fields.append(
+            self._zvec.FieldSchema(
                 name=_PAYLOAD_FIELD,
                 data_type=self._zvec.DataType.STRING,
                 nullable=False,
@@ -235,16 +261,25 @@ class ZvecVectorStore(VectorStore):
         except KeyError as exc:
             raise ValueError(f"Vector collection is not open: {name!r}") from exc
 
-    def _fields(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _fields(self, collection: str, payload: dict[str, Any], stable_id: str | None = None) -> dict[str, Any]:
         projected = {
             name: payload[name]
             for name in _PAYLOAD_FIELDS[collection]
             if name in payload and payload[name] is not None
         }
+        if stable_id is not None:
+            projected[_STABLE_ID_FIELD] = stable_id
         projected[_PAYLOAD_FIELD] = json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         )
         return projected
+
+    @staticmethod
+    def stable_id_to_point_id(stable_id: str) -> str:
+        """Deterministic UUID5 from stable ID (safe for any Zvec doc ID constraints)."""
+
+        import uuid
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, stable_id))
 
     @staticmethod
     def _payload(doc) -> dict[str, Any]:
@@ -319,14 +354,14 @@ class ZvecVectorStore(VectorStore):
             batch = points[start : start + 1000]
             docs = [
                 self._zvec.Doc(
-                    id=point.id,
+                    id=self.stable_id_to_point_id(point.id),
                     vectors={_VECTOR_FIELD: point.vector},
-                    fields=self._fields(collection, point.payload),
+                    fields=self._fields(collection, point.payload, stable_id=point.id),
                 )
                 for point in batch
             ]
             self._check_statuses(target.upsert(docs))
-            ids.extend(point.id for point in batch)
+            ids.extend(self.stable_id_to_point_id(point.id) for point in batch)
         target.flush()
         if self.optimize_on_upsert:
             target.optimize()
@@ -359,7 +394,7 @@ class ZvecVectorStore(VectorStore):
         )
         results = [
             VectorSearchResult(
-                id=str(doc.id),
+                id=_domain_id(doc),
                 score=self._similarity(float(doc.score or 0.0)),
                 payload=self._payload(doc),
             )
@@ -375,13 +410,15 @@ class ZvecVectorStore(VectorStore):
         result: dict[str, list[float]] = {}
         target = self._collection(collection)
         for start in range(0, len(ids), 1000):
+            batch = ids[start : start + 1000]
+            point_ids = [self.stable_id_to_point_id(sid) for sid in batch]
             docs = target.fetch(
-                ids[start : start + 1000], output_fields=[], include_vector=True
+                point_ids, output_fields=[_STABLE_ID_FIELD], include_vector=True
             )
             for point_id, doc in docs.items():
                 vector = doc.vector(_VECTOR_FIELD)
                 if vector is not None:
-                    result[str(point_id)] = list(vector)
+                    result[_domain_id(doc)] = list(vector)
         return result
 
     def scroll_all(self, collection: str) -> Iterator[VectorPoint]:
@@ -396,7 +433,7 @@ class ZvecVectorStore(VectorStore):
                 vector = doc.vector(_VECTOR_FIELD)
                 if vector is not None:
                     yield VectorPoint(
-                        id=point_id,
+                        id=_domain_id(doc),
                         vector=list(vector),
                         payload=self._payload(doc),
                     )
@@ -408,25 +445,26 @@ class ZvecVectorStore(VectorStore):
         found: set[str] = set()
         target = self._collection(collection)
         for start in range(0, len(ids), 1000):
-            found.update(
-                str(point_id)
-                for point_id in target.fetch(
-                    ids[start : start + 1000],
-                    output_fields=[],
-                    include_vector=False,
-                )
+            batch = ids[start : start + 1000]
+            point_ids = [self.stable_id_to_point_id(sid) for sid in batch]
+            docs = target.fetch(
+                point_ids,
+                output_fields=[_STABLE_ID_FIELD],
+                include_vector=False,
             )
+            found.update(_domain_id(doc) for doc in docs.values())
         return found
 
     def delete(self, collection: str, ids: list[str]) -> None:
         if not ids:
             return
         target = self._collection(collection)
-        for start in range(0, len(ids), 1000):
-            batch = ids[start : start + 1000]
+        point_ids = [self.stable_id_to_point_id(sid) for sid in ids]
+        for start in range(0, len(point_ids), 1000):
+            batch = point_ids[start : start + 1000]
             self._check_statuses(target.delete(batch))
         target.flush()
-        self._forget_ids(collection, ids)
+        self._forget_ids(collection, point_ids)
 
     def close(self) -> None:
         for collection in self._collections.values():
