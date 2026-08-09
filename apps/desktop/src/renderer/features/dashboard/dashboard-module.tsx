@@ -40,6 +40,7 @@
  * `ALL CHECKS PASS`），不是挑好看的。
  */
 import { useEffect, useRef, useState } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { Avatar, Button, cn } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
@@ -112,6 +113,16 @@ export function DashboardModule() {
    * 分成两页时这个动作要用户自己抄一遍名字。
    */
   const [entityFocus, setEntityFocus] = useState<string | null>(null)
+
+  /**
+   * 「刷新状态」按钮的加载态 + 失效入口。
+   *
+   * 用 `useQueryClient` 而不是逐个 hook 的 `refetch()`：这一屏的数据来自
+   * 十几个 query（采集/图谱/数字人/水位/身份…），逐个列举必然漏，
+   * 而漏掉的那个恰好就是用户在看的那个。全失效的代价是一次多余的重取。
+   */
+  const queryClient = useQueryClient()
+  const [refreshing, setRefreshing] = useState(false)
 
   /**
    * 数字分身的名字与形象（引导流程的 payload）。
@@ -357,6 +368,44 @@ export function DashboardModule() {
               size="xl"
             />
             <GreetingRow session={session} channelNick={channelNick} />
+            {/*
+              ── 刷新：把这一屏的状态重新读一遍 ──────────────
+
+              ## ★★ 为什么需要它（而不是自动轮询）
+
+              这一屏的数字平时靠**事件推送**保持新鲜（`useIngestProgress`
+              把主进程推来的快照直接写进 query cache）——采集在跑时它比
+              任何轮询都实时，也更省。
+
+              但采集**不跑**时就没有事件。而那恰好是最需要看状态的时候
+              （身份没绑上、被 blocked、权限不足）：数字停在旧值上，
+              而用户唯一的出路是重启应用。这与我们修过的那批
+              「点了没反应」是同一类问题 —— 系统没在骗人，只是没有出口。
+
+              所以刷新是一个**用户主动**的动作，与"系统自动保持新鲜"
+              不是一回事，两者并存。
+
+              ## ★ 它不采集
+
+              点它只是重新读一遍状态，**不会**去拉新消息（那是
+              `ingest.runOnce`，另有入口）。文案必须说清 ——
+              两者混淆会让用户以为点一下就能把落后的消息补上来。
+
+              `ml-auto` 推到最右：它是这一行的次要动作，不该抢问候语的位置。
+            */}
+            <Button
+              size="sm"
+              variant="secondary"
+              className="ml-auto"
+              loading={refreshing}
+              onClick={() => {
+                setRefreshing(true)
+                void queryClient.invalidateQueries().finally(() => setRefreshing(false))
+              }}
+              title="重新读取这一屏的状态（不会去拉新消息）"
+            >
+              刷新状态
+            </Button>
           </div>
         )}
 

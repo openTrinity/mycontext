@@ -24,7 +24,9 @@
     "identityPending": "Connected. We found several accounts with the same name — confirm which one is you so learning can tell apart what you said from what others said. You can continue without confirming and finish this later in Settings.",
     "identityAmbiguous": "Several accounts share your name, so we can't tell which one is you automatically. Confirm it so learning can tell apart what you said from what others said. You can continue without confirming and finish this later in Settings.",
     "identityUnresolved": "We couldn't determine who \"you\" are — the last automatic attempt didn't succeed (possibly offline at the time). Click \"Resolve identity\" to retry. You can continue without confirming and finish this later in Settings.",
-    "identityAdoptable": "This machine already has a session for {{corpName}} · {{userName}}, but this account hasn't used it yet. Click \"Resolve identity\" below to adopt it as you, or use \"Use this identity\" on the channel page."
+    "identityAdoptable": "This machine already has a session for {{corpName}} · {{userName}}, but this account hasn't used it yet. Click \"Resolve identity\" below to adopt it as you, or use \"Use this identity\" on the channel page.",
+    "identityPendingTitle": "One more step: confirm who “you” are",
+    "identityReady": "Connected, and we know who “you” are — this step is done."
   },
   "skip": "Skip for now",
   "skipHint": "You can finish connecting later in Settings",

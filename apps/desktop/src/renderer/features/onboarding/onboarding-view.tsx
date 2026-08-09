@@ -471,7 +471,28 @@ export function OnboardingView() {
                    * `identityProblem !== null` 门控，而不是"没确认就显示"。
                    */}
                   {identityProblem === null ? null : (
-                    <div className="flex flex-col gap-[var(--gap-component-sm)] rounded-[var(--radius-md)] border border-[var(--border-divider-light)] bg-[var(--bg-card-z0)] p-[var(--gap-component-md)]">
+                    /**
+                     * ★★ 这一块要读起来像**一个状态**，不是一条附加说明。
+                     *
+                     * 原来它是白底细边的小框（`bg-card-z0` + `border-divider-light`），
+                     * 挂在授权面板下面 —— 与"补充说明"长得一样，容易被当成
+                     * 可忽略的文字划过去。而它其实是一个**待办**：
+                     * 未确认身份时蒸馏会拒掉全部语料（且不报错），画像出不来。
+                     *
+                     * 所以改成 warning 底色 + 一个标题行，让引导里的三档
+                     * 在视觉上真的是三档：
+                     *
+                     *   未授权       → 上面那个授权面板（有按钮）
+                     *   已授权待确认 → **这一块**（黄底 + 标题 + 解析入口）
+                     *   已授权已就绪 → 两者都不出现，直接下一步
+                     *
+                     * ★ 标题与正文分行：标题回答"这是什么状态"，
+                     * 正文回答"为什么要管它"。挤成一段时用户只读前半句。
+                     */
+                    <div className="flex flex-col gap-[var(--gap-component-sm)] rounded-[var(--radius-md)] bg-[var(--status-fill-warning-container)] p-[var(--gap-component-md)]">
+                      <span className="typography-body-small-500 text-[var(--status-warning)]">
+                        {t("channel.identityPendingTitle")}
+                      </span>
                       <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
                         {identityProblem.kind === "ambiguous"
                           ? t("channel.identityAmbiguous")
@@ -485,6 +506,18 @@ export function OnboardingView() {
                       <SelfIdentityPanel confirmed={selfConfirmed} unjudged={unjudged} />
                     </div>
                   )}
+                  {/*
+                    ★ 第三档：已授权、身份也确认了 → 明确说"这一步完成了"。
+
+                    原来这一档**什么都不显示**，于是它与"还在加载"、
+                    "出了点问题但没提示"在界面上长得一样 —— 用户不知道
+                    该不该等，也不知道能不能往下走。一行绿字就解决。
+                  */}
+                  {authorized && selfConfirmed && identityProblem === null ? (
+                    <p className="typography-body-small-400 text-[var(--status-success)]">
+                      {t("channel.identityReady")}
+                    </p>
+                  ) : null}
                 </div>
               )
             ) : null}

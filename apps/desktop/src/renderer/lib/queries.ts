@@ -1282,11 +1282,37 @@ export function useSaveDwsSource() {
       path?: string | null | undefined
       channelCode?: string | null | undefined
     }) => unwrap(await window.mycontext.dwsSource.save(input)),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.dwsSource })
-      // 换了 dws 之后授权状态可能跟着变（比如闭源版能刷新、开源版刷不动）
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.channels })
-    },
+    /**
+     * ★★ 全失效，且用 `onSettled` —— 换渠道客户端等于换掉了整条链的底层。
+     *
+     * ## 原来只失效两个 key，而那漏掉了受影响最大的几个
+     *
+     * 旧写法是 `onSuccess` 里失效 `dwsSource` + `channels`。而换 binary
+     * 之后**主进程侧**已经做了更多事（`register.ts` 的 `dwsSourceSave`）：
+     * 它会调 `dataPlane.clearBlocked()` 解除采集的终态闸。
+     *
+     * 于是漏掉的那些 key 全都停在旧值上：`ingest`（blocked 刚被清）、
+     * `selfIdentity`、`adoptableSession`、`status`、`channelIdentities`。
+     * 表现正是用户报的那件事：**换了客户端，界面上「采集未运行 / 身份未确认」
+     * 一个都不变，要重启应用才认**。
+     *
+     * ★ 用全失效而不是把那 5 个 key 补上：列举必然再漏（这次就漏了 5 个），
+     * 而"换底层"影响的面本来就是"几乎所有渠道相关的东西"。代价是一次多余的
+     * 重取，比"界面说的与实际不一致"便宜得多。
+     * 对照组就在本文件里 —— `useSwitchChannelIdentity` 用的正是全失效。
+     *
+     * ★ `onSettled` 而不是 `onSuccess`：主进程是**先 save 再 clearBlocked**，
+     * 所以即便 save 抛错，状态也可能已经变了一半。"失败就不刷新"会留下一个
+     * 比刷新更糟的中间态。
+     *
+     * ## ★ 事件流不用管（实测确认）
+     *
+     * 长连接的 binary 是在 spawn 那一刻定的，看起来需要重连。但
+     * `DingTalkEventConsumer` 的重连是 `while` 循环里每轮都调 `spawnOnce()`，
+     * 而那里面 `runtime.resolve("dws")` 是**现读**的（`events.ts:194`）——
+     * 也就是它下次退避重连时自然就用上新 binary 了，不需要我们介入。
+     */
+    onSettled: () => void queryClient.invalidateQueries(),
   })
 }
 
