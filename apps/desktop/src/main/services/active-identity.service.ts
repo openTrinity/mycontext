@@ -179,9 +179,35 @@ export class ActiveIdentityService {
    *    （`accounts.vault_id`）。那是"注册了但还没连渠道"的正常状态，
    *    onboarding 状态要往那个库里写。
    *
-   * @returns 要挂载的 vaultId（调用方负责真正挂）
+   * @returns 要挂载的 vaultId **与那个身份本身**（调用方负责真正挂）。
+   *
+   * ## ★★ 为什么必须把 identity 一起返回
+   *
+   * 调用方拿到 vaultId 之后调 `mountVault(vaultId)`，而那个方法第一件事是
+   * `await unmountVault()` —— 它的 `releaseVault` 里有 `activeIdentity.clear()`。
+   * 于是**这个方法刚设好的 `this.current` 被随后的卸载清掉了**，
+   * 而 mount 内部再去读 `currentIdentity()` 只会读到 null。
+   *
+   * 实测后果（用户日志，两行紧挨着且互相矛盾）：
+   *
+   * ```
+   * 14:58:43.130  active identity restored {channelId: dingtalk, …}
+   * 14:58:43.233  DIAG {seedIsUndefined: true, memoryHasIdentity: false}
+   * 14:58:43.233  vault has no bound channel identity {reason: identity_unbound}
+   * ```
+   *
+   * → 数据流整个不起：采集不跑、事件流不连、界面说「采集未运行」。
+   * 而**身份其实早就确认了**（`channel_self_identity` 有行、`confirmed_at`
+   * 有值、12832 条消息已标 `is_self=1`）—— 用户的困惑完全正确。
+   *
+   * ★ 修法是把身份**显式传给 mount**，而不是让 mount 去读内存态。
+   * `mountVault` 的 `seedIdentity` 参数本来就是为这件事设计的
+   * （见那里的注释：「为什么必须是参数」），只是登录这条路忘了传。
    */
-  resolveOnLogin(input: { accountId: string; fallbackVaultId: string }): string {
+  resolveOnLogin(input: { accountId: string; fallbackVaultId: string }): {
+    vaultId: string
+    identity: ChannelIdentityVaultRecord | null
+  } {
     const remembered = this.readRemembered()
     if (remembered !== null && remembered.accountId === input.accountId) {
       const found = this.options.identities.find(remembered)
@@ -191,7 +217,7 @@ export class ActiveIdentityService {
           channelId: found.channelId,
           corpName: found.corpName,
         })
-        return found.vaultId
+        return { vaultId: found.vaultId, identity: found }
       }
       // 记的那个身份已被解绑 → 清掉这条记录，别让它每次登录都查一次空
       this.options.settings.delete(ACTIVE_IDENTITY_KEY)
@@ -205,13 +231,13 @@ export class ActiveIdentityService {
         channelId: mostRecent.channelId,
         corpName: mostRecent.corpName,
       })
-      return mostRecent.vaultId
+      return { vaultId: mostRecent.vaultId, identity: mostRecent }
     }
 
     // 还没绑过任何渠道身份 —— 用基础 vault（onboarding 要往里写）
     this.current = null
     this.options.logger.info("no channel identity bound; using base vault", {})
-    return input.fallbackVaultId
+    return { vaultId: input.fallbackVaultId, identity: null }
   }
 
   /** 登出：清掉内存态。**不动** `app_settings` —— 下次登录还要用它恢复。 */

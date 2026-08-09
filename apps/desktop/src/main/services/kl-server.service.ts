@@ -1080,7 +1080,30 @@ export class KlServerService {
 
     const dbPath = join(this.dataDir, "knowledge.db")
     if (!existsSync(dbPath)) {
-      return empty("还没建过图（点「重新建图」开始，需要几分钟且会出网）")
+      /**
+       * ★★ **正在建图时不许说"还没建过"** —— 那是一句会误导操作的假话。
+       *
+       * `fresh=true` 的第一步是把整个 kl 目录删掉（`kl graph data wiped for
+       * fresh rebuild`），此后一段时间 `knowledge.db` 确实不存在。而那时
+       * 建图**正在跑**。
+       *
+       * 实测撞上（用户截图 + 库里数字）：界面显示「实体 0 / 事实 0」+
+       * 「图是空的 —— 建图没有成功跑过（点「重新建图」…）」，而同一时刻
+       * 库里已经有 `entities 321 / facts 409`，几分钟后那一轮正常完成
+       * （`graph build finished {entities:321, facts:409, edges:24222}`）。
+       *
+       * 危险的不是"数字不准"，而是它**引导用户点「重新建图」**——
+       * 那会把正在建的这一轮连同已建好的部分再删一遍，于是永远建不完。
+       *
+       * ★ 判据用 `this.building` 而不是"文件存不存在"：前者是我们自己的
+       * 状态机（`rebuildGraph` 进出时置位），后者在 fresh 那个窗口里
+       * 恰好给出相反的答案。
+       */
+      return empty(
+        this.building
+          ? "正在建图（第一次要几分钟）—— 这一轮完成后就会有内容，不用重新点"
+          : "还没建过图（点「重新建图」开始，需要几分钟且会出网）",
+      )
     }
 
     const open = this.options.openGraphDb ?? defaultOpenGraphDb
@@ -1157,7 +1180,20 @@ export class KlServerService {
        * ★ 文案指向**那一步**而不是"再等等"：抽取失败要么重试、要么换网关，
        * 而"最后一步"这个说法会让人什么都不做。
        */
-      const reason = describeGraphStage({ entities, facts, edges })
+      /**
+       * ★★ 建图**正在跑**时，半成品不是"失败"。
+       *
+       * `describeGraphStage` 的那几句（"事实一条都没抽出来"、"关系边还没建"）
+       * 说的是**一轮跑完之后**的状态。而建图中途它们全都会命中 ——
+       * Phase A 完成时 facts 天然是 0、边要到最后一步才建。
+       *
+       * 实测那一轮：中途 `entities 321 / facts 409 / edges 0`，
+       * 完成时 `edges 24222`。也就是说"关系边还没建"在中途是**正常**的，
+       * 而把它说成需要用户处理的问题会让人去点重新建图。
+       */
+      const reason = this.building
+        ? "正在建图（第一次要几分钟）—— 数字会随进度增长"
+        : describeGraphStage({ entities, facts, edges })
 
       return {
         /**

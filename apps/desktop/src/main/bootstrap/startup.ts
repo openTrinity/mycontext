@@ -1408,11 +1408,19 @@ export function bootstrapApp(mainDir: string): AppContext {
         })
         return
       }
-      const vaultId = activeIdentity.resolveOnLogin({
+      /**
+       * ★★ 身份要**显式传给 mount**，不能让它去读内存态。
+       *
+       * `mountVault` 第一件事是 `await unmountVault()`，而那里的
+       * `releaseVault` 会 `activeIdentity.clear()` —— 于是 `resolveOnLogin`
+       * 刚设好的身份被随后的卸载清掉，mount 里读到 null → `identity_unbound`
+       * → 数据流整个不起。完整推理见 `resolveOnLogin` 的注释。
+       */
+      const { vaultId, identity: resolved } = activeIdentity.resolveOnLogin({
         accountId: next.accountId,
         fallbackVaultId: next.vaultId,
       })
-      void mountVault(vaultId).catch((error: unknown) => {
+      void mountVault(vaultId, resolved).catch((error: unknown) => {
         logger.error("mount vault failed", {
           detail: error instanceof Error ? error.message : String(error),
         })
@@ -1499,11 +1507,12 @@ export function bootstrapApp(mainDir: string): AppContext {
         logger.warn("channel data wipe: no session; nothing to remount", {})
         return
       }
-      const vaultId = activeIdentity.resolveOnLogin({
+      // ★ 同上：身份显式传给 mount（见 `resolveOnLogin` 的注释）
+      const { vaultId, identity: resolved } = activeIdentity.resolveOnLogin({
         accountId: session.accountId,
         fallbackVaultId,
       })
-      await mountVault(vaultId)
+      await mountVault(vaultId, resolved)
     },
   })
 

@@ -132,17 +132,17 @@ describe("钉给渠道命令的 profile", () => {
 describe("登录时挑哪个 vault", () => {
   it("还没绑任何身份 → 退回账号的基础 vault（onboarding 要往那个库写）", () => {
     const service = makeService()
-    expect(service.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })).toBe(
-      BASE_VAULT,
-    )
+    expect(
+      service.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT }).vaultId,
+    ).toBe(BASE_VAULT)
     expect(service.currentIdentity()).toBeNull()
   })
 
   it("绑过一个 → 用它的 vault", () => {
     bind(CORP_A, USER_A, "vault-a")
-    expect(makeService().resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })).toBe(
-      "vault-a",
-    )
+    expect(
+      makeService().resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT }).vaultId,
+    ).toBe("vault-a")
   })
 
   /**
@@ -159,7 +159,7 @@ describe("登录时挑哪个 vault", () => {
 
     // 新实例 = 模拟重启
     const second = makeService()
-    expect(second.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })).toBe(
+    expect(second.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT }).vaultId).toBe(
       "vault-b",
     )
   })
@@ -176,9 +176,9 @@ describe("登录时挑哪个 vault", () => {
     identities.unbind(keyOf(CORP_A, USER_A))
     bind(CORP_B, USER_B, "vault-b", "组织乙")
 
-    expect(makeService().resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })).toBe(
-      "vault-b",
-    )
+    expect(
+      makeService().resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT }).vaultId,
+    ).toBe("vault-b")
   })
 
   it("别的账号记的身份不影响这个账号", () => {
@@ -187,7 +187,8 @@ describe("登录时挑哪个 vault", () => {
     first.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })
     // 换个账号登录 → 它没有任何身份，该走基础 vault
     expect(
-      makeService().resolveOnLogin({ accountId: "acct-2", fallbackVaultId: "vault-other-base" }),
+      makeService().resolveOnLogin({ accountId: "acct-2", fallbackVaultId: "vault-other-base" })
+        .vaultId,
     ).toBe("vault-other-base")
   })
 })
@@ -443,8 +444,8 @@ describe("登出", () => {
     expect(service.currentIdentity()).toBeNull()
     expect(service.currentProfile()).toBeUndefined()
     // 新实例仍能恢复到 vault-a
-    expect(makeService().resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })).toBe(
-      "vault-a",
-    )
+    expect(
+      makeService().resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT }).vaultId,
+    ).toBe("vault-a")
   })
 })
