@@ -11,7 +11,12 @@ export { PROBE_TIMEOUT_MS, probeBinaryVersion } from "./probe-version.js"
 
 export { createAgentResolver } from "./agent-resolution-cache.js"
 
-export { PYTHON_MIN_VERSION, probePythonVersion, resolvePython } from "./python.js"
+export {
+  PYTHON_MIN_VERSION,
+  bundledPythonExe,
+  probePythonVersion,
+  resolvePython,
+} from "./python.js"
 export type { PythonVersionProbe, ResolvedPython } from "./python.js"
 
 export { ProcessRunner } from "./process.js"

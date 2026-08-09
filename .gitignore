@@ -98,10 +98,11 @@ kl-graph/**/*.pyc
 # 为什么连 venv 一起入：打包后的用户不可能去跑 `pnpm setup:python`，
 # 也不该要求他们出网装 288MB 依赖。整套入 git 之后 clone/安装即可用。
 #
-# venv 里只有两处绑机器路径，都已解决：
-# · `bin/python*` 软链 —— 入库时就是**相对**的（../../python/bin/python3）；
-# · `pyvenv.cfg` 的 `home =` —— 必须绝对，启动时按本机路径重写一次
-#   （见 scripts/lib/python-env.mjs 的 relocateVenv；实测不改就起不来）。
+# 代价是 venv 里那些绑机器路径的地方必须全部改成自定位（软链改相对、
+# shebang 改 sh/python polyglot、activate 推自身位置、`pyvenv.cfg` 的
+# `home =` **整行不写**）。逐条见 vendor/python/README.md 的那张表与
+# scripts/lib/python-env.mjs 的 relocateVenv / rewriteVenvScripts。
+# `check:vendor-clean` 有一条门禁盯着"入 git 的 pyvenv.cfg 不得带 home ="。
 vendor/python/*/*.tar.gz
 # venv 里的这些是执行副产物，不入 git（首次 import 自动重建）
 vendor/python/*/venv/**/__pycache__/

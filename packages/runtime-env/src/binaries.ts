@@ -123,6 +123,17 @@ export interface RuntimeEnvOptions {
    * 这只该发生在"这个 vault 还没绑任何渠道身份"时。
    */
   dwsProfile?: (() => string | undefined) | undefined
+  /**
+   * 仓库根 —— 内置 Python 解释器就在它下面的 `vendor/python/<plat>/python`。
+   *
+   * 打包态传的是 `process.resourcesPath`（`Resources/` **镜像仓库布局**，
+   * 所以同一个相对路径在两种形态下都成立 —— 见 `python.ts` 的
+   * `bundledPythonExe` 与 `electron-builder.yml` 的 extraResources）。
+   *
+   * 缺省 undefined = 没有内置那一档，`tryResolvePython` 退回 env/PATH/系统
+   * 三档（既有测试就是这么调的，行为不变）。
+   */
+  repoRoot?: string | undefined
   /** 覆盖环境变量来源（测试注入用；缺省读 process.env） */
   env?: NodeJS.ProcessEnv
 }
@@ -396,14 +407,19 @@ export class RuntimeEnv {
 
   /**
    * Python 解释器解析。返回 null 表示「没有可用的」——**这是预期状态**，
-   * 蒸馏降级即可（我们刻意不打包解释器）。
+   * 蒸馏降级即可。
+   *
+   * 第一优先是**内置**那份（`repoRoot` 给了才有这一档）：它随包分发、版本由
+   * 我们钉。本机的只作兜底 —— 实测过 PATH 上的 `python3` 是**另一个项目
+   * venv 里的解释器**，而蒸馏跑在那上面等于把一个外部项目的生命周期
+   * 接进了我们的功能。详见 `./python.ts` 里那一档的注释。
    *
    * 实现在 ./python.ts：它要执行候选来读版本，而本文件受 spawn 门禁约束。
    * 这里保留一个方法是为了调用方便 —— 主进程已经持有 RuntimeEnv，
    * 不必为了一个解释器再传一份 env 进去。
    */
   tryResolvePython(runVersionProbe?: PythonVersionProbe): ResolvedPython | null {
-    return resolvePython(this.options.env ?? process.env, runVersionProbe)
+    return resolvePython(this.options.env ?? process.env, runVersionProbe, this.options.repoRoot)
   }
 
   /**

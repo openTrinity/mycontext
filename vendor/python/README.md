@@ -23,16 +23,50 @@ kl-server 拿系统 python3 起来就 `exit 3`，而日志里只有一个退出�
 | --- | --- | --- |
 | `<platform>/python/` | ✅ | 解释器本体（精简后 ~43MB） |
 | `<platform>/VERSION` | ✅ | 版本戳，升级时比对 |
-| `<platform>/venv/` | ❌ | 由 `pnpm setup:python` 在各机器上建 |
+| `<platform>/venv/` | ✅ | kl 的依赖（9223 个文件 / 385MB） |
 
-### 为什么 venv 不入 git
+### 为什么 venv 也入 git
 
-**venv 里写死了绝对路径** —— `pyvenv.cfg` 的 `home =`、每个脚本的 shebang
-都是生成它那台机器的路径。提交上去在别人机器上全是坏的。这不是体积问题，
-是 venv 的设计使然。
+venv 里**曾经**处处是绝对路径（生成它那台机器的），所以这一节原来写的是
+"venv 不入 git"。而真正的约束是另一件事：**打包给用户时不可能让他们去跑
+`pnpm setup:python`**，也不该要求他们出网装 280MB 依赖。
 
-所以：解释器入 git（跨机器可用），venv 由 `pnpm setup:python` 现场拼装
-（几秒，装依赖需要出网一次）。
+所以选择是"把 venv 里的绝对路径全部消灭"，而不是"不提交它"。已经做掉的：
+
+| 绑路径的地方 | 现在的形态 |
+| --- | --- |
+| `bin/python*` 软链 | 相对（`../../python/bin/python3`） |
+| `pyvenv.cfg` 的 `home =` | **整行不写** —— 靠上面那个相对软链自定位（实测：写相对路径反而起不来） |
+| 23 个 console-script 的 shebang | `#!/bin/sh` + sh/python polyglot，用 `$0` 推同目录的 `python3` |
+| `activate` / `activate.fish` | 用 `BASH_SOURCE` / `${(%):-%x}` / `status --current-filename` 推自身 |
+| `activate.csh` | **删掉** —— csh 拿不到自身路径，而全仓库没人引用它 |
+| `bin/kl` | 相对自身上跳 5 级（由 `installKlWrapper` 生成） |
+
+实现与逐条理由见 `scripts/lib/python-env.mjs`（`relocateVenv` /
+`rewriteVenvScripts`）。`check:vendor-clean` 有一条门禁盯着"入 git 的
+`pyvenv.cfg` 不得带 `home =`"。
+
+### ★ 打包态没有 venv
+
+`scripts/build-python-bundle.mjs` 会把 venv 的 site-packages **压平进解释器
+自己那份**，产物里只有 `python/`。理由是 venv 只有 site-packages、没有标准库，
+它靠 `pyvenv.cfg` 去解释器那边借 —— 而修那个指针意味着往 .app 内部写文件
+（破坏签名；Gatekeeper 隔离时那还是只读路径）。裸解释器本来就自定位，
+所以去掉 venv 那一层之后零环境变量、拷到哪都能跑。
+
+## 谁在用这个解释器
+
+**所有** mycontext 起的 Python 子进程，两条路：
+
+| 用途 | 解析入口 | 要不要 venv 的依赖 |
+| --- | --- | --- |
+| kl（知识图谱） | `scripts/lib/python-env.mjs` 的 `venvPython()` | 要（qdrant/litellm/scipy…） |
+| forge 蒸馏、persona 判定 | `packages/runtime-env/src/python.ts` 的 `resolvePython()` | **不要** —— 纯标准库 |
+
+后者只需要 base 解释器（`<platform>/python/bin/python3`），所以它同步拼路径
+就够，不走 kl 那套异步准备流程。它仍保留 `MYCONTEXT_PYTHON_BIN` → 内置 →
+PATH → 系统固定位置四档，内置排在 PATH 之前 —— 否则会命中本机某个偶然的
+`python3`（实测踩过：那是**另一个项目 venv 里的 3.14.5**）。
 
 ## 上游与版本
 
@@ -40,7 +74,24 @@ kl-server 拿系统 python3 起来就 `exit 3`，而日志里只有一个退出�
 选它而不是自己编：「在别人机器上能跑的 Python」有大量平台细节
 （rpath、SSL 证书位置、framework 布局），自己编必然踩一遍。
 
-当前版本见 `<platform>/VERSION`。
+**盘上这份的版本以 `<platform>/VERSION` 为准**（当前 `3.12.11+uv` —— `+uv`
+表示它是用下面办法①装的，不是 `pnpm vendor:python` 下载的）。
+
+### ★ VERSION 与 python-runtime.mjs 里的常量对不上，这是**已知**的
+
+`scripts/lib/python-runtime.mjs` 的 `PYTHON_VERSION` / `PYTHON_RELEASE` /
+`PYTHON_TARGETS` 是**下载路径**用的（含官方 sha256），当前写的是
+`3.12.13` / `20260728`。而入 git 这份是 3.12.11。
+
+两者不一致目前**没有后果**：解释器已入 git，`ensureBundledPython` 头一行
+`hasBundledPython()` 就命中，下载路径永远走不到。但它是个陷阱 ——
+谁删掉 `vendor/python/<platform>/` 想重建，拿回来的会是另一个小版本
+（而 venv 里那些 `.so` 是按 3.12 的 ABI 编的，小版本差异在 cp312 tag 内
+一般无碍，但"一般"不是"验过"）。
+
+要么重建时连 VERSION 一起对齐，要么把那批常量升到与盘上一致。
+选 3.12 这个大版本的理由仍然成立（见那个文件的注释：kl 的依赖里有带原生
+扩展的包，3.12 的 wheel 覆盖面比 3.13 全）。
 
 ## 怎么升级 / 补别的平台
 

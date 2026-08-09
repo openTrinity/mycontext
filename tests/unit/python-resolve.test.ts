@@ -18,7 +18,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { PYTHON_MIN_VERSION, RuntimeEnv, type PythonVersionProbe } from "@mycontext/runtime-env"
+import { PYTHON_MIN_VERSION, RuntimeEnv, bundledPythonExe } from "@mycontext/runtime-env"
+import type { PythonVersionProbe } from "@mycontext/runtime-env"
 
 const root = resolve(import.meta.dirname, "../..")
 
@@ -126,6 +127,111 @@ describe("Python 解释器解析", () => {
     )
     expect(resolved?.version).toEqual([3, 13, 2])
     expect(resolved?.source).toBe("env")
+  })
+
+  /**
+   * ★★ 内置那一档：这几条防的是一个**已经发生过**的静默错配。
+   *
+   * 加这一档之前最高优先级是 PATH，而 PATH 上的 `python3` 跟本项目无关。
+   * 实测（本机）：`which python3` 是**另一个项目 venv 里的 3.14.5**，
+   * 于是蒸馏与 persona 判定一直跑在那个解释器上 —— 它随时可能被那个项目
+   * 删掉或升级，而表现是蒸馏突然降级，没有任何东西解释为什么。
+   */
+  describe("内置解释器优先", () => {
+    /** 铺一个假的 `vendor/python/<plat>/python/bin/python3`（内容无所谓，只要文件在）。 */
+    function fakeRepo(): { repoRoot: string; exe: string; cleanup: () => void } {
+      const repoRoot = mkdtempSync(join(tmpdir(), "mycontext-repo-"))
+      const exe = bundledPythonExe(repoRoot)
+      mkdirSync(join(exe, ".."), { recursive: true })
+      writeFileSync(exe, "")
+      return { repoRoot, exe, cleanup: () => rmSync(repoRoot, { recursive: true, force: true }) }
+    }
+
+    it("内置那份排在 PATH **之前**（PATH 上有个能跑的也不用它）", () => {
+      const { repoRoot, exe, cleanup } = fakeRepo()
+      // PATH 上放一个同样合格的候选：断言的是**顺序**，不是「只有一个能用」。
+      const pathDir = mkdtempSync(join(tmpdir(), "mycontext-path-"))
+      const name = process.platform === "win32" ? "python.exe" : "python3"
+      writeFileSync(join(pathDir, name), "")
+
+      const resolved = new RuntimeEnv({
+        binDir: join(root, "apps/desktop/resources/bin"),
+        dwsChannel: "test",
+        dwsConfigDir: "/tmp/mycontext-test-dws",
+        env: { PATH: pathDir },
+        repoRoot,
+      }).tryResolvePython(probeReturning([3, 12, 11]))
+
+      expect(resolved?.path).toBe(exe)
+      expect(resolved?.source).toBe("bundled")
+      cleanup()
+      rmSync(pathDir, { recursive: true, force: true })
+    })
+
+    it("MYCONTEXT_PYTHON_BIN 仍然盖过内置（逃生阀不能被堵掉）", () => {
+      const { repoRoot, cleanup } = fakeRepo()
+      const resolved = new RuntimeEnv({
+        binDir: join(root, "apps/desktop/resources/bin"),
+        dwsChannel: "test",
+        dwsConfigDir: "/tmp/mycontext-test-dws",
+        env: { MYCONTEXT_PYTHON_BIN: REAL_FILE, PATH: "/nonexistent" },
+        repoRoot,
+      }).tryResolvePython(probeReturning([3, 12, 0]))
+
+      expect(resolved?.path).toBe(REAL_FILE)
+      expect(resolved?.source).toBe("env")
+      cleanup()
+    })
+
+    it("内置的**跑不起来**时退回本机（压平产物可能被拷坏）", () => {
+      // `build-python-bundle.mjs` 的注释里记着实测过的形态：拷贝解引用了
+      // 相对软链之后解释器 dyld 失败。那时「文件在」是真的、「能跑」是假的，
+      // 所以这一档也必须探测而不是判存在。
+      const { repoRoot, exe, cleanup } = fakeRepo()
+      const pathDir = mkdtempSync(join(tmpdir(), "mycontext-path-"))
+      const name = process.platform === "win32" ? "python.exe" : "python3"
+      writeFileSync(join(pathDir, name), "")
+
+      const resolved = new RuntimeEnv({
+        binDir: join(root, "apps/desktop/resources/bin"),
+        dwsChannel: "test",
+        dwsConfigDir: "/tmp/mycontext-test-dws",
+        env: { PATH: pathDir },
+        repoRoot,
+        // 内置那个探测失败，PATH 上那个合格
+      }).tryResolvePython((path) => (path === exe ? null : [3, 11, 0]))
+
+      expect(resolved?.path).toBe(join(pathDir, name))
+      expect(resolved?.source).toBe("path")
+      cleanup()
+      rmSync(pathDir, { recursive: true, force: true })
+    })
+
+    it("不给 repoRoot 时没有内置这一档（既有调用方行为不变）", () => {
+      const resolved = makeEnv({ PATH: "/nonexistent" }).tryResolvePython(
+        probeReturning([3, 12, 0]),
+      )
+      // 系统固定位置那一档仍在，所以只断言"不是 bundled"。
+      expect(resolved?.source).not.toBe("bundled")
+    })
+
+    /**
+     * ★★ 两份路径实现的**防漂移门禁**。
+     *
+     * `packages/runtime-env/src/python.ts` 的 `bundledPythonExe()` 与
+     * `scripts/lib/python-runtime.mjs` 的同名函数算的是同一个路径。
+     * 不复用后者是因为它是 `.mjs`、只能异步 import，而 `bootstrapApp` 是同步的
+     * （见那边注释）。两份实现必然漂移，所以用一条测试钉住 ——
+     * 「注释说要同步改」在这个仓库里已经失效过一次（kl 的目录层数那处，
+     * 见 `services/python-env.ts` 的 `repoRootFrom` 注释）。
+     */
+    it("与 scripts/lib/python-runtime.mjs 算出同一个路径", async () => {
+      // 类型来自 tests/python-runtime-mjs.d.ts —— 那份刻意写了真实签名而不是
+      // any，好让「上游改了返回形状」先在 tsc 上红（见它的文件头）。
+      const mjs = await import("../../scripts/lib/python-runtime.mjs")
+      const fake = join(tmpdir(), "mycontext-drift-check")
+      expect(bundledPythonExe(fake)).toBe(mjs.bundledPythonExe(fake))
+    })
   })
 
   it("默认探测器在本机能找到 Python（不注入时走真实探测）", () => {

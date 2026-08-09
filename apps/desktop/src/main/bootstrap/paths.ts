@@ -91,6 +91,18 @@ export interface AppPaths {
    * 不存在时 kl 功能整体降级为"未集成"。
    */
   klRoot: string
+  /**
+   * 「仓库根」—— 内置 Python 与运行时要 import 的 `.mjs` 都挂在它下面。
+   *
+   * 开发态是真的仓库根；打包态是 `Resources/`（它**镜像仓库布局**，
+   * 所以 `vendor/python/<plat>/python`、`scripts/lib/*.mjs` 这些相对路径
+   * 在两种形态下是同一个 —— 见 `resolveKlRoot` 的注释与 electron-builder.yml）。
+   *
+   * ★ 与 `klRoot` 是**同一个约定的两半**：这里 = klRoot 上跳一级。
+   * `services/python-env.ts` 的 `repoRootFrom()` 做的是同一件事（那条路
+   * 拿到的只有 klRoot，所以留着）—— 层数改了两边都要动。
+   */
+  repoRoot: string
 }
 
 /**
@@ -198,6 +210,8 @@ export function resolveAppPaths(options: {
   const agentNpmCache = join(userData, "agent-npm-cache")
   mkdirSync(agentNpmCache, { recursive: true })
 
+  const klRoot = resolveKlRoot(packaged, options.mainDir)
+
   return {
     userData,
     controlDatabase: join(userData, "control.sqlite"),
@@ -211,6 +225,8 @@ export function resolveAppPaths(options: {
     legacySharedRoot,
     legacyAgentHome,
     agentNpmCache,
-    klRoot: resolveKlRoot(packaged, options.mainDir),
+    klRoot,
+    // 上跳一级 —— 与 `services/python-env.ts` 的 `repoRootFrom()` 同一个约定。
+    repoRoot: join(klRoot, ".."),
   }
 }

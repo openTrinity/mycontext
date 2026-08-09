@@ -126,8 +126,9 @@ export class ForgeService {
       return {
         ok: false,
         reason:
-          "未检测到可用的 Python 3.9+。蒸馏引擎是 Python 源码（随包分发），" +
-          "但解释器不内置 —— 装一个或用 MYCONTEXT_PYTHON_BIN 指定。",
+          "未检测到可用的 Python 3.9+。内置解释器（vendor/python）不可用，" +
+          "本机也没找到 —— 跑 pnpm setup:python 补内置那份，" +
+          "或用 MYCONTEXT_PYTHON_BIN 指定一个。",
       }
     }
     if (!existsSync(join(this.options.forgeDir, "forge", "__main__.py"))) {

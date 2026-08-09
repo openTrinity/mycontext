@@ -11,19 +11,28 @@
  * · 同事机器上是 homebrew 3.13 才碰巧能用 —— 那是运气，不是设计；
  * · 打包给非开发者时更不成立：那些机器上可能根本没有 Python。
  *
- * 所以 Python 运行时**随包分发**。解析顺序与 dws 同一套思路：
- * 显式覆盖（`KL_PYTHON`）→ 内置 → 本机 python3（仅开发态兜底）。
+ * 所以 Python 运行时**随包分发**。解析顺序：显式覆盖（`KL_PYTHON`）→ 内置。
  *
- * ## 为什么按需下载而不是入 git
+ * ★ forge 蒸馏与 persona 判定走的是**另一条**解析路径
+ * （`packages/runtime-env/src/python.ts`），它只要 base 解释器、不要 venv 里的
+ * 依赖（那两个是纯标准库）。它同样把内置那份排在本机之前 —— 见那边的注释。
  *
- * dws 入 git 的理由是"21MB 单文件、低频更新、mac arm 开发者零配置"。
- * Python 的差别是**每平台一份**（darwin-arm64/x64、win、linux），
- * 全塞进去约 4×20MB，而仓库 `.git` 现在才 20MB。
+ * ## ★★ 解释器与 venv 现在**都入 git**（这一段曾经写的是相反的话）
  *
- * 而它有 dws 没有的性质：**上游有稳定公开的发布地址 + 官方 SHA256SUMS**，
- * 下载后校验的完整性保证与入 git 等价，体积上却省掉四份 blob。
- * 下载一次缓存在 `vendor/python/<platform>/`（gitignore），
- * 之后所有构建与启动都命中缓存。
+ * 原来这里论证的是"按需下载而不是入 git"，理由是每平台一份、四份约 80MB。
+ * 那个取舍后来被一个更硬的约束推翻了：**打包给用户时不可能让他们跑
+ * `pnpm setup:python`**，也不该要求他们出网装 280MB 依赖。于是解释器
+ * （43MB）与 venv（385MB / 9223 个文件）都进了 git，代价是把 venv 里的
+ * 绝对路径全部消灭（见 `python-env.mjs` 的 `relocateVenv` 与
+ * `vendor/python/README.md` 的那张表）。
+ *
+ * 于是下面这套下载逻辑现在是**冷路径**：`ensureBundledPython` 头一行
+ * `hasBundledPython()` 就命中，永远不联网。它留着是为了补别的平台
+ * （`pnpm vendor:python --target`）与"有人删了 vendor 想重建"。
+ *
+ * ★ 也正因为它是冷路径，下面那批常量（3.12.13）与盘上那份
+ * （`VERSION` = 3.12.11+uv）**已经不一致**，而没有任何东西会报错。
+ * 重建前先读 `vendor/python/README.md` 里"VERSION 与常量对不上"那一节。
  *
  * ## 为什么用 python-build-standalone
  *
@@ -85,7 +94,7 @@ export function platformKey() {
   return `${process.platform}-${arch}`
 }
 
-/** 内置 Python 的缓存根（gitignore）。 */
+/** 内置 Python 的根（**入 git**，见文件头）。 */
 export function pythonCacheDir(repoRoot) {
   return join(repoRoot, "vendor", "python", platformKey())
 }
@@ -95,6 +104,11 @@ export function pythonCacheDir(repoRoot) {
  *
  * 上游包解开后是 `python/bin/python3`（win 是 `python/python.exe`）——
  * 顶层那个 `python/` 目录是它自带的，不是我们加的。
+ *
+ * ★ `packages/runtime-env/src/python.ts` 里有**同一个路径的第二份实现**
+ * （那条路要在同步的 `bootstrapApp` 里用，而这个文件是 .mjs、只能异步 import）。
+ * 两边由 `tests/unit/python-resolve.test.ts` 的一条测试钉住 ——
+ * 改这个函数的返回形状时那条会红。
  */
 export function bundledPythonExe(repoRoot) {
   const base = join(pythonCacheDir(repoRoot), "python")

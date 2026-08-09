@@ -11,7 +11,12 @@
  * · 打包给非开发者时更不成立：那些机器上可能根本没有 Python。
  *
  * 所以解释器随包分发（见 `python-runtime.mjs`），再用它建**一个** venv
- * 给所有 Python 需求共用（kl、forge、将来别的）。
+ * 装 kl 的依赖（约 280MB / 150+ 个包）。
+ *
+ * ★ forge 蒸馏与 persona 判定**不走这个 venv** —— 它们是纯标准库
+ * （逐文件扫过 `vendor/forge` 全树），只要 base 解释器就够，
+ * 解析在 `packages/runtime-env/src/python.ts`（同步拼路径，不碰这套异步流程）。
+ * 那边同样把内置那份排在本机 `python3` 之前。
  *
  * ## 启动时「激活」这个环境
  *

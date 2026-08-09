@@ -261,6 +261,15 @@ export function bootstrapApp(mainDir: string): AppContext {
   const runtime = new RuntimeEnv({
     binDir: paths.binDir,
     /**
+     * 内置 Python 解释器的所在（`<repoRoot>/vendor/python/<plat>/python`）。
+     *
+     * ★ 给了它，`tryResolvePython()` 才会**优先用内置那份**而不是本机的。
+     * 不给的后果实测过：PATH 上第一个 `python3` 是**另一个项目 venv 里的
+     * 3.14.5**，于是蒸馏与 persona 判定一直跑在一个跟本项目无关、
+     * 且随时可能被那个项目删掉的解释器上。
+     */
+    repoRoot: paths.repoRoot,
+    /**
      * ★ 用 getter：用户在 UI 上改完路径/渠道号应当**立即生效**，
      * 而 `RuntimeEnv` 是启动时构造一次的。`resolve()` / `buildEnv()`
      * 每次调用都现读这两个 option —— 传静态值的话改完得重启，
@@ -526,9 +535,15 @@ export function bootstrapApp(mainDir: string): AppContext {
   /**
    * forge 蒸馏引擎（随包分发的 Python 源码）。
    *
-   * 解释器**不内置**（打包一个要几十 MB，与 opencode 那条「102MB 不入 git」
-   * 的取舍冲突），所以在这里解析一次并把结果传进去：缺失不是错误，
-   * 是降级 —— `availability()` 会给出人话原因，状态页显示它。
+   * 解释器**现在也随包**（`vendor/python/`，为 kl 引入的），所以这里解析出来
+   * 的第一候选就是它 —— 见 `runtime` 的 `repoRoot` 与 `python.ts` 的
+   * `bundledPythonExe`。forge 与 persona.py 是**纯标准库**（逐文件扫过
+   * `vendor/forge` 全树与 `templates/persona/scripts/persona.py`：只有 stdlib
+   * 加 forge 自己拷进去的 `imruntime.py`），所以它们只要 base 解释器，
+   * 不需要 kl 那套 venv + 280MB 依赖的异步准备。
+   *
+   * 仍然可能是 null（内置那份被裁掉、平台还没准备、且本机也没有）——
+   * 那是降级不是错误：`availability()` 会给出人话原因，状态页显示它。
    */
   const forgePython = runtime.tryResolvePython()
   if (forgePython === null) {
