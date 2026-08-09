@@ -9,7 +9,7 @@
  */
 import type { BrowserWindow } from "electron"
 import type { Clock, Logger } from "@mycontext/kernel"
-import { AppError } from "@mycontext/kernel"
+import { AppError, isAppError } from "@mycontext/kernel"
 import type {
   ChannelEvents,
   ChannelEventSubscriptionAudit,
@@ -431,6 +431,11 @@ export class DataPlaneService {
           started: false,
         },
         selfConfirmed: false,
+        /**
+         * 未登录/未挂载 → `unbound`：那时既没有身份行，也不该去解析。
+         * 给 `unresolved` 会让界面提示"点一下解析身份"，而实际要做的是先登录。
+         */
+        selfIdentityState: "unbound",
         mediaAssets: 0,
         minutes: 0,
         // 未登录时"还没跑过一轮"→ null。给 `drained: true` 会把未知说成没问题。
@@ -578,7 +583,24 @@ export class DataPlaneService {
 
     // 抛出的 SELF_IDENTITY_AMBIGUOUS 直接透给 UI：
     // 「无法唯一确定」必须让用户看到，不能退回到"挑一个"。
-    const resolved = await identity.resolveSelf({ inferFromMessages })
+    /**
+     * ★ 记一笔"这次是不是歧义失败" —— 那个事实只在抛错的这一刻存在。
+     *
+     * 身份行压根没写成，所以事后从库里看，「同名多 ID」与「还没解析过」
+     * 完全同形，而两者要给用户的引导相反（确认哪个是你 / 点一下解析）。
+     * 界面据此分叉，见 `IngestSnapshot.selfIdentityState`。
+     */
+    let resolved: Awaited<ReturnType<typeof identity.resolveSelf>>
+    try {
+      resolved = await identity.resolveSelf({ inferFromMessages })
+    } catch (error) {
+      if (isAppError(error) && error.code === "SELF_IDENTITY_AMBIGUOUS") {
+        this.ingest?.noteIdentityAmbiguous(true)
+      }
+      throw error
+    }
+    // 解析成功 → 清掉那一笔（否则用户修好之后界面还在说"同名歧义"）
+    this.ingest?.noteIdentityAmbiguous(false)
     // 走的哪条路要可见：三条路的可靠性不同，出问题时第一个要问的就是这个。
     this.options.logger.info("self identity resolved", { source: resolved.source })
     const repository = new SelfIdentityRepository(db)

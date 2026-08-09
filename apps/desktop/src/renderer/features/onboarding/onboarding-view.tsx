@@ -30,6 +30,7 @@ import type {
   OnboardingStepView,
 } from "@mycontext/ipc-contract"
 import {
+  useAdoptableSession,
   useChannels,
   useCompleteOnboarding,
   useCompleteStep,
@@ -44,6 +45,7 @@ import {
 import { useErrorText } from "../../lib/use-error-text.js"
 import { ChannelAuthPanel } from "../channels/channel-auth-panel.js"
 import { SelfIdentityPanel } from "../settings/self-identity-panel.js"
+import { readIdentityProblem } from "../dashboard/dashboard-data.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { StepBar, type StepBarItem, type StepVisualState } from "./step-bar.js"
 import { readPersonaIdentity } from "../persona/persona-identity.js"
@@ -227,8 +229,31 @@ export function OnboardingView() {
    * 那时下面的完成门不自动打勾、并就地给出确认入口。
    */
   const ingestSnapshot = useIngestSnapshot(authorized)
+  /**
+   * 本机有一份可采纳的登录态吗 —— 「继承来的登录态」那一档要用它。
+   * 只在已授权时问（未授权时它必然为空，白发一次 IPC）。
+   */
+  const adoptable = useAdoptableSession(authorized)
   const selfConfirmed = ingestSnapshot.data?.selfConfirmed ?? false
   const unjudged = ingestSnapshot.data?.unjudged ?? 0
+  /**
+   * 身份没确认的**原因** —— 界面据此给不同的引导。
+   *
+   * ★ 原来这里只有 `selfConfirmed` 一个布尔值，于是所有成因都被显示成
+   * 一句「检测到同名的多个账号」。而 `!selfConfirmed` 至少四种成因，
+   * 只有一种是同名歧义（见 `IngestSnapshot.selfIdentityState`）——
+   * 刚清过数据、解析失败过、还没授权都会走到这里，那时那句话是**假的**，
+   * 会把用户指向一个不存在的重名同事。
+   *
+   * `undefined`（快照还没回来）→ 不下结论：下面那块整体不渲染。
+   */
+  const identityState = ingestSnapshot.data?.selfIdentityState
+  const identityProblem = readIdentityProblem({
+    selfState:
+      identityState === undefined ? "unknown" : selfConfirmed ? "confirmed" : "unconfirmed",
+    adoptable: adoptable.data,
+    identityState,
+  })
 
   /**
    * 授权且身份已确认，才把第 1 步记成 done（软门）。
@@ -421,14 +446,49 @@ export function OnboardingView() {
                    * 走到这里的少数人，确认一下哪个账号是自己，蒸馏才能正确归属。
                    * 不确认也能继续：底部「跳过此步」始终可用（软门，不阻塞）。
                    */}
-                  {authorized && !selfConfirmed ? (
+                  {/*
+                   * ★★ 身份没确认时的引导 —— 按**真实原因**分叉。
+                   *
+                   * 原来这里是 `authorized && !selfConfirmed` 一律显示
+                   * 「检测到同名的多个账号——确认一下哪个是你」。而那句话在
+                   * 绝大多数成因下是假的：刚清过数据、解析失败过、还没绑身份
+                   * 都会走到这里。用户会去找一个不存在的重名同事，
+                   * 而真正该做的事（去授权 / 点采纳 / 重试解析）不被提及。
+                   *
+                   * 现在四档各说各的（判据在 `readIdentityProblem`）：
+                   * · unbound   → 先完成授权；
+                   * · ambiguous → **真的**同名歧义，确认哪个是你；
+                   * · adopt     → 本机有现成登录态，点「用这个身份」；
+                   * · resolve   → 解析失败过，重试一次。
+                   *
+                   * 那两个按钮（解析/确认并回填）只在**自动确认没成功**时才
+                   * 有意义 —— 正常路径上主进程授权后就自动 resolve+confirm 了
+                   * （见 post-auth-identity 的 confirmIdentity）。所以整块由
+                   * `identityProblem !== null` 门控，而不是"没确认就显示"。
+                   */}
+                  {identityProblem === null ? null : (
                     <div className="flex flex-col gap-[var(--gap-component-sm)] rounded-[var(--radius-md)] border border-[var(--border-divider-light)] bg-[var(--bg-card-z0)] p-[var(--gap-component-md)]">
                       <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
-                        {t("channel.identityPending")}
+                        {identityProblem.kind === "unbound"
+                          ? t("channel.identityUnbound")
+                          : identityProblem.kind === "ambiguous"
+                            ? t("channel.identityAmbiguous")
+                            : identityProblem.kind === "adopt"
+                              ? t("channel.identityAdoptable", {
+                                  corpName: identityProblem.corpName,
+                                  userName: identityProblem.userName,
+                                })
+                              : t("channel.identityUnresolved")}
                       </p>
-                      <SelfIdentityPanel confirmed={selfConfirmed} unjudged={unjudged} />
+                      {/*
+                        ★ `unbound` 时不给那两个按钮：还没有身份，解析必然失败
+                        （渠道命令会被身份闸拒掉）。那时唯一该做的是上面的授权。
+                      */}
+                      {identityProblem.kind === "unbound" ? null : (
+                        <SelfIdentityPanel confirmed={selfConfirmed} unjudged={unjudged} />
+                      )}
                     </div>
-                  ) : null}
+                  )}
                 </div>
               )
             ) : null}

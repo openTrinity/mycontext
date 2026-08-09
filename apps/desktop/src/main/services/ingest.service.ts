@@ -549,6 +549,13 @@ export interface IngestSnapshot {
   /** 连续失败轮数。>0 时状态页要显示「正在退避重试」，否则减速看起来像卡住 */
   failedAttempts: number
   selfConfirmed: boolean
+  /**
+   * 身份没确认的**原因**。null = 已确认。
+   *
+   * 界面据此给不同的引导（见 ipc-contract 里 `selfIdentityState` 的注释：
+   * 四种成因只有一种是同名歧义，用一句话盖住会把用户指向不存在的问题）。
+   */
+  selfIdentityState: "unbound" | "unresolved" | "ambiguous" | "unconfirmed" | null
   /** 媒体元数据行数（一期只记 ID 不下载字节） */
   mediaAssets: number
   /** 听记条数 */
@@ -722,6 +729,20 @@ export class IngestService {
    * 顺带触发一次真实的子进程调用 —— 两件事的代价差几个数量级。
    */
   private lastSessionRecheckAt = 0
+  /**
+   * 最近一次身份解析是不是**歧义**失败的。
+   *
+   * ## ★ 为什么需要记一笔，不能从库里推出来
+   *
+   * 「同名多 ID / 两条判据冲突」这个事实只在 `resolveSelf()` 抛错的那一刻
+   * 存在 —— 它不落库（身份行压根没写成），所以事后从表里看，
+   * 「歧义」与「还没解析过」完全同形。而这两者要给用户的引导相反：
+   * 前者是"确认哪个是你"，后者是"点一下解析/去授权"。
+   *
+   * 由 `DataPlaneService` 在 resolve 失败时告知（见 `noteIdentityAmbiguous`）。
+   * 解析成功或确认之后归零。
+   */
+  private identityAmbiguous = false
   private pendingHints = new Set<string>()
   /**
    * 在途的 `tickPull`。`stop()` 要 await 它。
@@ -3579,6 +3600,46 @@ export class IngestService {
    * 会落在上一次的 5 分钟窗口里被吞掉 —— 而那一条恰好是最该看到的
    * （它说明用户以为修好了，其实没修好）。
    */
+  /**
+   * 记一笔「这次身份解析是歧义失败」，或（`false`）把它清掉。
+   *
+   * 由 `DataPlaneService.resolveSelf()` 的调用侧告知 —— 那个事实只在抛错的
+   * 那一刻存在，不落库（见 `identityAmbiguous` 的注释）。
+   */
+  noteIdentityAmbiguous(value: boolean): void {
+    this.identityAmbiguous = value
+  }
+
+  /**
+   * 身份没确认时的**原因**；已确认返回 null。
+   *
+   * 三档，每一档对应一个不同的用户动作：
+   * ① 没身份行 + 这次解析是歧义 → 确认哪个是你（`ambiguous`）；
+   * ② 没身份行 + 不是歧义 → 点一下解析/重试（`unresolved`）；
+   * ③ 有身份行但没 confirm → 确认并回填（`unconfirmed`）。
+   *
+   * ★ ① 与 ② 的区别是这次改动的**核心**：它们在库里完全同形（都是"没有
+   * 身份行"），而引导相反。混成一句「检测到同名的多个账号」会让绝大多数
+   * 走到这里的人去找一个不存在的重名同事。
+   *
+   * ## ★ 为什么这里**不判** `unbound`
+   *
+   * "有没有绑渠道身份"这个事实在这一层拿不到（`IngestService` 只有 db 与
+   * plugin，而 `auth.status()` 是异步的、快照是同步的）。渲染层本来就有
+   * 渠道状态（`useChannels`），由它把"未连接"这一档合进来 ——
+   * 见 renderer 侧 `readSelfIdentityHint`。
+   *
+   * 硬要在这里补一个 `unbound` 就得让快照变异步或缓存一份可能过期的授权态，
+   * 两者都比"让已经有这个信息的那一层去合"更糟。
+   */
+  private selfIdentityState(
+    self: { confirmedAt: number | null } | null,
+  ): IngestSnapshot["selfIdentityState"] {
+    if (self !== null && self.confirmedAt !== null) return null
+    if (self === null) return this.identityAmbiguous ? "ambiguous" : "unresolved"
+    return "unconfirmed"
+  }
+
   clearBlocked(): void {
     this.blockedReason = null
     this.lastError = null
@@ -3737,6 +3798,7 @@ export class IngestService {
       // 退避中要可见：不显示的话"采集变慢了"看起来与卡住一样。
       failedAttempts: this.scheduler.failedAttempts,
       selfConfirmed: self?.confirmedAt !== null && self?.confirmedAt !== undefined,
+      selfIdentityState: this.selfIdentityState(self ?? null),
       // 媒体与听记也要可见：不显示的话「采到了但没落库」与「本来就没有」
       // 在面板上完全同形 —— 这正是本轮修复的那一类故障。
       mediaAssets: new MediaAssetRepository(this.options.db).count(),

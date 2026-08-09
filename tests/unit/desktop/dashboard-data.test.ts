@@ -680,6 +680,71 @@ describe("★★ readIdentityProblem：红字指向哪个入口", () => {
       kind: "resolve",
     })
   })
+
+  /**
+   * ★★★ 「真的同名歧义」必须与「只是还没解析」分开 —— 这两者在库里**同形**
+   * （都是"没有身份行"），而给用户的引导相反。
+   *
+   * ## 修复前的真实症状
+   *
+   * 界面对**所有**未确认都显示「检测到同名的多个账号——确认一下哪个是你」。
+   * 而走到那里的成因至少四种，只有一种是同名歧义：刚清过数据、
+   * 上次解析失败过、还没绑身份都会走到这里。于是用户去找一个**不存在的
+   * 重名同事**，而真正该做的事（去授权 / 采纳 / 重试）一个字都没提。
+   *
+   * 这与 §4「不要用一句话盖住没验证过的分支」同一条：那句文案在断言一件
+   * 系统压根没检测过的事实（它只知道"没确认"，不知道"为什么"）。
+   */
+  it("★★ identityState=ambiguous → 才说同名歧义", () => {
+    expect(
+      readIdentityProblem({
+        selfState: "unconfirmed",
+        adoptable: null,
+        identityState: "ambiguous",
+      }),
+    ).toEqual({ kind: "ambiguous" })
+  })
+
+  it("★★ identityState=unresolved → 说「重试解析」，不说同名歧义", () => {
+    expect(
+      readIdentityProblem({
+        selfState: "unconfirmed",
+        adoptable: null,
+        identityState: "unresolved",
+      }),
+    ).toEqual({ kind: "resolve" })
+  })
+
+  /**
+   * ★ 没绑身份 → 指向**授权**，而且要盖过 adopt。
+   *
+   * 排在最前是因为它更根本：还没有身份，谈不上解析或采纳。
+   * 给错方向的代价是用户在一个解决不了问题的按钮上反复点。
+   */
+  it("★★ identityState=unbound → 指向授权（即使有可采纳的登录态）", () => {
+    expect(
+      readIdentityProblem({
+        selfState: "unconfirmed",
+        adoptable: { corpName: "示例集团", userName: "王强" },
+        identityState: "unbound",
+      }),
+    ).toEqual({ kind: "unbound" })
+  })
+
+  /**
+   * ★ `unconfirmed`（有身份行、只是没 confirm）仍走原来的两分法。
+   *
+   * 那一档 adopt 与 resolve 的区分依然有效 —— 新增的三档没有把它盖掉。
+   */
+  it("identityState=unconfirmed → 仍按有没有可采纳的登录态分叉", () => {
+    expect(
+      readIdentityProblem({
+        selfState: "unconfirmed",
+        adoptable: { corpName: "示例集团", userName: "王强" },
+        identityState: "unconfirmed",
+      }),
+    ).toEqual({ kind: "adopt", corpName: "示例集团", userName: "王强" })
+  })
 })
 
 /**

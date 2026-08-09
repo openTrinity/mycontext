@@ -1176,6 +1176,15 @@ function authorizedChannel(selfConfirmed: boolean): Recorded {
     blockedReason: null,
     failedAttempts: 0,
     selfConfirmed,
+    /**
+     * ★ 原因也要给：界面按它分叉（见 `readIdentityProblem`）。
+     * 不给（undefined）会被当成"快照还没回来"而整块不渲染 ——
+     * 那正是这一层要区分的：加载态不该显示告警。
+     *
+     * 这一组测的是"未确认时给不给入口"，所以给 `unresolved`
+     * （最常见的那一档：自动识别没成功，点一下重试）。
+     */
+    selfIdentityState: selfConfirmed ? null : ("unresolved" as const),
     mediaAssets: 0,
     minutes: 0,
     storage: { mainBytes: 0, walBytes: 0, rawRecords: 0, rawPruned: 0, vectors: 0 },

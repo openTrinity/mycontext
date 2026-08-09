@@ -1590,6 +1590,28 @@ export const ingestSnapshotSchema = z.object({
    */
   failedAttempts: z.number(),
   selfConfirmed: z.boolean(),
+  /**
+   * 本人身份**为什么**还没确认 —— `null` = 已确认（正常）。
+   *
+   * ## ★★ 为什么光有 `selfConfirmed` 不够
+   *
+   * 界面原来只有那个布尔值，于是「没确认」这一个状态被显示成一句
+   * 「检测到同名的多个账号——确认一下哪个是你」。而 `!selfConfirmed`
+   * 至少有四种成因，只有**一种**是同名歧义：
+   *
+   * · `unbound`   —— 还没绑渠道身份（没授权 / 刚清过数据）。这时该做的是
+   *   去授权，而不是"确认哪个是你"；
+   * · `unresolved` —— 已绑身份但身份行还没解析出来（授权后那次自动
+   *   resolve 失败过，比如当时没网）。该做的是点一下重试；
+   * · `ambiguous` —— **真的**同名多 ID / 两条判据冲突。这才是那句文案的场景；
+   * · `unconfirmed` —— 身份行有了、但 `confirmed_at` 还是空（历史库、
+   *   或 confirm 那一步被打断）。该做的是确认+回填。
+   *
+   * 拿一种成因的文案去覆盖另外三种，用户会被指向一件不需要做的事
+   * （去找一个不存在的重名同事），而真正该做的那件不会被提到。
+   * 这与 CLAUDE.md §4 的「不要用一句话盖住没验证过的分支」同一条。
+   */
+  selfIdentityState: z.enum(["unbound", "unresolved", "ambiguous", "unconfirmed"]).nullable(),
   /** 媒体元数据行数（一期只记资源 ID，不下载字节） */
   mediaAssets: z.number(),
   /** 听记条数 */

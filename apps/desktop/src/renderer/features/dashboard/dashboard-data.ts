@@ -536,13 +536,37 @@ export function readIdentityBar(input: {
  * @param adoptable 本机有一份可采纳的登录态吗（来自 `useAdoptableSession`）。
  *   `undefined` = 还在查 / 没查（那时按"解析失败"处理，那是更保守的指向：
  *   那条路对两种成因都至少是可尝试的）。
+ * @param identityState 主进程给的**原因**（`IngestSnapshot.selfIdentityState`）。
+ *   有它才能把"真的同名歧义"与"只是还没解析"分开 —— 两者在库里同形
+ *   （都没有身份行），而引导相反。不传（旧调用方）时退回原来的两分法。
  */
 export function readIdentityProblem(input: {
   selfState: IdentityBarView["selfState"]
   adoptable: { corpName: string; userName: string } | null | undefined
-}): { kind: "adopt"; corpName: string; userName: string } | { kind: "resolve" } | null {
+  identityState?: "unbound" | "unresolved" | "ambiguous" | "unconfirmed" | null | undefined
+}):
+  | { kind: "adopt"; corpName: string; userName: string }
+  | { kind: "resolve" }
+  | { kind: "ambiguous" }
+  | { kind: "unbound" }
+  | null {
   // 只在真的"读到了、但没确认"时说话。`unknown` 是加载态，报警是狼来了。
   if (input.selfState !== "unconfirmed") return null
+  /**
+   * ★ 没绑身份 → 该去授权，而不是"确认哪个是你"。
+   *
+   * 这一档排在最前：它比下面两者更根本（还没有身份，谈不上解析或歧义），
+   * 而给错方向的代价是用户在一个解决不了问题的按钮上反复点。
+   */
+  if (input.identityState === "unbound") return { kind: "unbound" }
+  /**
+   * ★★ 真的同名歧义 —— **只有**主进程说是它才这么讲。
+   *
+   * 原来界面对所有"未确认"都显示「检测到同名的多个账号」，而那句话
+   * 在绝大多数成因下是**假的**（刚清过数据、解析失败、还没授权都会走到
+   * 这里）。它会让用户去找一个不存在的重名同事，而真正该做的事不被提及。
+   */
+  if (input.identityState === "ambiguous") return { kind: "ambiguous" }
   const adoptable = input.adoptable
   if (adoptable === null || adoptable === undefined) return { kind: "resolve" }
   return { kind: "adopt", corpName: adoptable.corpName, userName: adoptable.userName }
