@@ -58,10 +58,14 @@ function stubbedRuntime(): RuntimeEnv {
 }
 
 /**
- * 造一个 `login` 会以 `stderr` 失败的 auth。
+ * 造一个 `login` 会**抛错**的 auth（超时 / 起不来 / 被杀）。
  *
- * `spawn` 抛错模拟真实的非零退出（`ProcessRunner` 在 exit≠0 时抛 AppError），
- * 因为被测的分支正在那个 catch 里。
+ * ⚠️ 注意这**不是**非零退出那条路径：`ProcessRunner.run()` 对 exit≠0 是
+ * `resolve(result)` 而不是抛（只打一条 non-zero 警告）。真实的
+ * 「拒绝覆盖旧登录槽」走的是 resolve —— 见下面 `authExitingWith`。
+ *
+ * 首版修复只覆盖了这条 throw 路径，于是真实场景完全没被拦到，
+ * 表现是"修了却还报「请重试」"。两条都要有测试。
  */
 function authFailingWith(detail: string): DingTalkAuth {
   return new DingTalkAuth({
@@ -70,6 +74,31 @@ function authFailingWith(detail: string): DingTalkAuth {
       spawn: async () => {
         throw new AppError("PROCESS_FAILED", detail)
       },
+      exec: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ success: true, authenticated: false }),
+        stderr: "",
+        timedOut: false,
+      }),
+    } as never,
+    logger: NOOP_LOGGER as never,
+    openExternal: async () => {},
+  })
+}
+
+/**
+ * ★★ 造**真实**那条路径：`spawn` 以非零退出 **resolve**，错误文本在 stderr 里。
+ *
+ * 这是 `dws auth login` 撞上旧登录槽时的实际形态（实测 exit=2）。
+ * `exec`（status 复核）故意答"未授权" —— 那正是修复前会把用户带到
+ * 「授权流程结束但未检测到有效登录态，请重试」的原因：
+ * 非零退出没被拦，流程继续走到复核，复核说未授权。
+ */
+function authExitingWith(stderr: string, exitCode = 2): DingTalkAuth {
+  return new DingTalkAuth({
+    runtime: stubbedRuntime(),
+    processes: {
+      spawn: async () => ({ exitCode, stdout: "", stderr, timedOut: false }),
       exec: async () => ({
         exitCode: 0,
         stdout: JSON.stringify({ success: true, authenticated: false }),
@@ -128,6 +157,47 @@ describe("DingTalkAuth 识别「拒绝覆盖旧登录槽」", () => {
       expect(phases).toContain("failed")
     })
   }
+
+  /**
+   * ★★★ 这一条是**真实场景**：`spawn` 非零退出走 resolve，不走 catch。
+   *
+   * 修复前的表现（用户实际遇到的）：这条路径完全没被拦 → 流程继续走到
+   * status 复核 → 复核说未授权 → 报「授权流程结束但未检测到有效登录态，
+   * **请重试**」。也就是说第一版"修好了"之后用户看到的还是同一句话，
+   * 因为修在了一条永远不会执行的分支上（catch 只接超时/起不来/被取消）。
+   *
+   * 断言里特意写明**不是** authNotDetected：那正是回归时会退回去的地方。
+   */
+  it("★★ 非零退出（resolve 路径，真实场景）也要识别，不能落到「请重试」", async () => {
+    const phases: string[] = []
+    const auth = authExitingWith(
+      "[AUTH] dingtalk login failed: 本地登录态无法安全更新: legacy token slot " +
+        '"auth-token" does not safely match the only profile in organization ' +
+        '"dingFAKECORP0001"; refusing to overwrite a potentially unique old login',
+    )
+
+    await expect(auth.login(ctxCollecting(phases) as never)).rejects.toMatchObject({
+      code: "CHANNEL_AUTH_LEGACY_TOKEN_SLOT",
+      retryable: false,
+    })
+    expect(phases).toContain("failed")
+  })
+
+  /**
+   * ★ 非零退出但**认不出**原因时，仍交给 status 复核。
+   *
+   * 非零退出还有别的成因（用户在浏览器里放弃、网络断了），那些不该被
+   * 当成"去终端迁移登录态"。复核才是"授权到底成没成"的可信判据。
+   */
+  it("非零退出但原因认不出 → 仍走 status 复核（authNotDetected）", async () => {
+    const phases: string[] = []
+    const auth = authExitingWith("dws: context canceled by user")
+
+    await expect(auth.login(ctxCollecting(phases) as never)).rejects.toMatchObject({
+      code: "CHANNEL_AUTH_FAILED",
+      messageKey: "errors:channel.authNotDetected",
+    })
+  })
 
   /**
    * ★ 反面：**普通**授权失败仍然走 `CHANNEL_AUTH_FAILED` 且 retryable。

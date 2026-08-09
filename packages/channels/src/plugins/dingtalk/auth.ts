@@ -72,6 +72,25 @@ function isLegacyTokenSlotRefusal(detail: string): boolean {
   return LEGACY_TOKEN_SLOT_MARKERS.some((marker) => detail.includes(marker))
 }
 
+/**
+ * 造「拒绝覆盖旧登录槽」那个错误。
+ *
+ * 抽出来是因为它有**两个**触发点，而它们的形状完全不同（见 login 里的注释）：
+ * · `spawn` 非零退出 —— 走 resolve，错误文本在 `stderr` 里；
+ * · `spawn` 抛错（超时/杀进程等）—— 走 catch，文本在 `error.message` 里。
+ *
+ * 首版只挂在 catch 上，于是**真实那条路径（resolve）完全没被覆盖** ——
+ * 表现就是修了却还报「请重试」。
+ */
+function legacyTokenSlotError(detail: string, cause?: unknown): AppError {
+  return new AppError("CHANNEL_AUTH_LEGACY_TOKEN_SLOT", `钉钉拒绝覆盖本地既有登录态：${detail}`, {
+    ...(cause === undefined ? {} : { cause }),
+    // 终态：exit code 恒为 2，重试一百次都一样（见 markers 上方那段）
+    retryable: false,
+    messageKey: "errors:channel.authLegacyTokenSlot",
+  })
+}
+
 export interface DingTalkAuthOptions {
   runtime: RuntimeEnv
   processes: ProcessRunner
@@ -183,8 +202,14 @@ export class DingTalkAuth implements ChannelAuth {
       })
     }
 
+    /**
+     * 子进程的结果要在 try 之外用（非零退出的判定在下面），所以声明在这里。
+     * 走到那句判定时它必然已赋值 —— catch 的每条分支都 throw。
+     */
+    let login: Awaited<ReturnType<ProcessRunner["spawn"]>>
+
     try {
-      await this.options.processes.spawn({
+      login = await this.options.processes.spawn({
         executable: binary.path,
         args,
         env: this.options.runtime.buildEnv(),
@@ -247,15 +272,7 @@ export class DingTalkAuth implements ChannelAuth {
           messageKey: "errors:channel.authLegacyTokenSlot",
           detail,
         })
-        throw new AppError(
-          "CHANNEL_AUTH_LEGACY_TOKEN_SLOT",
-          `钉钉拒绝覆盖本地既有登录态：${detail}`,
-          {
-            cause: error,
-            retryable: false,
-            messageKey: "errors:channel.authLegacyTokenSlot",
-          },
-        )
+        throw legacyTokenSlotError(detail, error)
       }
       ctx.onProgress({ phase: "failed", messageKey: "errors:channel.authFailed", detail })
       throw new AppError("CHANNEL_AUTH_FAILED", `钉钉授权失败：${detail}`, {
@@ -264,6 +281,41 @@ export class DingTalkAuth implements ChannelAuth {
         messageKey: "errors:channel.authFailed",
         messageParams: { detail },
       })
+    }
+
+    /**
+     * ★★ `spawn` 非零退出走的是 **resolve**，不是 throw —— 所以必须在这里判。
+     *
+     * `ProcessRunner.run()` 对非零退出只打一条 `process non-zero exit` 警告然后
+     * `resolve(result)`（见 runtime-env/src/process.ts）。也就是说上面那个
+     * `catch` 只能接到"起不来 / 超时 / 被取消"，**接不到 `exit=2`**。
+     *
+     * 这一条是首版修复漏掉的那半边：识别逻辑只挂在 catch 上，而真实的
+     * 「拒绝覆盖旧登录槽」走的恰恰是这条 resolve 路径 —— 于是流程继续往下，
+     * 落到下面那个"复查 status → 未授权"的分支，报出
+     * 「授权流程结束但未检测到有效登录态，请重试」。修了却还是那句话，
+     * 正是因为修在了一条不会执行的分支上。
+     *
+     * ★ 只在**识别得出**时拦：非零退出还有别的原因（用户在浏览器里放弃、
+     * 网络断了），那些交给下面的 status 复查 —— 它是"授权到底成没成"
+     * 唯一可信的判据（见下一段），比 exit code 准。
+     */
+    const loginOutput = `${login.stderr}\n${login.stdout}`
+    if (login.exitCode !== 0 && isLegacyTokenSlotRefusal(loginOutput)) {
+      /**
+       * detail 取 stderr 的尾部：整段输出可能很长，而 UI 只需要那句原因。
+       * 不放整段是因为它可能含组织 id 这类标识符。
+       */
+      const detail = login.stderr.trim().slice(-400)
+      this.options.logger.warn("dws login refused to overwrite existing session", {
+        exitCode: login.exitCode,
+      })
+      ctx.onProgress({
+        phase: "failed",
+        messageKey: "errors:channel.authLegacyTokenSlot",
+        detail,
+      })
+      throw legacyTokenSlotError(detail)
     }
 
     /**
