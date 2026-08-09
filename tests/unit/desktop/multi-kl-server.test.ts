@@ -259,3 +259,51 @@ describe("★★★ 路由：渠道 → 它自己的 kl（每条都反证另一�
     expect(feishu.rebuildGraph).toHaveBeenCalledTimes(1)
   })
 })
+
+/**
+ * ## ★★★ 查询与推送必须是**同一份**状态
+ *
+ * 渲染层拿 kl 状态的方式是"首帧查一次 + 之后全靠 `onStatus` 推送"
+ * （`useKlServerStatus`）。这意味着**推送**才是长期生效的那一份 ——
+ * 而它曾经来自另一个对象：
+ *
+ * · 查询走 `MultiKlServerService.status()` → 有 `perChannel`（两条）；
+ * · 推送走 `KlServerService.pushStatus()` → `this.status()`，**没有** `perChannel`。
+ *
+ * 于是界面在第一次状态变化后就退化成"只有一个渠道"，并落进渲染层的
+ * 缺失回落分支 —— 实测显示成一张「飞书 · 就绪 · 8200」的卡
+ * （标签是飞书、端口是主渠道的）。用户报了这个，而排查绕了几轮，
+ * 因为**渲染层的代码是对的**，错的是它收到的数据来自谁。
+ *
+ * 这条门禁锁的是"合并状态里一定有 perChannel 且渠道齐全" ——
+ * 也就是推送源必须交出这一份。接线那侧（`mergedStatus`）由
+ * `spawn-wiring` 那类装配门禁与真机日志覆盖。
+ */
+describe("★★★ 推送给渲染层的状态必须带 perChannel", () => {
+  it("★★★ 合并状态含全部渠道（推送源交出的就是这一份）", () => {
+    const primary = server("dingtalk", 10)
+    const feishu = server("feishu", 3)
+    const service = new MultiKlServerService(
+      primary as unknown as KlServerService,
+      () => [
+        {
+          channelId: "feishu",
+          service: feishu as unknown as KlServerService,
+          enabled: () => true,
+        },
+      ],
+      "dingtalk",
+    )
+
+    const merged = service.status()
+    /**
+     * ★ 判据是"字段存在且渠道齐全"。
+     *
+     * `perChannel` 在契约里是 optional（为了兼容旧主进程），所以
+     * "推了一份没有它的状态"在类型上完全合法 —— 那正是这个 bug 能存在的原因。
+     * 断言必须显式检查它不是 undefined。
+     */
+    expect(merged.perChannel).toBeDefined()
+    expect(merged.perChannel?.map((row) => row.channelId).sort()).toEqual(["dingtalk", "feishu"])
+  })
+})

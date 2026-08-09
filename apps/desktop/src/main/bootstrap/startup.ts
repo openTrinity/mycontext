@@ -37,7 +37,7 @@ import {
 import { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 import { LlmHolder } from "@mycontext/llm"
 import { IPC_EVENTS } from "@mycontext/ipc-contract"
-import type { KlGraphOverview } from "@mycontext/ipc-contract"
+import type { KlGraphOverview, KlServerStatus } from "@mycontext/ipc-contract"
 import { bootstrapConfig } from "./config.js"
 import { resolveAppPaths, type AppPaths } from "./paths.js"
 import {
@@ -1082,6 +1082,18 @@ export function bootstrapApp(mainDir: string): AppContext {
     exportDir: "",
     port: klPort,
     getWindow: () => window,
+    /**
+     * ★★ 推送给渲染层时用**多渠道合并后**的状态（含 `perChannel`）。
+     *
+     * 不接这一条的话：首帧查询走 `appKlServer`（有 perChannel），而之后每次
+     * 状态变化推来的是主渠道自己那份（没有）—— 界面在第一次刷新后就退化成
+     * "只有一个渠道"，并落进渲染层的回落分支，显示一张标着飞书、
+     * 实际是主渠道端口的假卡。用户报过这个。
+     *
+     * ★ 惰性取值（`appKlServer` 在下面才构造，而它把 `klServer` 当参数）——
+     * 直接引用会撞 TDZ；用箭头函数推迟到真正推送的那一刻。
+     */
+    mergedStatus: (): KlServerStatus => appKlServer.status(),
     /**
      * 准备并**激活** mycontext 的共用 Python 环境（内置解释器 + venv + 依赖）。
      *

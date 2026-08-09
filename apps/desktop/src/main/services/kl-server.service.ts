@@ -209,6 +209,20 @@ export interface KlServerServiceOptions {
   exportDir?: string
   getWindow: () => BrowserWindow | null
   /**
+   * 推送给渲染层时用**这个**状态，而不是 `this.status()`。
+   *
+   * ## ★★ 为什么需要它
+   *
+   * 多渠道下渲染层要的是合并后的状态（含 `perChannel`），而那是
+   * `MultiKlServerService` 才有的。这个类只知道自己那一个 kl ——
+   * 直接推 `this.status()` 会让渲染层每次收到推送都丢掉 `perChannel`，
+   * 于是界面在第一次状态变化后就退化成"只有一个渠道"（完整分析见 `pushStatus`）。
+   *
+   * ★ 回调而不是持有门面：门面包着这个实例，反向引用会成环。
+   * ★ 可选：单渠道装配与本类的单测不需要知道门面存在（不给就推自己的）。
+   */
+  mergedStatus?: () => KlServerStatus
+  /**
    * 健康探测。注入以便测试：默认打真 `GET http://127.0.0.1:{port}/health`。
    * 返回 true = ready（`{status:"ok"}`）。
    */
@@ -2498,7 +2512,33 @@ export class KlServerService {
   private pushStatus(): void {
     const window = this.options.getWindow()
     if (window === null || window.isDestroyed()) return
-    window.webContents.send(IPC_EVENTS.klServerStatus, this.status())
+    /**
+     * ★★ 推的是**多渠道合并后**的状态，不是 `this.status()`。
+     *
+     * ## 这一条修的是"界面每次刷新都退化"
+     *
+     * `this.status()` 是**这一个** kl 自己的状态 —— 它没有 `perChannel` 字段
+     * （那是 `MultiKlServerService` 合并出来的）。而渲染层是
+     * "首帧查询一次 + 之后全靠 `onStatus` 推送"：
+     *
+     * · 首帧 `serverStatus()` → 走多渠道门面 → `perChannel` 有两条（对的）；
+     * · 之后任何一次状态变化推来的都**没有** `perChannel` → 覆盖掉首帧那份。
+     *
+     * 于是界面在第一次状态变化后就退化，并落进渲染层的"缺 perChannel"回落分支
+     * ——实测表现是一张「飞书 · 就绪 · 8200」的卡（标签是飞书、数据是主渠道的），
+     * 而 8200 是主渠道的端口。用户报了这个，我前几轮一直在渲染层找原因，
+     * 而根因在**推送源**：查询与推送走的是两个不同的对象。
+     *
+     * ★ 用回调注入而不是让这个类持有门面：门面**包着**它（`MultiKlServerService`
+     * 的构造参数就是这个实例），直接引用会成环。
+     *
+     * ★ 没给回调时回落到 `this.status()` —— 单渠道装配（以及这个类的单测）
+     * 不需要知道门面的存在。
+     */
+    window.webContents.send(
+      IPC_EVENTS.klServerStatus,
+      this.options.mergedStatus?.() ?? this.status(),
+    )
   }
 }
 
