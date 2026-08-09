@@ -37,6 +37,14 @@ use `improve_mode`.
 | `full` | Force graph-wide similarity, disambiguation, and community reconstruction. | Initial seeding, intentional re-clustering, or repair. |
 | `off` | Skip all similarity/community improvement. | Fast loading when only chunk/entity/fact retrieval is needed, or periodic dependencies are unavailable. |
 
+The full-baseline requirement for forced `incremental` mode is checked when
+improvement begins, after Phase A and Phase B have persisted their outputs. On
+an initial non-empty ingestion, forced `incremental` therefore fails during the
+improve phase without rolling back the completed build. The durable workset and
+checkpoints remain; retry the same input with `auto` or `full` to resume the
+completed work and create the baseline. If the admitted batch has no
+improvement targets, improvement resolves to `off` and no baseline check runs.
+
 `auto` is based on persisted community state. There are no timestamp watermarks,
 incremental run counters, or “full every N runs” rules.
 
