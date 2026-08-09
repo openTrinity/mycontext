@@ -246,6 +246,45 @@ export class ActiveIdentityService {
   }
 
   /**
+   * 把内存态**设回**某个身份 —— 给"卸载刚把它清掉、而我们其实没换人"用。
+   *
+   * ## ★★ 为什么需要这个方法（`clear()` 的对称件）
+   *
+   * `mountVault()` 第一件事是 `await unmountVault()`，而卸载最后一步
+   * `releaseVault` 会 `clear()`。那对**登出**是对的，但登录/启动恢复走的是
+   * 同一条挂载路径 —— 于是 `resolveOnLogin` 刚设好的身份被顺带清掉。
+   *
+   * ## ★★ 上一版修复为什么不够（两条独立的路，只修了一条）
+   *
+   * 上一版把身份传给了 `mountVault` 的 `seedIdentity`，于是渠道配置目录
+   * seed 对了（身份隔离的**主防线**）。但**内存态仍然是空的** ——
+   * 而钉 `--profile` 那道读的是 `currentProfile()` → `this.current`，
+   * 它又是 `dwsProfileArgs()` 的唯一来源。实测下来是这样：
+   *
+   * ```
+   * 23:42:51.201  active identity restored {channelId: dingtalk, …}
+   * 23:42:51.325  channel profile seeded for vault {channelId: dingtalk}  ← 主防线对了
+   * 23:42:52.651  ingest started {channelId: dingtalk}                     ← 数据流起来了
+   * 23:42:52.653  ingest tick failed {detail: "还没绑定渠道身份，拒绝执行渠道命令…"}
+   * ```
+   *
+   * 采集/听记/文档三路全灭、事件流一路退避到 60s，每 10 秒刷一条 warn。
+   * 前一版的 `identity_unbound` 消失了，换成这条 —— 同一个根因的第二个出口。
+   *
+   * ★ 为什么不让 `releaseVault` 别清：那个 `clear()` 是**登出语义**的一部分
+   * （登出后 `currentProfile()` 必须是 undefined，否则登出了还能按身份跑
+   * 渠道命令）。卸载不知道自己是"要登出"还是"要换个 vault 再挂回来"——
+   * 知道的是调用方。所以由挂载方在卸载之后**显式设回**，
+   * 而不是把这个判断塞进卸载。
+   *
+   * ★ 幂等且**不写库**：只动内存态。`markUsed` / `remember` 是 `switchTo`
+   * 的事（那是"用户换了身份"），这里表达的是"还是同一个人，别把他忘了"。
+   */
+  adopt(identity: ChannelIdentityVaultRecord | null): void {
+    this.current = identity
+  }
+
+  /**
    * 切到另一个身份。
    *
    * 幂等：已经是它就什么都不做（不白付一次几十秒的卸载+挂载）。

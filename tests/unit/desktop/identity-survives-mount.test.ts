@@ -43,6 +43,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLogger } from "@mycontext/kernel"
+import type { ChannelIdentityVaultRecord } from "@mycontext/store"
 import {
   ChannelIdentityVaultRepository,
   openStore,
@@ -252,5 +253,154 @@ describe("★★ resolveOnLogin 要把身份一起交出来", () => {
     expect(vaultId).toBe("vault-b")
     expect(identity).not.toBeNull()
     expect(identity?.corpId).toBe("dingFAKECORP0002")
+  })
+})
+
+/**
+ * 造一个**完整复刻真 `mountVault`** 的服务：卸载清掉内存态，
+ * 然后按传进来的 `seedIdentity` 设回（`activeIdentity.adopt`）。
+ *
+ * ★★ 与上面那个 `makeService` 的差别就是这次修复本身：那个只复刻了
+ * `clear()`（卸载），于是它锁得住"调用方手上那份还在"，
+ * 却锁不住"**内存态**也回来了"。而 `currentProfile()` 读的是内存态。
+ */
+function makeRealisticService(seen: { profileDuringIngest: string | undefined }) {
+  /**
+   * ★ 这就是 `startup.ts` 的 `mountVault` 那三步，顺序照抄：
+   * ① `await unmountVault()` → `releaseVault` → `clear()`；
+   * ② `if (seedIdentity !== undefined) activeIdentity.adopt(seedIdentity)`（本次修复）；
+   * ③ attach 各服务 —— `dataPlane.attach()` 在这里就起采集。
+   */
+  const mountVault = (
+    _vaultId: string,
+    seedIdentity?: ChannelIdentityVaultRecord | null,
+  ): Promise<void> => {
+    service.clear() // ① releaseVault
+    if (seedIdentity !== undefined) service.adopt(seedIdentity) // ② 设回
+    /**
+     * ③ 模拟 `dataPlane.attach()`：它在 mount **内部**就起采集，而采集的
+     * 第一条渠道命令要钉 `--profile`（读 `currentProfile()`）。所以判据必须在
+     * **这个时刻**取，而不是 mount 返回之后 —— 那时再对也已经晚了一整轮。
+     */
+    seen.profileDuringIngest = service.currentProfile()
+    return Promise.resolve()
+  }
+  const service: ActiveIdentityService = new ActiveIdentityService({
+    identities,
+    settings: new SettingsRepository(store.db),
+    logger,
+    now: () => NOW,
+    mount: (vaultId, identity) => mountVault(vaultId, identity),
+  })
+  return { service, mountVault }
+}
+
+describe("★★★ 挂载完成后 currentProfile 必须能钉住（渠道命令的唯一来源）", () => {
+  /**
+   * ★★★ **这一条是第二次修复的直接反面。**
+   *
+   * 上一版只把身份传给了 `seedIdentity`（渠道配置目录 seed 对了），
+   * 而内存态仍然是空的。于是实测：
+   *
+   * ```
+   * channel profile seeded for vault {channelId: dingtalk}   ← 主防线对了
+   * ingest started {channelId: dingtalk}                      ← 数据流起来了
+   * ingest tick failed {detail: "还没绑定渠道身份，拒绝执行渠道命令…"}
+   * ```
+   *
+   * 采集/听记/文档三路全灭、事件流退避到 60s，每 10 秒刷一条 warn。
+   *
+   * ★ 判据是 `currentProfile()` 而不是 `currentIdentity()`：前者是
+   * `dwsProfileArgs()` 的**唯一**来源，也就是渠道命令那道闸真正读的东西。
+   */
+  it("★★★ 登录挂载完 → currentProfile 有值（否则每条渠道命令都被拒）", async () => {
+    identities.bind({
+      ...keyOf(),
+      vaultId: "vault-a",
+      corpName: "组织甲",
+      userName: "张三",
+      at: NOW.toISOString(),
+    })
+    const seen = { profileDuringIngest: undefined as string | undefined }
+    const { service, mountVault } = makeRealisticService(seen)
+
+    const { vaultId, identity } = service.resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+    })
+    // 生产里就是这么调的（startup.ts 的两个 mountVault 调用点）
+    await mountVault(vaultId, identity)
+
+    expect(service.currentProfile()).toBe(CORP)
+    expect(service.currentProfile()).not.toBeUndefined()
+  })
+
+  /**
+   * ★★ 而且要在 **mount 内部**（采集起来的那一刻）就已经钉得上。
+   *
+   * mount 返回之后才对是不够的：`dataPlane.attach()` 在 mount 里面就起采集，
+   * 那时 profile 读不到的话第一轮直接被拒（实测日志里 `ingest started` 与
+   * `ingest tick failed` 相差 2 毫秒）。
+   */
+  it("★★ mount 内部起采集的那一刻就已经钉得上", async () => {
+    identities.bind({
+      ...keyOf(),
+      vaultId: "vault-a",
+      corpName: "组织甲",
+      userName: "张三",
+      at: NOW.toISOString(),
+    })
+    const seen = { profileDuringIngest: undefined as string | undefined }
+    const { service, mountVault } = makeRealisticService(seen)
+    const { vaultId, identity } = service.resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+    })
+
+    await mountVault(vaultId, identity)
+
+    expect(seen.profileDuringIngest).toBe(CORP)
+  })
+
+  /**
+   * ★ 反面：没绑身份（基础 vault）时 profile 必须**仍然是 undefined**。
+   *
+   * 这条保证上面那个修复没把"未授权"也变成"能钉住" —— 那会让引导阶段
+   * 拿着一个不属于任何人的 profile 去跑渠道命令，正是那道闸要挡的事。
+   */
+  it("★ 没绑身份 → 挂载完 profile 仍是 undefined（那道闸该拦住）", async () => {
+    const seen = { profileDuringIngest: undefined as string | undefined }
+    const { service, mountVault } = makeRealisticService(seen)
+    const { vaultId, identity } = service.resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+    })
+
+    await mountVault(vaultId, identity)
+
+    expect(service.currentProfile()).toBeUndefined()
+  })
+
+  /**
+   * ★★ `adopt(null)` 要真的清干净 —— 那是**登出**语义。
+   *
+   * 登出后 `currentProfile()` 仍有值的话，退出登录之后还能按身份跑渠道命令。
+   */
+  it("★★ adopt(null) 之后 profile 是 undefined（登出语义）", () => {
+    identities.bind({
+      ...keyOf(),
+      vaultId: "vault-a",
+      corpName: "组织甲",
+      userName: "张三",
+      at: NOW.toISOString(),
+    })
+    const seen = { profileDuringIngest: undefined as string | undefined }
+    // ★ 这条不经过 mount：它锁的是 adopt(null) 本身的语义（登出）
+    const { service } = makeRealisticService(seen)
+    service.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })
+    expect(service.currentProfile()).toBe(CORP)
+
+    service.adopt(null)
+    expect(service.currentProfile()).toBeUndefined()
   })
 })

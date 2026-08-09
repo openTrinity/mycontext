@@ -21,6 +21,7 @@ import {
   OnboardingRepository,
   SettingsRepository,
   VaultStore,
+  type ChannelIdentityVaultRecord,
   type SqliteDatabase,
   type StoreHandle,
   type VaultPaths,
@@ -1160,14 +1161,61 @@ export function bootstrapApp(mainDir: string): AppContext {
    *   渠道配置目录会被 seed 成别人，而渠道命令按 seed 出来的身份作答。
    *   实测本机三个 vault 全部错配、两个正好对调。
    *
-   *   `undefined` = 由本函数按当前内存态推断（登录初始化那两条路径：
-   *   `resolveOnLogin()` 在返回前就已经把内存态设好了，所以那里推断是对的）。
+   *   `undefined` = 退回内存态推断。★★ **现在没有任何调用方走这一档** ——
+   *   三个调用点（登录、启动恢复、切身份）都显式传。
+   *
+   *   ⚠️ 这条注释原来写着「`resolveOnLogin()` 在返回前就已经把内存态设好了，
+   *   所以那里推断是对的」—— **那个前提是假的**，而它正是那个 bug 的来源：
+   *   本函数第一行 `await unmountVault()` 的 `releaseVault` 会
+   *   `activeIdentity.clear()`，把"返回前设好的"那份清掉。也就是说这一档
+   *   在这里**永远**读到 null，而不是"当前内存态"。
+   *
+   *   留着这个分支只为让"显式传 `null`"（这个 vault 明确没身份）与"不传"
+   *   在类型上仍是两件事；真要有新调用方走它，得先想清楚上面那句。
    */
   const mountVault = async (
     vaultId: string,
-    seedIdentity?: { channelId: string; corpId: string; userId: string } | null,
+    seedIdentity?: ChannelIdentityVaultRecord | null,
   ): Promise<void> => {
     await unmountVault()
+
+    /**
+     * ★★ 把内存态**设回**卸载刚清掉的那个身份。
+     *
+     * 上面那行 `unmountVault()` 的最后一步 `releaseVault` 会
+     * `activeIdentity.clear()` —— 那对**登出**是对的，但登录/启动恢复/切身份
+     * 走的是同一条挂载路径，于是调用方刚定好的身份被顺带清成 null。
+     *
+     * ## 为什么"传了 seedIdentity"还不够
+     *
+     * `seedIdentity` 只喂给下面的 `seedChannelProfile`（渠道配置目录，
+     * 身份隔离的**主防线**）。而**钉 `--profile` 那道**读的是
+     * `activeIdentity.currentProfile()` → 内存态，两者是两条独立的路。
+     * 上一版只修了前者，实测的样子：
+     *
+     * ```
+     * 23:42:51.325  channel profile seeded for vault {channelId: dingtalk}  ← 主防线对了
+     * 23:42:52.651  ingest started {channelId: dingtalk}                     ← 数据流起来了
+     * 23:42:52.653  ingest tick failed {detail: "还没绑定渠道身份，拒绝执行渠道命令…"}
+     * ```
+     *
+     * 采集/听记/文档三路全灭、事件流一路退避到 60s。
+     *
+     * ## ★ 为什么设回的位置**必须**是这里
+     *
+     * 在卸载**之后**（否则又被清掉），且在下面 attach 任何服务**之前**
+     * （`dataPlane.attach()` 里就会起采集，而它第一条命令就要钉 profile）。
+     * 这中间没有别的窗口 —— 所以这一行的位置本身就是判据。
+     *
+     * ★ 为什么不改成"`releaseVault` 别清"：那个 `clear()` 是登出语义的一部分
+     * （登出后 `currentProfile()` 必须是 undefined）。卸载不知道自己是
+     * "要登出"还是"要换个 vault 再挂回来"—— 知道的是调用方。
+     *
+     * ★ `undefined` 时**不动**内存态：那是"你自己看着办"，而此刻它已被卸载
+     * 清空。留着这个区分是为了让"显式传 null"（这个 vault 明确没身份）
+     * 仍然能把内存态清干净。
+     */
+    if (seedIdentity !== undefined) activeIdentity.adopt(seedIdentity)
 
     const handle = vaults.handle(vaultId)
     const vp = vaults.paths(vaultId)
