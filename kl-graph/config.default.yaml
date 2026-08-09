@@ -48,7 +48,7 @@ storage:
       graph: ${oc.env:KL_FALKOR_GRAPH,kl_graph}
 
   vector:
-    backend: ${oc.env:KL_VECTOR_BACKEND,qdrant}
+    backend: ${oc.env:KL_VECTOR_BACKEND,zvec}
     qdrant:
       exact_search: ${oc.env:KL_QDRANT_EXACT_SEARCH,0}
       # Empty host selects embedded local-file mode.

@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     # Core: ingestion, storage, query engine, CLI
-    "qdrant-client>=1.9.0",
     "zvec>=0.6.0",
     "aiosqlite>=0.19.0",
     "litellm>=1.0",
@@ -31,6 +30,11 @@ dependencies = [
     "scikit-learn>=1.4",
     "pypinyin>=0.51",
 ]
+
+[project.optional-dependencies]
+# Optional vector backend: Qdrant server or embedded mode
+# Default is zvec (installed as a core dependency above)
+qdrant = ["qdrant-client>=1.9.0"]
 
 [build-system]
 requires = ["hatchling"]

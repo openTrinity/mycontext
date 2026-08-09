@@ -1,5 +1,4 @@
 # Core
-qdrant-client>=1.9.0
 zvec>=0.6.0
 aiosqlite>=0.19.0
 litellm>=1.0,<1.90
@@ -20,6 +19,9 @@ filelock>=3.0        # cross-platform process lock for concurrent-ingest guard
 
 # Windows only: system timezone database is absent, required by ZoneInfo
 tzdata; sys_platform == "win32"
+
+# Optional: alternative vector backend (default is zvec, installed as core)
+# qdrant-client>=1.9.0    # Qdrant embedded local mode or remote server
 
 # Optional: alternative graph DB backend (install as needed)
 # falkordblite>=0.2.0     # GraphBLAS Cypher engine (SSPL, subprocess)
