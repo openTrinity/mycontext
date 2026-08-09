@@ -32,7 +32,6 @@ import {
   type IngestSnapshot,
   type SelfIdentityView,
 } from "@mycontext/ipc-contract"
-import { AUTO_BUILD_MIN_INTERVAL_MS } from "@mycontext/knowledge-feed"
 import { IngestService } from "./ingest.service.js"
 import type { FeedDirs, FeedService } from "./feed.service.js"
 
@@ -100,15 +99,6 @@ interface IngestIntervals {
   minutesMs?: number
   documentsMs?: number
   activeScanMs?: number
-  /**
-   * 建图最小间隔。**与上面几项不同：它不是"多久跑一次"，而是"至少隔多久"**
-   * —— 完整的 why 见契约里 `graphBuildMinIntervalMs` 的注释。
-   *
-   * ★ 它也不由 `IngestService` 消费（那是采集），而是被自动建图的判据
-   * （`auto-build.ts` 的 `decide()`）读走。放在同一组是因为存取链与
-   * 用户心智都一致，不是因为消费者相同。
-   */
-  graphBuildMinIntervalMs?: number
 }
 
 /**
@@ -130,14 +120,12 @@ function readIngestIntervals(db: SqliteDatabase): IngestIntervals | undefined {
     const minutesMs = num(parsed["minutesMs"])
     const documentsMs = num(parsed["documentsMs"])
     const activeScanMs = num(parsed["activeScanMs"])
-    const graphBuildMinIntervalMs = num(parsed["graphBuildMinIntervalMs"])
     if (probeBaseMs !== undefined) iv.probeBaseMs = probeBaseMs
     if (probeMaxMs !== undefined) iv.probeMaxMs = probeMaxMs
     if (pullMs !== undefined) iv.pullMs = pullMs
     if (minutesMs !== undefined) iv.minutesMs = minutesMs
     if (documentsMs !== undefined) iv.documentsMs = documentsMs
     if (activeScanMs !== undefined) iv.activeScanMs = activeScanMs
-    if (graphBuildMinIntervalMs !== undefined) iv.graphBuildMinIntervalMs = graphBuildMinIntervalMs
     return Object.keys(iv).length === 0 ? undefined : iv
   } catch {
     // 表还不存在（迁移没跑完）/ JSON 坏了 → 用默认，不让它挡住采集启动。
@@ -153,9 +141,11 @@ const SNAPSHOT_THROTTLE_MS = 250
  * （probe 10s / max 120s / pull 2min / minutes 30min）——
  * 两处各写一份会让设置页显示的默认值与实际跑的不一致，而那种偏差查不出来。
  *
- * ★ `graphBuildMinIntervalMs` 是例外：它的消费者不是 `IngestService` 而是
- * 自动建图的判据（`auto-build.ts`），所以同源对象是那边的
- * `AUTO_BUILD_MIN_INTERVAL_MS`。两处必须一致，同理由。
+ * ★ 这里**不再**有 `graphBuildMinIntervalMs`（自动建图的最小间隔）。
+ * rebase 到 main 之后那套节流换了机制：不再按"至少隔多久"，而是按
+ * **连续失败次数**退避（`auto-build.ts` 的 `AUTO_BUILD_BACKOFF_MS`，
+ * 30min / 1h / 2h 三档）。保留一个并行的最小间隔等于两套节流各判一次，
+ * 而它们不一致时的表现是"该建的时候没建"—— 静默且难查。
  */
 const INTERVAL_DEFAULTS: Required<IngestIntervals> = {
   probeBaseMs: 10_000,
@@ -164,7 +154,6 @@ const INTERVAL_DEFAULTS: Required<IngestIntervals> = {
   minutesMs: 30 * 60_000,
   documentsMs: 60 * 60_000,
   activeScanMs: 30_000,
-  graphBuildMinIntervalMs: AUTO_BUILD_MIN_INTERVAL_MS,
 }
 
 /** 生效的采集周期（全字段都有值 —— 缺省与用户配置合并后的结果）。 */

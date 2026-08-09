@@ -282,6 +282,11 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
     selfState: identity.selfState,
     adoptable: adoptable.data,
     // ★ 把原因带上：没有它「真的同名歧义」与「只是还没解析」无法区分
+    /**
+     * ★ 走 `scope.ingest` —— 这个组件不再自己调 `useIngestSnapshot`
+     * （那些查询已收进 `useDashboardScope`）。`scopeSnapshot` 用 `...snap`
+     * 展开，所以这个顶层字段照旧在。
+     */
     identityState: scope.ingest?.selfIdentityState,
   })
 

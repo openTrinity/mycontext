@@ -465,12 +465,14 @@ export function bootstrapApp(mainDir: string): AppContext {
        * 挡住一次明确的点击就是"点了没反应"，那比多跑一次建图糟得多。
        */
       /**
-       * ★ 返回类型**必须显式写**（与下面 `buildSchedule` 同一个理由）：
-       * 这个闭包引用 `dataPlane`，而 `dataPlane` 的构造又引用 `feed` ——
-       * 不标注的话 tsc 判定循环推断（TS7022/7023），报的位置还在别处
-       * （`feed`/`dataPlane` 的声明行），很难看出根因在这一行。
+       * ★ 这里**曾经**有一个 `minIntervalMs`（自动建图的最小间隔，取自
+       * 用户可配的采集周期）。rebase 到 main 之后那套节流换了机制 ——
+       * 改成按**连续失败次数**退避（`AUTO_BUILD_BACKOFF_MS`：30min/1h/2h），
+       * 而 `AutoBuildInput` 里已经没有这个字段。
+       *
+       * 没有保留一个并行的最小间隔：两套节流各判一次，不一致时的表现是
+       * "该建的时候没建"—— 静默且难查。
        */
-      minIntervalMs: (): number => dataPlane.intervals().graphBuildMinIntervalMs,
       ready: () => {
         const status = klServer.status()
         // building 中不再触发（rebuildGraph 自己也会挡，这里省一次无效调用）
