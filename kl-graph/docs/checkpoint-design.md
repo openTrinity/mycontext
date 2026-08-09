@@ -9,8 +9,9 @@
 ## 1. Context & Problem
 
 > Note (post-cutover): the extraction cache now lives in the `extraction_cache`
-> table of `knowledge.db` (keyed by md5 of chunk id, success-only rows);
-> deleting or `--fresh-db`-ing `knowledge.db` clears it. The JSON-per-chunk
+> table of the separate `extraction_cache.db` (keyed by md5 of chunk id,
+> success-only rows, rolling LRU with a configurable fixed entry limit).
+> Deleting or `--fresh-db`-ing `knowledge.db` preserves it. The JSON-per-chunk
 > "disk cache" layout described throughout this doc — including the `extraction`
 > (B.1) commit-vs-cache row and the `_load_extraction_cache` replay references —
 > is historical.
@@ -355,7 +356,7 @@ On resume, if the requested parameters differ from what's recorded, the step re-
 
 | Flag | Effect |
 |------|--------|
-| `--fresh-db` | Deletes SQLite + Qdrant + checkpoint file (complete restart) |
+| `--fresh-db` | Deletes `knowledge.db` + Qdrant + graph + checkpoint, while preserving the separate extraction cache |
 | `--reset-checkpoint` | Clears all checkpoint entries (re-runs everything with idempotent inserts) |
 | `--reset-checkpoint improve` | Clears only `improve.*` steps (re-runs improve with potentially new params) |
 | `--no-checkpoint` (improve.py) | Run without checkpoint (ignore and don't update) |

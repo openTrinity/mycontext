@@ -133,7 +133,7 @@ remaining delta. The same workflow handles the initial build and later updates.
 
 | Step | Operation | Produces |
 |------|-----------|----------|
-| 1.8 | **LLM extraction** — entity + fact extraction per chunk (cached in the `extraction_cache` table of knowledge.db) | Extraction cache |
+| 1.8 | **LLM extraction** — entity + fact extraction per chunk (cached in separate, bounded `extraction_cache.db`, preserved across graph/content rebuilds) | Extraction cache |
 | 1.9 | **Build entities** — merge by normalized name, create Person entities from chunk authors | Entity nodes |
 | 1.10 | **Build facts** — create Fact nodes from extraction results | Fact nodes |
 | 1.11 | **Embed entities + facts** — into vector store | Entity/Fact vectors |

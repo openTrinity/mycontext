@@ -54,8 +54,8 @@ Three stages:
      No LLM; dense + BM25 recall works after this.
    - **Phase B** runs LLM entity/fact extraction over the selected chunks, then builds
      and embeds the graph (entities, facts, structural edges). This is the only
-     LLM-billed phase; results are cached per chunk in the `extraction_cache`
-     table of `knowledge.db` and replayable.
+     LLM-billed phase; results are cached per chunk in the separate, bounded
+     `extraction_cache.db` and remain replayable across database rebuilds.
    - **Finalization** builds similarity edges (ENTITY_SIMILAR, FACT_SIMILAR),
      runs community detection (Leiden L0–L3), entity disambiguation, and
      community summarization + embedding. Re-runnable standalone with different
@@ -123,7 +123,7 @@ Example `.env`:
 
 ```bash
 # --- data + export locations ---
-export KL_DATA_DIR=./data                      # where knowledge.db + qdrant land
+export KL_DATA_DIR=./data                      # knowledge/cache DBs + qdrant
 export KL_DWS_EXPORT_DIR=/path/to/dws_export   # offline scripts.ingest default only
 
 # --- embedding endpoint (OpenAI-compatible, routed via litellm) ---
@@ -149,6 +149,7 @@ export KL_LLM_FLASH_BASE_URL=https://your-llm-endpoint
 export KL_LLM_FLASH_PROVIDER=anthropic             # LiteLLM provider prefix
 export KL_LLM_FLASH_MODEL=qwen3.6-flash
 export ANTHROPIC_AUTH_TOKEN=your-llm-key       # used as the LLM API key
+export KL_EXTRACTION_CACHE_MAX_ENTRIES=100000  # rolling LRU row limit
 # Force litellm onto its httpx transport (kl-graph also sets this in code).
 # Its default aiohttp transport raises `'ascii' codec` UnicodeEncodeError when a
 # gateway returns a non-ASCII response header. Value MUST be "True" (not "1").
@@ -342,8 +343,8 @@ external backend paths or graph names must also be distinct.
 ```bash
 set -a; source .env; set +a
 
-# Ingest: Phase A + Phase B. --fresh-db wipes knowledge.db (the extraction
-# cache lives inside it, so this clears the cache too) + Qdrant + Ladybug graph;
+# Ingest: Phase A + Phase B. --fresh-db wipes knowledge.db + Qdrant + the
+# Ladybug graph, but preserves the rolling extraction_cache.db;
 # with no flag it smart-resumes (skip Phase A if already embedded).
 python -m scripts.ingest \
   --input-dir /path/to/dws_export \
@@ -371,7 +372,7 @@ python scripts/embed_communities.py
 | `--build-only` | Advanced: build graph from cached results only, no LLM (assumes Phase A ran) |
 | `--concurrency N` | Max concurrent extraction LLM calls (recommended: **50**) |
 | `--improve-mode MODE` | `auto` (default), `incremental`, `full`, or `off` |
-| `--fresh-db` | Delete `knowledge.db`, Qdrant, and the active Ladybug graph first (the extraction cache lives inside `knowledge.db`, so it is cleared too) |
+| `--fresh-db` | Delete `knowledge.db`, Qdrant, and the active Ladybug graph first; preserve `extraction_cache.db` |
 
 The script and `POST /ingest` use the same unit-incremental runner and the same
 source-specific checkpoint. There is no timestamp watermark or separate
@@ -533,8 +534,8 @@ kl-graph/
 ├── requirements.txt
 ├── .env                  # (gitignored) local endpoint/secret config
 └── data/                 # (gitignored) runtime data
-    ├── knowledge.db          # SQLite content/metadata; also edges when backend=sqlite;
-    │                         # holds the `extraction_cache` table (Phase A LLM cache, replay source)
+    ├── knowledge.db          # SQLite content/metadata; also edges when backend=sqlite
+    ├── extraction_cache.db   # durable Phase-A LLM cache; rolling LRU, 100k rows by default
     ├── graph.ladybug/        # LadybugDB nodes/edges when backend=ladybug
     ├── qdrant_data/          # main vector store (chunks/entities/facts)
     └── qdrant_communities/   # community-summary vector store

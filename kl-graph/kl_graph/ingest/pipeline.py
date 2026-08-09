@@ -42,6 +42,9 @@ ENTITY_DESCRIPTION_SUMMARIZE = bool(
 )
 GENERIC_SOURCES = tuple(cfg.pipelines.ingestion.generic_sources)
 KEEP_EXTRACTION_CACHE = bool(cfg.pipelines.ingestion.keep_extraction_cache)
+EXTRACTION_CACHE_MAX_ENTRIES = int(
+    cfg.pipelines.ingestion.extraction.cache_max_entries
+)
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 from kl_graph.ingest.checkpoint import IngestCheckpoint
@@ -641,6 +644,7 @@ class IngestionPipeline:
         cache_db: Path | None = None,
         max_concurrent_llm: int = 50,
         *,
+        cache_max_entries: int = EXTRACTION_CACHE_MAX_ENTRIES,
         store: KnowledgeStore | None = None,
         sqlite: SQLiteStore | None = None,  # backward-compat alias for store
         qdrant: QdrantStore | None = None,
@@ -653,11 +657,19 @@ class IngestionPipeline:
         structural_cache=None,
     ):
         self.messages_dir = messages_dir
-        self.sqlite_path = sqlite_path
+        self.sqlite_path = Path(sqlite_path)
         self.qdrant_path = qdrant_path
-        # The extraction cache is a table inside the SQLite content db
-        # (``knowledge.db``); default to the same file the graph store uses.
-        self.cache_db = cache_db if cache_db is not None else sqlite_path
+        # Keep expensive LLM results outside the disposable content database.
+        # Deriving from sqlite_path preserves custom data-directory behavior.
+        self.cache_db = (
+            Path(cache_db)
+            if cache_db is not None
+            else self.sqlite_path.parent / "extraction_cache.db"
+        )
+        self.cache_max_entries = int(cache_max_entries)
+        self.legacy_cache_db = (
+            self.sqlite_path if self.cache_db != self.sqlite_path else None
+        )
         self.keep_cache = keep_cache
         self.source_id = source_id
         self.incremental_units = incremental_units
@@ -749,6 +761,19 @@ class IngestionPipeline:
         TEMPORAL / REPLY_TO) still restrict themselves to the chat chunks.
         """
         return [*self.messages, *self.extra_chunks]
+
+    def _validate_extraction_cache_capacity(self, required_entries: int) -> None:
+        """Prevent rolling eviction from corrupting the active graph build."""
+        if required_entries <= self.cache_max_entries:
+            return
+        raise RuntimeError(
+            "Extraction workset contains "
+            f"{required_entries:,} chunks, exceeding the rolling cache limit "
+            f"of {self.cache_max_entries:,}. Increase "
+            "pipelines.ingestion.extraction.cache_max_entries (or "
+            "KL_EXTRACTION_CACHE_MAX_ENTRIES) before extraction so results "
+            "needed by the following graph build are not evicted."
+        )
 
     @property
     def workset_unit_count(self) -> int:
@@ -892,7 +917,12 @@ class IngestionPipeline:
             return
         from kl_graph.ingest.extraction_cache import ExtractionCacheStore
 
-        store = ExtractionCacheStore(self.cache_db)
+        store = ExtractionCacheStore(
+            self.cache_db,
+            max_entries=self.cache_max_entries,
+            # Clearing must never import the legacy cache just to delete it.
+            legacy_db_path=None,
+        )
         try:
             store.clear()
         finally:
@@ -1006,6 +1036,8 @@ class IngestionPipeline:
                 f"{len(self.extra_chunks)} source chunks = {len(chunks)} total"
             )
 
+            self._validate_extraction_cache_capacity(len(chunks))
+
             # C7: every chunk is extracted (no trivial-skip filter).
             print(f"  Chunks to extract: {len(chunks)}")
 
@@ -1014,6 +1046,8 @@ class IngestionPipeline:
                 self.extractor = LLMExtractor(
                     cache_db=self.cache_db,
                     max_concurrent=self.max_concurrent_llm,
+                    cache_max_entries=self.cache_max_entries,
+                    legacy_cache_db=self.legacy_cache_db,
                 )
 
             # Run flat parallel extraction over all chunks
@@ -1200,9 +1234,17 @@ class IngestionPipeline:
         from kl_graph.ingest.extraction_cache import ExtractionCacheStore
 
         if self.extractor is None:
-            self.extractor = LLMExtractor(cache_db=self.cache_db)
+            self.extractor = LLMExtractor(
+                cache_db=self.cache_db,
+                cache_max_entries=self.cache_max_entries,
+                legacy_cache_db=self.legacy_cache_db,
+            )
         model = self.extractor.model
-        store = ExtractionCacheStore(self.cache_db)
+        store = ExtractionCacheStore(
+            self.cache_db,
+            max_entries=self.cache_max_entries,
+            legacy_db_path=self.legacy_cache_db,
+        )
         try:
             results = store.all_results(model)
         finally:

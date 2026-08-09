@@ -40,9 +40,11 @@ def test_fresh_db_removes_ladybug_store(
     import scripts.ingest as ingest_script
 
     sqlite_path = tmp_path / "knowledge.db"
+    extraction_cache_path = tmp_path / "extraction_cache.db"
     qdrant_path = tmp_path / "qdrant_data"
     ladybug_path = tmp_path / "graph.ladybug"
     sqlite_path.write_text("stale", encoding="utf-8")
+    extraction_cache_path.write_text("expensive-cache", encoding="utf-8")
     qdrant_path.mkdir()
 
     from kl_graph.storage.ladybug_graph import LadybugGraphDB
@@ -59,5 +61,6 @@ def test_fresh_db_removes_ladybug_store(
     ingest_script._reset_stores()
 
     assert not sqlite_path.exists()
+    assert extraction_cache_path.read_text(encoding="utf-8") == "expensive-cache"
     assert not qdrant_path.exists()
     assert not ladybug_path.exists()

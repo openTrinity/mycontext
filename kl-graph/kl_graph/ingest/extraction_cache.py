@@ -1,8 +1,9 @@
 """SQLite-backed cache for Phase-A LLM extraction results.
 
-Replaces the md5-sharded one-JSON-file-per-chunk cache with a single
-``extraction_cache`` table (living inside ``data/knowledge.db`` in production,
-a tmp file under test). Keyed by ``md5(chunk_id)`` — the exact digest the
+Replaces the md5-sharded one-JSON-file-per-chunk cache with a separate,
+bounded ``data/extraction_cache.db`` SQLite database.  Keeping it separate from
+``knowledge.db`` preserves expensive LLM results across graph/content database
+rebuilds.  The cache is keyed by ``md5(chunk_id)`` — the exact digest the
 extractor used for its file paths — so the same chunk resolves to the same row.
 
 Design invariant (see ``docs/todo/archive/extraction-cache-hardening-2026-08-05.md``): the cache
@@ -10,14 +11,14 @@ holds only end-to-end-validated successful extractions. Failed/transient
 outcomes are never written; hard stops raise loudly upstream. There is no
 ``status`` column — every row is valid by construction.
 
-The store opens its OWN WAL connection to the given db file so its lifecycle
-is decoupled from ``SQLiteStore``; ``CREATE TABLE IF NOT EXISTS`` touches only
-its own table, so ``--extract-only`` runs work before graph tables exist. WAL
-+ a 30s busy timeout + single-statement UPSERTs make it safe for the two
-writer processes this project runs (CLI ingest + server background ingest).
+The store opens its own WAL connection and evicts least-recently-used rows when
+the configured entry limit is exceeded.  Cache hits are touched in batches to
+avoid turning a warm replay into one SQLite commit per chunk.  A one-time,
+non-destructive migration imports the former ``knowledge.db.extraction_cache``
+table when present.
 
 Example:
-    >>> store = ExtractionCacheStore(Path("data/knowledge.db"))
+    >>> store = ExtractionCacheStore(Path("data/extraction_cache.db"))
     >>> store.put({"entities": [], "facts": [], "_msg_id": "c1"}, "c1", "qwen")
     >>> store.get("c1", "qwen")
     {'entities': [], 'facts': [], '_msg_id': 'c1'}
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 # SQLite host-parameter ceiling on old builds is 999; chunk IN(...) lists well
 # under it so we stay portable regardless of the linked SQLite version.
 _IN_CHUNK = 500
+_TOUCH_BATCH = 256
+DEFAULT_MAX_ENTRIES = 100_000
 
 
 class ExtractionCacheStore:
@@ -49,20 +52,40 @@ class ExtractionCacheStore:
     output.
 
     Args:
-        db_path: Path to the SQLite database file (production:
-            ``config.SQLITE_PATH``; tests: a tmp file). Parent dirs are created.
+        db_path: Path to the dedicated SQLite cache database. Parent dirs are
+            created automatically.
+        max_entries: Hard row-count limit. Least-recently-used rows are evicted
+            after writes so the cache cannot grow without bound.
+        legacy_db_path: Optional former content database. Its extraction-cache
+            rows are imported once without modifying the legacy database.
     """
 
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        db_path: Path,
+        max_entries: int = DEFAULT_MAX_ENTRIES,
+        legacy_db_path: Path | None = None,
+    ):
+        if max_entries <= 0:
+            raise ValueError("max_entries must be greater than zero")
+        self.db_path = Path(db_path)
+        self.max_entries = int(max_entries)
+        self._pending_touches: dict[str, int] = {}
+        self._last_access_tick = time.time_ns()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # timeout doubles as the busy timeout so a concurrent writer waits
         # rather than raising "database is locked".
-        self.conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
+        self.conn = sqlite3.connect(
+            str(self.db_path), timeout=30.0, check_same_thread=False
+        )
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self._create_table()
+        if legacy_db_path is not None:
+            self._migrate_legacy_cache(Path(legacy_db_path))
+        if self._evict_if_needed():
+            self.conn.commit()
 
     def _create_table(self) -> None:
         """Create the ``extraction_cache`` table if it does not exist."""
@@ -74,9 +97,133 @@ class ExtractionCacheStore:
                 payload    TEXT NOT NULL,
                 model      TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                last_accessed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS cache_metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             """
+        )
+        columns = {
+            row["name"]
+            for row in self.conn.execute(
+                "PRAGMA table_info(extraction_cache)"
+            ).fetchall()
+        }
+        if "last_accessed" not in columns:
+            self.conn.execute(
+                "ALTER TABLE extraction_cache "
+                "ADD COLUMN last_accessed INTEGER NOT NULL DEFAULT 0"
+            )
+            self.conn.execute(
+                "UPDATE extraction_cache SET last_accessed = updated_at "
+                "WHERE last_accessed = 0"
+            )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_extraction_cache_lru "
+            "ON extraction_cache(last_accessed, updated_at, cache_key)"
+        )
+        self.conn.commit()
+
+    def _migrate_legacy_cache(self, legacy_db_path: Path) -> None:
+        """Import the old ``knowledge.db`` cache once, without deleting it."""
+        try:
+            if legacy_db_path.resolve() == self.db_path.resolve():
+                return
+        except OSError:
+            if legacy_db_path == self.db_path:
+                return
+
+        marker = "legacy-migration:" + hashlib.sha256(
+            str(legacy_db_path.resolve()).encode()
+        ).hexdigest()
+        already_done = self.conn.execute(
+            "SELECT 1 FROM cache_metadata WHERE key = ?", (marker,)
+        ).fetchone()
+        if already_done is not None:
+            return
+
+        if not legacy_db_path.exists():
+            self._mark_migration_complete(marker)
+            return
+
+        legacy: sqlite3.Connection | None = None
+        try:
+            legacy = sqlite3.connect(str(legacy_db_path), timeout=30.0)
+            legacy.row_factory = sqlite3.Row
+            table = legacy.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'extraction_cache'"
+            ).fetchone()
+            if table is None:
+                self._mark_migration_complete(marker)
+                return
+
+            columns = {
+                row["name"]
+                for row in legacy.execute(
+                    "PRAGMA table_info(extraction_cache)"
+                ).fetchall()
+            }
+            access_column = (
+                "last_accessed" if "last_accessed" in columns else "updated_at"
+            )
+            cursor = legacy.execute(
+                "SELECT cache_key, chunk_id, payload, model, created_at, "
+                f"updated_at, {access_column} AS last_accessed "
+                "FROM extraction_cache"
+            )
+            before = self.count()
+            while rows := cursor.fetchmany(1_000):
+                self.conn.executemany(
+                    """INSERT OR IGNORE INTO extraction_cache
+                         (cache_key, chunk_id, payload, model, created_at,
+                          updated_at, last_accessed)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            row["cache_key"],
+                            row["chunk_id"],
+                            row["payload"],
+                            row["model"],
+                            row["created_at"],
+                            row["updated_at"],
+                            row["last_accessed"],
+                        )
+                        for row in rows
+                    ],
+                )
+            self._evict_if_needed()
+            self.conn.execute(
+                "INSERT OR REPLACE INTO cache_metadata(key, value) VALUES (?, ?)",
+                (marker, str(int(time.time()))),
+            )
+            self.conn.commit()
+            imported = self.count() - before
+            if imported:
+                logger.info(
+                    "Imported %d extraction-cache rows from %s into %s",
+                    imported,
+                    legacy_db_path,
+                    self.db_path,
+                )
+        except sqlite3.Error as exc:
+            self.conn.rollback()
+            logger.warning(
+                "Could not migrate legacy extraction cache from %s: %s",
+                legacy_db_path,
+                exc,
+            )
+        finally:
+            if legacy is not None:
+                legacy.close()
+
+    def _mark_migration_complete(self, marker: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cache_metadata(key, value) VALUES (?, ?)",
+            (marker, str(int(time.time()))),
         )
         self.conn.commit()
 
@@ -118,7 +265,10 @@ class ExtractionCacheStore:
         ).fetchone()
         if row is None or row["model"] != model:
             return None
-        return self._parse_payload(row["payload"])
+        parsed = self._parse_payload(row["payload"])
+        if parsed is not None:
+            self._queue_touch(self.cache_key(chunk_id))
+        return parsed
 
     def get_many(self, chunk_ids: list[str], model: str) -> dict[str, dict]:
         """Return cached results for the given chunk ids, keyed by chunk_id.
@@ -150,6 +300,7 @@ class ExtractionCacheStore:
                 parsed = self._parse_payload(row["payload"])
                 if parsed is not None:
                     results[row["chunk_id"]] = parsed
+                    self._queue_touch(self.cache_key(row["chunk_id"]))
         return results
 
     def all_results(self, model: str) -> dict[str, dict]:
@@ -165,14 +316,15 @@ class ExtractionCacheStore:
             Mapping of chunk_id → extraction result dict.
         """
         results: dict[str, dict] = {}
-        cursor = self.conn.execute(
+        rows = self.conn.execute(
             "SELECT chunk_id, payload FROM extraction_cache WHERE model = ?",
             (model,),
-        )
-        for row in cursor:
+        ).fetchall()
+        for row in rows:
             parsed = self._parse_payload(row["payload"])
             if parsed is not None:
                 results[row["chunk_id"]] = parsed
+                self._queue_touch(self.cache_key(row["chunk_id"]))
         return results
 
     @staticmethod
@@ -183,6 +335,29 @@ class ExtractionCacheStore:
         except (json.JSONDecodeError, TypeError):
             return None
         return data if isinstance(data, dict) else None
+
+    def _next_access_tick(self) -> int:
+        """Return a process-local strictly increasing access timestamp."""
+        self._last_access_tick = max(time.time_ns(), self._last_access_tick + 1)
+        return self._last_access_tick
+
+    def _queue_touch(self, cache_key: str) -> None:
+        """Record an LRU touch, flushing periodically to limit write overhead."""
+        self._pending_touches[cache_key] = self._next_access_tick()
+        if len(self._pending_touches) >= _TOUCH_BATCH:
+            self._flush_touches()
+
+    def _flush_touches(self, *, commit: bool = True) -> None:
+        if not self._pending_touches:
+            return
+        touches = list(self._pending_touches.items())
+        self.conn.executemany(
+            "UPDATE extraction_cache SET last_accessed = ? WHERE cache_key = ?",
+            [(accessed, cache_key) for cache_key, accessed in touches],
+        )
+        self._pending_touches.clear()
+        if commit:
+            self.conn.commit()
 
     # ─── Writes ───────────────────────────────────────────────────────────
 
@@ -210,6 +385,7 @@ class ExtractionCacheStore:
         if not items:
             return
         now = int(time.time())
+        first_access = self._next_access_tick()
         rows = [
             (
                 self.cache_key(chunk_id),
@@ -218,26 +394,57 @@ class ExtractionCacheStore:
                 model,
                 now,
                 now,
+                first_access + index,
             )
-            for payload, chunk_id in items
+            for index, (payload, chunk_id) in enumerate(items)
         ]
+        self._last_access_tick = first_access + len(items) - 1
+        self._flush_touches(commit=False)
         self.conn.executemany(
             """INSERT INTO extraction_cache
-                 (cache_key, chunk_id, payload, model, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+                 (cache_key, chunk_id, payload, model, created_at, updated_at,
+                  last_accessed)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(cache_key) DO UPDATE SET
                  chunk_id = excluded.chunk_id,
                  payload = excluded.payload,
                  model = excluded.model,
-                 updated_at = MAX(excluded.updated_at, extraction_cache.updated_at + 1)""",
+                 updated_at = MAX(excluded.updated_at, extraction_cache.updated_at + 1),
+                 last_accessed = excluded.last_accessed""",
             rows,
         )
+        self._evict_if_needed()
         self.conn.commit()
+
+    def _evict_if_needed(self) -> int:
+        """Evict least-recently-used rows until ``max_entries`` is satisfied."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM extraction_cache"
+        ).fetchone()
+        overflow = int(row["n"]) - self.max_entries
+        if overflow <= 0:
+            return 0
+        self.conn.execute(
+            """DELETE FROM extraction_cache
+               WHERE cache_key IN (
+                   SELECT cache_key FROM extraction_cache
+                   ORDER BY last_accessed ASC, updated_at ASC, cache_key ASC
+                   LIMIT ?
+               )""",
+            (overflow,),
+        )
+        logger.debug(
+            "Evicted %d LRU extraction-cache rows (limit=%d)",
+            overflow,
+            self.max_entries,
+        )
+        return overflow
 
     # ─── Maintenance ──────────────────────────────────────────────────────
 
     def clear(self) -> None:
         """Delete every cached row (``keep_cache=False``)."""
+        self._pending_touches.clear()
         self.conn.execute("DELETE FROM extraction_cache")
         self.conn.commit()
 
@@ -250,6 +457,7 @@ class ExtractionCacheStore:
 
     def close(self) -> None:
         """Close the underlying connection."""
+        self._flush_touches()
         self.conn.close()
 
     # ─── Context manager ──────────────────────────────────────────────────

@@ -27,7 +27,10 @@ LLM_BATCH_TIMEOUT = int(cfg.pipelines.ingestion.extraction.batch_timeout)
 LLM_MAX_RETRIES = int(cfg.services.llm_flash.max_retries)
 LLM_MODEL = cfg.services.llm_flash.model
 LLM_TIMEOUT = float(cfg.services.llm_flash.timeout)
-SQLITE_PATH = DATA_DIR / "knowledge.db"
+EXTRACTION_CACHE_PATH = DATA_DIR / "extraction_cache.db"
+EXTRACTION_CACHE_MAX_ENTRIES = int(
+    cfg.pipelines.ingestion.extraction.cache_max_entries
+)
 from kl_graph.ingest.extraction_cache import ExtractionCacheStore
 from kl_graph.models.types import Chunk
 
@@ -784,14 +787,20 @@ class LLMExtractor:
 
     def __init__(
         self,
-        cache_db: Path = SQLITE_PATH,
+        cache_db: Path = EXTRACTION_CACHE_PATH,
         base_url: str = LLM_BASE_URL,
         model: str = LLM_MODEL,
         provider: str = LLM_PROVIDER,
         api_key: str | None = None,
         max_concurrent: int = 50,
+        cache_max_entries: int = EXTRACTION_CACHE_MAX_ENTRIES,
+        legacy_cache_db: Path | None = None,
     ):
         self.cache_db = Path(cache_db)
+        self.cache_max_entries = int(cache_max_entries)
+        self.legacy_cache_db = (
+            Path(legacy_cache_db) if legacy_cache_db is not None else None
+        )
         # Lazily opened on first cache access so constructing an extractor is
         # cheap and does not touch the filesystem/db until extraction runs.
         self._cache: ExtractionCacheStore | None = None
@@ -839,7 +848,11 @@ class LLMExtractor:
     def _store(self) -> ExtractionCacheStore:
         """Open (once) and return the SQLite extraction-cache store."""
         if self._cache is None:
-            self._cache = ExtractionCacheStore(self.cache_db)
+            self._cache = ExtractionCacheStore(
+                self.cache_db,
+                max_entries=self.cache_max_entries,
+                legacy_db_path=self.legacy_cache_db,
+            )
         return self._cache
 
     def close(self) -> None:

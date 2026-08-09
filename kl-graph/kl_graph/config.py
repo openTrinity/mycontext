@@ -139,6 +139,7 @@ class IngestionEmbeddingConfig(_ConfigModel):
 class ExtractionConfig(_ConfigModel):
     batch_size: int
     batch_timeout: int
+    cache_max_entries: int = Field(gt=0)
 
 
 class IncrementalConfig(_ConfigModel):

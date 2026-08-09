@@ -17,6 +17,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import kl_graph.ingest.llm_extractor as lx
@@ -39,7 +41,8 @@ def _resp(content: str):
 
 def test_extract_then_pipeline_replay_loads_only_successes(monkeypatch, tmp_path):
     """extract_all_flat over a mixed batch → only the success is replayable."""
-    db = tmp_path / "knowledge.db"
+    knowledge_db = tmp_path / "knowledge.db"
+    cache_db = tmp_path / "extraction_cache.db"
 
     # Batch of two: slot 0 succeeds, slot 1 is dropped by the model.
     async def one_of_two(**kwargs):
@@ -48,7 +51,7 @@ def test_extract_then_pipeline_replay_loads_only_successes(monkeypatch, tmp_path
     monkeypatch.setattr(lx.litellm, "acompletion", one_of_two)
     monkeypatch.setattr(lx, "LLM_BATCH_SIZE", 8)
 
-    ex = LLMExtractor(cache_db=db)
+    ex = LLMExtractor(cache_db=cache_db)
     c0, c1 = _chunk("c0"), _chunk("c1")
     asyncio.run(ex.extract_all_flat([c0, c1]))
     model = ex.model
@@ -57,34 +60,79 @@ def test_extract_then_pipeline_replay_loads_only_successes(monkeypatch, tmp_path
     # Pipeline replay reads the same table.
     from kl_graph.ingest.pipeline import IngestionPipeline
 
-    pipe = IngestionPipeline(sqlite_path=db, cache_db=db)
+    pipe = IngestionPipeline(
+        sqlite_path=knowledge_db, cache_db=cache_db, store=object()
+    )
     pipe._load_extraction_cache()
     assert "c0" in pipe.extraction_results  # success replayed
     assert "c1" not in pipe.extraction_results  # dropped slot never stored
     assert pipe.extraction_results["c0"]["entities"] == [{"name": "X"}]
 
     # Cross-check the raw store agrees.
-    store = ExtractionCacheStore(db)
+    store = ExtractionCacheStore(cache_db)
     assert store.count() == 1
     assert store.all_results(model).keys() == {"c0"}
     store.close()
+    pipe.close()
 
 
 def test_keep_cache_false_clears_table(monkeypatch, tmp_path):
-    db = tmp_path / "knowledge.db"
-    store = ExtractionCacheStore(db)
+    knowledge_db = tmp_path / "knowledge.db"
+    cache_db = tmp_path / "extraction_cache.db"
+    legacy = ExtractionCacheStore(knowledge_db)
+    legacy.put(
+        {"entities": [], "facts": [], "_msg_id": "legacy"},
+        "legacy",
+        "anthropic/m",
+    )
+    legacy.close()
+    store = ExtractionCacheStore(cache_db)
     store.put({"entities": [], "facts": [], "_msg_id": "c0"}, "c0", "anthropic/m")
     store.close()
 
     from kl_graph.ingest.pipeline import IngestionPipeline
 
-    pipe = IngestionPipeline(sqlite_path=db, cache_db=db, keep_cache=False)
+    pipe = IngestionPipeline(
+        sqlite_path=knowledge_db,
+        cache_db=cache_db,
+        keep_cache=False,
+        store=object(),
+    )
     pipe._graph_build_ran = True
     pipe._maybe_clear_extraction_cache()
 
-    store = ExtractionCacheStore(db)
+    store = ExtractionCacheStore(cache_db)
     assert store.count() == 0
+    migration_markers = store.conn.execute(
+        "SELECT COUNT(*) FROM cache_metadata"
+    ).fetchone()[0]
+    assert migration_markers == 0
     store.close()
+    pipe.close()
+
+
+def test_pipeline_defaults_to_cache_sibling_of_content_db(tmp_path):
+    from kl_graph.ingest.pipeline import IngestionPipeline
+
+    knowledge_db = tmp_path / "knowledge.db"
+    pipe = IngestionPipeline(sqlite_path=knowledge_db, store=object())
+
+    assert pipe.cache_db == tmp_path / "extraction_cache.db"
+    assert pipe.legacy_cache_db == knowledge_db
+    pipe.close()
+
+
+def test_pipeline_rejects_workset_larger_than_rolling_cache(tmp_path):
+    from kl_graph.ingest.pipeline import IngestionPipeline
+
+    pipe = IngestionPipeline(
+        sqlite_path=tmp_path / "knowledge.db",
+        cache_max_entries=2,
+        store=object(),
+    )
+    with pytest.raises(RuntimeError, match="3 chunks.*limit of 2"):
+        pipe._validate_extraction_cache_capacity(3)
+    pipe.close()
 
 
 def test_incremental_get_many_returns_only_requested(tmp_path):
@@ -96,5 +144,7 @@ def test_incremental_get_many_returns_only_requested(tmp_path):
     store.put({"entities": [], "facts": [], "_msg_id": "c"}, "c", model)
     store.close()
 
-    got = ExtractionCacheStore(db).get_many(["a", "c"], model)
+    reader = ExtractionCacheStore(db)
+    got = reader.get_many(["a", "c"], model)
     assert set(got.keys()) == {"a", "c"}
+    reader.close()

@@ -63,13 +63,14 @@ from kl_graph.ingest.runner import (
 # Derived paths / constants from OmegaConf config
 DWS_EXPORT_DIR = _path(cfg.application.dws_export_dir)
 SQLITE_PATH = DATA_DIR / "knowledge.db"
+EXTRACTION_CACHE_PATH = DATA_DIR / "extraction_cache.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 GRAPH_BACKEND = cfg.storage.graph.backend
 KEEP_EXTRACTION_CACHE = bool(cfg.pipelines.ingestion.keep_extraction_cache)
 
 
 def _reset_stores() -> None:
-    """Remove persisted stores selected by the current configuration."""
+    """Remove rebuildable stores while preserving the extraction cache."""
     import shutil
 
     if SQLITE_PATH.exists():
@@ -163,7 +164,7 @@ async def main():
     parser.add_argument(
         "--fresh-db",
         action="store_true",
-        help="Delete existing database before building",
+        help="Delete graph/content stores before building; preserve extraction cache",
     )
     parser.add_argument(
         "--no-keep-cache",
@@ -197,6 +198,7 @@ async def main():
     print(f"Input dir:    {input_dir}")
     print(f"Source ID:    {args.source_id}")
     print(f"SQLite path:  {SQLITE_PATH}")
+    print(f"Extraction cache: {EXTRACTION_CACHE_PATH}")
     print(f"Graph backend: {GRAPH_BACKEND}")
     if GRAPH_BACKEND == "ladybug":
         print(f"Ladybug path: {GRAPH_DB_PATH}")

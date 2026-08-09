@@ -150,7 +150,7 @@ RAM, disk I/O, and graph/Qdrant operations.
 | A3. Deduplicate units | Candidate units | Light | Indexed SQLite lookups, approximately `O(U)`. No model calls. |
 | A4. Persist chunks and lineage | New units/chunks | Light | One SQLite commit point plus ordered unit/chunk mappings, approximately `O(N)`. |
 | A5. Embed chunks | New chunks | Heavy | Remote embedding work, approximately `O(N × D)` plus network latency. Byte-identical texts share one embedding call, but each chunk still gets a point. |
-| B1. Extraction-cache lookup | New chunks | Light | Indexed SQLite reads. Cache hits remove the dominant extraction cost. |
+| B1. Extraction-cache lookup | New chunks | Light | Indexed reads from separate `extraction_cache.db`. Cache hits remove the dominant extraction cost; the rolling LRU retains at most 100k rows by default (`KL_EXTRACTION_CACHE_MAX_ENTRIES`), which must be at least the largest extraction workset. |
 | B2. LLM extraction | Cache misses | Usually heaviest | External cost approximately proportional to `T`; wall time depends on endpoint latency, batching, and `concurrency`. This usually dominates a normal ingest. |
 | B3. Build/update entities | Batch | Medium | Linear folding/upserts. High-mention entities may trigger bounded entity-description summarization LLM calls. |
 | B4. Build facts | Batch | Light–medium | Linear normalization, deterministic IDs, and inserts. No separate LLM call beyond extraction. |

@@ -13,9 +13,12 @@ No network I/O. Run:
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -54,6 +57,7 @@ def test_schema_created_on_fresh_db(tmp_path) -> None:
         "model",
         "created_at",
         "updated_at",
+        "last_accessed",
     }
     assert "status" not in cols
     store.close()
@@ -237,6 +241,121 @@ def test_put_many_empty_is_noop(tmp_path) -> None:
     store.put_many([], MODEL)
     assert store.count() == 0
     store.close()
+
+
+# ─── bounded rolling eviction ────────────────────────────────────────────────
+
+
+def test_cache_rejects_non_positive_entry_limit(tmp_path) -> None:
+    with pytest.raises(ValueError, match="greater than zero"):
+        ExtractionCacheStore(tmp_path / "extraction_cache.db", max_entries=0)
+
+
+def test_rolling_cache_evicts_least_recently_used_row(tmp_path) -> None:
+    store = ExtractionCacheStore(
+        tmp_path / "extraction_cache.db", max_entries=3
+    )
+    store.put_many(
+        [(_result("c1"), "c1"), (_result("c2"), "c2"), (_result("c3"), "c3")],
+        MODEL,
+    )
+
+    # A hit makes c1 newer than c2/c3. The pending touch is flushed before the
+    # next write and therefore participates in that write's eviction decision.
+    assert store.get("c1", MODEL) is not None
+    store.put(_result("c4"), "c4", MODEL)
+
+    assert store.count() == 3
+    assert store.get("c1", MODEL) is not None
+    assert store.get("c2", MODEL) is None
+    assert store.get("c3", MODEL) is not None
+    assert store.get("c4", MODEL) is not None
+    store.close()
+
+
+def test_put_many_larger_than_limit_keeps_newest_rows(tmp_path) -> None:
+    store = ExtractionCacheStore(
+        tmp_path / "extraction_cache.db", max_entries=2
+    )
+    store.put_many(
+        [(_result("c1"), "c1"), (_result("c2"), "c2"), (_result("c3"), "c3")],
+        MODEL,
+    )
+    assert set(store.all_results(MODEL)) == {"c2", "c3"}
+    store.close()
+
+
+def test_reopening_with_lower_limit_prunes_existing_rows(tmp_path) -> None:
+    cache_db = tmp_path / "extraction_cache.db"
+    store = ExtractionCacheStore(cache_db, max_entries=3)
+    store.put_many(
+        [(_result("c1"), "c1"), (_result("c2"), "c2"), (_result("c3"), "c3")],
+        MODEL,
+    )
+    store.close()
+
+    reopened = ExtractionCacheStore(cache_db, max_entries=2)
+    assert set(reopened.all_results(MODEL)) == {"c2", "c3"}
+    reopened.close()
+
+
+def test_legacy_knowledge_db_cache_is_imported_only_once(tmp_path) -> None:
+    legacy_db = tmp_path / "knowledge.db"
+    legacy = sqlite3.connect(legacy_db)
+    legacy.execute(
+        """CREATE TABLE extraction_cache (
+               cache_key TEXT PRIMARY KEY,
+               chunk_id TEXT NOT NULL,
+               payload TEXT NOT NULL,
+               model TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL
+           )"""
+    )
+    for index, chunk_id in enumerate(("c1", "c2", "c3"), start=1):
+        legacy.execute(
+            "INSERT INTO extraction_cache VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                ExtractionCacheStore.cache_key(chunk_id),
+                chunk_id,
+                json.dumps(_result(chunk_id)),
+                MODEL,
+                index,
+                index,
+            ),
+        )
+    legacy.commit()
+    legacy.close()
+
+    cache_db = tmp_path / "extraction_cache.db"
+    store = ExtractionCacheStore(
+        cache_db, max_entries=2, legacy_db_path=legacy_db
+    )
+    assert set(store.all_results(MODEL)) == {"c2", "c3"}
+    store.close()
+
+    # Once marked migrated, later legacy writes are not resurrected into the
+    # rolling cache on every process start.
+    legacy = sqlite3.connect(legacy_db)
+    legacy.execute(
+        "INSERT INTO extraction_cache VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            ExtractionCacheStore.cache_key("c4"),
+            "c4",
+            json.dumps(_result("c4")),
+            MODEL,
+            4,
+            4,
+        ),
+    )
+    legacy.commit()
+    legacy.close()
+
+    reopened = ExtractionCacheStore(
+        cache_db, max_entries=2, legacy_db_path=legacy_db
+    )
+    assert reopened.get("c4", MODEL) is None
+    reopened.close()
 
 
 # ─── context manager ──────────────────────────────────────────────────────────

@@ -47,7 +47,7 @@ DingTalk DWS Export → Ingestion Pipeline → SQLite + Qdrant → Retrieval Ser
 > that spec when changing any graph-building step below.
 
 1. **Ingestion** (`scripts/ingest.py` → `kl_graph/ingest/pipeline.py`)
-   - Phase A: LLM extraction (entities + facts from messages, cached in the `extraction_cache` table of knowledge.db)
+   - Phase A: LLM extraction (entities + facts from messages, cached in the separate bounded `extraction_cache.db`)
    - Phase B: Graph build (SQLite + embeddings + structural edges)
 
 2. **Periodic Improvement** (`scripts/improve.py` → `kl_graph/periodic/runner.py`)
@@ -136,7 +136,8 @@ kl-graph/
 ├── skills/               # Agent skill files (kl CLI usage guide, dws export)
 ├── tests/
 └── data/                 # (gitignored) Runtime data
-    ├── knowledge.db          # also holds the `extraction_cache` table (Phase A LLM cache)
+    ├── knowledge.db          # content/metadata database (safe to rebuild from cache + sources)
+    ├── extraction_cache.db   # durable bounded Phase-A LLM cache
     ├── graph.ladybug/    # LadybugDB nodes/edges (incrementally written during ingest)
     ├── qdrant_data/
     └── qdrant_communities/

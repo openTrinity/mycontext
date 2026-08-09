@@ -46,6 +46,7 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.embedding.timeout",
     "pipelines.ingestion.extraction.batch_size",
     "pipelines.ingestion.extraction.batch_timeout",
+    "pipelines.ingestion.extraction.cache_max_entries",
     "pipelines.ingestion.entity_description.summarize",
     "pipelines.ingestion.entity_description.concurrency",
     "pipelines.ingestion.incremental.community_summary_threshold",
