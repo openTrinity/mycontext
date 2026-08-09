@@ -167,10 +167,39 @@ describe("DwsCli.run 钉住身份", () => {
     expect(args).toContain("--profile")
   })
 
-  it("没绑身份时不带 --profile（退回 CLI 全局 profile）", async () => {
-    expect(await captureArgs(undefined, ["chat", "list-all-conversations"])).not.toContain(
-      "--profile",
-    )
+  /**
+   * ★★ 没绑身份时**拒绝执行业务命令** —— 这是行为变更，而且是安全修复。
+   *
+   * 原来这里断言的是"不带 --profile（退回 CLI 全局 profile）"。那个行为
+   * 正是一个越权读取面：全局 `currentProfile` 由用户在终端里的最后一次操作
+   * 决定，可能是**另一个组织**。于是"还没绑身份"这个状态下应用反而去读了
+   * 某个人的会话与消息，落进一个不属于任何身份的库 —— 与 CLAUDE.md §5
+   * 「不许扩大读取面」直接冲突，且完全静默（命令成功、数据入库、日志正常）。
+   *
+   * 实测触发路径：基础 vault（注册了但还没授权）挂载时 `dataPlane.attach`
+   * 照常起采集，而那时 `dwsProfile()` 返回 undefined。
+   *
+   * 抛而不是返回空：静默返回空会被上层记成"这个账号 0 条会话"，
+   * 那是本仓库最贵的那类 bug（把"读不到"记成"没有"）。
+   */
+  it("★★ 没绑身份时业务命令被拒（不退回 CLI 全局 profile）", async () => {
+    await expect(captureArgs(undefined, ["chat", "list-all-conversations"])).rejects.toMatchObject({
+      code: "CHANNEL_IDENTITY_UNAVAILABLE",
+      retryable: false,
+    })
+  })
+
+  /**
+   * ★ 但 `auth` 一族要放行 —— 它们是"还没有身份时唯一能做的事"。
+   *
+   * `auth status` 要回答"这台机器登录了谁"（不钉才问得到），
+   * 而 `auth login` 是获得身份的入口。把它们也拒掉会让用户
+   * **永远无法授权**（死锁：要身份才能问，要问才能拿到身份）。
+   */
+  it("★★ auth 一族在没绑身份时仍放行（否则永远授权不了）", async () => {
+    const args = await captureArgs(undefined, ["auth", "status"])
+    expect(args).not.toContain("--profile")
+    expect(args).toContain("status")
   })
 
   /**

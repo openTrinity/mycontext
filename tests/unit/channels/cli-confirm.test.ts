@@ -610,8 +610,15 @@ describe("DwsCli.run：真实授权失败 → 终态 AppError", () => {
       runtime: {
         resolve: () => ({ path: "/fake/dws" }),
         buildEnv: () => ({}),
-        // 未绑身份 → 不钉 profile（见 RuntimeEnv.dwsProfileArgs）
-        dwsProfileArgs: () => [],
+        /**
+         * 钉一个假身份。
+         *
+         * ★ 这里**必须**钉：`run()` 现在对"没绑身份 + 业务命令"直接抛
+         * `CHANNEL_IDENTITY_UNAVAILABLE`（不带 profile 会跟着 CLI 的全局身份
+         * 读到别人的数据，见那处注释）。不钉的话这一组测的就变成了那个守卫，
+         * 而它们真正要测的是**错误归类**（stderr-only 的授权失败能否被认出）。
+         */
+        dwsProfileArgs: () => ["--profile", "dingFAKECORP0001"],
       } as never,
       processes: {
         exec: async () => ({ exitCode, stdout: "", stderr, timedOut: false }),

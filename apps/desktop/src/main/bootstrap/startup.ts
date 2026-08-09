@@ -1138,6 +1138,45 @@ export function bootstrapApp(mainDir: string): AppContext {
       if (seeded) logger.info("channel profile seeded for vault", { channelId: identity.channelId })
     }
 
+    /**
+     * ★★ 没绑身份 → **不起任何拉数据的东西**。
+     *
+     * ## 为什么这不只是省资源
+     *
+     * 未绑身份时 `dwsProfile()` 返回 undefined，于是 `dwsProfileArgs()` 给空数组
+     * —— 渠道命令**不带 `--profile`**，也就跟着 CLI 的**全局 currentProfile** 走。
+     * 而那个值由用户在终端里的最后一次操作决定。
+     *
+     * 后果是拿着一个**没有身份的基础 vault**去采**某个人**的会话与消息：
+     * · 采到的数据落进基础 vault，而它不属于任何身份；
+     * · 之后用户真去授权 → 走 `bindAuthorized` 建/挂另一个 vault →
+     *   那批数据留在基础 vault 里成为孤儿，既不显示也不清理；
+     * · 更糟的是全局 profile 恰好是**另一个组织**时，我们就把别人的
+     *   聊天记录采进来了 —— 与 CLAUDE.md §5「不许扩大读取面」直接冲突。
+     *
+     * 而这一切是**静默**的：探针照跑、日志照记、状态页显示"采集中"。
+     *
+     * ## 起什么、不起什么
+     *
+     * 不起：采集/Feed（`dataPlane.attach`）、数字人调度（`persona.start`）、
+     * kl 检索子进程（`ensureReady`，约 90s warmup + 常驻内存）——
+     * 三者都会 spawn 子进程或按周期拉数据。
+     *
+     * 仍然做：`attach` 那些**纯本地**的绑定（onboarding / media / search /
+     * persona.attach / klServer.rebind）。它们不拉数据，而引导流程要往
+     * 这个库里写（选范围、存数字人草稿），设置页也要能读。
+     *
+     * 绑上身份之后走的是 `switchTo()` → `mount()`，那时这个分支不成立，
+     * 三者照常起来 —— 所以这里不需要"补起"的逻辑。
+     */
+    const dataFlowsAllowed = identity !== null
+    if (!dataFlowsAllowed) {
+      logger.info("vault has no bound channel identity; skipping data flows", {
+        // 不记 vaultId：它是存储布局，日志里给出"为什么不采"就够了
+        reason: "identity_unbound",
+      })
+    }
+
     onboarding.bind(
       new SettingsRepository(handle.db, "vault_settings"),
       new OnboardingRepository(handle.db),
@@ -1213,7 +1252,8 @@ export function bootstrapApp(mainDir: string): AppContext {
     // kl-server 随登录懒启动（warmup ~90s，不阻塞登录）。fire-and-forget：
     // ensureReady 内部轮询健康、自己管状态机（starting→ready/failed）并经 IPC
     // 推 UI，绝不能 await（会卡住登录）。失败只降级（搜索落回本地召回），不抛。
-    void klServer.ensureReady().catch(() => undefined)
+    // ★ 未绑身份时不起：90s warmup + 常驻内存，而那个库里还没有任何语料。
+    if (dataFlowsAllowed) void klServer.ensureReady().catch(() => undefined)
     /**
      * 数字人调度器随登录启动。
      *
@@ -1223,23 +1263,28 @@ export function bootstrapApp(mainDir: string): AppContext {
      * ★ 注意这里**不再**说"默认 listening = 0 所以不处理任何消息" ——
      * 那个开关已经删了，现在管控层收所有消息（它是订阅者）。
      * 安全性来自"发不发"那一层，不是"收不收"。
+     *
+     * ★ 未绑身份时不起：它按周期跑、会去渠道取消息与联系人，
+     * 而那时命令不带 `--profile`（见上面 `dataFlowsAllowed` 那段）。
      */
-    persona.start()
+    if (dataFlowsAllowed) persona.start()
     search.attach(handle.db, agentDirs)
-    await dataPlane
-      .attach(handle.db, vp.database, {
-        dataRoot: vp.root,
-        exportRoot: vp.exportRoot,
-        klRoot: vp.klRoot,
-        handoffFile: vp.handoffFile,
-      })
-      .catch((error: unknown) => {
-        // 数据面挂载失败不该阻止登录：用户仍能用设置页与授权，
-        // 状态页会显示 lastError。把它变成"登录失败"才是过度反应。
-        logger.error("data plane attach failed", {
-          detail: error instanceof Error ? error.message : String(error),
+    if (dataFlowsAllowed) {
+      await dataPlane
+        .attach(handle.db, vp.database, {
+          dataRoot: vp.root,
+          exportRoot: vp.exportRoot,
+          klRoot: vp.klRoot,
+          handoffFile: vp.handoffFile,
         })
-      })
+        .catch((error: unknown) => {
+          // 数据面挂载失败不该阻止登录：用户仍能用设置页与授权，
+          // 状态页会显示 lastError。把它变成"登录失败"才是过度反应。
+          logger.error("data plane attach failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        })
+    }
   }
 
   /**

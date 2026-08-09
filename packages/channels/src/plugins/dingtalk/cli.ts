@@ -722,7 +722,44 @@ export class DwsCli {
      * 拿刚拿到的凭据去核对），比这里的默认更具体。
      */
     if (!finalArgs.includes("--profile")) {
-      finalArgs.push(...this.options.runtime.dwsProfileArgs())
+      const pinned = this.options.runtime.dwsProfileArgs()
+      /**
+       * ★★ 钉不上身份时**拒绝执行业务命令**，而不是"就这么跑"。
+       *
+       * ## 为什么必须拒绝
+       *
+       * 钉不上（vault 还没绑身份）时不带 `--profile`，命令就跟着 CLI 的
+       * **全局 currentProfile** 走 —— 而那个值由用户在终端里的最后一次
+       * 操作决定，可能是**另一个组织**。于是"还没授权"这个状态下我们
+       * 反而去读了某个人的会话与消息，且落进一个不属于任何身份的库。
+       *
+       * 这与 CLAUDE.md §5「不许扩大读取面」直接冲突，而且完全静默：
+       * 命令成功、数据入库、日志正常。
+       *
+       * ## 为什么 `auth` 一族要放行
+       *
+       * 它们是"还没有身份时唯一能做的事"：`auth status` 要回答"这台机器
+       * 登录了谁"（不钉才问得到），`auth login` 是获得身份的入口。
+       * 判据用**命令路径前两段**而不是白名单表：`auth` 子树整体属于
+       * "身份之前"的阶段，而业务命令（chat/contact/minutes/doc/…）
+       * 一律要求先有身份。
+       *
+       * ★ 抛而不是返回空结果：静默返回空会被上层解读成"这个账号没有会话"，
+       * 那正是本仓库最贵的那类 bug（把"读不到"记成"0 条"）。
+       */
+      if (pinned.length === 0 && commandPath(args)[0] !== "auth") {
+        throw new AppError(
+          "CHANNEL_IDENTITY_UNAVAILABLE",
+          "还没绑定渠道身份，拒绝执行渠道命令（否则会跟着 CLI 的全局身份读到别人的数据）",
+          {
+            retryable: false,
+            messageKey: "errors:byCode.CHANNEL_IDENTITY_UNAVAILABLE",
+            // 只记命令名：参数里可能有会话 id
+            context: { command: commandPath(args).join(" ") },
+          },
+        )
+      }
+      finalArgs.push(...pinned)
     }
 
     const result = await this.options.processes.exec({
