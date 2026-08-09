@@ -169,16 +169,29 @@ export KL_GRAPH_BACKEND=ladybug                  # "ladybug" (default) | "sqlite
 # export KL_LADYBUG_READ_ONLY=0                 # open graph read-only (query-only deployments)
 # export KL_LADYBUG_BUFFER_POOL_SIZE=0           # buffer pool bytes (0 ≈ 80% of RAM)
 # export KL_LADYBUG_MAX_NUM_THREADS=0           # max query threads (0 = auto)
+
+# --- vector backend (Qdrant remains the default) ---
+export KL_VECTOR_BACKEND=qdrant                  # "qdrant" | "zvec"
+# Empty KL_QDRANT_HOST selects embedded local-file mode.
+# export KL_QDRANT_HOST=localhost
+# export KL_QDRANT_PORT=6333
+# export KL_QDRANT_API_KEY=
+# export KL_ZVEC_INDEX_TYPE=hnsw                 # hnsw | flat | ivf
+# export KL_ZVEC_METRIC=cosine                   # cosine | ip | l2
 ```
 
 The stable server port can also be set as `server.port` in YAML. For a
 one-off override, use `./kl --port 8300 start` or run
 `python kl_server.py --port 8300` directly; the CLI option takes precedence.
 
-> **Embedding dimension.** `KL_EMBEDDING_DIM` is baked into the Qdrant
+> **Embedding dimension.** `KL_EMBEDDING_DIM` is baked into the vector-store
 > collections at creation time. Pick the value that matches your model
 > (e.g. 4096 for Qwen3-Embedding-8B, 1024 for Qwen3-Embedding-0.6B). Changing
 > models later requires wiping `$KL_DATA_DIR` and re-embedding everything.
+
+Local Qdrant data lives in `data/qdrant_data/` and
+`data/qdrant_communities/`; Zvec uses `data/zvec_data/` and
+`data/zvec_communities/`.
 
 > **Windows users.** Add `set PYTHONUTF8=1` to your `.env`. Without it, the
 > Python console defaults to GBK / cp1252 and any `print()` or log line

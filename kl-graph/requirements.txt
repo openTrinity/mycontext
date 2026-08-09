@@ -1,5 +1,6 @@
 # Core
 qdrant-client>=1.9.0
+zvec>=0.6.0
 aiosqlite>=0.19.0
 litellm>=1.0,<1.90
 jieba>=0.42

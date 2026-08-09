@@ -12,7 +12,7 @@ import numpy as np
 from kl_graph.models.types import Edge, EdgeType
 from kl_graph.periodic.entity_similarity import jaccard, overlap_coefficient
 from kl_graph.storage.base import KnowledgeStore
-from kl_graph.storage.qdrant_store import QdrantStore, point_id
+from kl_graph.storage.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class _HybridResult(NamedTuple):
 
 
 class AnnPlusIntraBatch:
-    """Incremental similarity using Qdrant ANN for new-to-existing and direct cosine for new-to-new.
+    """Use vector ANN for new-to-existing and cosine for new-to-new.
 
     Hybrid score for entities uses same weights as full rebuild:
     0.3 * embedding + 0.4 * structural (Jaccard co-occurrence) + 0.3 * fact_overlap
@@ -47,7 +47,7 @@ class AnnPlusIntraBatch:
         self,
         new_entity_ids: list[str],
         new_fact_ids: list[str],
-        qdrant: QdrantStore,
+        qdrant: VectorStore,
         store: KnowledgeStore,
         *,
         entity_threshold: float = 0.45,
@@ -74,7 +74,7 @@ class AnnPlusIntraBatch:
         Args:
             new_entity_ids: Entity IDs from this incremental run.
             new_fact_ids: Fact IDs from this incremental run.
-            qdrant: QdrantStore for ANN search against existing vectors.
+            qdrant: VectorStore for ANN search against existing vectors.
             store: KnowledgeStore for structural co-occurrence data.
             entity_threshold: Minimum hybrid score for ENTITY_SIMILAR (default 0.45).
             fact_threshold: Minimum cosine for FACT_SIMILAR (default 0.85).
@@ -161,35 +161,19 @@ class AnnPlusIntraBatch:
         return msg_sets, fact_sets
 
     def _retrieve_vectors(
-        self, qdrant: QdrantStore, collection: str, ids: list[str]
+        self, qdrant: VectorStore, collection: str, ids: list[str]
     ) -> dict[str, list[float]]:
         """Retrieve stored vectors for a list of entity/fact IDs.
 
         Args:
-            qdrant: QdrantStore to retrieve from.
+            qdrant: VectorStore to retrieve from.
             collection: "entities" or "facts".
             ids: Entity or fact IDs whose vectors to fetch.
 
         Returns:
             Dict mapping entity/fact ID to its vector (missing IDs are omitted).
         """
-        result: dict[str, list[float]] = {}
-        batch_size = 256
-        for i in range(0, len(ids), batch_size):
-            batch = ids[i : i + batch_size]
-            pids = [point_id(eid) for eid in batch]
-            records = qdrant.client.retrieve(
-                collection_name=collection,
-                ids=pids,
-                with_payload=True,
-                with_vectors=True,
-            )
-            pid_to_id = {point_id(eid): eid for eid in batch}
-            for rec in records:
-                orig_id = pid_to_id.get(str(rec.id))
-                if orig_id and rec.vector is not None:
-                    result[orig_id] = rec.vector
-        return result
+        return qdrant.retrieve_vectors(collection, ids)
 
     def _hybrid_score(
         self,
@@ -232,7 +216,7 @@ class AnnPlusIntraBatch:
         self,
         new_entity_ids: list[str],
         entity_vecs: dict[str, list[float]],
-        qdrant: QdrantStore,
+        qdrant: VectorStore,
         msg_sets: dict[str, set[str]],
         fact_sets: dict[str, set[str]],
         *,
@@ -243,7 +227,7 @@ class AnnPlusIntraBatch:
         Args:
             new_entity_ids: IDs of new entities.
             entity_vecs: Vectors keyed by entity ID.
-            qdrant: QdrantStore for ANN search.
+            qdrant: VectorStore for ANN search.
             msg_sets: Co-occurrence message sets per entity.
             fact_sets: Fact participation sets per entity.
             entity_threshold: Minimum hybrid score to emit edge.
@@ -359,7 +343,7 @@ class AnnPlusIntraBatch:
         self,
         new_fact_ids: list[str],
         fact_vecs: dict[str, list[float]],
-        qdrant: QdrantStore,
+        qdrant: VectorStore,
         *,
         fact_threshold: float,
     ) -> list[Edge]:
@@ -368,7 +352,7 @@ class AnnPlusIntraBatch:
         Args:
             new_fact_ids: IDs of new facts.
             fact_vecs: Vectors keyed by fact ID.
-            qdrant: QdrantStore for ANN search.
+            qdrant: VectorStore for ANN search.
             fact_threshold: Minimum cosine score to emit edge.
 
         Returns:

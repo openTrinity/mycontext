@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kl-server — Persistent retrieval server for the knowledge graph.
 
-Keeps Qdrant stores and SQLite open in memory to eliminate cold-start overhead.
+Keeps vector stores and SQLite open in memory to eliminate cold-start overhead.
 The kl CLI becomes a thin HTTP client calling this server.
 
 Start: .venv/bin/python kl_server.py
@@ -70,6 +70,11 @@ from kl_graph.query.global_search import NO_DATA_ANSWER, GlobalSearch
 from kl_graph.query.local_search import build_local_context
 from kl_graph.query.pagerank import compute_entity_pagerank
 from kl_graph.storage.base import KnowledgeStore, create_store
+from kl_graph.storage.vector_store import (
+    VectorStore,
+    create_vector_store,
+    vector_store_path,
+)
 
 if TYPE_CHECKING:
     from kl_graph.ingest.runner import ServingIndexUpdate
@@ -79,8 +84,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("kl-server")
 
-# Community Qdrant is a separate lightweight store
-COMMUNITY_QDRANT_PATH = str(Path(QDRANT_PATH).parent / "qdrant_communities")
+VECTOR_BACKEND = str(cfg.storage.vector.backend)
+VECTOR_PATH = vector_store_path(VECTOR_BACKEND, DATA_DIR)
+COMMUNITY_VECTOR_PATH = vector_store_path(
+    VECTOR_BACKEND, DATA_DIR, namespace="communities"
+)
+# Backward-compatible path constant imported by a few tests/tools.
+COMMUNITY_QDRANT_PATH = str(DATA_DIR / "qdrant_communities")
 
 PORT = _cli_port if _cli_port is not None else int(cfg.server.port)
 if not 1 <= PORT <= 65535:
@@ -93,8 +103,8 @@ if not 1 <= PORT <= 65535:
 class ServerState:
     """Holds pre-warmed connections."""
 
-    qdrant_main: object | None = None  # QdrantClient
-    qdrant_communities: object | None = None  # QdrantClient
+    qdrant_main: VectorStore | None = None
+    qdrant_communities: VectorStore | None = None
     adjacency: Mapping[str, tuple[AdjacencyEntry, ...]] | None = (
         None  # entity_id/fact_id -> list of (edge_type, neighbor_id, neighbor_type, dir)
     )
@@ -519,23 +529,18 @@ def _compute_pagerank(
 
 
 def _shared_stores():
-    """Return a (store, qdrant) pair for background ingest/improve jobs.
+    """Return shared graph and vector stores for ingest/improve jobs.
 
     Reuses state.store so the configured backend's routing is preserved during
     ingest. A missing store is a startup failure: silently falling back to
     SQLite would split graph writes across two edge authorities.
-    Always reuses the single open Qdrant client (single-writer lock).
+    Always reuses the server's single open vector-store instance.
     """
-    from kl_graph.storage.qdrant_store import QdrantStore
-
     if state.store is None:
         raise RuntimeError("KnowledgeStore is not initialized")
-    shared_store = state.store
-
-    shared_qdrant = QdrantStore.__new__(QdrantStore)
-    shared_qdrant.path = QDRANT_PATH
-    shared_qdrant.client = state.qdrant_main
-    return shared_store, shared_qdrant
+    if state.qdrant_main is None:
+        raise RuntimeError("VectorStore is not initialized")
+    return state.store, state.qdrant_main
 
 
 def _hot_swap_graph(update: ServingIndexUpdate | None = None):
@@ -574,11 +579,20 @@ def _hot_swap_graph(update: ServingIndexUpdate | None = None):
         if state.engine is not None and hasattr(state.engine, "pagerank"):
             state.engine.pagerank = new_pagerank
     # Re-open the community store if this ingest created it.
-    if state.qdrant_communities is None and Path(COMMUNITY_QDRANT_PATH).exists():
+    remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(
+        cfg.storage.vector.qdrant.host
+    )
+    if state.qdrant_communities is None and (
+        remote_qdrant or COMMUNITY_VECTOR_PATH.exists()
+    ):
         try:
-            from qdrant_client import QdrantClient
-
-            state.qdrant_communities = QdrantClient(path=COMMUNITY_QDRANT_PATH)
+            state.qdrant_communities = create_vector_store(
+                VECTOR_BACKEND,
+                data_dir=DATA_DIR,
+                embedding_dim=int(cfg.services.embedding.dim),
+                namespace="communities",
+                collections=["communities"],
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Could not open community store after ingest: {e}")
     logger.info(
@@ -648,7 +662,7 @@ def _set_ingest_counts(result) -> None:
 async def _run_single_ingest_job(req: IngestRequest):
     """Background ingest: Phase A (chunk+embed) then Phase B (extract+graph).
 
-    Runs inside the server process so it reuses the single Qdrant writer. The
+    Runs inside the server process so it reuses the single vector-store writer. The
     server keeps serving throughout; on completion the graph indexes are
     hot-swapped in. Overall progress is surfaced via /status.
     """
@@ -772,40 +786,39 @@ async def lifespan(app: FastAPI):
     #     endpoints through the configured store (LadybugDB on ladybug).
     state.pagerank = _compute_pagerank(state.store)
 
-    # 3. Qdrant main store (slow — mmaps 300MB)
-    logger.info(f"Opening Qdrant main: {QDRANT_PATH}")
-    from qdrant_client import QdrantClient
-
-    state.qdrant_main = QdrantClient(path=QDRANT_PATH)
-    # Ensure the main collections exist so the server can start against a
-    # brand-new store and a first ingest can upsert. Reuses QdrantStore's
-    # idempotent _ensure_collections on our already-open client (no 2nd handle).
-    from kl_graph.storage.qdrant_store import QdrantStore
-
-    _main_store = QdrantStore.__new__(QdrantStore)
-    _main_store.path = QDRANT_PATH
-    _main_store.client = state.qdrant_main
+    # 3. Main vector store (local backends mmap their indexes).
+    logger.info("Opening %s vector store: %s", VECTOR_BACKEND, VECTOR_PATH)
+    state.qdrant_main = create_vector_store(
+        VECTOR_BACKEND,
+        data_dir=DATA_DIR,
+        embedding_dim=int(cfg.services.embedding.dim),
+    )
+    # Warm by doing a small metadata operation.
     try:
-        _main_store._ensure_collections()
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Could not ensure Qdrant collections: {e}")
-    # Warm by doing a dummy operation
-    try:
-        state.qdrant_main.get_collection("facts")
+        state.qdrant_main.count("facts")
     except Exception:  # noqa: BLE001, S110
         pass
-    logger.info("Qdrant main: ready")
+    logger.info("Vector store main: ready")
 
-    # 4. Qdrant communities (fast — separate small store)
-    if Path(COMMUNITY_QDRANT_PATH).exists():
-        logger.info(f"Opening Qdrant communities: {COMMUNITY_QDRANT_PATH}")
-        state.qdrant_communities = QdrantClient(path=COMMUNITY_QDRANT_PATH)
-        logger.info("Qdrant communities: ready")
+    # 4. Community vectors (a separate small local store).
+    remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(
+        cfg.storage.vector.qdrant.host
+    )
+    if remote_qdrant or COMMUNITY_VECTOR_PATH.exists():
+        logger.info("Opening community vector store: %s", COMMUNITY_VECTOR_PATH)
+        state.qdrant_communities = create_vector_store(
+            VECTOR_BACKEND,
+            data_dir=DATA_DIR,
+            embedding_dim=int(cfg.services.embedding.dim),
+            namespace="communities",
+            collections=["communities"],
+        )
+        logger.info("Community vector store: ready")
     else:
-        logger.warning(f"Community store not found: {COMMUNITY_QDRANT_PATH}")
+        logger.warning(f"Community store not found: {COMMUNITY_VECTOR_PATH}")
 
     # 5. Hybrid query engine — shares the warm store (configured backend) +
-    # Qdrant client + pagerank so /search delegates to the full engine
+    # vector store + pagerank so /search delegates to the full engine
     # (dense+sparse+RRF+rerank +optional Phase-2) and the graph endpoints reuse
     # it for seed extraction. Injecting ``store=state.store`` (NOT a fresh
     # SQLiteStore) is what makes the engine's structural expansion + PageRank
@@ -817,7 +830,7 @@ async def lifespan(app: FastAPI):
 
         state.engine = QueryEngine(
             store=state.store,
-            qdrant=_main_store,
+            qdrant=state.qdrant_main,
             pagerank=state.pagerank,
         )
         logger.info("Query engine: ready")
@@ -985,19 +998,19 @@ async def get_status():
     ]
     stats["edges"] = state.store.count_edges() if state.store else 0
 
-    # Qdrant counts
+    # Vector collection counts
     qdrant_stats = {}
     for coll in ["chunks", "entities", "facts"]:
         try:
-            info = state.qdrant_main.get_collection(coll)
-            qdrant_stats[coll] = info.points_count
+            qdrant_stats[coll] = state.qdrant_main.count(coll)
         except Exception:  # noqa: BLE001
             qdrant_stats[coll] = 0
 
     if state.qdrant_communities:
         try:
-            info = state.qdrant_communities.get_collection("communities")
-            qdrant_stats["communities"] = info.points_count
+            qdrant_stats["communities"] = state.qdrant_communities.count(
+                "communities"
+            )
         except Exception:  # noqa: BLE001
             qdrant_stats["communities"] = 0
 
@@ -1017,6 +1030,7 @@ async def get_status():
         "status": "ready",
         "startup_time_s": round(state.startup_time, 1),
         "graph_backend": cfg.storage.graph.backend,
+        "vector_backend": cfg.storage.vector.backend,
         "adjacency_entities": len(state.adjacency) if state.adjacency else 0,
         "sqlite": stats,
         "qdrant": qdrant_stats,
@@ -1068,7 +1082,7 @@ async def search(req: EmbedSearchRequest):
     """Vector similarity search over a single collection.
 
     Embeds the query once (via the shared engine's embedder) and runs a pure
-    cosine ANN against one Qdrant collection: ``facts`` (default), ``chunks``
+    cosine ANN against one vector collection: ``facts`` (default), ``chunks``
     (alias ``messages``),
     ``entities``, or ``communities``. Returns raw hits ``{results:[{id, score,
     payload}], ...}``. For a synthesized answer over all collections use /ask.
@@ -1080,7 +1094,7 @@ async def search(req: EmbedSearchRequest):
 
     t0 = time.time()
     async with _query_sema():
-        # Embed on the network path (awaited); run the local Qdrant ANN on a
+        # Embed on the network path (awaited); run the local vector ANN on a
         # worker thread so the loop stays free for other requests.
         try:
             vec = await state.engine.embedder.aembed_one(req.query)
@@ -1092,7 +1106,7 @@ async def search(req: EmbedSearchRequest):
 
         # Surface the domain id (fact_id / entity_id / chunk_id) as ``id`` so
         # callers can chain search → context/expand/timeline directly. The raw
-        # Qdrant point id is kept as ``point_id`` for debugging; the full payload
+        # physical point id is kept as ``point_id`` for debugging; the full payload
         # (which also carries the domain id) is returned unchanged.
         _id_key = {
             "facts": "fact_id",
@@ -1101,13 +1115,18 @@ async def search(req: EmbedSearchRequest):
             "messages": "chunk_id",
         }.get(req.collection)
         results = []
-        for r in response.points:
-            payload = r.payload or {}
+        result_store = (
+            state.qdrant_communities
+            if req.collection == "communities"
+            else state.qdrant_main
+        )
+        for r in response:
+            payload = r.payload
             domain_id = payload.get(_id_key) if _id_key else None
             results.append(
                 {
                     "id": str(domain_id) if domain_id is not None else str(r.id),
-                    "point_id": str(r.id),
+                    "point_id": result_store.stable_id_to_point_id(r.id),
                     "score": r.score,
                     "payload": payload,
                 }
@@ -1123,46 +1142,29 @@ async def search(req: EmbedSearchRequest):
 
 
 def _search_qdrant(req: EmbedSearchRequest, vec: list[float]):
-    """Run /search's Qdrant ANN (local, blocking; offload target)."""
-    from qdrant_client.models import (
-        FieldCondition,
-        Filter,
-        Range,
-        SearchParams,
-    )
+    """Run /search's vector ANN (local, blocking; offload target)."""
 
     if req.collection == "communities":
         if not state.qdrant_communities:
             raise HTTPException(404, "Community store not available")
-        return state.qdrant_communities.query_points(
-            collection_name="communities",
-            query=vec,
+        return state.qdrant_communities.search(
+            "communities",
+            vec,
             limit=req.top_k,
-            search_params=SearchParams(
-                exact=bool(cfg.storage.vector.qdrant.exact_search), hnsw_ef=128
-            ),
         )
     # `messages` is a backward-compat alias for the unified `chunks` store.
     collection = "chunks" if req.collection == "messages" else req.collection
-    conditions = []
+    filter_payload = {}
     if req.min_timestamp is not None:
-        conditions.append(
-            FieldCondition(key="timestamp", range=Range(gte=req.min_timestamp))
-        )
+        filter_payload["timestamp_gte"] = req.min_timestamp
     if req.max_timestamp is not None:
-        conditions.append(
-            FieldCondition(key="timestamp", range=Range(lte=req.max_timestamp))
-        )
-    filter_obj = Filter(must=conditions) if conditions else None
+        filter_payload["timestamp_lte"] = req.max_timestamp
 
-    return state.qdrant_main.query_points(
-        collection_name=collection,
-        query=vec,
+    return state.qdrant_main.search(
+        collection,
+        vec,
         limit=req.top_k,
-        query_filter=filter_obj,
-        search_params=SearchParams(
-            exact=bool(cfg.storage.vector.qdrant.exact_search), hnsw_ef=128
-        ),
+        filter_payload=filter_payload or None,
     )
 
 

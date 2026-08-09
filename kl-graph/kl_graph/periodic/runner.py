@@ -35,7 +35,7 @@ try:
 except ImportError:
     run_community_summarization = None  # type: ignore[assignment]
 from kl_graph.storage.base import KnowledgeStore, create_store
-from kl_graph.storage.qdrant_store import QdrantStore
+from kl_graph.storage.vector_store import VectorStore, create_vector_store
 
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
@@ -46,7 +46,7 @@ def run_periodic_improvement(
     qdrant_path=QDRANT_PATH,
     *,
     store: KnowledgeStore | None = None,
-    qdrant: QdrantStore | None = None,
+    qdrant: VectorStore | None = None,
     checkpoint: IngestCheckpoint | None = None,
     # Fact similarity params
     fact_sim_threshold: float = 0.85,
@@ -100,7 +100,13 @@ def run_periodic_improvement(
         else:
             store = create_store(backend=graph_backend, db_path=sqlite_path)
     if qdrant is None:
-        qdrant = QdrantStore(qdrant_path)
+        vector_backend = str(cfg.storage.vector.backend)
+        qdrant = create_vector_store(
+            vector_backend,
+            data_dir=DATA_DIR,
+            embedding_dim=int(cfg.services.embedding.dim),
+            path=qdrant_path if vector_backend == "qdrant" else None,
+        )
 
     try:
         # Step 1: Fact FACT_SIMILAR edges

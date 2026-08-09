@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 
 from kl_graph.models.types import Edge
 from kl_graph.storage.base import KnowledgeStore
-from kl_graph.storage.qdrant_store import QdrantStore
+from kl_graph.storage.vector_store import VectorStore
 
 
 @runtime_checkable
@@ -17,7 +17,7 @@ class IncrementalSimilarityStrategy(Protocol):
         self,
         new_entity_ids: list[str],
         new_fact_ids: list[str],
-        qdrant: QdrantStore,
+        qdrant: VectorStore,
         store: KnowledgeStore,
         *,
         entity_threshold: float = 0.45,
@@ -30,7 +30,7 @@ class IncrementalSimilarityStrategy(Protocol):
         Args:
             new_entity_ids: IDs of entities created in this incremental run.
             new_fact_ids: IDs of facts created in this incremental run.
-            qdrant: QdrantStore for vector similarity lookups.
+            qdrant: VectorStore for vector similarity lookups.
             store: KnowledgeStore for structural data (co-occurrence, ABOUT edges).
             entity_threshold: Minimum hybrid score to emit ENTITY_SIMILAR edge (default 0.45).
             fact_threshold: Minimum cosine score to emit FACT_SIMILAR edge (default 0.85).

@@ -17,7 +17,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from kl_graph.config import cfg, DATA_DIR
+from kl_graph.config import DATA_DIR, cfg
 
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 EMBEDDING_DIM = int(cfg.services.embedding.dim)
@@ -57,19 +57,42 @@ class QdrantStore:
         },
     }
 
-    def __init__(self, path: str | None = None):
+    def __init__(
+        self,
+        path: str | None = None,
+        *,
+        host: str = "",
+        port: int = 6333,
+        api_key: str = "",
+        embedding_dim: int = EMBEDDING_DIM,
+        exact_search: bool = QDRANT_EXACT_SEARCH,
+        collections: dict | None = None,
+        client: QdrantClient | None = None,
+    ):
         self.path = path or QDRANT_PATH
-        self.client = QdrantClient(path=self.path)
+        self.embedding_dim = int(embedding_dim)
+        self.exact_search = bool(exact_search)
+        self.collections = collections or self.COLLECTIONS
+        if client is not None:
+            self.client = client
+        elif host:
+            self.client = QdrantClient(
+                host=host,
+                port=int(port),
+                api_key=api_key or None,
+            )
+        else:
+            self.client = QdrantClient(path=self.path)
         self._ensure_collections()
 
     def _ensure_collections(self):
         existing = {c.name for c in self.client.get_collections().collections}
-        for name, config in self.COLLECTIONS.items():
+        for name, config in self.collections.items():
             if name not in existing:
                 self.client.create_collection(
                     collection_name=name,
                     vectors_config=VectorParams(
-                        size=EMBEDDING_DIM,
+                        size=self.embedding_dim,
                         distance=Distance.COSINE,
                     ),
                 )
@@ -110,7 +133,7 @@ class QdrantStore:
             limit=limit,
             query_filter=filter_conditions,
             score_threshold=score_threshold,
-            search_params=SearchParams(exact=QDRANT_EXACT_SEARCH, hnsw_ef=128),
+            search_params=SearchParams(exact=self.exact_search, hnsw_ef=128),
         )
         return [
             {

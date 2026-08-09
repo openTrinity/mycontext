@@ -48,9 +48,16 @@ storage:
       graph: ${oc.env:KL_FALKOR_GRAPH,kl_graph}
 
   vector:
-    backend: qdrant
+    backend: ${oc.env:KL_VECTOR_BACKEND,qdrant}
     qdrant:
-      exact_search: false
+      exact_search: ${oc.env:KL_QDRANT_EXACT_SEARCH,0}
+      # Empty host selects embedded local-file mode.
+      host: ${oc.env:KL_QDRANT_HOST,""}
+      port: ${oc.env:KL_QDRANT_PORT,6333}
+      api_key: ${oc.env:KL_QDRANT_API_KEY,""}
+    zvec:
+      index_type: ${oc.env:KL_ZVEC_INDEX_TYPE,hnsw}
+      metric: ${oc.env:KL_ZVEC_METRIC,cosine}
 
 pipelines:
   ingestion:

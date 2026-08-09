@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Embed community summaries into Qdrant for vector search.
+"""Embed community summaries into the configured vector store.
 
 Reads all community_summaries from SQLite, embeds them via vLLM,
-and upserts into the 'communities' Qdrant collection.
+and upserts into the ``communities`` collection.
 
 Usage:
     python scripts/embed_communities.py
@@ -12,7 +12,6 @@ import argparse
 import json
 import sys
 import time
-import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -25,15 +24,17 @@ if _pre_args.config:
     from kl_graph.config import load_config
     load_config(_pre_args.config)
 
-from qdrant_client.models import PointStruct
-
-from kl_graph.config import cfg, DATA_DIR
+from kl_graph.config import DATA_DIR, cfg
 from kl_graph.ingest.embedder import Embedder
 from kl_graph.storage.sqlite_store import SQLiteStore
+from kl_graph.storage.vector_store import (
+    VectorPoint,
+    create_vector_store,
+    vector_store_path,
+)
 
 # Derived paths / constants from OmegaConf config
 SQLITE_PATH = DATA_DIR / "knowledge.db"
-QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 EMBEDDING_DIM = int(cfg.services.embedding.dim)
 
 
@@ -86,47 +87,29 @@ def main():
 
     # Build points
     points = []
-    for i, (vec, meta) in enumerate(zip(vectors, metadata)):
-        # Deterministic ID from level + community_id
-        point_id = str(uuid.uuid5(
-            uuid.NAMESPACE_DNS,
-            f"community:{meta['level']}:{meta['community_id']}"
-        ))
-        points.append(PointStruct(
-            id=point_id,
-            vector=vec,
-            payload=meta,
-        ))
+    for vec, meta in zip(vectors, metadata):
+        stable_id = f"community:{meta['level']}:{meta['community_id']}"
+        points.append(VectorPoint(id=stable_id, vector=vec, payload=meta))
 
-    # Upsert into Qdrant — use a SEPARATE small Qdrant path for communities only.
-    # This avoids the cold-start penalty of mmap-ing the 300MB main store.
-    COMMUNITY_QDRANT_PATH = str(Path(QDRANT_PATH).parent / "qdrant_communities")
-    print(f"  Upserting {len(points)} vectors to {COMMUNITY_QDRANT_PATH}...")
-
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams
-
-    client = QdrantClient(path=COMMUNITY_QDRANT_PATH)
-
-    # Recreate collection (small store, fast)
-    existing = {c.name for c in client.get_collections().collections}
-    if "communities" in existing:
-        client.delete_collection("communities")
-    client.create_collection(
-        collection_name="communities",
-        vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+    # Keep communities in a separate lightweight vector-store namespace.
+    backend = str(cfg.storage.vector.backend)
+    community_path = vector_store_path(backend, DATA_DIR, namespace="communities")
+    print(f"  Upserting {len(points)} vectors to {community_path}...")
+    store = create_vector_store(
+        backend,
+        data_dir=DATA_DIR,
+        embedding_dim=EMBEDDING_DIM,
+        namespace="communities",
+        collections=["communities"],
     )
-    print("  Created 'communities' collection")
-
-    # Upsert in batches of 256
-    batch_size = 256
-    for i in range(0, len(points), batch_size):
-        batch = points[i:i + batch_size]
-        client.upsert(collection_name="communities", points=batch)
-        print(f"  Upserted {min(i + batch_size, len(points))}/{len(points)}")
-
-    n = client.get_collection("communities").points_count
-    client.close()
+    try:
+        previous_ids = {point.id for point in store.scroll_all("communities")}
+        store.upsert("communities", points)
+        current_ids = {point.id for point in points}
+        store.delete("communities", list(previous_ids - current_ids))
+        n = store.count("communities")
+    finally:
+        store.close()
 
     elapsed = time.time() - t0
     print(f"\n  Done: {n} community vectors in {elapsed:.1f}s")

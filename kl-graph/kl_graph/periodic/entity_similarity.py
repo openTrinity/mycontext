@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from kl_graph.models.types import Edge, EdgeType
 from kl_graph.storage.base import KnowledgeStore
-from kl_graph.storage.qdrant_store import QdrantStore
+from kl_graph.storage.vector_store import VectorStore
 
 
 def jaccard(set_a: set, set_b: set) -> float:
@@ -38,7 +38,7 @@ def overlap_coefficient(set_a: set, set_b: set) -> float:
 
 
 def build_entity_similarity_edges(
-    qdrant: QdrantStore,
+    qdrant: VectorStore,
     store: KnowledgeStore,
     embedding_threshold: float = 0.65,
     hybrid_threshold: float = 0.45,
@@ -54,7 +54,7 @@ def build_entity_similarity_edges(
     on candidates above embedding_threshold.
 
     Args:
-        qdrant: Qdrant store with "entities" collection
+        qdrant: Vector store with an ``entities`` collection
         store: KnowledgeStore with entities, edges tables
         embedding_threshold: Minimum embedding score for pre-filter
         hybrid_threshold: Minimum hybrid score for final edge creation
@@ -67,29 +67,15 @@ def build_entity_similarity_edges(
     Returns:
         Number of ENTITY_SIMILAR edges created
     """
-    print("  Loading entity vectors from Qdrant...")
+    print("  Loading entity vectors from vector store...")
     entities_count = qdrant.count("entities")
-    print(f"  Total entities in Qdrant: {entities_count}")
+    print(f"  Total entities in vector store: {entities_count}")
 
     if entities_count == 0:
         print("  No entities to compare. Skipping.")
         return 0
 
-    # Scroll all entity points
-    all_points = []
-    offset = None
-    while True:
-        points, next_offset = qdrant.client.scroll(
-            collection_name="entities",
-            limit=256,
-            offset=offset,
-            with_vectors=True,
-            with_payload=True,
-        )
-        all_points.extend(points)
-        if next_offset is None:
-            break
-        offset = next_offset
+    all_points = list(qdrant.scroll_all("entities"))
 
     print(f"  Retrieved {len(all_points)} entity vectors")
 

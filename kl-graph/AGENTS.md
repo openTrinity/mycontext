@@ -2,12 +2,12 @@
 
 A retrieval system that ingests DingTalk workplace messages, extracts entities and facts via LLM, builds a multi-resolution knowledge graph with community detection, and serves queries through a persistent FastAPI server.
 
-> **Authoritative graph design — `graph-design.md` (repo root).** It is the
+> **Authoritative graph design — `docs/graph-design.md`.** It is the
 > "Grand Design" and the source of truth for the graph's node types, edge types,
 > pipeline phases, and naming. **All graph-building work MUST obey
-> `graph-design.md`.** Read it before changing extraction, edge creation
+> `docs/graph-design.md`.** Read it before changing extraction, edge creation
 > (`pipeline.py` `_create_edges`), the `EdgeType` enum, or the periodic/query
-> graph logic. If the design must change, update `graph-design.md` first, then
+> graph logic. If the design must change, update `docs/graph-design.md` first, then
 > the code.
 
 ## Environment Constraints
@@ -43,7 +43,7 @@ DingTalk DWS Export → Ingestion Pipeline → SQLite + Qdrant → Retrieval Ser
 
 ### Three Phases
 
-> These phases implement the pipeline defined in `graph-design.md` — conform to
+> These phases implement the pipeline defined in `docs/graph-design.md` — conform to
 > that spec when changing any graph-building step below.
 
 1. **Ingestion** (`scripts/ingest.py` → `kl_graph/ingest/pipeline.py`)
@@ -64,7 +64,7 @@ DingTalk DWS Export → Ingestion Pipeline → SQLite + Qdrant → Retrieval Ser
 |-----------|-----------|-------|
 | Storage | SQLite (WAL mode) | `data/knowledge.db` |
 | Graph paths | LadybugDB (default) or SQLite BFS | `KL_GRAPH_BACKEND=ladybug\|sqlite` |
-| Vectors | Qdrant (local file mode) | `data/qdrant_data/`, `data/qdrant_communities/` |
+| Vectors | Qdrant (default) or Zvec | `KL_VECTOR_BACKEND=qdrant\|zvec`; local stores live under `data/` |
 | Embeddings | Qwen3-Embedding-8B via vLLM | Port 8100, dim=4096, no Matryoshka |
 | LLM | qwen3.7-plus via remote API | Entity/fact extraction + query synthesis |
 | Community | Leiden algorithm (4 resolutions) + HDBSCAN | Multi-resolution clustering |

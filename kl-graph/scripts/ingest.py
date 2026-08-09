@@ -59,6 +59,7 @@ from kl_graph.ingest.runner import (
     make_checkpoint,
     run_ingestion,
 )
+from kl_graph.storage.vector_store import vector_store_path
 
 # Derived paths / constants from OmegaConf config
 DWS_EXPORT_DIR = _path(cfg.application.dws_export_dir)
@@ -66,7 +67,15 @@ SQLITE_PATH = DATA_DIR / "knowledge.db"
 EXTRACTION_CACHE_PATH = DATA_DIR / "extraction_cache.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 GRAPH_BACKEND = cfg.storage.graph.backend
+VECTOR_BACKEND = str(cfg.storage.vector.backend)
 KEEP_EXTRACTION_CACHE = bool(cfg.pipelines.ingestion.keep_extraction_cache)
+
+
+def _vector_path() -> Path:
+    # Retain the patchable QDRANT_PATH used by older tests and wrappers.
+    if VECTOR_BACKEND == "qdrant":
+        return Path(QDRANT_PATH)
+    return vector_store_path(VECTOR_BACKEND, DATA_DIR)
 
 
 def _reset_stores() -> None:
@@ -76,10 +85,10 @@ def _reset_stores() -> None:
     if SQLITE_PATH.exists():
         SQLITE_PATH.unlink()
         print(f"Deleted {SQLITE_PATH}")
-    qdrant_path = Path(QDRANT_PATH)
-    if qdrant_path.exists():
-        shutil.rmtree(qdrant_path)
-        print(f"Deleted {qdrant_path}")
+    vector_path = _vector_path()
+    if vector_path.exists():
+        shutil.rmtree(vector_path)
+        print(f"Deleted {vector_path}")
     if GRAPH_BACKEND == "ladybug":
         # LadybugDB may be a file or a directory, plus WAL/lock/bak siblings;
         # clear all of them so stale nodes from a previous ingest don't linger
@@ -204,6 +213,7 @@ async def main():
     print(f"SQLite path:  {SQLITE_PATH}")
     print(f"Extraction cache: {EXTRACTION_CACHE_PATH}")
     print(f"Graph backend: {GRAPH_BACKEND}")
+    print(f"Vector backend: {VECTOR_BACKEND}")
     if GRAPH_BACKEND == "ladybug":
         print(f"Ladybug path: {GRAPH_DB_PATH}")
 
@@ -216,10 +226,10 @@ async def main():
         if SQLITE_PATH.exists():
             SQLITE_PATH.unlink()
             print(f"Deleted {SQLITE_PATH}")
-        qdrant_path = Path(QDRANT_PATH)
-        if qdrant_path.exists():
-            shutil.rmtree(qdrant_path)
-            print(f"Deleted {qdrant_path}")
+        vector_path = _vector_path()
+        if vector_path.exists():
+            shutil.rmtree(vector_path)
+            print(f"Deleted {vector_path}")
         # Also clear the graph DB (LadybugDB/FalkorDB) so stale nodes from a
         # previous ingest don't linger. Edge insertion MATCHes both endpoints,
         # so leftover nodes from an old schema cause silent edge-insertion

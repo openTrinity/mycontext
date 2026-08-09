@@ -12,12 +12,22 @@ Dependencies: kl_graph.models.types (data models), ladybug (required by the appl
 from kl_graph.storage.base import KnowledgeStore, create_store
 from kl_graph.storage.graph_db import GraphDB, PathResult, create_graph_db
 from kl_graph.storage.sqlite_store import SQLiteStore
+from kl_graph.storage.vector_store import (
+    VectorPoint,
+    VectorSearchResult,
+    VectorStore,
+    create_vector_store,
+)
 
 __all__ = [
     "GraphDB",
     "KnowledgeStore",
     "PathResult",
     "SQLiteStore",
+    "VectorPoint",
+    "VectorSearchResult",
+    "VectorStore",
     "create_graph_db",
     "create_store",
+    "create_vector_store",
 ]

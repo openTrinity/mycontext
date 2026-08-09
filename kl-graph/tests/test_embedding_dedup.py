@@ -92,12 +92,12 @@ def test_reuse_empty() -> None:
 
 
 class _RecordingQdrant:
-    """Fake Qdrant: records each upsert_batch call's collection + size."""
+    """Fake vector store: records each upsert call's collection + size."""
 
     def __init__(self) -> None:
         self.upserts: list[tuple[str, int]] = []
 
-    def upsert_batch(self, collection, points):
+    def upsert(self, collection, points):
         self.upserts.append((collection, len(points)))
 
 

@@ -109,13 +109,20 @@ class GraphStorageConfig(_ConfigModel):
 
 class QdrantConfig(_ConfigModel):
     exact_search: bool
+    host: str = ""
+    port: int = Field(default=6333, ge=1, le=65535)
+    api_key: str = ""
+
+
+class ZvecConfig(_ConfigModel):
+    index_type: Literal["hnsw", "flat", "ivf", "diskann"] = "hnsw"
+    metric: Literal["cosine", "ip", "l2"] = "cosine"
 
 
 class VectorStorageConfig(_ConfigModel):
-    # Qdrant is currently the sole implementation. This field makes the role
-    # extensible without pretending unsupported backends already work.
-    backend: Literal["qdrant"]
+    backend: Literal["qdrant", "zvec"]
     qdrant: QdrantConfig
+    zvec: ZvecConfig
 
 
 class StorageConfig(_ConfigModel):

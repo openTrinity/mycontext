@@ -27,7 +27,7 @@ import numpy as np
 from kl_graph.config import cfg
 from kl_graph.models.types import Edge, EdgeType
 from kl_graph.storage.base import KnowledgeStore
-from kl_graph.storage.qdrant_store import QdrantStore
+from kl_graph.storage.vector_store import VectorStore
 from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
 
@@ -736,23 +736,10 @@ def create_disambiguation_edges(
     return edges_created
 
 
-def load_embedding_vectors(qdrant: QdrantStore) -> dict[str, np.ndarray]:
-    """Load all entity embedding vectors from Qdrant."""
-    print("  Loading entity embeddings from Qdrant...")
-    all_points = []
-    offset = None
-    while True:
-        points, next_offset = qdrant.client.scroll(
-            collection_name="entities",
-            limit=256,
-            offset=offset,
-            with_vectors=True,
-            with_payload=True,
-        )
-        all_points.extend(points)
-        if next_offset is None:
-            break
-        offset = next_offset
+def load_embedding_vectors(qdrant: VectorStore) -> dict[str, np.ndarray]:
+    """Load all entity embedding vectors from the vector store."""
+    print("  Loading entity embeddings from vector store...")
+    all_points = list(qdrant.scroll_all("entities"))
 
     vectors = {}
     for p in all_points:
@@ -766,7 +753,7 @@ def load_embedding_vectors(qdrant: QdrantStore) -> dict[str, np.ndarray]:
 
 def run_entity_disambiguation(
     store: KnowledgeStore,
-    qdrant: QdrantStore,
+    qdrant: VectorStore,
     # Blocking thresholds
     pinyin_threshold: float = 0.8,
     char_overlap_threshold: float = 0.3,

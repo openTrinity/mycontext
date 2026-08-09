@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from kl_graph.config import cfg, DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS
+from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, cfg
 from kl_graph.ingest.embedder import Embedder
 from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
@@ -41,8 +41,8 @@ from kl_graph.query.query_rewrite import (
 )
 from kl_graph.query.rerank import Reranker
 from kl_graph.storage.base import KnowledgeStore, create_store
-from kl_graph.storage.qdrant_store import QdrantStore
 from kl_graph.storage.sqlite_store import SQLiteStore
+from kl_graph.storage.vector_store import VectorStore, create_vector_store
 from kl_graph.utils.helpers import dedup_ranked, rrf
 
 logger = logging.getLogger(__name__)
@@ -221,7 +221,7 @@ class QueryEngine:
         sqlite_path=SQLITE_PATH,
         qdrant_path=QDRANT_PATH,
         sqlite: SQLiteStore | None = None,
-        qdrant: QdrantStore | None = None,
+        qdrant: VectorStore | None = None,
         pagerank: dict | None = None,
         store: KnowledgeStore | None = None,
     ):
@@ -253,7 +253,13 @@ class QueryEngine:
                 ),
             )
         self.sqlite = self.store  # back-compat alias (content reads + stats)
-        self.qdrant = qdrant if qdrant is not None else QdrantStore(qdrant_path)
+        vector_backend = str(cfg.storage.vector.backend)
+        self.qdrant = qdrant if qdrant is not None else create_vector_store(
+            vector_backend,
+            data_dir=DATA_DIR,
+            embedding_dim=int(cfg.services.embedding.dim),
+            path=qdrant_path if vector_backend == "qdrant" else None,
+        )
         qemb_cfg = cfg.pipelines.query.embedding
         self.embedder = Embedder(
             max_retries=qemb_cfg.max_retries,

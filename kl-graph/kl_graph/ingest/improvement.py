@@ -20,7 +20,7 @@ from kl_graph.periodic.community_detection import (
     RESOLUTIONS,
 )
 from kl_graph.storage.base import KnowledgeStore
-from kl_graph.storage.qdrant_store import QdrantStore
+from kl_graph.storage.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ def _invalidate_summaries(
 def run_incremental_improvement(
     *,
     store: KnowledgeStore,
-    qdrant: QdrantStore,
+    qdrant: VectorStore,
     targets: ImprovementTargets,
     checkpoint: IngestCheckpoint | None = None,
     batch_id: str | None = None,
@@ -316,7 +316,7 @@ def run_improvement(
     requested_mode: str,
     *,
     store: KnowledgeStore,
-    qdrant: QdrantStore,
+    qdrant: VectorStore,
     targets: ImprovementTargets,
     checkpoint: IngestCheckpoint | None = None,
     batch_id: str | None = None,

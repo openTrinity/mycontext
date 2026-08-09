@@ -3,7 +3,7 @@
 Two-phase design:
   Phase A: Chunking (load + persist + embed; no LLM)
     - Loads every source (chat + non-chat) into unified ``Chunk``s
-    - Persists them to SQLite and embeds them into Qdrant ``chunks``
+    - Persists them to SQLite and embeds them into vector-store ``chunks``
     - At end-of-A dense + BM25 retrieval over all sources is usable
 
   Phase B: Extraction + graph build (LLM; replayable from cache)
@@ -26,8 +26,6 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-
-from qdrant_client.models import PointStruct
 
 from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, _path, cfg
 
@@ -75,8 +73,8 @@ from kl_graph.models.types import (
     scope_id_from,
 )
 from kl_graph.storage.base import KnowledgeStore, create_store
-from kl_graph.storage.qdrant_store import QdrantStore, point_id
 from kl_graph.storage.sqlite_store import SQLiteStore
+from kl_graph.storage.vector_store import VectorPoint, VectorStore, create_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -647,7 +645,7 @@ class IngestionPipeline:
         cache_max_entries: int = EXTRACTION_CACHE_MAX_ENTRIES,
         store: KnowledgeStore | None = None,
         sqlite: SQLiteStore | None = None,  # backward-compat alias for store
-        qdrant: QdrantStore | None = None,
+        qdrant: VectorStore | None = None,
         embedder: Embedder | None = None,
         checkpoint: IngestCheckpoint | None = None,
         keep_cache: bool = KEEP_EXTRACTION_CACHE,
@@ -696,9 +694,9 @@ class IngestionPipeline:
             injected_store = None
 
         # Injected stores (e.g. from a running kl-server that already holds the
-        # single-writer Qdrant client) are reused instead of opening new ones.
+        # single-writer vector store) are reused instead of opening new ones.
         self.store: KnowledgeStore | None = injected_store
-        self.qdrant: QdrantStore | None = qdrant
+        self.qdrant: VectorStore | None = qdrant
         self.embedder: Embedder | None = embedder
         self._owns_stores = injected_store is None and qdrant is None
         self.extractor: LLMExtractor | None = None
@@ -946,7 +944,13 @@ class IngestionPipeline:
                     backend=graph_backend, db_path=self.sqlite_path
                 )
         if self.qdrant is None:
-            self.qdrant = QdrantStore(self.qdrant_path)
+            vector_backend = str(cfg.storage.vector.backend)
+            self.qdrant = create_vector_store(
+                vector_backend,
+                data_dir=self.sqlite_path.parent,
+                embedding_dim=int(cfg.services.embedding.dim),
+                path=self.qdrant_path if vector_backend == "qdrant" else None,
+            )
         if self.embedder is None:
             emb_cfg = cfg.pipelines.ingestion.embedding
             self.embedder = Embedder(
@@ -966,7 +970,7 @@ class IngestionPipeline:
     def run_phase_a(self, progress_callback=None):
         """Phase A: load every source, persist chunks, embed them. No LLM.
 
-        At the end of Phase A the SQLite ``chunks`` table + Qdrant ``chunks``
+        At the end of Phase A the SQLite ``chunks`` table + vector ``chunks``
         collection are populated for all sources, so dense + BM25 retrieval is
         immediately usable. Phase B then adds the graph layer on top.
         """
@@ -992,7 +996,7 @@ class IngestionPipeline:
         if progress_callback:
             progress_callback("phase_a", 0.5)
 
-        print("\n[A.3] Embedding chunks into Qdrant...")
+        print("\n[A.3] Embedding chunks into vector store...")
         self._embed_chunks()
 
         elapsed = time.time() - t0
@@ -1481,12 +1485,12 @@ class IngestionPipeline:
         if not points:
             return 0
         n = len(points)
-        self.qdrant.upsert_batch(collection, points)
+        self.qdrant.upsert(collection, points)
         points.clear()
         return n
 
     def _embed_chunks(self):
-        """Embed all chunks (chat + non-chat) into the Qdrant ``chunks`` collection.
+        """Embed all chunks into the vector store's ``chunks`` collection.
 
         Phase A step: after this, dense + BM25 retrieval over every source is
         usable, before any LLM extraction runs. Chat chunks carry extra
@@ -1502,13 +1506,16 @@ class IngestionPipeline:
                 print("  No chunks to embed.")
                 s.done(count=0)
                 return
-            # Deterministic point ids (uuid5 of the chunk id): re-embedding a chunk
-            # overwrites the same Qdrant point instead of appending a duplicate, and
-            # is immune to input-order changes. Skip chunks a previous run already
-            # flushed (resume), so a crash at N% resumes at N%.
-            pids = [point_id(c.id) for c in chunks]
-            already = self.qdrant.existing_ids("chunks", pids)
-            todo = [(c, pid) for c, pid in zip(chunks, pids) if pid not in already]
+            # Adapters map stable chunk IDs to any backend-specific physical ID.
+            # Skip chunks a previous run already flushed (resume), so a crash at
+            # N% resumes at N%.
+            ids = [c.id for c in chunks]
+            already = self.qdrant.existing_ids("chunks", ids)
+            todo = [
+                (chunk, stable_id)
+                for chunk, stable_id in zip(chunks, ids)
+                if stable_id not in already
+            ]
             if already:
                 print(f"  Skipping {len(already)} already-embedded chunks (resume)")
             if not todo:
@@ -1529,7 +1536,7 @@ class IngestionPipeline:
             embeddings = self._embed_texts_reusing_duplicates(texts, "  Chunks")
             points = []
             flushed = 0
-            for (c, pid), emb in zip(todo, embeddings):
+            for (c, stable_id), emb in zip(todo, embeddings):
                 payload = {
                     "chunk_id": c.id,
                     "source_type": c.source_type,
@@ -1544,14 +1551,14 @@ class IngestionPipeline:
                         sender=c.metadata.get("sender", ""),
                         sender_id=c.metadata.get("sender_id") or "",
                     )
-                points.append(PointStruct(id=pid, vector=emb, payload=payload))
+                points.append(VectorPoint(id=stable_id, vector=emb, payload=payload))
                 flushed += self._flush_if_full("chunks", points)
             flushed += self._flush_points("chunks", points)
             print(f"  Chunks: {flushed} vectors stored")
             s.done(count=flushed)
 
     def _embed_graph(self):
-        """Embed entities and facts into their Qdrant collections (Phase B)."""
+        """Embed entities and facts into their vector collections (Phase B)."""
         with self.step("phase_b.embed_graph") as s:
             if s.skip:
                 return
@@ -1561,10 +1568,12 @@ class IngestionPipeline:
             if self.all_entities:
                 print("  Embedding entities...")
                 entity_list = list(self.all_entities.values())
-                epids = [point_id(e.id) for e in entity_list]
-                already = self.qdrant.existing_ids("entities", epids)
+                entity_ids = [e.id for e in entity_list]
+                already = self.qdrant.existing_ids("entities", entity_ids)
                 todo = [
-                    (e, pid) for e, pid in zip(entity_list, epids) if pid not in already
+                    (entity, stable_id)
+                    for entity, stable_id in zip(entity_list, entity_ids)
+                    if stable_id not in already
                 ]
                 if already:
                     print(
@@ -1577,10 +1586,10 @@ class IngestionPipeline:
                     )
                     entity_points = []
                     flushed = 0
-                    for (ent, pid), emb in zip(todo, entity_embeddings):
+                    for (ent, stable_id), emb in zip(todo, entity_embeddings):
                         entity_points.append(
-                            PointStruct(
-                                id=pid,
+                            VectorPoint(
+                                id=stable_id,
                                 vector=emb,
                                 payload={
                                     "entity_id": ent.id,
@@ -1597,12 +1606,12 @@ class IngestionPipeline:
             # Embed facts
             if self.all_facts:
                 print("  Embedding facts...")
-                fpids = [point_id(f.id) for f in self.all_facts]
-                already = self.qdrant.existing_ids("facts", fpids)
+                fact_ids = [f.id for f in self.all_facts]
+                already = self.qdrant.existing_ids("facts", fact_ids)
                 todo = [
-                    (f, pid)
-                    for f, pid in zip(self.all_facts, fpids)
-                    if pid not in already
+                    (fact, stable_id)
+                    for fact, stable_id in zip(self.all_facts, fact_ids)
+                    if stable_id not in already
                 ]
                 if already:
                     print(f"  Skipping {len(already)} already-embedded facts (resume)")
@@ -1613,10 +1622,10 @@ class IngestionPipeline:
                     )
                     fact_points = []
                     flushed = 0
-                    for (fact, pid), emb in zip(todo, fact_embeddings):
+                    for (fact, stable_id), emb in zip(todo, fact_embeddings):
                         fact_points.append(
-                            PointStruct(
-                                id=pid,
+                            VectorPoint(
+                                id=stable_id,
                                 vector=emb,
                                 payload={
                                     "fact_id": fact.id,
@@ -2183,9 +2192,9 @@ class IngestionPipeline:
         print(f"  Facts: {self.store.count_facts()}")
         print(f"  Edges: {self.store.count_edges()}")
         print(f"  Edge breakdown: {self.store.count_edges_by_type()}")
-        print(f"  Qdrant chunks: {self.qdrant.count('chunks')}")
-        print(f"  Qdrant entities: {self.qdrant.count('entities')}")
-        print(f"  Qdrant facts: {self.qdrant.count('facts')}")
+        print(f"  Vector chunks: {self.qdrant.count('chunks')}")
+        print(f"  Vector entities: {self.qdrant.count('entities')}")
+        print(f"  Vector facts: {self.qdrant.count('facts')}")
         # Embedding token usage for graph build
         if self.embedder:
             self.embedder.print_usage_stats("Phase B.2 (Entity/Fact Embedding)")
@@ -2214,7 +2223,7 @@ class IngestionPipeline:
 
         Parses the source folders (cheap, no store writes) to learn how many
         chunks Phase A would produce, then checks the SQLite ``chunks`` table
-        and the Qdrant ``chunks`` collection both cover them. A partial Phase A
+        and the vector ``chunks`` collection both cover them. A partial Phase A
         (persisted but not embedded, or fewer rows than sources) counts as *not*
         complete, so the canonical runner re-runs Phase A from the start.
         """
@@ -2243,7 +2252,7 @@ class IngestionPipeline:
     def close(self):
         # Always close the extractor's own cache connection — the extractor is
         # created by the pipeline (not injected), so its SQLite handle is ours
-        # to close even when the graph/Qdrant stores were injected by a caller.
+        # to close even when the graph/vector stores were injected by a caller.
         extractor = getattr(self, "extractor", None)
         if extractor is not None:
             extractor.close()

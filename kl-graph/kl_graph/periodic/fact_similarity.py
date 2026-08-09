@@ -15,11 +15,11 @@ from tqdm import tqdm
 
 from kl_graph.models.types import Edge, EdgeType
 from kl_graph.storage.base import KnowledgeStore
-from kl_graph.storage.qdrant_store import QdrantStore
+from kl_graph.storage.vector_store import VectorStore
 
 
 def build_fact_similarity_edges(
-    qdrant: QdrantStore,
+    qdrant: VectorStore,
     store: KnowledgeStore,
     threshold: float = 0.85,
     max_neighbors: int = 10,
@@ -31,7 +31,7 @@ def build_fact_similarity_edges(
     to find pairs above threshold. Much faster than 17K individual ANN queries.
 
     Args:
-        qdrant: Qdrant store with "facts" collection populated
+        qdrant: Vector store with a populated ``facts`` collection
         store: KnowledgeStore with facts and edges tables
         threshold: Minimum cosine similarity to create an edge
         max_neighbors: Max edges per fact (top-K)
@@ -40,29 +40,15 @@ def build_fact_similarity_edges(
     Returns:
         Number of FACT_SIMILAR edges created
     """
-    print("  Loading fact vectors from Qdrant...")
+    print("  Loading fact vectors from vector store...")
     facts_count = qdrant.count("facts")
-    print(f"  Total facts in Qdrant: {facts_count}")
+    print(f"  Total facts in vector store: {facts_count}")
 
     if facts_count == 0:
         print("  No facts to compare. Skipping.")
         return 0
 
-    # Scroll all facts to get vectors and IDs
-    all_points = []
-    offset = None
-    while True:
-        points, next_offset = qdrant.client.scroll(
-            collection_name="facts",
-            limit=256,
-            offset=offset,
-            with_vectors=True,
-            with_payload=True,
-        )
-        all_points.extend(points)
-        if next_offset is None:
-            break
-        offset = next_offset
+    all_points = list(qdrant.scroll_all("facts"))
 
     print(f"  Retrieved {len(all_points)} fact vectors")
 

@@ -120,6 +120,24 @@ def _make_mock_qdrant(
 
     qdrant.search.side_effect = _search
 
+    vectors_by_collection = {
+        "entities": {
+            rec.payload["entity_id"]: rec.vector
+            for rec in (entity_retrieve_records or [])
+        },
+        "facts": {
+            rec.payload["fact_id"]: rec.vector
+            for rec in (fact_retrieve_records or [])
+        },
+    }
+    qdrant.retrieve_vectors.side_effect = (
+        lambda collection, ids: {
+            point_id: vectors_by_collection[collection][point_id]
+            for point_id in ids
+            if point_id in vectors_by_collection[collection]
+        }
+    )
+
     def _retrieve(collection_name: str, ids: list, **kw):
         if collection_name == "entities":
             return entity_retrieve_records or []
