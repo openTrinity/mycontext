@@ -716,19 +716,33 @@ describe("★★ readIdentityProblem：红字指向哪个入口", () => {
   })
 
   /**
-   * ★ 没绑身份 → 指向**授权**，而且要盖过 adopt。
+   * ★★ 没绑身份 → **不说话**（不是"换一句话说"）。
    *
-   * 排在最前是因为它更根本：还没有身份，谈不上解析或采纳。
-   * 给错方向的代价是用户在一个解决不了问题的按钮上反复点。
+   * 这一档的正确动作是"去授权"，而那件事已经有人在说、而且说得更好：
+   * 引导页上方那个授权面板本身就写着「为当前账号授权一次，才能确定
+   * 「你」是谁」并带按钮；仪表盘那条 `staleData` 说「钉钉未连接 ——
+   * 以下是历史数据」。在它们下面再挂一个"还没授权"的框是同一件事说两遍，
+   * 而重复的提示会稀释真正需要注意的那两档（同名歧义、解析失败）。
+   *
+   * ★ 断言 null 而不是某个 kind：可见性由那两处负责，
+   * 删掉它们中任何一个之前要先把这句话搬过去。
    */
-  it("★★ identityState=unbound → 指向授权（即使有可采纳的登录态）", () => {
+  it("★★ identityState=unbound → 不说话（授权面板与 staleData 已经在说了）", () => {
+    expect(
+      readIdentityProblem({
+        selfState: "unconfirmed",
+        adoptable: null,
+        identityState: "unbound",
+      }),
+    ).toBeNull()
+    // 即使有可采纳的登录态也不说：没授权时"采纳"也无从谈起
     expect(
       readIdentityProblem({
         selfState: "unconfirmed",
         adoptable: { corpName: "示例集团", userName: "王强" },
         identityState: "unbound",
       }),
-    ).toEqual({ kind: "unbound" })
+    ).toBeNull()
   })
 
   /**

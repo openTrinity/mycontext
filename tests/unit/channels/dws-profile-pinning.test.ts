@@ -203,6 +203,54 @@ describe("DwsCli.run 钉住身份", () => {
   })
 
   /**
+   * ★★★ 「确定我是谁」那条链必须能在**没绑身份**时跑 —— 否则是死锁。
+   *
+   * ## 这一条锁的是一个真实踩到的 bug
+   *
+   * 上面那道闸第一版只放行 `auth` 子树。但**确定"我是谁"本身**要跑
+   * `contact user get-self` 与 `contact user search`，那两条属于 contact 子树
+   * —— 于是「用这个身份」按钮被自己的守卫打死了（实测：点了没反应）：
+   *
+   *   adoptExistingSession → resolveSelf → get-self
+   *   → 被闸拒 → confirmIdentity 的 catch 吞掉 → 照常返回成功
+   *
+   * 死锁：采纳是**获得**身份的入口，却需要身份才能跑。
+   *
+   * 解法是给这条链一个**显式**旗子而不是放宽判据：调用方必须写明意图，
+   * 读代码时看得见，其余业务命令一律照拦（下一条锁）。
+   */
+  it("★★ establishingIdentity=true → 没绑身份也放行（否则采纳身份是死锁）", async () => {
+    let seen: string[] = []
+    const cli = new DwsCli({
+      runtime: stubResolve(runtimeWith(undefined)),
+      processes: {
+        exec: async (input: { args: string[] }) => {
+          seen = input.args
+          return { exitCode: 0, stdout: "{}", stderr: "", timedOut: false }
+        },
+      } as never,
+      logger: NOOP_LOGGER as never,
+    })
+
+    await cli.run(["contact", "user", "get-self"], { establishingIdentity: true })
+    expect(seen).toContain("get-self")
+    // 仍然不带 --profile（没身份可钉）—— 这一档就是"还没有身份"
+    expect(seen).not.toContain("--profile")
+  })
+
+  /**
+   * ★★ 那个旗子**不是万能钥匙**：不传它的业务命令照样被拒。
+   *
+   * 没有这一条，`establishingIdentity` 很容易被后来的人当成"绕过闸的开关"
+   * 顺手加到别处，而那等于把整道闸废掉。
+   */
+  it("★★ 不传 establishingIdentity 的业务命令仍被拒", async () => {
+    await expect(captureArgs(undefined, ["chat", "message", "list-all"])).rejects.toMatchObject({
+      code: "CHANNEL_IDENTITY_UNAVAILABLE",
+    })
+  })
+
+  /**
    * ★ 调用方显式指定时不覆盖 —— 那是"我就要问这一个身份"，比默认更具体。
    * 覆盖会让参数里出现两个 `--profile`，而上游取哪个是不确定的。
    */

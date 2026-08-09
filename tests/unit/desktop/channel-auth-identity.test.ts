@@ -514,12 +514,24 @@ describe("★★ 采纳本机已有的登录态", () => {
       profileCalls: 0,
       clearBlockedCalls: 0,
     }
+    /**
+     * ★ 身份行是**可变**的：`resolveSelf` 成功之后它就存在了。
+     *
+     * 原来这个桩是个常量 null，于是它表达不了"落库成功"这件事 ——
+     * 而 `adoptExistingSession` 现在正是**重读这一行**来判断到底成没成
+     * （不再"跑完没抛就报成功"，见那里的注释）。
+     *
+     * 用真实语义建模：一开始是入参给的那个值，resolveSelf 跑成功后变成有行。
+     */
+    let row = identityRow
     return {
       spy,
       deps: {
         dataPlane: {
           resolveSelf: () => {
             spy.resolveCalls += 1
+            // 真实行为：resolveSelf 内部 upsert 身份行
+            row = { channelId: "dingtalk" }
             return Promise.resolve({ confirmed: false, openIds: ["o1"], matchedMessageCount: 3 })
           },
           confirmSelf: () => ({ backfilled: 3, mentionsBackfilled: 0 }),
@@ -536,7 +548,7 @@ describe("★★ 采纳本机已有的登录态", () => {
         },
         logger,
         toFileUrl: (path) => `mycontext-file://local${path}`,
-        readSelfIdentity: () => identityRow,
+        readSelfIdentity: () => row,
         channelStatus: () => {
           spy.statusCalls += 1
           return Promise.resolve(status)
@@ -596,23 +608,32 @@ describe("★★ 采纳本机已有的登录态", () => {
   })
 
   /**
-   * ★ 采纳内部失败**不能**抛给调用方。
+   * ★ 采纳内部失败**不能**抛给调用方，但要**如实返回 false**。
    *
-   * 身份解析失败是预期内的（同名多 ID、换了组织都会抛），而这是个 IPC
-   * handler 背后的动作 —— 抛出去只会变成一个界面上的红字，而头像那段
-   * 其实可能已经成功了。
+   * 不抛的理由不变：身份解析失败是预期内的（同名多 ID、换了组织都会抛），
+   * 而这是个 IPC handler 背后的动作 —— 抛出去只会变成一个界面上的红字，
+   * 而头像那段其实可能已经成功了。
+   *
+   * ★★ 但原来这里断言的是 `resolves.toBe(true)` —— 那把「点了没反应」
+   * 这个 bug 当成契约锁住了：解析失败、身份行没落下来，却报告成功。
+   * 实测症状就是「用这个身份」按钮点下去乐观更新一闪、刷新后原样，
+   * 而日志里只有一条 warn。
+   *
+   * 现在判据是"身份行真的在了吗"（见 `adoptExistingSession` 的注释），
+   * 所以失败路径返回 false，界面据此能继续提示而不是假装成功。
    */
-  it("采纳内部抛错时不往外抛", async () => {
+  it("★★ 采纳内部抛错 → 不往外抛，但如实返回 false（不能假装成功）", async () => {
     const { deps } = makeBackfillDeps(null, AUTHORIZED)
     const failing = {
       ...deps,
       dataPlane: {
         ...deps.dataPlane,
+        // 失败 → 身份行不会被写出来（桩里那次赋值不发生）
         resolveSelf: () => Promise.reject(new AppError("SELF_IDENTITY_CONFLICT", "换了身份")),
       },
     }
 
-    await expect(adoptExistingSession(failing)).resolves.toBe(true)
+    await expect(adoptExistingSession(failing)).resolves.toBe(false)
   })
 
   /**

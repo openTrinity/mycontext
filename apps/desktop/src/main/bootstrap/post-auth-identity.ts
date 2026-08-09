@@ -281,7 +281,25 @@ export async function adoptExistingSession(
 
   logger.info("adopting existing channel session", { corpName: status.corpName })
   await applyPostAuthIdentity(deps, status)
-  return true
+  /**
+   * ★★ 判据是「**身份行真的落下来了**」，不是「跑完没抛」。
+   *
+   * `applyPostAuthIdentity` 里两段各自 catch（那是对的：取头像失败不该
+   * 连带身份也不落），于是它**永远不抛** —— 直接 `return true` 等于
+   * 不管成没成都报成功。实测踩到过：`resolveSelf` 被身份闸拒掉、
+   * catch 记了一条 warn、这里照样返回 true，界面上表现是
+   * **「用这个身份」点了没反应**（乐观更新一闪，刷新后原样）。
+   *
+   * 重新读一次那一行是廉价的（一次本地 SELECT，与开头那个幂等门同一个查询），
+   * 而它把"我以为做成了"换成"确实做成了"。
+   */
+  const adopted = deps.readSelfIdentity() !== null
+  if (!adopted) {
+    logger.warn("adopt existing session did not land an identity row", {
+      corpName: status.corpName,
+    })
+  }
+  return adopted
 }
 
 /**

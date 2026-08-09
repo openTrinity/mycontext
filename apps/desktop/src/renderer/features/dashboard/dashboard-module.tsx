@@ -432,11 +432,9 @@ export function DashboardModule() {
               text={
                 identityProblem.kind === "adopt"
                   ? `本人身份还没确认 —— 蒸馏会拒掉全部语料。本机已登录「${identityProblem.corpName}」，去设置的渠道页采纳这份登录态`
-                  : identityProblem.kind === "unbound"
-                    ? "还没为当前账号完成钉钉授权 —— 蒸馏会拒掉全部语料。去设置的渠道页授权一次"
-                    : identityProblem.kind === "ambiguous"
-                      ? "同名账号有多个，没法自动确定哪个是你 —— 蒸馏会拒掉全部语料，去「运行状态」页确认"
-                      : "本人身份还没确认 —— 蒸馏会拒掉全部语料，去「运行状态」页解析并确认"
+                  : identityProblem.kind === "ambiguous"
+                    ? "同名账号有多个，没法自动确定哪个是你 —— 蒸馏会拒掉全部语料，去「运行状态」页确认"
+                    : "本人身份还没确认 —— 蒸馏会拒掉全部语料，去「运行状态」页解析并确认"
               }
               tone="bad"
             />

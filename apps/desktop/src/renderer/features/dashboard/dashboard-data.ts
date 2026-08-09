@@ -548,17 +548,25 @@ export function readIdentityProblem(input: {
   | { kind: "adopt"; corpName: string; userName: string }
   | { kind: "resolve" }
   | { kind: "ambiguous" }
-  | { kind: "unbound" }
   | null {
   // 只在真的"读到了、但没确认"时说话。`unknown` 是加载态，报警是狼来了。
   if (input.selfState !== "unconfirmed") return null
   /**
-   * ★ 没绑身份 → 该去授权，而不是"确认哪个是你"。
+   * ★★ 没绑身份 → **什么都不说**（不是"换一句话说"）。
    *
-   * 这一档排在最前：它比下面两者更根本（还没有身份，谈不上解析或歧义），
-   * 而给错方向的代价是用户在一个解决不了问题的按钮上反复点。
+   * 这一档的正确动作是"去授权"，而那件事**已经有人在说了**，而且说得更好：
+   * · 引导页：上方那个授权面板本身就写着「为当前账号授权一次，才能确定
+   *   「你」是谁」，还带着「开始授权」按钮；
+   * · 仪表盘：`readIngest` 的 `staleData` 那条说「钉钉未连接 —— 以下是
+   *   历史数据，现在不会有新消息进来」。
+   *
+   * 在它们下面再挂一个"还没授权"的框，是同一件事说两遍 —— 而重复的提示
+   * 会稀释真正需要注意的那条（同名歧义、解析失败那两档才是这里的职责）。
+   *
+   * ★ 这不是"少报一个状态"：`unbound` 的可见性由那两处负责，
+   * 这里返回 null 只是不重复。删掉它们中任何一个之前，先把这句话搬过去。
    */
-  if (input.identityState === "unbound") return { kind: "unbound" }
+  if (input.identityState === "unbound") return null
   /**
    * ★★ 真的同名歧义 —— **只有**主进程说是它才这么讲。
    *

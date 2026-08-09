@@ -455,11 +455,15 @@ export function OnboardingView() {
                    * 都会走到这里。用户会去找一个不存在的重名同事，
                    * 而真正该做的事（去授权 / 点采纳 / 重试解析）不被提及。
                    *
-                   * 现在四档各说各的（判据在 `readIdentityProblem`）：
-                   * · unbound   → 先完成授权；
+                   * 现在三档各说各的（判据在 `readIdentityProblem`）：
                    * · ambiguous → **真的**同名歧义，确认哪个是你；
                    * · adopt     → 本机有现成登录态，点「用这个身份」；
                    * · resolve   → 解析失败过，重试一次。
+                   *
+                   * ★ 「还没授权」那一档**刻意不说话**：上方那个授权面板已经
+                   * 写着「为当前账号授权一次，才能确定『你』是谁」并带按钮 ——
+                   * 在它下面再挂一个说同样话的框只是噪音，还会稀释上面这三档
+                   * （那三档才是这里的职责）。
                    *
                    * 那两个按钮（解析/确认并回填）只在**自动确认没成功**时才
                    * 有意义 —— 正常路径上主进程授权后就自动 resolve+confirm 了
@@ -469,24 +473,16 @@ export function OnboardingView() {
                   {identityProblem === null ? null : (
                     <div className="flex flex-col gap-[var(--gap-component-sm)] rounded-[var(--radius-md)] border border-[var(--border-divider-light)] bg-[var(--bg-card-z0)] p-[var(--gap-component-md)]">
                       <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
-                        {identityProblem.kind === "unbound"
-                          ? t("channel.identityUnbound")
-                          : identityProblem.kind === "ambiguous"
-                            ? t("channel.identityAmbiguous")
-                            : identityProblem.kind === "adopt"
-                              ? t("channel.identityAdoptable", {
-                                  corpName: identityProblem.corpName,
-                                  userName: identityProblem.userName,
-                                })
-                              : t("channel.identityUnresolved")}
+                        {identityProblem.kind === "ambiguous"
+                          ? t("channel.identityAmbiguous")
+                          : identityProblem.kind === "adopt"
+                            ? t("channel.identityAdoptable", {
+                                corpName: identityProblem.corpName,
+                                userName: identityProblem.userName,
+                              })
+                            : t("channel.identityUnresolved")}
                       </p>
-                      {/*
-                        ★ `unbound` 时不给那两个按钮：还没有身份，解析必然失败
-                        （渠道命令会被身份闸拒掉）。那时唯一该做的是上面的授权。
-                      */}
-                      {identityProblem.kind === "unbound" ? null : (
-                        <SelfIdentityPanel confirmed={selfConfirmed} unjudged={unjudged} />
-                      )}
+                      <SelfIdentityPanel confirmed={selfConfirmed} unjudged={unjudged} />
                     </div>
                   )}
                 </div>

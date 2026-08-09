@@ -196,8 +196,17 @@ export async function resolveSelf(
   channelId = "dingtalk",
   options: { inferFromMessages?: InferSelfFromMessages } = {},
 ): Promise<ResolvedSelfIdentity> {
-  // ★ 必须压平：真实形状是数组 + orgEmployeeModel 嵌套（见文件头 §4）。
-  const self = flattenSelfPayload(await cli.json<unknown>(["contact", "user", "get-self"]))
+  /**
+   * ★ 必须压平：真实形状是数组 + orgEmployeeModel 嵌套（见文件头 §4）。
+   *
+   * ★★ `establishingIdentity` —— 这一条与下面那条 `search` 是「**确定我是谁**」
+   * 本身，所以要显式解除 `DwsCli` 那道"必须先有身份"的前置（见 cli.ts 里
+   * 那段注释）。不传的话「用这个身份」/首次授权后的自动确认会被自己的
+   * 守卫拦掉，而上层 catch 把异常吞掉 —— 表现是"点了没反应"。
+   */
+  const self = flattenSelfPayload(
+    await cli.json<unknown>(["contact", "user", "get-self"], { establishingIdentity: true }),
+  )
   const userId = str(self.userId, self.user_id)
   if (userId === null) {
     throw new AppError("SELF_IDENTITY_AMBIGUOUS", "无法从渠道获取本人 userId", {
@@ -261,7 +270,10 @@ export async function resolveSelf(
   }
 
   const candidates = toCandidateArray(
-    await cli.json<unknown>(["contact", "user", "search", "--query", orgName]),
+    // 同 get-self：这是"确定我是谁"的一部分（见那里的注释）
+    await cli.json<unknown>(["contact", "user", "search", "--query", orgName], {
+      establishingIdentity: true,
+    }),
   )
 
   // ★ 只按 userId 精确匹配。姓名相同的候选实测有 6 个。

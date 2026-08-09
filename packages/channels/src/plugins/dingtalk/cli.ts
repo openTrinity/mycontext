@@ -694,7 +694,7 @@ export class DwsCli {
    */
   async run(
     args: readonly string[],
-    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+    options: { signal?: AbortSignal; timeoutMs?: number; establishingIdentity?: boolean } = {},
   ): Promise<DwsCommandResult> {
     // ★ 白名单门禁：白名单外的命令根本走不出这里（不只是"不自动确认"）。
     assertAllowedCommand(args)
@@ -746,8 +746,31 @@ export class DwsCli {
        *
        * ★ 抛而不是返回空结果：静默返回空会被上层解读成"这个账号没有会话"，
        * 那正是本仓库最贵的那类 bug（把"读不到"记成"0 条"）。
+       *
+       * ## ★★ `establishingIdentity` —— 「获得身份」那条链的显式通路
+       *
+       * 光放行 `auth` 不够：**确定"我是谁"本身**要跑 `contact user get-self`
+       * 与 `contact user search`，而那两条是 contact 子树。于是这道闸把
+       * 「用这个身份」按钮打死了（实测：点了没反应）——
+       * `adoptExistingSession → resolveSelf → get-self` 被拒，
+       * 而上层 `confirmIdentity` 的 catch 把异常吞掉、照常返回成功。
+       * 死锁：采纳是**获得**身份的入口，却需要身份才能跑。
+       *
+       * 所以给这条链一个**显式**的旗子，而不是放宽判据：
+       * · 调用方必须写明"我正在确定身份"，读代码时看得见；
+       * · 只有 `identity.resolveSelf()` 那一条链传它（见 self-identity.ts），
+       *   其余业务命令一律照拦。
+       *
+       * ⚠️ 它**不是**万能钥匙：`assertAllowedCommand` 那道白名单门禁在上面、
+       * 与这里无关，`get-self`/`search` 本来就在白名单里且都是纯读。
+       * 这个旗子只解除"必须先有身份"这一条前置，而那一条对
+       * "正在确定身份"这件事本身自相矛盾。
        */
-      if (pinned.length === 0 && commandPath(args)[0] !== "auth") {
+      if (
+        pinned.length === 0 &&
+        commandPath(args)[0] !== "auth" &&
+        options.establishingIdentity !== true
+      ) {
         throw new AppError(
           "CHANNEL_IDENTITY_UNAVAILABLE",
           "还没绑定渠道身份，拒绝执行渠道命令（否则会跟着 CLI 的全局身份读到别人的数据）",
@@ -792,7 +815,7 @@ export class DwsCli {
    */
   async json<T>(
     args: readonly string[],
-    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+    options: { signal?: AbortSignal; timeoutMs?: number; establishingIdentity?: boolean } = {},
   ): Promise<T> {
     const result = await this.run(args, options)
     const parsed = extractJson(result.stdout)
