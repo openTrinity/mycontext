@@ -202,10 +202,28 @@ describe("★★ 建图带渠道归属", () => {
    * 后者在"两处都读、以顶层为准"这种半吊子实现下也是绿的，
    * 而那正是改动前那一版的形状。
    */
-  it("★★ 进度按 perChannel 那一行取，不读顶层聚合", () => {
-    expect(code).toContain("row.buildProgress")
-    // 顶层只能作为"旧主进程没有这个字段"的回落，不能是主判据
-    expect(code).toMatch(/row === undefined \? status\?\.buildProgress : row\.buildProgress/)
+  /**
+   * ★★ 判据升级过一次：从"进度别读顶层"变成"**结构上读不到顶层**"。
+   *
+   * 上一版是"每渠道一行状态 + 顶层一套按钮"，那时这条断言盯的是
+   * `row === undefined ? status?.buildProgress : row.buildProgress` ——
+   * 也就是"以 row 为主、顶层只做旧主进程回落"。
+   *
+   * 但那个布局本身是错的：两行渠道状态下面挂一套按钮，用户的原话是
+   * 「这里的停止是停止谁，这里的重建是重建谁」。现在改成**每渠道一张卡**，
+   * 按钮长在卡里、数据全部取自 `row` —— `ChannelKlCard` 拿不到 `status`
+   * 这个变量，于是"读顶层"在结构上不可能发生。
+   *
+   * 所以判据也跟着换：不再匹配某个三元表达式，而是断言
+   * ① 卡组件存在且只吃一个 `row`；② 卡内不出现任何 `status?.` 读取。
+   */
+  it("★★ 每渠道一张卡：卡内只读 row，读不到顶层聚合", () => {
+    expect(code).toContain("function ChannelKlCard")
+    expect(code).toContain("klBuildPercent(row.buildProgress")
+    // 卡组件的函数体里不许出现顶层 status —— 它压根不在作用域里
+    const card = code.slice(code.indexOf("function ChannelKlCard"))
+    expect(card).not.toContain("status?.")
+    expect(card).not.toContain("status.perChannel")
   })
 
   /** ★ 文案里必须出现渠道名 —— 只有百分比的那个 key 不够。 */
@@ -218,14 +236,24 @@ describe("★★ 建图带渠道归属", () => {
   })
 
   /**
-   * ★ 别的渠道在建图要说出来，但**不能**显示成这一栏的进度。
-   * 它会占机器、会出网烧 LLM —— 用户有权知道；而把它当成这一栏的百分比
-   * 就是改动前那个歧义本身。
+   * ★ 「别的渠道也在建图」这句话**已经不需要了**，这条断言随之删除。
+   *
+   * 它是上一版的补偿：那时只有一栏进度，所以要额外说一句"另一个渠道也在建"，
+   * 否则用户在飞书栏看到"没在建"而后台钉钉正烧着 LLM。
+   *
+   * 现在每个渠道都有自己的卡、自己的进度行 —— 钉钉在建图，钉钉那张卡上就
+   * 直接写着「钉钉 建图中 42%」。用一句话去描述另一张卡上已经写明的事实
+   * 是纯冗余，而冗余的那份还会过期（它依赖顶层聚合）。
+   *
+   * ★ i18n 的 `buildingElsewhere` 键**保留**：删键要同时清两个语言文件，
+   * 而它下次做"跨渠道并发提示"时还用得上。没有消费方的文案不该留着 ——
+   * 这条规矩是对的，但它的门禁在 i18n 那边统一管，不在这个文件里。
    */
-  it("★ 别的渠道在建图时给一句独立的说明", () => {
-    expect(code).toContain("buildingElsewhere")
+  it("★ 每张卡有自己的进度行（不再需要「别的渠道也在建」那句补偿）", () => {
+    // 进度文案仍在，且带渠道名
+    expect(code).toContain("buildProgressOn")
     for (const loc of ["zh", "en"]) {
-      expect(readLocale(loc)["buildingElsewhere"]).toContain("{{channels}}")
+      expect(readLocale(loc)["buildProgressOn"]).toContain("{{channel}}")
     }
   })
 
@@ -233,10 +261,35 @@ describe("★★ 建图带渠道归属", () => {
    * ★★ 按钮的禁用也按渠道判。
    *
    * 顶层 `status.building` 是"任一在建" —— 用它禁用的话钉钉建图期间
-   * 飞书那栏也点不了，而两者互不影响。
+   * 飞书那张卡也点不了，而两者是独立的 kl（各自进程、端口、Qdrant writer）。
    */
-  it("★★ busy 按渠道判，不是顶层的「任一在建」", () => {
-    expect(code).toMatch(/row === undefined \? status\?\.building === true : row\.building/)
+  it("★★ busy 只看这张卡自己的 row.building", () => {
+    const card = code.slice(code.indexOf("function ChannelKlCard"))
+    expect(card).toMatch(/const busy = build\.isPending \|\| row\.building/)
+  })
+
+  /**
+   * ★★★ 这一条是用户报了**四遍**的那个问题的门禁：
+   * 「这里的停止是停止谁，这里的重建是重建谁」。
+   *
+   * 判据不是"文案里有渠道名"（那是补丁），而是**按钮的渠道来自它所在的卡**。
+   * 只要 onClick 里取的是 `row.channelId`，"打给谁"就由 DOM 结构决定，
+   * 不可能与用户看到的那一行不一致。
+   *
+   * 反证：断言这一段里**不出现** `channelId ?? undefined` 这类页面级取值 ——
+   * 那正是上一版的写法，而它在 `channelId` 为 null（还没选过）时退化成
+   * "不指定渠道 → 全建/全停"。实测踩到过：点一次建图，日志里
+   * `graph build started` 主渠道与飞书各来一条。
+   */
+  it("★★★ 启停与建图的渠道都取自这张卡的 row.channelId", () => {
+    const card = code.slice(code.indexOf("function ChannelKlCard"))
+    expect(card).toMatch(/stop\.mutate\(row\.channelId\)/)
+    expect(card).toMatch(/start\.mutate\(row\.channelId\)/)
+    expect(card).toMatch(/fresh: false, channelId: row\.channelId/)
+    expect(card).toMatch(/fresh: true, channelId: row\.channelId/)
+    // ★ 不许再出现"页面级 channelId 兜 undefined"那套写法
+    expect(card).not.toContain("channelId ?? undefined")
+    expect(card).not.toContain("channelId === null ? {} :")
   })
 })
 

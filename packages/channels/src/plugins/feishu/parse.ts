@@ -83,14 +83,6 @@ export const LARK_AUTH_SCOPES = [
   "docx:document:readonly",
 ] as const
 
-/**
- * 拿不到会话名时的占位。
- *
- * ★ 单独一个常量而不是散在各处的字面量：解析里要判"这个名字是不是占位"
- * （见单聊那段的"已有名字不覆盖"），而拿字面量比对是那类会漂的判据。
- */
-const FEISHU_FALLBACK_TITLE = "飞书会话"
-
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
 }
@@ -249,8 +241,15 @@ function itemsOf(payload: unknown): unknown[] {
  *
  * 这是渠道无关性的落点：时间格式、id 形态、@ 字段叫什么，全部在这里吸收 ——
  * 规范化层往下看不出数据来自哪个渠道（见 `ParsedMessageLike` 的注释）。
+ *
+ * @param selfOpenId 本人的 open_id（`ou_…`），拿不到时给 null。
+ *   只用于**单聊会话名**那条推导 —— 见下面 `fromPartner` 那段。
  */
-export function parseLarkMessagePage(payload: unknown, fetchedAt: number): ChannelPullPage {
+export function parseLarkMessagePage(
+  payload: unknown,
+  fetchedAt: number,
+  selfOpenId: string | null = null,
+): ChannelPullPage {
   const conversations = new Map<string, ParsedConversationLike>()
   const messages: ParsedMessageLike[] = []
   for (const raw of itemsOf(payload)) {
@@ -265,19 +264,32 @@ export function parseLarkMessagePage(payload: unknown, fetchedAt: number): Chann
     const chatType = str(item["chat_type"], item["chatType"], chat["chat_type"])
     const isDirect = chatType === "p2p" || chatType === "direct"
     /**
-     * ★★ 单聊的会话名要从**对端发的那条消息**里取。
+     * ★★ 单聊的会话名要从**对端的名字**里取。
      *
      * 实测：消息搜索的响应里 `chat_partner` **只有 open_id、没有名字**
      * （`{"open_id":"ou_…"}`），而 `chat_name` / `chat.name` 在单聊上压根不存在。
      * 于是原来那三个候选全空 → 每个单聊都叫「飞书会话」，用户在采集范围里
-     * 看到三行一模一样的「飞书会话」，完全没法选。
+     * 看到几行一模一样的「飞书会话」，完全没法选。
      *
-     * 而 `sender.name` **是有真名的**（实测：开发者小助手 / 用户391097 / …）。
-     * 所以：单聊取"不是我发的那条消息"的 sender 名 —— 那就是对端的名字。
+     * 而 `sender.name` **是有真名的**。所以单聊取"对端那条消息"的 sender 名。
      *
-     * ★ 判据用 `sender.open_id !== chat_partner.open_id` 的**反面**：
-     * 直接判 `=== partner.open_id` 更准（那明确是对端），而"不是我"要先知道
-     * 我是谁，那需要多一次身份查询。
+     * ## ★★ 两条判据，缺一不可
+     *
+     * ① `sender.open_id === chat_partner.open_id` —— 明确是对端发的。
+     * ② `sender.open_id !== selfOpenId` —— **不是我**发的。
+     *
+     * 只有 ① 时漏掉一整类：**对端从没发过消息**的单聊（我发出去对方没回）。
+     * 实测本机 4 个飞书单聊里有 3 个是这样 —— 它们的 `chat_partner.open_id`
+     * 在整页消息里一次都不作为 sender 出现，于是判据 ① 永不成立，
+     * 标题恒为占位。改动前那一版只有 ①，所以那 3 个会话仍然叫「飞书会话」。
+     *
+     * ★ 这时 ② 给出的名字**是我自己的** —— 那不对，所以只在
+     * `senderOpenId !== selfOpenId` 时才采用（也就是"能确定不是我"）。
+     * 只有我自己发过消息的单聊仍然取不到对端名字（响应里确实没有），
+     * 那时保持占位 —— 编一个名字比显示占位更糟。
+     *
+     * ★ `selfOpenId` 为 null（身份还没解析）时 ② 整条跳过，退化成只有 ①，
+     * 与改动前行为一致 —— 而不是把我自己的名字当成对端名。
      *
      * ★ 已经有名字的会话**不覆盖**：同一个会话会在多页里重复出现，而后一页
      * 可能恰好只有我自己发的消息 —— 那时不该把已经拿到的名字冲成占位。
@@ -285,17 +297,38 @@ export function parseLarkMessagePage(payload: unknown, fetchedAt: number): Chann
     const partnerOpenId = str(partner["open_id"], partner["openId"])
     const senderOpenId = str(sender["open_id"], sender["openId"], sender["id"])
     const senderName = str(sender["name"], sender["display_name"])
-    const fromPartner =
+    /** ① 明确是对端发的 */
+    const byPartnerId =
       isDirect && partnerOpenId !== null && senderOpenId === partnerOpenId ? senderName : null
+    /** ② 能确定"不是我"（对端没发过消息时这条是唯一出路） */
+    const byNotSelf =
+      isDirect && selfOpenId !== null && senderOpenId !== null && senderOpenId !== selfOpenId
+        ? senderName
+        : null
+    const fromPartner = byPartnerId ?? byNotSelf
 
     const known = conversations.get(conversationId)
+    /**
+     * ★★ 推不出名字时给 **null**，而不是写一个占位字符串进库。
+     *
+     * 占位值（`飞书会话`）是非 null 的，而落库那侧是
+     * `title = COALESCE(excluded.title, conversations.title)` —— 于是占位会
+     * **覆盖掉一个已经拿到的真名**：同一个会话在下一页/下一轮里恰好只有我
+     * 自己发言时，那次 upsert 就把名字冲回占位了。
+     *
+     * 上面那句"已有名字优先于占位"只在**单页内**成立（`conversations` 是这一页
+     * 的 Map），跨页跨轮次不成立 —— 而跨轮次才是常态。
+     *
+     * 给 null 之后 `COALESCE` 天然保护已有真名，且"这个会话还没有名字"这件事
+     * 如实传下去（渲染层据此给兜底文案，见 `sources-step.tsx`）——
+     * 而不是把一个我们编的字符串伪装成渠道给的会话名。
+     */
     const title =
       str(item["chat_name"], chat["name"], partner["name"]) ??
       fromPartner ??
-      // 上一页已经拿到的名字优先于占位（见上面最后一段）
-      (known?.title !== null && known?.title !== undefined && known.title !== FEISHU_FALLBACK_TITLE
-        ? known.title
-        : FEISHU_FALLBACK_TITLE)
+      // 上一页已经拿到的名字仍然优先（同一页内多条消息时有用）
+      known?.title ??
+      null
     conversations.set(conversationId, {
       externalId: conversationId,
       title,

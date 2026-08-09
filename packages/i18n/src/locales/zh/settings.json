@@ -152,7 +152,10 @@
       "channel": {
         "dingtalk": "钉钉",
         "feishu": "飞书"
-      }
+      },
+      "startOn": "启动 {{channel}}",
+      "stopOn": "停止 {{channel}}",
+      "retryOn": "重试 {{channel}}"
     },
     "scope": {
       "title": "采集范围",

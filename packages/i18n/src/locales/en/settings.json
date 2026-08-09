@@ -152,7 +152,10 @@
       "channel": {
         "dingtalk": "DingTalk",
         "feishu": "Feishu"
-      }
+      },
+      "startOn": "Start {{channel}}",
+      "stopOn": "Stop {{channel}}",
+      "retryOn": "Retry {{channel}}"
     },
     "scope": {
       "title": "Collection scope",

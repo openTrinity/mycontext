@@ -168,6 +168,7 @@ async function pullMessages(
   cli: Pick<LarkCli, "json">,
   spec: ChannelPullSpec,
   cursor: BranchCursor | null,
+  selfOpenId: string | null,
 ): Promise<BranchResult> {
   const args = [
     "im",
@@ -199,7 +200,7 @@ async function pullMessages(
   const truncated = token !== null && page >= PAGE_LIMIT
   const next = token === null || truncated ? null : { page: page + 1, token }
 
-  const direct = parseLarkMessagePage(payload, spec.end)
+  const direct = parseLarkMessagePage(payload, spec.end, selfOpenId)
   if (direct.messages.some((message) => message.contentText !== null)) {
     return { page: direct, next, truncated }
   }
@@ -222,7 +223,7 @@ async function pullMessages(
       ],
       spec.signal === undefined ? {} : { signal: spec.signal },
     )
-    hydrated.push(parseLarkMessagePage(body, spec.end))
+    hydrated.push(parseLarkMessagePage(body, spec.end, selfOpenId))
   }
   return {
     page: hydrated.length === 0 ? direct : mergePages(hydrated),
@@ -232,6 +233,39 @@ async function pullMessages(
 }
 
 export function createFeishuIngest(cli: Pick<LarkCli, "json">): ChannelIngest {
+  /**
+   * 本人 open_id —— 只给**单聊会话名**那条推导用（见 `parseLarkMessagePage`）。
+   *
+   * ## ★ 为什么在这里取，而不是让上层传进来
+   *
+   * `ChannelIngest` 的契约里没有"本人身份"这一项，而加一个参数会让所有渠道
+   * 都要回答"你的本人 id 是什么" —— 那是 `ChannelIdentity` 的职责。
+   * 飞书这边它恰好很便宜：`auth status` 是已经在白名单里的只读命令，
+   * 而它的响应里就带着 open_id。
+   *
+   * ★ **进程内缓存一次**：`pull` 每页都会调，而本人 id 在一次会话里不会变。
+   * 不缓存的话每翻一页多起一次子进程（实测一个时间窗能翻 20 页）。
+   *
+   * ★ 取不到就返回 null 并**记住这个 null**（`resolved` 标记），不反复重试：
+   * 拿不到的原因通常是稳定的（没授权 / 网络被拦），而每页重试一次
+   * 会把一个"少个会话名"的小问题变成"每页多一次失败的子进程调用"。
+   * null 时那条推导退化成只看 `chat_partner.open_id`，与改动前一致。
+   */
+  let cachedSelfOpenId: string | null = null
+  let selfResolved = false
+  const selfOpenId = async (): Promise<string | null> => {
+    if (selfResolved) return cachedSelfOpenId
+    selfResolved = true
+    try {
+      const payload = await cli.json<unknown>(["auth", "status", "--json", "--verify"])
+      cachedSelfOpenId = parseLarkIdentity(payload)?.openId ?? null
+    } catch {
+      // 拿不到本人 id 不该让采集失败 —— 它只影响会话名，不影响消息本身
+      cachedSelfOpenId = null
+    }
+    return cachedSelfOpenId
+  }
+
   return {
     probe: () => Promise.resolve(null),
     /**
@@ -248,7 +282,7 @@ export function createFeishuIngest(cli: Pick<LarkCli, "json">): ChannelIngest {
      */
     async pull(spec: ChannelPullSpec): Promise<ChannelPullPage> {
       const cursor = parseCursor(spec.cursor)
-      const result = await pullMessages(cli, spec, cursor?.im ?? null)
+      const result = await pullMessages(cli, spec, cursor?.im ?? null, await selfOpenId())
       const nextCursor: FeishuCursor = { kind: "feishu", im: result.next }
       const hasMore = result.next !== null
       return {

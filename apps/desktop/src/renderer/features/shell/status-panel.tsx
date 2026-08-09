@@ -36,6 +36,14 @@ import { IngestIntervalsPanel } from "../settings/ingest-intervals-panel.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
+/**
+ * 主渠道 id —— `perChannel` 缺失时（旧主进程）回落用。
+ *
+ * 与 `collection-scope-panel.tsx` 里那份同值：渲染层没有"渠道注册表"，
+ * 而把它提成共享常量要跨 feature 目录引一个 barrel，收益不抵耦合。
+ */
+const PRIMARY_CHANNEL_ID = "dingtalk"
+
 /** 配置来源的 i18n key。三种来源都要有，缺一个界面上就是原样的 key。 */
 const SOURCE_LABEL_KEY: Record<ConfigEntryView["source"], string> = {
   default: "status.config.sources.default",
@@ -337,358 +345,262 @@ export function klServiceStateKey(state: KlServerStatus["state"]): string {
 function KlPanel({ channelId }: { channelId: string | null }) {
   const { t } = useDynamicTranslation("settings")
   const status = useKlServerStatus()
+
+  /**
+   * ★★ **每个渠道一张卡，按钮长在卡里** —— 不再有"顶层一套按钮"。
+   *
+   * ## 为什么必须这样，而不是"标题上写个渠道名"
+   *
+   * 改动前这一块是：上面列出「钉钉 就绪 8200 / 飞书 就绪 8201」两行状态，
+   * 下面放**一个**「停止」和**一组**「建图 / 重建」。用户的原话是
+   * 「这里的停止是停止谁，这里的重建是重建谁」—— 而这个问题**没有答案**
+   * 可以从版面上读出来：那两行看起来是并列的两个东西，按钮却只有一套。
+   *
+   * 我上一轮试过"在分区标题里写当前渠道"（`知识图谱（kl）·飞书`）——
+   * 那仍然是错的：标题在最上面，而按钮在下面紧贴着**两行渠道状态**。
+   * 版面上离按钮最近的东西是那两行，人自然会以为按钮对它们都生效。
+   * 用文字去解释一个错的布局，不如把布局改对。
+   *
+   * 现在：每个渠道是一张自包含的卡 —— 它的状态徽章、端口、失败原因、
+   * 启停按钮、建图/重建按钮、建图进度，全都在同一张卡里。
+   * "这个按钮管谁"由**它长在哪张卡里**回答，不需要任何文案。
+   *
+   * ★ 顶层不再有任何按钮。副作用是"点错渠道"这件事在结构上不可能发生 ——
+   * 而它原来是可能的，且其中「重建」不可逆（删图重烧、几小时、出网烧 LLM）。
+   *
+   * ★ `channelId`（页面顶部那个 picker 选的）现在只用来**高亮**当前看的那张卡，
+   * 不再决定按钮打给谁。两者解耦之后，picker 滚出视野也不影响判断。
+   */
+  const rows = status?.perChannel ?? []
+  return (
+    <Section title={t("status.sections.kl")}>
+      <div className="flex flex-col gap-3">
+        {/*
+          ★ 出网提示是**整机**的一句话（两个渠道共用同一个远端网关），
+          所以留在卡片外面 —— 放进每张卡会重复两遍同一件事。
+        */}
+        {status?.networkEgress === true && (
+          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("status.kl.egress")}：{t("status.kl.egressYes")}
+          </p>
+        )}
+
+        {/*
+          ★ `perChannel` 为空 = 旧主进程（还没有这个字段）→ 回落成一张
+          「主渠道」卡，用顶层那几个字段。不这么兜的话升级过程中这一整块
+          会消失，而那时用户既看不到状态也没有启停入口。
+        */}
+        {(rows.length === 0
+          ? [
+              {
+                channelId: channelId ?? PRIMARY_CHANNEL_ID,
+                state: status?.state ?? "stopped",
+                reason: status?.reason ?? null,
+                port: status?.port ?? null,
+                building: status?.building === true,
+                buildProgress: status?.buildProgress ?? null,
+                idle: false,
+              },
+            ]
+          : rows
+        ).map((row) => (
+          <ChannelKlCard
+            key={row.channelId}
+            row={row}
+            /** 页面顶部 picker 选中的那张卡描边 —— 只是视觉定位，不影响行为。 */
+            highlighted={row.channelId === channelId}
+          />
+        ))}
+      </div>
+    </Section>
+  )
+}
+
+/**
+ * 一个渠道的图谱卡：状态 + 启停 + 建图/重建 + 进度，全都只关于**这一个**渠道。
+ *
+ * ★ 每张卡自己持有 mutation（`useKlServerStart` 等）而不是从父层传下来：
+ * 那样 `isPending` 是**这张卡**的 —— 点飞书的「建图」不会让钉钉那张卡的
+ * 按钮也转圈。共享一个 mutation 时两张卡的 loading 态会一起亮，
+ * 而那会让人以为两个渠道都在跑（正是这一块原来的老问题）。
+ */
+function ChannelKlCard({
+  row,
+  highlighted,
+}: {
+  row: NonNullable<KlServerStatus["perChannel"]>[number]
+  highlighted: boolean
+}) {
+  const { t } = useDynamicTranslation("settings")
   const start = useKlServerStart()
   const stop = useKlServerStop()
   const build = useKlGraphBuild()
 
+  const channel = t(`status.kl.channel.${row.channelId}`, { defaultValue: row.channelId })
   /**
-   * ★★ 服务状态按**选中的渠道**取 —— 顶层那个 `state` 是主渠道的。
+   * ★ 只看**这个渠道**在不在建图。
    *
-   * 不按渠道取的后果（实测）：选了飞书、而飞书的 kl 是 failed，界面上那个
-   * 徽章却显示「就绪」（钉钉的），按钮也是「停止」而不是「重试」——
-   * 于是**失败的那个渠道没有任何重试入口**（`failed` 之后不自动重起，
-   * 那是刻意的，所以必须有入口）。
+   * 顶层那个 `building` 是"任一渠道在建"—— 用它禁用按钮的话，钉钉建图期间
+   * 飞书这张卡的按钮也是灰的。两个渠道是两个独立的 kl（各自进程、端口、
+   * Qdrant writer），钉钉在跑压根不妨碍飞书建图。
    */
-  const row = (status?.perChannel ?? []).find((item) => item.channelId === channelId)
-  const state = row?.state ?? status?.state ?? "stopped"
-  /**
-   * 数据动作是否在跑 —— 只用来**互斥禁用那三个按钮**（别同时建两次）。
-   *
-   * ★ 不再参与服务徽章：见文件内上面那段注释。
-   *
-   * ## ★★ 按渠道判，不用顶层那个"任一在建"
-   *
-   * 顶层 `status.building` 是**任一渠道在建**。于是钉钉在建图时，飞书那栏的
-   * 「建图」按钮也是灰的 —— 两个渠道是两个独立的 kl（各自的进程、端口、
-   * Qdrant），钉钉在跑压根不妨碍飞书建图。锁住一个能点的按钮，
-   * 而界面上没有一句话说明为什么。
-   *
-   * ★ `row === undefined`（旧主进程没有 `perChannel`）时回落到顶层：
-   * 那时只有一个渠道，两者等价。
-   */
-  const busy = build.isPending || (row === undefined ? status?.building === true : row.building)
-  /**
-   * ★★ 进度按渠道取 —— 这一行原来读顶层 `status.buildProgress`，而那个是
-   * "**任意**一个在建的渠道"的进度（见 `MultiKlServerService.status()`）。
-   * 用户报的正是这个：界面上一行「建图中 85%」，而**不知道是谁在建**。
-   *
-   * `row?.buildProgress` 在旧主进程上是 `undefined`（字段还不存在）——
-   * 那时回落到顶层，与改动前行为一致。
-   */
-  const percent = klBuildPercent(
-    (row === undefined ? status?.buildProgress : row.buildProgress) ?? null,
-  )
-  /**
-   * 在建的是**别的**渠道吗。
-   *
-   * ★ 为什么要单独说这一句：不说的话用户在飞书那栏看到"没在建图"，
-   * 而后台钉钉正烧着 LLM 出网跑几十分钟 —— 那是个该被看见的事实
-   * （尤其它会占着机器）。但它**不该**表现为飞书这栏的进度条，
-   * 那正是改动前那个歧义。
-   */
-  const otherBuilding = (status?.perChannel ?? []).filter(
-    (item) => item.building && item.channelId !== channelId,
-  )
+  const busy = build.isPending || row.building
+  const percent = klBuildPercent(row.buildProgress ?? null)
   const buildResult = build.data
-
-  /**
-   * 服务状态文案 —— **只看服务自己的状态机**（见 `klServiceStateKey`）。
-   *
-   * 建图期间服务照常提供检索（in-server ingest），所以这里不能被 `busy` 覆盖成
-   * 「建图占用中」：那会把一个可用的服务显示成不可用。
-   */
-  const stateLabel = t(klServiceStateKey(state))
-  /** 失败原因也按渠道取（顶层那个只是主渠道的）。 */
-  const reason = row?.reason ?? status?.reason ?? null
-  const badgeStyle = KL_STATE_STYLE[state]
+  /** `idle` 是"刻意没起"（还没采到语料），不是故障 —— 用中性色，见 schema 注释。 */
+  const badgeStyle = row.idle ? KL_STATE_STYLE.stopped : KL_STATE_STYLE[row.state]
 
   return (
-    /**
-     * ★★ 分区标题带上**当前渠道** —— 否则这一块的按钮不知道在管谁。
-     *
-     * 这一页只有**一个**渠道选择器，而它在最上面「数据面」那一栏的标题行里。
-     * 图谱这一块离它一屏多，用户看到「启动 / 停止 / 建图 / 重建」时那个
-     * picker **已经滚出视野** —— 于是"点停止不知道停谁、点建图不知道给谁建"
-     * （用户原话）。而这几个动作里有一个是不可逆的（重建会删图重烧）。
-     *
-     * 不在这里再放一个 picker：两个选择器会让人在"数据面选了飞书、
-     * 图谱这块却停在钉钉"的状态里点下去，那比看不见更糟。
-     * 标题里写清渠道名是最省的解法 —— 它跟着同一个 state 走，不可能不一致。
-     */
-    <Section
-      title={
-        channelId === null
-          ? t("status.sections.kl")
-          : `${t("status.sections.kl")}·${t(`status.kl.channel.${channelId}`, { defaultValue: channelId })}`
-      }
+    <div
+      className={`flex flex-col gap-3 radius-lg border p-4 ${
+        highlighted
+          ? "border-[var(--border-accent)] bg-[var(--bg-card-z1)]"
+          : "border-[var(--border-light)]"
+      }`}
+      data-channel={row.channelId}
     >
-      <div className="flex flex-col gap-4 radius-lg border border-[var(--border-light)] p-4">
-        {/* —— 图谱服务 —— */}
-        <div className="flex flex-col gap-2">
-          {/*
-            ★ 分区内小标题用 `body-small-400 font-medium`（13px）而不是
-            `caption-400`（12px）。原来是 caption —— 而它统辖的正文也是
-            13px，也就是**标题比正文小**，层次是倒的。
-            比正文重一档（font-medium）而不是更大：这是块内分节，
-            用更大的字号会与上面那个 `title-small-500` 打架。
-          */}
-          <h3 className="typography-body-small-400 font-medium text-[var(--text-base-secondary)]">
-            {t("status.kl.serverTitle")}
-          </h3>
-          <div className="flex items-center gap-3">
-            <span
-              className={`typography-caption-400 inline-flex items-center radius-sm px-2 py-0.5 ${badgeStyle}`}
-            >
-              {stateLabel}
-            </span>
-            {(row?.port ?? status?.port) !== null && (row?.port ?? status?.port) !== undefined && (
-              <span className="typography-caption-400 font-mono-token text-[var(--text-base-tertiary)]">
-                {t("status.kl.port")} {row?.port ?? status?.port}
-              </span>
-            )}
-            {status?.networkEgress === true && (
-              <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-                {t("status.kl.egress")}：{t("status.kl.egressYes")}
-              </span>
-            )}
-          </div>
-
-          {state === "failed" && reason !== null && (
-            <p className="typography-body-small-400 text-[var(--status-error)]">{reason}</p>
-          )}
-
-          {/*
-            ★★ 逐渠道摊开 —— 顶层那个徽章会**隐藏单渠道的失败**。
-
-            顶层 `state` 取的是主渠道。于是另一个渠道的 kl 彻底 failed 时，
-            这里仍然显示「运行中」——那一路整个坏掉而界面说一切正常，
-            只能靠翻日志发现。而那正是本仓库最贵的那类 bug 的形状。
-
-            ★ 只在**真有多个渠道**时渲染：单渠道时这一行与上面的徽章说的是
-            同一件事，多显示一遍只是噪音。
-          */}
-          {(status?.perChannel ?? []).length > 1 && (
-            <div className="flex flex-col gap-1">
-              {(status?.perChannel ?? []).map((row) => (
-                <div key={row.channelId} className="flex items-center gap-2">
-                  <span className="typography-caption-400 min-w-16 text-[var(--text-base-tertiary)]">
-                    {t(`status.kl.channel.${row.channelId}`, { defaultValue: row.channelId })}
-                  </span>
-                  <span
-                    className={`typography-caption-400 inline-flex items-center radius-sm px-2 py-0.5 ${
-                      /**
-                       * ★ `idle`（还没采到消息 → 我们刻意没起它）用**中性**样式，
-                       * 不是错误色。合成一个的话一次正常的降级看起来像故障，
-                       * 而用户会去点「重试」—— 那什么也修不了。
-                       */
-                      row.idle ? KL_STATE_STYLE.stopped : KL_STATE_STYLE[row.state]
-                    }`}
-                  >
-                    {row.idle ? t("status.kl.channelIdle") : t(klServiceStateKey(row.state))}
-                  </span>
-                  {row.port !== null && (
-                    <span className="typography-caption-400 font-mono-token text-[var(--text-base-tertiary)]">
-                      {row.port}
-                    </span>
-                  )}
-                  {/* ★ 失败原因逐渠道给 —— 顶层那个 reason 只是主渠道的 */}
-                  {row.state === "failed" && row.reason !== null && (
-                    <span className="typography-caption-400 text-[var(--status-error)]">
-                      {row.reason}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="flex flex-wrap items-center gap-2">
-            {/*
-              ★ 建图期间**照常**给服务操作 —— 服务没停（in-server ingest），
-              停它是用户合法的选择（比如想中断这一轮）。原来这里 `busy ? null`
-              把按钮整个藏掉，理由是"服务由数据流程收尾拉起"；那对旧实现成立
-              （建图确实先 stop），现在只会让用户在几十分钟里没有任何可操作项。
-            */}
-            {/* ★ 三个按钮都带渠道 —— 见上面 `row` 的注释 */}
-            {state === "ready" ? (
-              <Button size="sm" variant="secondary" onClick={() => stop.mutate(channelId ?? undefined)}>
-                {t("status.kl.stop")}
-              </Button>
-            ) : state === "failed" ? (
-              <Button size="sm" variant="secondary" onClick={() => start.mutate(channelId ?? undefined)}>
-                {t("status.kl.retry")}
-              </Button>
-            ) : (
-              <Button size="sm" variant="secondary" onClick={() => start.mutate(channelId ?? undefined)}>
-                {t("status.kl.start")}
-              </Button>
-            )}
-          </div>
-        </div>
-
-        <div className="border-t border-[var(--border-divider-light)]" />
-
-        {/* —— 图谱数据（建图 / 优化 / 重建）—— */}
-        <div className="flex flex-col gap-2">
-          <h3 className="typography-body-small-400 font-medium text-[var(--text-base-secondary)]">
-            {t("status.kl.dataTitle")}
-          </h3>
-          {/*
-            ★ 三个按钮各自的说明挂在**它描述的那个控件**上，不再排成三行灰字。
-
-            ## 为什么原来那样是错的
-
-            原来 `buildHint` 与 `optimizeHint` 是两个常驻的 `<p>`（加起来
-            60 多字），而 `rebuildHint` **在 i18n 里存在却从未被渲染** ——
-            也就是说三个动作里唯一**不可逆**的那个，反而是唯一没有说明的。
-
-            这三句解释的都是"这个按钮会做什么"，属于**参考信息**：读一次
-            就够，却每次打开状态页都占掉两行。与会话表头那次同一个判断
-            （`reply-mode-controls.tsx` 的 autoWarn）—— 解释控件语义的话
-            挂 `title`，描述当前状态的话留在版面上。
-
-            ★ 重建那句**除了** title 还留在版面上：`window.confirm` 是在
-            点下去**之后**才出现的，而用户需要在点之前就知道它与旁边那个
-            「建图」差在哪（一个增量、一个清空重抽）。不可逆的动作，
-            代价要写在按钮旁边。
-          */}
-          <div className="flex flex-wrap items-center gap-2">
-            {/* 建图：增量（抽过的不重抽，第二次起很快）。 */}
-            <Button
-              size="sm"
-              disabled={busy}
-              title={t("status.kl.buildHint")}
-              // ★ 带上渠道：不带的话在飞书那栏点「建图」会把钉钉的也建一遍
-              onClick={() => build.mutate({ fresh: false, ...(channelId === null ? {} : { channelId }) })}
-            >
-              {/*
-                ★ 文案跟 `disabled` 用**同一个** `busy`，不是 `build.isPending`。
-
-                `isPending` 只在"这次 UI 会话里点过按钮"时为 true。而建图也可能是
-                自动触发的、或在上一次应用启动时就开始跑的 —— 那时
-                `status.building` 是 true、`isPending` 是 false，于是按钮灰掉却
-                仍写着「建图」：两个按钮都点不动，界面上没有一句话说明为什么。
-                实测撞到过（重启后 `/status` 是 `ingest.state=running`
-                phase_a 0.2%，UI 一片死寂）。禁用的理由要写在按钮上。
-              */}
-              {busy ? t("status.kl.building") : t("status.kl.build")}
-            </Button>
-            {/*
-              ★ 这里**曾经**有第三个按钮「优化图谱」,已删。
-
-              它跑 `python -m scripts.improve`(补 SIMILAR_TO 边 + 消歧 + 社群)。
-              而读 `kl-graph/kl_server.py` 发现:`/ingest` 的
-              `run_improve` **默认就是 True**,建图内部已经跑完同一件事
-              (就是进度里那个 `improve / communities + pagerank` 阶段)。
-
-              也就是说这个按钮是**重复的** —— 更糟的是它为了独占数据文件会先
-              `stop()` 掉 server,而那正是实测到的 `[Errno 32] Broken pipe` 与
-              `Qdrant already accessed` 两次故障的来源。
-
-              「优化」本来就是建图的一个内部阶段,不是用户需要理解的概念。
-              服务端 `optimizeGraph()` 与它的 IPC 通道保留(诊断/将来可能要
-              单独重跑),但**不在界面上暴露**。
-            */}
-            {/*
-              重建：清空重抽。**不弹二次确认** —— 这是设置页里一个明确标着
-              「重建」、旁边就写着代价的按钮，点它的人正是想要这个结果。
-              而 `window.confirm` 是系统模态框（跳出应用视觉、不可样式化），
-              为一个可预期的操作打断一次交互，收益不抵成本。
-              代价说明留在按钮旁边那行小字里（点之前就能读到，比弹窗更早）。
-            */}
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy}
-              title={t("status.kl.rebuildHint")}
-              /**
-               * ★★ `fresh` 会**删图**。必须带渠道 —— 不带的话用户在飞书那栏
-               * 点「重建」会把钉钉那 37826 个 chunk 一起删了重烧（约 3 小时、
-               * 出网烧 LLM），而那是不可逆的。
-               */
-              onClick={() => build.mutate({ fresh: true, ...(channelId === null ? {} : { channelId }) })}
-            >
-              {t("status.kl.rebuild")}
-            </Button>
-          </div>
-          {/*
-            ★ 只留「重建」那一句在版面上 —— 三个动作里唯一不可逆的那个。
-            另两句已经进了各自按钮的 title（见上）。
-          */}
-          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-            {t("status.kl.rebuildHint")}
-          </p>
-
-          {/* 建图进度：只一行文字（不要进度条 —— 见 klBuildPercent 注释）。 */}
-          {percent !== null && (
-            <p
-              className="typography-body-small-400 text-[var(--status-link)]"
-              // 分钟级任务：让读屏软件在进度变化时播报
-              aria-live="polite"
-            >
-              {/*
-                ★★ 带上渠道名。原来这里是 `status.kl.buildProgress`（只有百分比），
-                而多渠道下那个数字**不知道属于谁** —— 用户报的正是这个。
-                现在进度取自这一栏自己的渠道（见上面 `percent`），文案也说出来。
-              */}
-              {t("status.kl.buildProgressOn", {
-                channel: t(`status.kl.channel.${channelId ?? ""}`, {
-                  defaultValue: channelId ?? "",
-                }),
-                percent,
-                defaultValue: `{{channel}} 建图中 {{percent}}%`,
-              })}
-            </p>
-          )}
-
-          {/*
-            ★ 别的渠道在建图 —— 说出来但**不**显示成这一栏的进度。
-            它会占机器、会出网烧 LLM，用户有权知道；而把它显示成这一栏的
-            百分比就是改动前那个歧义。
-          */}
-          {otherBuilding.length > 0 && (
-            <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-              {t("status.kl.buildingElsewhere", {
-                channels: otherBuilding
-                  .map((item) =>
-                    t(`status.kl.channel.${item.channelId}`, {
-                      defaultValue: item.channelId,
-                    }),
-                  )
-                  .join("、"),
-                defaultValue: `{{channels}} 也在建图（各渠道互不影响，这里照常能点）`,
-              })}
-            </p>
-          )}
-
-          {buildResult !== undefined &&
-            (buildResult.ok ? (
-              <p className="typography-body-small-400 text-[var(--status-success)]">
-                {/*
-                  ★★ 报**净增**而不是绝对值 —— 与仪表盘那个「图谱详情」
-                  popover 同源（都读这一轮的 `volume`）。
-
-                  绝对值在增量建图下几乎不变（实测一轮总数从 660 涨到 695），
-                  于是每次建完都显示一个差不多的大数字，看起来像"没跑"。
-                  而净增（+35 / +75 / +1,359）才回答"这一轮干了什么"。
-
-                  `volume` 缺席（老版本主进程 / 被打断）→ 退回绝对值：
-                  少一点信息量好过显示一个空白回执。
-                */}
-                {t("status.kl.buildDone", {
-                  entities: buildResult.volume?.entities ?? buildResult.entities,
-                  facts: buildResult.volume?.facts ?? buildResult.facts,
-                  edges: buildResult.volume?.edges ?? buildResult.edges,
-                })}
-              </p>
-            ) : (
-              <p className="typography-body-small-400 text-[var(--status-error)]">
-                {t("status.kl.buildFailed", { reason: buildResult.reason ?? "" })}
-              </p>
-            ))}
-        </div>
+      {/* —— 谁 + 什么状态 —— */}
+      <div className="flex flex-wrap items-center gap-3">
+        {/*
+          ★ 渠道名是这张卡的**标题**，用 body-small + medium（13px）——
+          它要比卡里的正文重一档，但不能与分区标题（title-small-500）打架。
+        */}
+        <span className="typography-body-small-400 font-medium text-[var(--text-base-primary)]">
+          {channel}
+        </span>
+        <span
+          className={`typography-caption-400 inline-flex items-center radius-sm px-2 py-0.5 ${badgeStyle}`}
+        >
+          {row.idle ? t("status.kl.channelIdle") : t(klServiceStateKey(row.state))}
+        </span>
+        {row.port !== null && (
+          <span className="typography-caption-400 font-mono-token text-[var(--text-base-tertiary)]">
+            {t("status.kl.port")} {row.port}
+          </span>
+        )}
       </div>
-    </Section>
+
+      {row.state === "failed" && row.reason !== null && (
+        <p className="typography-body-small-400 text-[var(--status-error)]">{row.reason}</p>
+      )}
+
+      {/* —— 服务：启 / 停 / 重试 —— */}
+      <div className="flex flex-wrap items-center gap-2">
+        {/*
+          ★ 建图期间**照常**给服务操作：服务没停（in-server ingest），
+          停它是用户合法的选择（比如想中断这一轮）。
+        */}
+        {row.state === "ready" ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={stop.isPending}
+            onClick={() => stop.mutate(row.channelId)}
+          >
+            {/* ★ 按钮上带渠道名：读到"停止 飞书"就不必再去别处确认打给谁 */}
+            {t("status.kl.stopOn", { channel, defaultValue: `停止 {{channel}}` })}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={start.isPending}
+            onClick={() => start.mutate(row.channelId)}
+          >
+            {row.state === "failed"
+              ? t("status.kl.retryOn", { channel, defaultValue: `重试 {{channel}}` })
+              : t("status.kl.startOn", { channel, defaultValue: `启动 {{channel}}` })}
+          </Button>
+        )}
+      </div>
+
+      <div className="border-t border-[var(--border-divider-light)]" />
+
+      {/* —— 图谱数据：建图 / 重建 —— */}
+      <div className="flex flex-col gap-2">
+        {/*
+          ★ 卡内小标题仍用 `body-small-400 font-medium`（13px），**不用 caption**：
+          它统辖的正文也是 13px，用 12px 会让标题比正文小（层次倒置）。
+          门禁：`status-panel-hierarchy.test.tsx` 的那条 h3 断言。
+        */}
+        <h3 className="typography-body-small-400 font-medium text-[var(--text-base-secondary)]">
+          {t("status.kl.dataTitle")}
+        </h3>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 建图：增量（抽过的不重抽，第二次起很快）。 */}
+          <Button
+            size="sm"
+            disabled={busy}
+            title={t("status.kl.buildHint")}
+            /**
+             * ★ 渠道**来自这张卡自己**（`row.channelId`），不再取页面级的
+             * `channelId` —— 后者可能是 null（还没选过），而那时会退化成
+             * "不指定渠道 → 全建"。实测踩到过：点一次建图，日志里
+             * `graph build started` 主渠道与飞书各来一条。
+             */
+            onClick={() => build.mutate({ fresh: false, channelId: row.channelId })}
+          >
+            {/*
+              ★ 文案跟 `disabled` 用同一个 `busy`，不是 `build.isPending`：
+              建图也可能是自动触发或上次启动就在跑的，那时按钮灰掉却仍写着
+              「建图」—— 禁用的理由要写在按钮上。
+            */}
+            {busy ? t("status.kl.building") : t("status.kl.build")}
+          </Button>
+          {/*
+            重建：清空重抽。不弹系统确认框（`window.confirm` 跳出应用视觉、
+            不可样式化），代价写在下面那行小字里 —— 点之前就能读到，比弹窗更早。
+          */}
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={busy}
+            title={t("status.kl.rebuildHint")}
+            /**
+             * ★★ `fresh` 会**删图**。渠道同样取自这张卡 —— 打错渠道的后果是
+             * 把另一个渠道那几万个 chunk 删了重烧（不可逆、几小时、出网）。
+             */
+            onClick={() => build.mutate({ fresh: true, channelId: row.channelId })}
+          >
+            {t("status.kl.rebuild")}
+          </Button>
+        </div>
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("status.kl.rebuildHint")}
+        </p>
+
+        {/* 建图进度：只一行文字（不要进度条 —— 见 klBuildPercent 注释）。 */}
+        {percent !== null && (
+          <p
+            className="typography-body-small-400 text-[var(--status-link)]"
+            // 分钟级任务：让读屏软件在进度变化时播报
+            aria-live="polite"
+          >
+            {/* 进度取自这张卡自己的 `row.buildProgress`，归属不可能错 */}
+            {t("status.kl.buildProgressOn", {
+              channel,
+              percent,
+              defaultValue: `{{channel}} 建图中 {{percent}}%`,
+            })}
+          </p>
+        )}
+
+        {buildResult !== undefined &&
+          (buildResult.ok ? (
+            <p className="typography-body-small-400 text-[var(--status-success)]">
+              {t("status.kl.buildDone", {
+                entities: buildResult.entities,
+                facts: buildResult.facts,
+                edges: buildResult.edges,
+              })}
+            </p>
+          ) : (
+            <p className="typography-body-small-400 text-[var(--status-error)]">
+              {t("status.kl.buildFailed", { reason: buildResult.reason ?? "" })}
+            </p>
+          ))}
+      </div>
+    </div>
   )
 }
 

@@ -647,7 +647,19 @@ function ConversationGroup({
                         )
                       })()}
                       <span className="typography-body-small-400 truncate text-[var(--text-base-primary)]">
-                        {item.title ?? item.externalId}
+                        {/*
+                          ★ 没有会话名时显示 id 的**尾段**，而不是整串或一个占位词。
+
+                          采集层拿不到名字时给的是 `null`（不写占位进库 ——
+                          占位会覆盖掉已经拿到的真名，见 `parseLarkMessagePage`）。
+                          那时这一行要能**互相区分**：几行一模一样的「飞书会话」
+                          让人完全没法选（用户报过），而 id 尾段虽然不好看，
+                          至少每行不同、且能与渠道里的会话对上。
+
+                          取后 8 位：前缀（`oc_` / `cid`）对所有会话都一样，
+                          区分度全在尾部。
+                        */}
+                        {item.title ?? `#${item.externalId.slice(-8)}`}
                       </span>
                       {showMemberCount && item.memberCount !== null ? (
                         <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
