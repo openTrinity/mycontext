@@ -43,7 +43,8 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { usePersonaTrace } from "../../lib/queries.js"
 import { EventStream } from "../agent-stream/event-stream.js"
 import { toChatItems } from "../agent-stream/to-chat-items.js"
-import { RunTraceDisclosure } from "./run-trace-disclosure.js"
+import { ChevronDownIcon } from "../agent-stream/tool-icons.js"
+import { RunTraceDialog } from "./run-trace-dialog.js"
 import { PersonaSignature } from "./persona-signature.js"
 import { explainDecisionReason, type ReasonKind } from "./decision-reason.js"
 
@@ -523,6 +524,8 @@ function DraftPanel({
   const { t } = useDynamicTranslation("persona")
   const base = draft.editedText ?? draft.text
   const [text, setText] = useState(base)
+  /** 回看过程的弹窗开着没有（见下面那个入口的注释）。 */
+  const [traceOpen, setTraceOpen] = useState(false)
   const explained = explainDecisionReason(draft.notSentReason)
   const dirty = text.trim() !== base.trim()
   const sendText = text.trim()
@@ -622,16 +625,53 @@ function DraftPanel({
       </div>
 
       {/*
-        ★ 回看这条草稿是怎么想出来的。
+        ★ 回看这条草稿是怎么想出来的 —— 一个**弹窗**，不是就地展开。
 
-        **默认收起**：这一块的主任务是审正文，过程是次要的 —— 常驻展开会把
-        发送按钮挤到屏幕外。展开才去查库（见 `RunTraceDisclosure` 的 enabled 门控），
-        一屏十条草稿不会各预取一遍。
+        ## 为什么不能就地展开
 
-        `runId` 为 null（用户自己写的那条 / 老库里的草稿）时**整块不渲染** ——
-        显示一个点了没反应的按钮比不显示更糟。
+        这一块的主任务是**审正文**，而回看过程是次要的。原来它是一个折叠块，
+        展开后把 trace（thinking + 正文 + 一列工具调用）铺在草稿下面，
+        于是发送按钮被推到屏幕外 —— 用户要一边滚回去找按钮一边记着刚看到什么。
+        而这一块住在消息流底部一个 `shrink-0` 的条里，它本来就不该变高。
+
+        弹窗把两个任务分开：审在这里，回看在那里，看完关掉回到原位。
+        `runId` 为 null（用户自己写的那条 / 老库里的草稿）时**入口都不给** ——
+        显示一个点了只会说"没有过程"的按钮比不显示更糟。
+
+        ★ 弹窗**只在打开时才挂载**：它的两个查询以 `open` 当 enabled，
+        而一屏可能有 10 个草稿 tab —— 各预取一遍是白花的库查询。
       */}
-      {draft.runId === null ? null : <RunTraceDisclosure runId={draft.runId} />}
+      {draft.runId === null ? null : (
+        <>
+          <button
+            type="button"
+            onClick={() => setTraceOpen(true)}
+            className={cn(
+              "typography-caption-400 flex items-center gap-1 self-start",
+              "-mx-1 rounded-[var(--radius-sm)] px-1 py-0.5",
+              "text-[var(--text-base-tertiary)] transition-colors duration-150",
+              "hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-secondary)]",
+              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-focus)]",
+            )}
+          >
+            {t("dockTraceShow")}
+            <ChevronDownIcon className="size-3 shrink-0 -rotate-90" />
+          </button>
+          {traceOpen ? (
+            <RunTraceDialog
+              runId={draft.runId}
+              open
+              onClose={() => setTraceOpen(false)}
+              /**
+               * ★ 不传 `resultText`：用户眼前正在审的就是这条草稿，
+               * 在弹窗里再抄一遍是同一句话说两次。
+               * 也不传 `kindLabel` —— 它还没发出去，没有"来源"可言。
+               */
+              occurredAt={draft.createdAt}
+            />
+          ) : null}
+        </>
+      )}
       {/*
         ★ 边界必须说清：点「发送」是**真的以本人身份发出去**。
         放在按钮下面而不是这一块顶部：它解释的是那个按钮。

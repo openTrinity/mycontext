@@ -1,26 +1,26 @@
 /**
- * ActivityFeed —— 「处理结果」：分身替我发过的、和我采纳过的那些回复。
+ * ActivityFeed —— 「历史处理结果」：分身替我发过的、和我采纳过的那些回复。
  *
- * ## ★ 每一项都能点开看**那一轮的处理过程**
+ * ## ★★ 每一条的过程是**一个独立弹窗**，不是就地展开
  *
- * 原来这一栏每项只有：标签 + 时间 + 正文前三行，**没有任何点击**。
- * 也就是用户看得到"发了这句话"，却看不到**为什么发的、怎么想出来的**
- * —— 而这恰恰是分身替他说过话之后最需要回答的问题。
+ * 原来每项下面挂一个「看生成过程」的折叠块（`RunTraceDisclosure`），
+ * 展开后就地铺开元信息 + trace。这个形态在真实数据上是读不了的：
  *
- * 现在每项下面有一个「看处理过程」，展开后给两层：
- * · 元信息（触发消息 / 判定与原因 / 耗时 token）—— 回答"为什么会跑、判成什么"；
- * · agent 的 trace（thinking / 正文 / tool）—— 回答"这句话怎么想出来的"。
+ * 这一栏住在中栏右上角一个 360px 宽、`max-h-72`（288px）的 popover 里，
+ * 而 popover 又在 `persona-module` 那个 `overflow-hidden` 的布局区里。
+ * 于是一段几十条 tool_call 的 trace 要从 288px 的窗口里读，滚的还是
+ * **外层那条列表**的滚动条 —— 用户报的「没法 scroll、看不全」就是这个。
+ * 而且展开一条会把列表里其余条目全推到视野外，用户丢失了"我在看哪一条"。
  *
- * 两者是**两个查询**，都只在展开时才发（见 `RunTraceDisclosure` 与
- * `usePersonaRunDetail` 的 enabled 门控）：一屏 20 条各预取一遍是白花的
- * 库查询，而其中 19 条用户不会展开。
+ * 现在整行可点 → 开 `RunTraceDialog`（原生 `<dialog>`，top layer 不受
+ * 祖先 overflow 影响）。列表本身回到它该做的事：**扫一眼有哪些**。
  *
  * ## ★★ 三种状态必须长得不一样
  *
  * ```
- * runId 为 null            → 不给入口（本来就不是 agent 生成的，没有过程可言）
- * 有 runId 但 trace 为空   → 给入口，展开说"这一轮没有留下过程"
- * 有 runId 且有 trace      → 给入口，展开是完整过程
+ * runId 为 null            → 整行不可点（本来就不是 agent 生成的，没有过程可言）
+ * 有 runId 但 trace 为空   → 可点，弹窗里说"这一轮没有留下过程"
+ * 有 runId 且有 trace      → 可点，弹窗里是完整过程
  * ```
  * 中间那种必须能说出来：把它显示成一片空白，就等于让「没有」与
  * 「没加载出来」不可区分。
@@ -29,13 +29,19 @@
  * 那条路"—— 那是误判：真实原因是 `appendTrace` 的行主键不带 runId，
  * 重启后新轮次把旧轮次的痕迹整行改嫁走了（已修，见 store 侧那个方法）。
  * 再次普遍出现时先查写入侧，别照抄那个解释。
+ *
+ * ## ★ 一次只有一个弹窗（`openId` 是单值而不是 Set）
+ *
+ * 于是**至多一个** run 的 trace + 元信息在查库。原来每条各挂一个折叠块时
+ * 用户可以展开好几条，那就是好几组查询同时在跑；而"同时读两条的过程"
+ * 本来也不是一个真实的动作。
  */
-import { Tag } from "@mycontext/design"
+import { useState } from "react"
+import { Tag, cn } from "@mycontext/design"
 import type { PersonaActivityView } from "@mycontext/ipc-contract"
-import { usePersonaRunDetail } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
-import { explainDecisionReason } from "./decision-reason.js"
-import { RunTraceDisclosure } from "./run-trace-disclosure.js"
+import { ChevronDownIcon } from "../agent-stream/tool-icons.js"
+import { RunTraceDialog } from "./run-trace-dialog.js"
 
 export interface ActivityFeedProps {
   activities: readonly PersonaActivityView[]
@@ -52,6 +58,12 @@ function timeLabel(ms: number): string {
 
 export function ActivityFeed({ activities }: ActivityFeedProps) {
   const { t } = useDynamicTranslation("persona")
+  /**
+   * 哪一条的过程弹窗开着（`activity.id`，不是 runId —— 同一个 run 理论上
+   * 可以对应两条活动记录，用 activity.id 才能保证"点的就是打开的那条"）。
+   */
+  const [openId, setOpenId] = useState<string | null>(null)
+  const opened = activities.find((activity) => activity.id === openId) ?? null
 
   return (
     <section className="flex flex-col gap-2">
@@ -74,115 +86,139 @@ export function ActivityFeed({ activities }: ActivityFeedProps) {
           </p>
         </div>
       ) : (
-        <ul className="flex flex-col gap-1">
+        <ul className="flex flex-col">
           {activities.map((activity) => (
-            <li
-              key={activity.id}
-              className="flex flex-col gap-1 border-b border-[var(--border-divider-light)] px-1 py-2 last:border-b-0"
-            >
-              <div className="flex items-center gap-1.5">
-                <Tag size="sm" status={activity.kind === "auto_sent" ? "success" : "accent"}>
-                  {t(`activityKinds.${activity.kind}`)}
-                </Tag>
-                <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-                  {timeLabel(activity.occurredAt)}
-                </span>
-              </div>
-              <p className="typography-body-small-400 line-clamp-3 whitespace-pre-wrap break-words text-[var(--text-base-secondary)]">
-                {activity.text}
-              </p>
-              {/*
-                ★ `runId` 为 null 时整块不渲染 —— 那是"用户自己写的"或
-                升级前的旧记录，本来就没有过程。给一个点了只会说
-                "没有过程"的按钮，等于让用户白点一次才知道这里没东西。
-              */}
-              {activity.runId === null ? null : (
-                <RunTraceDisclosure
-                  runId={activity.runId}
-                  header={<RunMeta runId={activity.runId} />}
-                />
-              )}
+            <li key={activity.id}>
+              <ActivityRow
+                activity={activity}
+                kindLabel={t(`activityKinds.${activity.kind}`)}
+                openHint={t("traceOpenHint")}
+                noTraceHint={t("traceNoRunHint")}
+                onOpen={() => setOpenId(activity.id)}
+              />
             </li>
           ))}
         </ul>
+      )}
+
+      {/*
+        ★ 弹窗**只在有目标时才挂载**，而不是恒挂一个 `open={false}` 的。
+        `RunTraceDialog` 的两个查询以 `open` 当 enabled，恒挂虽然也不会查，
+        但那时它需要一个假的 runId —— 而"给一个不存在的 id 只为了让组件
+        挂得住"是下一个 bug 的入口。
+
+        `opened.runId` 再判一次 null：`ActivityRow` 已经保证 null 时不可点，
+        这里是类型收窄（也是那条不变式的第二道保险）。
+      */}
+      {opened === null || opened.runId === null ? null : (
+        <RunTraceDialog
+          /**
+           * ★ `key` 带 activity.id：换一条时要**换一个**组件实例。
+           * 复用同一个实例的话 `usePersonaRunTrace(runId)` 换了 key
+           * 但组件还在旧的 isPending 状态里，会闪一下上一条的内容。
+           */
+          key={opened.id}
+          runId={opened.runId}
+          open
+          onClose={() => setOpenId(null)}
+          resultText={opened.text}
+          kindLabel={t(`activityKinds.${opened.kind}`)}
+          occurredAt={opened.occurredAt}
+        />
       )}
     </section>
   )
 }
 
 /**
- * 那一轮的元信息：触发消息 / 判定与原因 / 耗时 token。
+ * 一条历史：来源标签 + 时间 + 正文前三行。
  *
- * ## ★ 为什么它是 `RunTraceDisclosure` 的 `header` 而不是自己一块
+ * ## ★ 整行可点，而不是行内再放一个「看过程」按钮
  *
- * 它与 trace 回答的是同一个问题的两半（为什么跑 / 怎么想的），
- * 分成两个可展开块会让用户点两次才看全一件事。
+ * 这一行**没有别的动作** —— 用户在这里唯一想做的事就是"看看这句是怎么来的"。
+ * 那种情况下把点击目标缩小到一个 12px 的小字链接只是让人点得更费劲
+ * （而它旁边的正文明明是这一行的主体）。
  *
- * ★ 放在 header 位置还有一个实际作用：本组件**只在展开时才挂载** ——
- * 也就是那次 `usePersonaRunDetail` 只在用户真的要看时才发出去。
+ * ★ 用 `<button>` 而不是给 `<li>` 挂 onClick：点击能力必须落在可聚焦、
+ * 有语义的元素上（键盘能 Tab 到并回车，读屏器会念"按钮"）。
+ * 挂了 onClick 的 li 仍然只是一段文字 —— 这与 `message-thread` 里
+ * `QuotedBlock` / `AgentSendBadge` 是同一条规则。
+ *
+ * ## ★ `runId` 为 null → 退回 `<div>`，不是一个 disabled 的按钮
+ *
+ * 那不是"暂时不能点"，而是**本来就不可点**（用户自己写的那条 / 升级前的
+ * 旧记录，根本没有过程）。给个 disabled 按钮会让人反复去点，
+ * 而给一句说明（`title`）能让人知道为什么。
  */
-function RunMeta({ runId }: { runId: string }) {
-  const { t } = useDynamicTranslation("persona")
-  // 挂载即查（本组件只在展开时被挂载，见上面的注释）
-  const detail = usePersonaRunDetail(runId, true)
+function ActivityRow({
+  activity,
+  kindLabel,
+  openHint,
+  noTraceHint,
+  onOpen,
+}: {
+  activity: PersonaActivityView
+  kindLabel: string
+  openHint: string
+  noTraceHint: string
+  onOpen: () => void
+}) {
+  const inner = (
+    <>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-center gap-1.5">
+          <Tag size="sm" status={activity.kind === "auto_sent" ? "success" : "accent"}>
+            {kindLabel}
+          </Tag>
+          <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {timeLabel(activity.occurredAt)}
+          </span>
+        </div>
+        <p className="typography-body-small-400 line-clamp-3 whitespace-pre-wrap break-words text-left text-[var(--text-base-secondary)]">
+          {activity.text}
+        </p>
+      </div>
+      {/*
+        右指的 chevron —— "点了会打开一层"的标准提示。
+        ★ 常态半透明、hover/focus 才变实：它是提示而不是装饰，
+        一列常显的实心箭头会与正文抢注意力（`EventStream` 的工具行同款判据）。
+      */}
+      <ChevronDownIcon
+        className={cn(
+          "mt-0.5 size-3.5 shrink-0 -rotate-90 text-[var(--text-base-disable)]",
+          "transition-[opacity,color] duration-150 ease-out motion-reduce:transition-none",
+          "opacity-50 group-hover:opacity-100 group-hover:text-[var(--text-base-secondary)]",
+          "group-focus-visible:opacity-100",
+        )}
+      />
+    </>
+  )
 
-  if (detail.isPending) return null
-  const data = detail.data
-  if (data === null || data === undefined) {
-    /**
-     * 查不到那一轮（老库 / 已被保留策略清掉）—— 明说，而不是不显示。
-     * 不显示会让人以为"这条就是没有元信息"，而事实是"记录没了"。
-     */
+  const shared =
+    "flex w-full items-start gap-2 border-b border-[var(--border-divider-light)] px-2 py-2.5 last:border-b-0"
+
+  if (activity.runId === null) {
     return (
-      <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-        {t("runDetailMissing")}
-      </span>
+      <div className={shared} title={noTraceHint}>
+        {inner}
+      </div>
     )
   }
 
-  /**
-   * ★ 判定原因复用 `explainDecisionReason` —— 不在这里另写一份映射。
-   *
-   * 同一个 reason 在运行日志与这里必须是**同一句话**，否则用户会以为
-   * 是两回事。而那个函数用 `Record<DecisionReason, …>`，policy 加一条
-   * 新 reason 时不补就编译不过。
-   */
-  const explained = explainDecisionReason(data.decisionReason)
-  const trigger = data.trigger
-
   return (
-    <dl className="flex flex-col gap-0.5 radius-sm bg-[var(--bg-card-z0)] px-2 py-1.5">
-      {trigger === null ? null : (
-        <MetaRow
-          label={t("runDetailTrigger")}
-          value={`${trigger.senderDisplayName ?? "—"}：${trigger.contentText ?? ""}`}
-        />
+    <button
+      type="button"
+      onClick={onOpen}
+      title={openHint}
+      className={cn(
+        shared,
+        "group -mx-1 rounded-[var(--radius-md)] px-3 text-left",
+        "transition-colors duration-150 ease-out motion-reduce:transition-none",
+        "hover:bg-[var(--overlay-on-container-hover)]",
+        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-focus)]",
       )}
-      <MetaRow
-        label={t("runDetailDecision")}
-        value={explained === null ? data.decision : `${data.decision} · ${t(explained.labelKey)}`}
-      />
-      {/*
-        耗时与 token 都可空（老记录 / 直连降级那条路不记）—— 两个都没有
-        就整行不渲染，而不是显示 "耗时 —s · — tokens" 那种噪音。
-      */}
-      {data.latencyMs === null && data.costTokens === null ? null : (
-        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-          {t("runDetailCost", {
-            seconds: ((data.latencyMs ?? 0) / 1000).toFixed(1),
-            tokens: data.costTokens ?? 0,
-          })}
-        </span>
-      )}
-    </dl>
-  )
-}
-
-function MetaRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="typography-caption-400 flex gap-1.5">
-      <dt className="shrink-0 text-[var(--text-base-tertiary)]">{label}</dt>
-      <dd className="min-w-0 truncate text-[var(--text-base-secondary)]">{value}</dd>
-    </div>
+    >
+      {inner}
+    </button>
   )
 }

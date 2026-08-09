@@ -12,28 +12,14 @@
  * `auto_sent` / `drafted` / `silent` / `error` 四态，扫一眼要能看出
  * 有没有 error —— 而一列等宽的中文词是扫不出来的。
  */
-import { Tag, type TagStatus } from "@mycontext/design"
+import { Tag } from "@mycontext/design"
 import type { PersonaRunView } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { explainDecisionReason } from "./decision-reason.js"
+import { DECISION_STATUS } from "./labels.js"
 
 export interface RunLogProps {
   runs: readonly PersonaRunView[]
-}
-
-/**
- * decision → Tag 状态色。
- *
- * 用 `Record<string, …>` + 兜底而不是 `Record<Decision, …>`：`decision`
- * 过 IPC 之后是 `string`（contract 里就是），而且 persona.service 会塞
- * 一个 schema 里没有的 `"error"`。硬收窄会让那条在界面上崩掉。
- */
-const DECISION_STATUS: Record<string, TagStatus> = {
-  auto_sent: "success",
-  drafted: "accent",
-  silent: "default",
-  escalated: "warning",
-  error: "error",
 }
 
 function timeLabel(ms: number): string {
