@@ -651,15 +651,28 @@ export class DataPlaneService {
    */
   async runOnce(channelId?: string): Promise<{ changed: number; unchanged: number }> {
     const ingest = this.ingest
-    if (ingest === null) return { changed: 0, unchanged: 0 }
     const primaryId = this.options.plugin.meta.id
     const wanted = (id: string): boolean => channelId === undefined || channelId === id
+    /**
+     * ★★ 主渠道没挂时，**别的渠道照样要能同步**。
+     *
+     * 这里原来是 `if (this.ingest === null) return {0,0}` —— 一个提前返回，
+     * 理由大概是"没登录就没什么可采"。但 `this.ingest` 只代表**主渠道**那一路：
+     * 主渠道未挂（未登录 / 正在重挂 / 那个渠道没授权）时，给飞书点「立即同步」
+     * 会**静默返回 0**，而飞书的管线明明挂着、能采。
+     *
+     * 表现是"点了没反应、也不报错" —— 与本仓库其他几处静默降级同一个形状。
+     * 现在判据改成"这一次要采的那些源里有没有能跑的"。
+     */
     const active = [
-      ...(this.activeChannels.has(primaryId) && wanted(primaryId) ? [ingest] : []),
+      ...(ingest !== null && this.activeChannels.has(primaryId) && wanted(primaryId)
+        ? [ingest]
+        : []),
       ...[...this.sourceIngest.entries()]
         .filter(([id]) => this.activeChannels.has(id) && wanted(id))
         .map(([, source]) => source),
     ]
+    if (active.length === 0) return { changed: 0, unchanged: 0 }
     const results = await Promise.all(
       active.map(async (source) => {
         source.clearBackoff()

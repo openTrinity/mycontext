@@ -386,14 +386,30 @@ function KlPanel({ channelId }: { channelId: string | null }) {
         )}
 
         {/*
-          ★ `perChannel` 为空 = 旧主进程（还没有这个字段）→ 回落成一张
-          「主渠道」卡，用顶层那几个字段。不这么兜的话升级过程中这一整块
-          会消失，而那时用户既看不到状态也没有启停入口。
+          ★★ `perChannel` 缺失时回落成**主渠道**那张卡 —— 渠道 id 写死
+          `PRIMARY_CHANNEL_ID`，**不能**用页面上选中的 `channelId`。
+
+          ## 这一条修的是一张"编出来的卡"
+
+          原来这里写的是 `channelId ?? PRIMARY_CHANNEL_ID` + 顶层的 port。
+          而顶层那几个字段**永远是主渠道的**（见 `MultiKlServerService.status()`
+          里 `...primary`）。于是 picker 选着飞书时，这个分支拼出一张
+          「飞书 · 就绪 · 8200」的卡 —— 标签是飞书，数据是钉钉的。
+
+          实测（用户截图 + 后端核对）：卡片写「飞书 8200 建图中 20%」，
+          而 8200 是钉钉的 kl（1730 条消息、ingest=done），飞书在 8201
+          且 ingest=idle 压根没在建。也就是那张卡上**每一个字段都属于另一个渠道**，
+          而按钮打给谁完全不可知 —— 这正是"不报错、只是答错"里最坏的一种。
+
+          `perChannel` 缺失只有一种成因：**旧主进程 + 新渲染层**（开发态热更时
+          vite 只 reload 渲染层）。那时能确定的只有"顶层是主渠道"，
+          所以标签也必须是主渠道 —— 宁可显示一张主渠道的卡，
+          也不要把它伪装成用户选中的那个渠道。
         */}
         {(rows.length === 0
           ? [
               {
-                channelId: channelId ?? PRIMARY_CHANNEL_ID,
+                channelId: PRIMARY_CHANNEL_ID,
                 state: status?.state ?? "stopped",
                 reason: status?.reason ?? null,
                 port: status?.port ?? null,

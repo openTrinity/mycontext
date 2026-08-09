@@ -4,6 +4,7 @@ import type {
   KlGraphOverview,
   KlServerStatus,
 } from "@mycontext/ipc-contract"
+import type { Logger } from "@mycontext/kernel"
 import type { KlServerService } from "./kl-server.service.js"
 
 export interface SourceKlServer {
@@ -29,6 +30,14 @@ export class MultiKlServerService {
     private readonly getSources: () => readonly SourceKlServer[],
     /** 主渠道的 id（`perChannel` 里要标出它是哪个）。 */
     private readonly primaryChannelId = "dingtalk",
+    /**
+     * 诊断日志。**可选** —— 这个门面在测试里被大量直接构造，
+     * 而那些用例不关心日志。
+     *
+     * ★ 有它是因为"渠道 → 端口"这个映射错了的时候完全静默
+     * （界面标着 A 渠道、显示 B 渠道的数据），而排查需要它。见 `status()`。
+     */
+    private readonly logger?: Pick<Logger, "debug">,
   ) {}
 
   private get sources(): readonly SourceKlServer[] {
@@ -53,6 +62,26 @@ export class MultiKlServerService {
     const active = sources.filter((source) => source.enabled())
     const activeStatuses = active.map((source) => source.service.status())
     const building = [primary, ...activeStatuses].find((status) => status.building)
+    /**
+     * ★★ 渠道 → 端口的映射**必须可诊断**。
+     *
+     * 这一层是"哪个渠道走哪个 kl"的唯一裁决点，而它错了的表现是
+     * **界面上标着 A 渠道、显示的是 B 渠道的数据** —— 不报错，只是答错。
+     * 实测撞到过：卡片写「飞书 · 就绪 · 8200」，而 8200 是主渠道的端口
+     * （飞书在 8201）。那时排查只能靠猜，因为这个映射从来没被打出来过。
+     *
+     * ★ 只打渠道 id 与端口（都不是隐私），且用 debug 级别 —— 它每次轮询
+     * 都会调（3 秒一次），info 会把日志刷满。
+     */
+    this.logger?.debug("kl channel port map", {
+      primary: { channelId: this.primaryChannelId, port: primary.port, state: primary.state },
+      sources: sources.map((source) => ({
+        channelId: source.channelId,
+        port: source.service.status().port,
+        state: source.service.status().state,
+        enabled: source.enabled(),
+      })),
+    })
     const perChannel = [
       {
         channelId: this.primaryChannelId,

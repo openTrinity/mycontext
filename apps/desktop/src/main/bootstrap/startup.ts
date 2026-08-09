@@ -1396,6 +1396,8 @@ export function bootstrapApp(mainDir: string): AppContext {
         }
       },
     })),
+    dingtalk.meta.id,
+    logger.child("MultiKl"),
   )
 
   /**
