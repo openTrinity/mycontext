@@ -258,9 +258,33 @@ export class GraphSyncService {
       error: null,
     }
 
-    if (lag === 0) return idle
+    /**
+     * ★★ 没有新数据 → 不导出。但**要说一句**。
+     *
+     * 这个 return 原来是完全静默的，而它排在所有日志之前 —— 于是
+     * 「这一轮没跑」与「跑了但没新数据」在日志里**长得一模一样**（都是空白）。
+     *
+     * 实测撞上（用户问"重启后好像没建图对吗"）：挂载时那一轮跑在采集写
+     * 第一条之前 3 秒，于是 `head === ackedSeq` → 从这里 return，
+     * 日志里 `graph export synced` / `graph ingest skipped` /
+     * `graph export failed` 三条一条都没有。查了半天才能确认"它跑了、
+     * 只是那一刻真的没有新数据"。
+     *
+     * ★ 频率不是问题：10 分钟一轮，一天最多 144 条，而没有新数据时
+     * 用户本来也不该看到别的动静。这与把 `graph ingest skipped` 从 debug
+     * 提到 info 是同一条教训（那里的注释写着"为什么不建完全查不出来"）——
+     * 只是那次漏了更早的这一档。
+     */
+    if (lag === 0) {
+      this.options.logger?.info("graph sync idle", { head, ackedSeq: acked })
+      return idle
+    }
     // 防重入：导出会写几 MB，两轮重叠会互相覆盖到半截的文件。
-    if (this.running) return idle
+    if (this.running) {
+      // ★ 同上：重入也要留痕，否则"被跳过"与"没跑"不可区分。
+      this.options.logger?.info("graph sync busy; skipping this round", { head, ackedSeq: acked })
+      return idle
+    }
     this.running = true
 
     try {

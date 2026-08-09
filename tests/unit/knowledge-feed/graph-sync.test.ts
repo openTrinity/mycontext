@@ -52,6 +52,11 @@ function makeSync(
   } = {},
 ) {
   const calls = { materialize: 0, ingest: 0 }
+  /**
+   * ★ 收下 info 级日志 —— 「这一轮为什么什么都没做」只能从日志看出来
+   * （见下面那组断言：静默 return 让"没跑"与"跑了但没新数据"不可区分）。
+   */
+  const infos: Array<{ message: string; fields: Record<string, unknown> }> = []
   // 先取出局部常量：在闭包里用 `overrides.triggerIngest!()` 会丢掉窄化
   // （TS 认为属性可能在闭包执行时已变），而 `!` 只是压制报错不是修正。
   const trigger = overrides.triggerIngest
@@ -73,9 +78,18 @@ function makeSync(
           },
         }),
     ...(overrides.autoBuild === undefined ? {} : { autoBuild: overrides.autoBuild }),
+    logger: {
+      info: (message: string, fields?: Record<string, unknown>) => {
+        infos.push({ message, fields: fields ?? {} })
+      },
+      warn: () => undefined,
+      debug: () => undefined,
+      error: () => undefined,
+      child: () => undefined,
+    } as never,
   })
   sync.register()
-  return { sync, calls }
+  return { sync, calls, infos }
 }
 
 describe("图谱同步的触发时机", () => {
@@ -631,6 +645,68 @@ describe("★★ 建图被主动打断（退出应用 / 停服务）不进退避
       // 第二轮已经在退避里，trigger 根本不会被调 —— 这本身就是失败计数还在的证据
       const second = await sync.runOnce()
       expect(second.ingestReason).toBe("backoff")
+    } finally {
+      vault.close()
+    }
+  })
+})
+
+describe("★★ 「这一轮什么都没做」必须留痕", () => {
+  /**
+   * ★★★ 这一组锁的是一个**静默的 return**。
+   *
+   * `runOnce` 的 `lag === 0` 那个 return 排在所有日志之前，于是
+   * 「这一轮没跑」与「跑了但没新数据」在日志里长得一模一样（都是空白）。
+   *
+   * ## 实测撞上
+   *
+   * 用户重启应用后问「好像没建图对吗」，而日志里
+   * `graph export synced` / `graph ingest skipped` / `graph export failed`
+   * 三条一条都没有 —— 无法回答那个问题。真相是：
+   *
+   * ```
+   * 00:20:11  挂载 → 跑一轮，那一刻 head === ackedSeq（28819）→ 静默 return
+   * 00:20:14  采集写第一条（seq 28820）        ← 比那一轮晚 3 秒
+   * ```
+   *
+   * 它**跑了**，只是那一刻真的没有新数据。而这件事花了很久才确认，
+   * 因为唯一能证明它的东西（日志）不存在。
+   *
+   * ★ 这与把 `graph ingest skipped` 从 debug 提到 info 是同一条教训
+   * （那里的注释写着"为什么不建完全查不出来"）—— 只是那次漏了更早的这一档。
+   */
+  it("★★★ 没有新数据 → 说一句 idle（不许静默 return）", async () => {
+    const vault = openTestVault()
+    try {
+      const { sync, infos } = makeSync(vault)
+
+      // lag 为 0（一条变更都没写）
+      await sync.runOnce()
+
+      const idle = infos.find((entry) => entry.message.includes("idle"))
+      expect(idle).toBeDefined()
+      // ★ 要带上两个数字 —— 否则读者无法判断"齐了"还是"游标坏了"
+      expect(idle?.fields).toMatchObject({ head: 0, ackedSeq: 0 })
+    } finally {
+      vault.close()
+    }
+  })
+
+  /**
+   * ★★ 而有新数据时说的是**另一句** —— 两者不能混。
+   *
+   * 混了的话 idle 那句就没有信息量了（"每轮都有一句"等于没有）。
+   */
+  it("★★ 有新数据 → 说的是 synced 而不是 idle", async () => {
+    const vault = openTestVault()
+    try {
+      const { sync, infos } = makeSync(vault)
+      appendChanges(vault, 3)
+
+      await sync.runOnce()
+
+      expect(infos.some((entry) => entry.message.includes("synced"))).toBe(true)
+      expect(infos.some((entry) => entry.message.includes("idle"))).toBe(false)
     } finally {
       vault.close()
     }

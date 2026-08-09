@@ -52,12 +52,48 @@ describe("★★ facts=0 时不许说「事实已就绪」", () => {
   })
 
   /**
-   * ★ 两者都齐、只差边 → 才可以说"最后一步"。
-   * 这条保证上面那个修复**没有把正确的那一档也改坏**。
+   * ★★★ 两者都齐、而 `edges` 是 **0** → **不许说话**。
+   *
+   * ## 这条断言原来锁的是一句假话
+   *
+   * 它原来要求「关系边还没建（建图的最后一步）」。而实测下来那句话在一个
+   * **完全建好**的图上永远为真：
+   *
+   * ```
+   * GET /status → {"graph_backend":"ladybug","sqlite":{"edges":26558}}
+   * SELECT COUNT(*) FROM edges  → 0
+   * ```
+   *
+   * 边不是没建，是**搬家了**。上游 `storage/base.py` 的
+   * `scan_edges_by_type` 注释明写「on the ladybug backend edges live in
+   * LadybugDB and the SQLite `edges` table is empty」，
+   * 而 `KL_GRAPH_BACKEND` 的默认值正是 `ladybug`。
+   *
+   * 代价：图有 26558 条边、检索正常，界面却一直说"还差最后一步"，
+   * 用户据此反复点「重新建图」，而每次重建从零开始。
+   *
+   * ★ 所以 `0` 在这里**没有信息量**，不能作为报警依据。
    */
-  it("★ facts>0 且 edges=0 → 仍然说「最后一步」", () => {
-    const reason = describeGraphStage({ entities: 60, facts: 120, edges: 0 })
-    expect(reason).toContain("关系边还没建")
+  it("★★★ facts>0 且 edges=0 → 不许说「关系边还没建」（ladybug 下 0 是正常值）", () => {
+    expect(describeGraphStage({ entities: 60, facts: 120, edges: 0 })).toBeNull()
+  })
+
+  /**
+   * ★★ 数不出来（`undefined`）时同样闭嘴。
+   *
+   * 这是"还没问过 /status"的形态。闭嘴比猜一句好 ——
+   * 上面那条假警告正是"拿一个数不出来的值当 0 来解读"的后果。
+   */
+  it("★★ edges 为 undefined（还没问到真实值）→ 也不说话", () => {
+    expect(describeGraphStage({ entities: 60, facts: 120, edges: undefined })).toBeNull()
+  })
+
+  /**
+   * ★ 而 `facts===0` 那两档**不受影响** —— 它们读的是 SQLite 里真实的表。
+   * 这条保证这次修复没把仍然有效的判据一起去掉。
+   */
+  it("★ edges 那一档去掉后，facts=0 仍然报警", () => {
+    expect(describeGraphStage({ entities: 60, facts: 0, edges: undefined })).toMatch(/抽取|LLM/)
   })
 
   /** 全空 → 说"建图没成功跑过"，与"跑了一半"是两件事。 */

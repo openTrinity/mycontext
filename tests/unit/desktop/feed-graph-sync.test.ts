@@ -17,7 +17,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createLogger, ManualClock } from "@mycontext/kernel"
 import { ChangelogRepository, ConsumerCursorRepository } from "@mycontext/store"
 import { GRAPH_SYNC_CONSUMER_ID } from "@mycontext/knowledge-feed"
@@ -214,6 +214,110 @@ describe("★ 图谱同步的接线", () => {
       expect(cursors).toHaveLength(1)
     } finally {
       await feed.detach()
+      vault.close()
+    }
+  })
+})
+
+/**
+ * 与 `makeFeed` 相同，只是**不关**定时器 —— 本组要数的正是那两枚。
+ *
+ * ★ 配合 `vi.useFakeTimers()`（见下面的 beforeEach）：真定时器会让
+ * 10 分钟那枚在测试结束后仍挂着，而假定时器只是登记、不真的跑。
+ */
+function makeFeedAutoStart(sharedRoot: string) {
+  const dirs = feedDirs(sharedRoot)
+  const feed = new FeedService({
+    clock: new ManualClock(START),
+    logger: createLogger("test-feed", { level: "error" }),
+    embedding: () => ({ baseUrl: "http://127.0.0.1:1/v1", model: "m", dim: 2048 }),
+    localEmbedding: { model: "m", dim: 1024 },
+    llm: () => ({ baseUrl: "http://127.0.0.1:1", model: "qwen" }),
+  })
+  return Object.assign(feed, { testDirs: dirs })
+}
+
+describe("★★ 挂载后的补跑（首轮必然白跑）", () => {
+  // ★ 假定时器：只登记不真跑，于是能数、也不会漏到别的用例里
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /**
+   * ★★★ 这一组锁的是一个**时序**问题，而它的表现是"重启后十分钟没有图"。
+   *
+   * ## 实测
+   *
+   * ```
+   * 00:20:11  挂载 → 立刻跑一轮
+   *           那一刻 head === ackedSeq（上次退出前已 ack）→ lag 0 → 白跑
+   * 00:20:14  采集写第一条（seq 28820）        ← 比那一轮晚 3 秒
+   * 00:24:59  head 已到 29937（lag 1118）      ← 但真正的下一轮要等 00:30:11
+   * ```
+   *
+   * 也就是"挂载时先跑一轮"这个好意**跑早了 3 秒**：采集还没写入它就问完了，
+   * 于是第一次真正的同步要等满一个周期（10 分钟），首次建图跟着推迟 ——
+   * 而用户刚启动应用、正盯着界面。
+   *
+   * ★ 断言的形态：`autoStart:false` 时**两个定时器都不许起**
+   *（单测不该在后台真写盘），而 `autoStart` 开着时补跑那一枚要存在且
+   * 在 detach 时被清掉 —— 后者是真实风险：它会 `tickGraphSync()` 而那要查库，
+   * 而 detach 之后调用方马上关库。
+   */
+  it("★★ autoStart:false → 补跑定时器也不起（不在后台写盘）", async () => {
+    const shared = tempDir()
+    const vault = openTestVault()
+    try {
+      const feed = makeFeed(shared)
+      await feed.attach(vault.db, feed.testDirs)
+      /**
+       * ★ 判据用"进程里没有待触发的 timer"而不是私有字段：
+       * `vitest` 的 fake timer 能数出来，而读私有字段等于把实现细节写进断言。
+       */
+      expect(vi.getTimerCount()).toBe(0)
+      await feed.detach()
+    } finally {
+      vault.close()
+    }
+  })
+
+  /**
+   * ★★★ 开着 autoStart 时：周期 + 补跑**两枚**定时器。
+   *
+   * 只有一枚的话就是修复前的行为 —— 首轮白跑之后要等满一个周期。
+   */
+  it("★★★ autoStart 开着 → 周期与补跑两枚定时器都在", async () => {
+    const shared = tempDir()
+    const vault = openTestVault()
+    try {
+      const feed = makeFeedAutoStart(shared)
+      await feed.attach(vault.db, feed.testDirs)
+      expect(vi.getTimerCount()).toBe(2)
+      await feed.detach()
+    } finally {
+      vault.close()
+    }
+  })
+
+  /**
+   * ★★ detach 要把**两枚都**清掉。
+   *
+   * 漏清补跑那枚的表现：登出/切身份之后 90 秒内冒出一次
+   * `tickGraphSync()` → 查一个已经关掉的库 → 无人 catch 的
+   * `The database connection is not open`（与 `pushTimer` 踩过的是同一个坑）。
+   */
+  it("★★ detach 之后一枚定时器都不留", async () => {
+    const shared = tempDir()
+    const vault = openTestVault()
+    try {
+      const feed = makeFeedAutoStart(shared)
+      await feed.attach(vault.db, feed.testDirs)
+      await feed.detach()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
       vault.close()
     }
   })

@@ -63,7 +63,7 @@ function fakeDb(over: Partial<Record<string, number>> = {}, extra: Partial<Graph
   return handle
 }
 
-function makeService(options: { dataDir: string; db?: GraphDbHandle }) {
+function makeService(options: { dataDir: string; db?: GraphDbHandle; edges?: number }) {
   return new KlServerService({
     clock: new ManualClock(1_000),
     logger,
@@ -74,7 +74,40 @@ function makeService(options: { dataDir: string; db?: GraphDbHandle }) {
     probeExisting: async () => false,
     probeHealth: async () => true,
     ...(options.db === undefined ? {} : { openGraphDb: () => options.db as GraphDbHandle }),
+    /**
+     * ★★ 边数从 `/status` 来，**不从 SQLite 来**。
+     *
+     * `SELECT COUNT(*) FROM edges` 在 ladybug 后端下恒为 0（那张表按设计
+     * 就是空的），所以 `fakeDb` 的 `edges` 值对生产没有意义 ——
+     * 生产里那个数字来自 kl 的 `state.store.count_edges()`（按后端分派）。
+     * 注入 `readStatus` 就是复刻那条真实的路。
+     */
+    ...(options.edges === undefined
+      ? {}
+      : {
+          readStatus: () =>
+            Promise.resolve({
+              state: "done" as const,
+              phase: "",
+              percent: 1,
+              error: "",
+              counts: { entities: 0, facts: 0, edges: options.edges as number },
+            }),
+        }),
   })
+}
+
+/**
+ * 造一个"server 起好了、已经问过一次 /status"的服务。
+ *
+ * ★ 走的是 `refreshEdgeCount()` —— 生产里 `ready` 那一步调的正是它
+ * （`void this.refreshEdgeCount()`）。不绕过接线直接塞字段值，
+ * 否则接线本身就没人验证了。
+ */
+async function serviceWithEdges(options: { dataDir: string; db?: GraphDbHandle; edges: number }) {
+  const service = makeService(options)
+  await service.refreshEdgeCount()
+  return service
 }
 
 describe("★ 图谱概览：空 / 半成品 / 完整必须说不同的话", () => {
@@ -126,28 +159,66 @@ describe("★ 图谱概览：空 / 半成品 / 完整必须说不同的话", () 
   })
 
   /**
-   * 半成品之二：实体与事实都有，边还没建。
+   * ★★★ 实体与事实都有、而 SQLite 的 `edges` 表是空的 → **不许报警**。
    *
-   * 这是真实观测到的中间态（entities=2170 facts=6603 edges=0）——
-   * fact 向量化跑完才建边。此时页面**应当可用**：分布图与枢纽都能看，
-   * 只有"顺关系走"还不行。
+   * ## 这条断言原来锁的是一句假话
+   *
+   * 它原来要求 reason 里有「关系边还没建」，注释还写着
+   * 「这是真实观测到的中间态（entities=2170 facts=6603 edges=0）」——
+   * 而那个"观测"本身就是从这张空表来的，所以前提是错的。
+   *
+   * 实测（同一时刻两个源）：
+   *
+   * ```
+   * GET /status → {"graph_backend":"ladybug","sqlite":{"entities":359,
+   *                "facts":454,"edges":26558}}     ← 真实边数
+   * SELECT COUNT(*) FROM edges  → 0                 ← 我们读的那张表
+   * ```
+   *
+   * 上游 `storage/base.py` 的 `scan_edges_by_type` 注释明写：
+   * 「on the ladybug backend edges live in LadybugDB and the SQLite
+   * `edges` table is empty」，而 `KL_GRAPH_BACKEND` 默认就是 `ladybug`。
+   *
+   * 代价：图有 26558 条边、检索完全正常，界面却一直说"还差最后一步"，
+   * 用户据此反复点「重新建图」，而每次重建从零开始 ——
+   * 于是"最后一步"永远不会完成。
    */
-  it("有 entities/facts 没 edges → 说「关系边还没建」但页面可用", () => {
+  it("★★★ 没问过 /status 时不许拿 SQLite 的 edges=0 说「关系边还没建」", () => {
     const view = makeService({
       dataDir: dataDirWithDb(),
       db: fakeDb({ entities: 2170, facts: 6603 }),
     }).graphOverview()
     expect(view.available).toBe(true)
-    expect(view.reason).toContain("关系边还没建")
+    expect(view.reason).toBeNull()
     expect(view.entities).toBe(2170)
   })
 
-  /** 完整图 → 没有任何提示语。有提示就等于说"还有问题"。 */
-  it("完整图 → reason 为 null（不留一句多余的话）", () => {
-    const view = makeService({
+  /**
+   * ★★ 而真实边数问到了就要**报出来** —— 那是 UI 上"关系"那一栏的数字。
+   *
+   * 判据走 `refreshEdgeCount()`（生产里 ready 那一步调的就是它），
+   * 所以这条同时锁住"接线通了"。
+   */
+  it("★★ 问过 /status 之后 edges 报的是真实边数（不是 SQLite 的 0）", async () => {
+    const service = await serviceWithEdges({
       dataDir: dataDirWithDb(),
-      db: fakeDb({ entities: 2170, facts: 6603, edges: 8800, chunks: 10475, messages: 10385 }),
-    }).graphOverview()
+      db: fakeDb({ entities: 2170, facts: 6603 }),
+      edges: 26_558,
+    })
+    const view = service.graphOverview()
+    expect(view.edges).toBe(26_558)
+    expect(view.reason).toBeNull()
+  })
+
+  /** 完整图 → 没有任何提示语。有提示就等于说"还有问题"。 */
+  it("完整图 → reason 为 null（不留一句多余的话）", async () => {
+    const service = await serviceWithEdges({
+      dataDir: dataDirWithDb(),
+      // ★ 这里的 edges 走 /status（见 makeService 的注释），chunks/messages 仍读 SQLite
+      db: fakeDb({ entities: 2170, facts: 6603, chunks: 10475, messages: 10385 }),
+      edges: 8800,
+    })
+    const view = service.graphOverview()
     expect(view.available).toBe(true)
     expect(view.reason).toBeNull()
     expect(view.edges).toBe(8800)

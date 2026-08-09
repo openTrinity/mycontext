@@ -299,6 +299,34 @@ export class KlServerService {
    * 拿它渲染进度前先读那段。
    */
   private buildProgress: { phase: string; percent: number; startedAt: number } | null = null
+  /**
+   * 最近一次从 kl `/status` 读到的**真实**关系边数。null = 还没问过。
+   *
+   * ## ★★ 为什么必须单独存这一个数
+   *
+   * 概览页其余数字直连只读 SQLite（理由见 `graphOverview` 的注释：聚合查询
+   * 上游没有端点，且建图期间 kl 的 HTTP 在忙）。但**边数不能这么读** ——
+   * `SELECT COUNT(*) FROM edges` 在 ladybug 后端下恒为 0，因为那张表按设计
+   * 就是空的（上游 `storage/base.py` 的 `scan_edges_by_type` 注释明写，
+   * 而 `KL_GRAPH_BACKEND` 的默认值就是 ladybug）。
+   *
+   * 实测同一时刻两个源的差距：
+   *
+   * ```
+   * GET /status → {"graph_backend":"ladybug","sqlite":{"edges":26558}}
+   * SELECT COUNT(*) FROM edges  → 0
+   * ```
+   *
+   * kl 的 `/status` 用 `state.store.count_edges()` 按后端分派，所以它是对的。
+   * 我们在建图轮询里本来就会拿到那个快照（`rebuildGraph` 的 `snapshot.counts`）
+   * —— 把边数记下来，概览页就能报真实值而不是一个恒 0 的假数字。
+   *
+   * ★ 为什么是"最近一次"而不是现取：`graphOverview()` 是**同步**的
+   * （IPC 那侧 `Promise.resolve(...)`），而问 HTTP 是异步的；更要紧的是
+   * 建图期间 kl 的端点在忙，现取会把最该能看的时刻变成看不到。
+   * 边数变化很慢，一个稍旧的真实值远好过一个永远为 0 的假值。
+   */
+  private lastKnownEdges: number | null = null
   /** 正在进行的 start（避免并发 ensureReady 起多个进程）。 */
   private starting: Promise<boolean> | null = null
   /** 正在建图（避免并发触发；建图期间禁止 ensureReady 起 server 抢 SQLite）。 */
@@ -1129,7 +1157,17 @@ export class KlServerService {
 
       const entities = count("entities")
       const facts = count("facts")
-      const edges = count("edges")
+      /**
+       * ★★ 边数**不从 SQLite 数** —— 那张表在 ladybug 后端下恒空
+       * （完整推理见 `lastKnownEdges` 与 `describeGraphStage` 的注释）。
+       *
+       * `null` = 还没从 `/status` 问到过真实值。那时**报 0 也没有意义**，
+       * 但契约里 `edges` 是 number，所以对外仍给 0 —— 区别在于
+       * 判据（`describeGraphStage`）收到的是 `undefined`，于是不会
+       * 拿这个数去说"关系边还没建"那句假话。
+       */
+      const knownEdges = this.lastKnownEdges
+      const edges = knownEdges ?? 0
 
       let topEntities: KlGraphOverview["topEntities"] = []
       try {
@@ -1193,7 +1231,7 @@ export class KlServerService {
        */
       const reason = this.building
         ? "正在建图（第一次要几分钟）—— 数字会随进度增长"
-        : describeGraphStage({ entities, facts, edges })
+        : describeGraphStage({ entities, facts, edges: knownEdges ?? undefined })
 
       return {
         /**
@@ -1372,6 +1410,8 @@ export class KlServerService {
 
       if (snapshot !== null) {
         counts = snapshot.counts
+        // ★ 记下 backend-aware 的真实边数（见 lastKnownEdges 的注释）
+        this.lastKnownEdges = snapshot.counts.edges
         this.buildProgress = { phase: snapshot.phase, percent: snapshot.percent, startedAt }
         this.pushStatus()
         if (snapshot.state === "done") {
@@ -1690,6 +1730,17 @@ export class KlServerService {
           warmupMs: this.options.clock.now() - startedAt,
         })
         this.setState("ready")
+        /**
+         * ★ 顺手问一次真实边数（见 `lastKnownEdges`）。
+         *
+         * 不问的话它只在**建图过程中**才会被填上，于是"启动后没建过图"的
+         * 那段时间概览页只能报 0 —— 而那正是用户最可能打开它的时刻
+         * （刚启动、想看看图里有什么）。
+         *
+         * ★ 不 await：ready 这条路不该等一次 HTTP。失败也不管 ——
+         * 拿不到就还是 null，判据据此不说话，比说错话好。
+         */
+        void this.refreshEdgeCount()
         return true
       }
       await sleep(HEALTH_POLL_INTERVAL_MS)
@@ -2026,6 +2077,30 @@ export class KlServerService {
     )
   }
 
+  /**
+   * 问一次 kl `/status`，把 backend-aware 的真实边数记下来。
+   *
+   * ★ 公开（而不是私有）是为了让测试走**这条真实的路** —— 生产里它由
+   * `ready` 那一步调（`void this.refreshEdgeCount()`）。测试注入 `readStatus`
+   * 再显式 await 它，等价于"server 起好了、问过一次 /status"，
+   * 而不是绕过接线直接塞一个字段值（那会让接线本身无人验证）。
+   *
+   * ★ 整段**吞异常**：这是一个纯诊断数字，它拿不到不该影响任何流程。
+   * 拿不到就保持 null —— `describeGraphStage` 收到 `undefined` 时闭嘴，
+   * 那比报一个恒 0 的假数字好（见 `lastKnownEdges` 的注释）。
+   */
+  async refreshEdgeCount(): Promise<void> {
+    try {
+      const readStatus = this.options.readStatus ?? defaultReadStatus
+      const snapshot = await readStatus(this.port)
+      if (snapshot !== null) this.lastKnownEdges = snapshot.counts.edges
+    } catch (error) {
+      this.options.logger.debug("read edge count failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
   private fail(reason: string): void {
     this.reason = reason
     this.state = "failed"
@@ -2073,7 +2148,11 @@ export class KlServerService {
 export function describeGraphStage(input: {
   entities: number
   facts: number
-  edges: number
+  /**
+   * 关系边数。**`undefined` = 数不出来**（而不是 0）——
+   * 见下面那一档：SQLite 的 `edges` 表在 ladybug 后端下设计上就是空的。
+   */
+  edges: number | undefined
 }): string | null {
   const { entities, facts, edges } = input
   /**
@@ -2095,7 +2174,35 @@ export function describeGraphStage(input: {
     return "实体已建好，但事实一条都没抽出来 —— Phase B 的 LLM 抽取没成功（多为网关超时/限流，可重试或换网关）"
   }
   if (entities === 0) return "实体还没建好（抽取已完成，建图阶段未完成）"
-  if (edges === 0) return "实体与事实已就绪，关系边还没建（建图的最后一步）"
+  /**
+   * ## ★★★ `edges === 0` **不能**当成"关系边还没建"
+   *
+   * 这一档原来无条件报「实体与事实已就绪，关系边还没建（建图的最后一步）」，
+   * 而实测下来它在一个**完全建好**的图上永远为真：
+   *
+   * ```
+   * GET /status → {"graph_backend":"ladybug","sqlite":{"entities":359,
+   *                "facts":454,"edges":26558}}          ← 真实边数
+   * SELECT COUNT(*) FROM edges  → 0                      ← 我们读的那张表
+   * ```
+   *
+   * 原因不是没建成，是**边搬家了**。上游 `storage/base.py` 的
+   * `scan_edges_by_type` 注释明写：「on the ladybug backend edges live in
+   * LadybugDB and the SQLite `edges` table is empty」——
+   * 而 `config.default.yaml` 里 `KL_GRAPH_BACKEND` 的默认值正是 `ladybug`。
+   * kl 自己的 `/status` 用 `state.store.count_edges()`（按后端分派），
+   * 所以它数得对；我们直连 SQLite 数的是一张**按设计永远空**的表。
+   *
+   * 那条假警告的代价：图明明有 26558 条边、可以正常检索，界面却一直说
+   * "还差最后一步"。用户据此反复点「重新建图」—— 而每次重建都从零开始，
+   * 于是"最后一步"永远不会完成。这与那条 1.7 GB 事故同一个形状：
+   * **判据读错了源，而错的结论看起来完全合理**。
+   *
+   * ★ 所以判据改成 `undefined`（数不出来就别说话），而 0 与正数都不报警：
+   * 在 ladybug 下 0 是正常值，没有任何信息量。真要发现"边没建成"，
+   * 得走 `/status` 那条 backend-aware 的路 —— 那是 `graphOverview` 的事。
+   */
+  void edges
   return null
 }
 

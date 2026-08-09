@@ -131,6 +131,15 @@ export interface FeedServiceOptions {
 /** 图谱同步的默认周期。见 options 注释。 */
 const GRAPH_SYNC_INTERVAL_MS = 10 * 60_000
 
+/**
+ * 挂载后多久补跑一轮图谱同步。见 `attach` 里那段（首轮必然白跑）。
+ *
+ * ★ 90 秒的取法：要**明显晚于**采集写入第一批（实测第一条在挂载后 3 秒、
+ * 第一批在十几秒内），又要**明显早于**一个完整周期（10 分钟）——
+ * 否则它就退化成"把周期缩短一半"，那是另一回事。
+ */
+const GRAPH_SYNC_CATCH_UP_MS = 90_000
+
 /** `autoBuild` 快照需要的那几个 getter（`FeedServiceOptions["autoBuild"]` 的非空形态）。 */
 type AutoBuildHooks = NonNullable<FeedServiceOptions["autoBuild"]>
 
@@ -188,6 +197,12 @@ export class FeedService {
   private dirs: FeedDirs | null = null
   private graphSync: GraphSyncService | null = null
   private graphTimer: NodeJS.Timeout | null = null
+  /**
+   * 挂载后的**补跑**定时器。见 `attach` 里那段（为什么首轮必然白跑）。
+   *
+   * 与 `graphTimer` 分开是因为它是一次性的：跑完就清，不进周期。
+   */
+  private graphCatchUpTimer: NodeJS.Timeout | null = null
   private inFlightSync: Promise<unknown> | null = null
 
   constructor(private readonly options: FeedServiceOptions) {}
@@ -275,6 +290,36 @@ export class FeedService {
       this.graphTimer = setInterval(() => void this.tickGraphSync(), interval)
       // 挂载时先跑一轮：登录后立刻有一份最新快照，不用等一个周期。
       void this.tickGraphSync()
+      /**
+       * ★★ 再排一次**补跑** —— 因为上面那一轮**必然**是白跑的。
+       *
+       * 实测的时序（用户问"重启后好像没建图对吗"）：
+       *
+       * ```
+       * 00:20:11  挂载 → 上面那轮 tickGraphSync()
+       *           那一刻 head === ackedSeq（上次退出前已 ack 到 28819）
+       *           → lag 0 → 直接 return，什么都不做
+       * 00:20:14  采集写第一条（seq 28820）        ← 比那一轮晚 3 秒
+       * 00:24:59  head 已到 29937（lag 1118）      ← 但要等到 00:30:11
+       * ```
+       *
+       * 也就是说"挂载时先跑一轮"这个好意**跑早了 3 秒**：它在采集还没写入时
+       * 就问完了，于是真正的第一次同步要等满一个周期（10 分钟），
+       * 首次建图跟着推迟 10 分钟。而用户刚启动应用、正盯着界面。
+       *
+       * ★ 为什么用一个固定延迟而不是订阅采集事件：`batch.persisted` 在
+       * `DataPlaneService` 里，而 `FeedService` 不认识采集器（两者的依赖方向
+       * 是 dataPlane → feed）。为了一次补跑把依赖反过来接，代价远大于收益 ——
+       * 而 90 秒之后采集的第一批必然已经落库（实测第一条在 3 秒内）。
+       *
+       * ★ 为什么不是"把首轮延后 90 秒"：那样**没有新数据时也要等 90 秒**才
+       * 有第一条日志，而挂载后立刻知道"当前水位是齐的"本身是有用的信息。
+       * 两轮各自回答不同的问题：立刻那轮说"现在齐不齐"，补跑说"新采的进不进图"。
+       */
+      this.graphCatchUpTimer = setTimeout(() => {
+        this.graphCatchUpTimer = null
+        void this.tickGraphSync()
+      }, GRAPH_SYNC_CATCH_UP_MS)
     }
   }
 
@@ -319,6 +364,13 @@ export class FeedService {
   async detach(): Promise<void> {
     if (this.graphTimer !== null) clearInterval(this.graphTimer)
     this.graphTimer = null
+    /**
+     * ★ 补跑那个一次性定时器也要清 —— 它会 `tickGraphSync()` 而那要查库，
+     * 而 detach 之后调用方马上关库。漏清的表现是登出/切身份后 90 秒内
+     * 冒出一次对已关闭连接的读（与 `pushTimer` 同一条纪律）。
+     */
+    if (this.graphCatchUpTimer !== null) clearTimeout(this.graphCatchUpTimer)
+    this.graphCatchUpTimer = null
     // 等在途的那一轮导出收尾再放开 db —— 调用方随后会关库。
     const inFlight = this.inFlightSync
     if (inFlight !== null) await inFlight.catch(() => undefined)
