@@ -723,10 +723,11 @@ export function registerIpc(deps: IpcDependencies): void {
   /**
    * 以「我」为中心的关系子图（ego graph）。
    *
-   * 同上：同步读只读 SQLite。图里几乎没有 entity↔entity 边，
-   * 所以关系由"同一条 fact 里共现"推导（见 graph-query.service 的注释）。
+   * 关系由"同一条 fact 里共现"推导。★ 那一步要问 kl 的 `/facts` ——
+   * SQLite 的 `edges` 表在默认后端（ladybug）下按设计恒空，
+   * 完整推理见 `GraphQueryOptions.factsOfEntity` 的注释。
    */
-  ipcMain.handle(IPC_CHANNELS.klGraphEgo, () => attempt(() => Promise.resolve(graphQuery.ego())))
+  ipcMain.handle(IPC_CHANNELS.klGraphEgo, () => attempt(() => graphQuery.ego()))
 
   /**
    * 带过滤的事实检索（时间范围 / 类型 / 实体 / 关键词）。

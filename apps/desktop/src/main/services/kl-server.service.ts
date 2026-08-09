@@ -2096,6 +2096,56 @@ export class KlServerService {
    * 拿不到就保持 null —— `describeGraphStage` 收到 `undefined` 时闭嘴，
    * 那比报一个恒 0 的假数字好（见 `lastKnownEdges` 的注释）。
    */
+  /**
+   * 问 kl「这个实体参与了哪些 fact」→ fact id 集合。
+   *
+   * ## ★★★ 为什么这条必须走 HTTP 而不是读 SQLite
+   *
+   * `ABOUT` 边（fact↔entity）在默认后端（ladybug）下**不在 SQLite 里** ——
+   * 上游 `storage/base.py` 明写那张 `edges` 表是空的，而
+   * `KL_GRAPH_BACKEND` 默认就是 `ladybug`。实测 `SELECT COUNT(*) FROM edges`
+   * → 0，而 `/status` 同时报 `edges: 26558`。
+   *
+   * ego 图（「它认识的人与事」）靠这些边推导共现，所以它一直是空的 ——
+   * 而界面把这说成"还没抽到关联"。完整推理见
+   * `GraphQueryOptions.factsOfEntity`。
+   *
+   * ## 为什么用 `/facts`
+   *
+   * `/entity` 也给 `ABOUT` 边，但上游硬编码 `edges_out[:5]` 截断到 5 条；
+   * `/expand` 只给 `ENTITY_SIMILAR`。`/facts` 的 `limit` 是入参，可放大。
+   * 实测 `limit=500` 时一次 1.2ms，618 个实体全问一遍 0.72s。
+   *
+   * ★ **没就绪时抛**而不是返回空集：空集会被上游读成"这个人没有任何关联"，
+   * 那正是本项目最贵的那类谎（把"读不到"记成"没有"）。抛出去之后
+   * `graph-query` 那侧的 catch 会给"图谱服务还没起来"这句真话。
+   */
+  async factsOfEntity(entityId: string, limit = 500): Promise<ReadonlySet<string>> {
+    if (this.state !== "ready") {
+      /**
+       * ★ 用裸 `Error` 而不是 `AppError`：`ErrorCode` 是封闭联合，
+       * 而这条只被 `graph-query` 内部 catch 掉换成一句降级文案，
+       * 从不过 IPC 给渲染层 —— 为它加一个全局错误码是过度设计。
+       */
+      throw new Error("图谱服务还没就绪，关系数据暂时读不到")
+    }
+    const response = await fetch(`http://127.0.0.1:${this.port}/facts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entity_id: entityId, limit }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) {
+      throw new Error(`读关系失败：HTTP ${response.status}`)
+    }
+    const body = (await response.json()) as { facts?: Array<{ id?: string }> }
+    const out = new Set<string>()
+    for (const fact of body.facts ?? []) {
+      if (typeof fact.id === "string" && fact.id !== "") out.add(fact.id)
+    }
+    return out
+  }
+
   async refreshEdgeCount(): Promise<void> {
     try {
       const readStatus = this.options.readStatus ?? defaultReadStatus

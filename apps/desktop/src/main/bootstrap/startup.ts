@@ -1025,6 +1025,14 @@ export function bootstrapApp(mainDir: string): AppContext {
         return new Map<string, string>()
       }
     },
+    /**
+     * ★★★ 关系（fact↔entity）必须问 kl —— SQLite 的 `edges` 表在默认后端
+     * （ladybug）下按设计恒空。完整推理见 `GraphQueryOptions.factsOfEntity`。
+     *
+     * 实测：`SELECT COUNT(*) FROM edges` → 0，而同一时刻 `/status` 报
+     * `edges: 26558`。不接这条的话「它认识的人与事」永远是空面板。
+     */
+    factsOfEntity: (entityId) => klServer.factsOfEntity(entityId),
   })
 
   const dataPlane = new DataPlaneService({

@@ -22,7 +22,7 @@
  * 单独归置、显式跳过，不混进默认门禁的"必须绿"。
  */
 import { existsSync, readdirSync } from "node:fs"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import Database from "better-sqlite3"
 import { describe, expect, it } from "vitest"
@@ -56,18 +56,31 @@ function resolveAppDir(): string {
   const base = join(homedir(), "Library", "Application Support")
   for (const name of APP_DIRS) {
     const dir = join(base, name)
-    if (existsSync(join(dir, "shared", "kl", "knowledge.db")) && existsSync(join(dir, "vaults"))) {
-      return dir
-    }
+    if (existsSync(join(dir, "vaults"))) return dir
   }
   // 都没有：返回第一个候选，让下面的 ready 判定为 false（本机没跑过）
   return join(base, APP_DIRS[0] ?? "MyContextDevelop")
 }
 
 const APP_DIR = resolveAppDir()
-const DATA_DIR = join(APP_DIR, "shared", "kl")
-const GRAPH_DB = join(DATA_DIR, "knowledge.db")
 const VAULTS = join(APP_DIR, "vaults")
+
+/**
+ * ★★★ 图库落点是 **per-vault**（`vaults/<id>/kl/`），不是 `shared/kl/`。
+ *
+ * 这个文件原来固定读 `shared/kl/knowledge.db` —— 那是身份隔离**之前**的
+ * 公共目录。实测本机那份是 2026-08-06 的旧库，schema 还停在
+ * `facts.source_message_id`（现在是 `source_chunk_id`），于是这些用例
+ * 一直在一个**过期的 schema** 上跑。
+ *
+ * 危险的不是"读了旧数据"，而是它**测不到生产真正读的那个库** ——
+ * 我这一轮改 SQL 之后报 `no such column: f.source_chunk_id`，
+ * 而那个错误只在旧库上成立。也就是这组"真实图库"断言此前给出的绿，
+ * 与生产行为无关。
+ */
+function klDirOf(vaultCorePath: string): string {
+  return join(dirname(vaultCorePath), "kl")
+}
 
 /**
  * 找一个有身份记录的 vault。找不到就跳过（没登录过的机器）。
@@ -115,7 +128,9 @@ function findVault(): string | null {
 }
 
 const vaultPath = findVault()
-const ready = existsSync(GRAPH_DB) && vaultPath !== null
+const DATA_DIR = vaultPath === null ? "" : klDirOf(vaultPath)
+const GRAPH_DB = DATA_DIR === "" ? "" : join(DATA_DIR, "knowledge.db")
+const ready = GRAPH_DB !== "" && existsSync(GRAPH_DB) && vaultPath !== null
 
 const noopLogger: Logger = {
   debug: () => undefined,
@@ -141,17 +156,42 @@ function makeService(): GraphQueryService {
 
   return new GraphQueryService({
     logger: noopLogger,
-    dataDir: DATA_DIR,
+    // 按 vault 惰性取值（与 getSelfNames 同一个理由：构造时还不知道挂哪个身份）
+    dataDir: () => DATA_DIR,
     now: () => systemClock.now(),
     getSelfNames: () => names,
     getChannelByConversation: () =>
       new Map(conversations.map((row) => [row.external_id, row.channel_id])),
+    /**
+     * ★★★ 关系走**真实的** kl `/facts`。
+     *
+     * 关系边（fact↔entity 的 `ABOUT`）在默认后端（ladybug）下不在 SQLite 里
+     * —— 上游 `kl_graph/storage/base.py:446` 明写那张 `edges` 表是空的，
+     * 而 `config.default.yaml:39` 的 `KL_GRAPH_BACKEND` 默认就是 ladybug。
+     * 实测同一时刻 `SELECT COUNT(*) FROM edges` → 0，而 `/status` 报 26558。
+     *
+     * ★ 这是 externals 测试，本来就要求真 kl 在 8200 上跑着 ——
+     * 所以这里直接打 HTTP，与生产同一条路（生产是 `klServer.factsOfEntity`）。
+     */
+    factsOfEntity: async (entityId) => {
+      const response = await fetch("http://127.0.0.1:8200/facts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entity_id: entityId, limit: 500 }),
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const body = (await response.json()) as { facts?: Array<{ id?: string }> }
+      const out = new Set<string>()
+      for (const fact of body.facts ?? []) if (typeof fact.id === "string") out.add(fact.id)
+      return out
+    },
   })
 }
 
 describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有就跳过）", () => {
-  it("认出「我」并给出邻居与边", () => {
-    const ego = makeService().ego()
+  it("认出「我」并给出邻居与边", async () => {
+    const ego = await makeService().ego()
     expect(ego.available).toBe(true)
     expect(ego.reason).toBeNull()
     expect(ego.self).not.toBeNull()
@@ -163,8 +203,8 @@ describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有�
     expect(ego.edges.length).toBeGreaterThan(0)
   })
 
-  it("★ 渠道真的归到了钉钉（跨两个库的 join，错了表现是「没有描边」）", () => {
-    const ego = makeService().ego()
+  it("★ 渠道真的归到了钉钉（跨两个库的 join，错了表现是「没有描边」）", async () => {
+    const ego = await makeService().ego()
     const channels = new Set(ego.nodes.flatMap((n) => n.channels))
     /**
      * kl 的 `messages.conversation_id` 就是 vault 的
@@ -174,14 +214,14 @@ describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有�
     expect(channels.has("dingtalk")).toBe(true)
   })
 
-  it("邻居数不超过上限（全图两千多个实体，不截就是毛线团）", () => {
-    const ego = makeService().ego()
+  it("邻居数不超过上限（全图两千多个实体，不截就是毛线团）", async () => {
+    const ego = await makeService().ego()
     // 中心 + 最多 TOP_PEERS 个邻居
     expect(ego.nodes.length).toBeLessThanOrEqual(25)
   })
 
-  it("★ 边的两端都在节点集合里（悬空的边会让 G6 直接报错）", () => {
-    const ego = makeService().ego()
+  it("★ 边的两端都在节点集合里（悬空的边会让 G6 直接报错）", async () => {
+    const ego = await makeService().ego()
     const ids = new Set(ego.nodes.map((n) => n.id))
     for (const edge of ego.edges) {
       expect(ids.has(edge.source)).toBe(true)
@@ -189,8 +229,8 @@ describe.skipIf(!ready)("★ ego 图在真实图库上（本机产物，没有�
     }
   })
 
-  it("★ 不返回名字之外的原文（fact 正文不进 ego 图 —— 那是大段聊天内容）", () => {
-    const ego = makeService().ego()
+  it("★ 不返回名字之外的原文（fact 正文不进 ego 图 —— 那是大段聊天内容）", async () => {
+    const ego = await makeService().ego()
     for (const node of ego.nodes) {
       // 实体名是短词；一旦这里出现长文本说明取错了列
       expect(node.name.length).toBeLessThan(80)
@@ -233,20 +273,54 @@ describe.skipIf(!ready)("★ 事实检索在真实图库上", () => {
     expect(out.reason).toBe(null)
   })
 
-  it("★ 关键词走 FTS 且命中的每一条正文里真的有它（中文已预分词）", () => {
-    const out = makeService().facts({
+  /**
+   * ★★ 关键词从**当前图库里现取**，不写死。
+   *
+   * 原来写死的是「沙箱」并注释「实测 62 条」——而那句实测属于**另一份**图库
+   * （旧的 `shared/kl`）。现在这台机器的图里那个词 0 条，于是这条用例
+   * 在一个健康的 FTS 上报红。
+   *
+   * ★ 写死一个词等于让断言依赖**某个人某段时期的聊天内容**：
+   * 它在别人机器上、或重建一次图之后就可能失效，而失败的样子是
+   * 「FTS 没接上」——指向一个完全没坏的东西。
+   *
+   * 所以改成：从一条真实 fact 的正文里取一个 2 字片段当关键词。
+   * 判据仍然是「命中的每一条正文里真的有它」——那才是这条要锁的东西。
+   */
+  it("★★ 关键词走 FTS 且命中的每一条正文里真的有它（中文已预分词）", () => {
+    const service = makeService()
+    const seed = service.facts({
       days: null,
       types: [],
       entityName: null,
-      keyword: "沙箱",
+      keyword: "",
+      limit: 1,
+      offset: 0,
+    })
+    const text = seed.facts[0]?.text ?? ""
+    expect(text.length).toBeGreaterThan(4)
+    /**
+     * ★ 取**中文的 2 字片段**：FTS 那侧对中文是预分词的，
+     * 取 1 字容易命中分词边界之外，取太长又可能跨词。
+     * 从 `[YYYY-MM-DD] ` 之后开始（正文都带这个前缀）。
+     */
+    const body = text.replace(/^\[\d{4}-\d{2}-\d{2}\]\s*/, "")
+    const keyword = body.slice(0, 2)
+    expect(keyword.length).toBe(2)
+
+    const out = service.facts({
+      days: null,
+      types: [],
+      entityName: null,
+      keyword,
       limit: 20,
       offset: 0,
     })
     expect(out.available).toBe(true)
-    // 本机图库里这个词有命中（实测 62 条）。0 条的话说明 FTS 没接上
+    // ★ 至少要命中那条种子自己 —— 0 条就说明 FTS 真的没接上
     expect(out.total).toBeGreaterThan(0)
     for (const fact of out.facts) {
-      expect(fact.text).toContain("沙箱")
+      expect(fact.text).toContain(keyword)
     }
   })
 
@@ -274,10 +348,10 @@ describe.skipIf(!ready)("★ 事实检索在真实图库上", () => {
     }
   })
 
-  it("★ 实体过滤不放大 total（一条 fact 可以关联多个实体）", () => {
+  it("★ 实体过滤不放大 total（一条 fact 可以关联多个实体）", async () => {
     const service = makeService()
     // 先拿一个真实存在的实体名（ego 图里的邻居）
-    const peer = service.ego().nodes.find((n) => n.hop !== 0)
+    const peer = (await service.ego()).nodes.find((n) => n.hop !== 0)
     expect(peer).toBeDefined()
     const out = service.facts({
       days: null,
@@ -288,6 +362,22 @@ describe.skipIf(!ready)("★ 事实检索在真实图库上", () => {
       offset: 0,
     })
     expect(out.available).toBe(true)
+    /**
+     * ★★★ 筛出来必须**有东西** —— 这条原来没有，于是一个恒返 0 的筛选器
+     * 从没被抓到。
+     *
+     * 原来的判据 `EXISTS (... FROM edges ... 'ABOUT' ...)` 在默认后端
+     * （ladybug）下恒为假：那张表按设计是空的（上游
+     * `kl_graph/storage/base.py:446` 明写）。实测本机同一个名字：
+     * 旧判据 **0 条**、正文匹配 **193 条**。
+     *
+     * ★ 下面那段 total 一致性检查被 `if (out.total > 20)` 包着 ——
+     * total 恒为 0 时它整段跳过，所以**跳过本身就是绿的**。
+     * 这正是"门禁跳过比门禁失败更糟"那一类：不加这一行，
+     * 这个用例对这个 bug 永远沉默。
+     */
+    expect(out.total).toBeGreaterThan(0)
+    expect(out.facts.length).toBeGreaterThan(0)
     /**
      * `EXISTS` 而不是 `JOIN`：JOIN 时 total 会数成"fact × 实体"的行数，
      * 于是它可能大于**去重后**能翻到的条数。这里断言 total 与实际
