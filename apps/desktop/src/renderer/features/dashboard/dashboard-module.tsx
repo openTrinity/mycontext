@@ -45,6 +45,7 @@ import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
   useAdoptableSession,
   useBootstrapState,
+  useChannels,
   useDistillProgress,
   useFeedInfo,
   useIngestSnapshot,
@@ -180,7 +181,23 @@ export function DashboardModule() {
     return node === undefined ? null : entityColor(node.type, mode)
   })()
 
-  const ing = readIngest(ingest.data ?? null)
+  /**
+   * 渠道现在连上了吗 —— 给「以下是历史数据」那句提示用。
+   *
+   * ★ 这与文件上方那句"曾经读 useChannels 是为了渠道筹码"不冲突：
+   * 那枚筹码归 `AppHeader` 了，而这里要的是**另一个**判据 ——
+   * 「这些数字还在增长吗」。引导走完之后应用不再判授权
+   * （`onboarding.isDismissed()` 只看四步走过没有），所以登录态过期时
+   * 仪表盘会一直显示历史数据而不给任何说明。见 `readIngest` 的 `staleData`。
+   *
+   * `undefined`（还在查）传 `null`：那时不下结论，免得已连接的账号
+   * 首帧闪一下"历史数据"。
+   */
+  const channels = useChannels()
+  const dingtalkState = channels.data?.find((item) => item.id === "dingtalk")?.status.state
+  const channelConnected = dingtalkState === undefined ? null : dingtalkState === "authorized"
+
+  const ing = readIngest(ingest.data ?? null, channelConnected)
   const per = readPersona(persona.data ?? null)
   const processing = readProcessing({ feed: feed.data ?? null, distill: distill.data ?? null })
   const klView = describeKl(kl)
@@ -426,6 +443,27 @@ export function DashboardModule() {
               text={ing.problem}
               tone={ingest.data?.blockedReason === null ? "warn" : "bad"}
             />
+          </div>
+        )}
+        {/*
+          ── 听记覆盖面 ─────────────────────────────────────
+
+          ## ★ 为什么在这里出现，而不是加进上面那六个清点数
+
+          那六个是 `lg:col-span-2` × 6 = 恰好 12 列（注释里那条"换行之后
+          仍然对齐"的不变式靠的就是这个）。加第七个会让每一档都不再是
+          12 的整除数 —— 而这一条要说的本来也不是"有多少"而是"全不全"。
+
+          与旁边那些 `ProblemLine` 同一个口径：**只在出事时出现一行**，
+          一切正常时什么都没有。听记条数本身仍然在 `IngestCards` 里
+          （给别的面板用），这里只负责"它是不是全部"这个问题。
+
+          `tone="warn"` 而不是 `bad`：覆盖不全是"还差一些"而不是"坏了"，
+          而且它不阻塞任何东西（会议照常在采、图谱照常在建）。
+        */}
+        {ing?.minutesHint === undefined || ing.minutesHint === null ? null : (
+          <div className="col-span-12">
+            <ProblemLine text={`听记：${ing.minutesHint}`} tone="warn" />
           </div>
         )}
         {/*

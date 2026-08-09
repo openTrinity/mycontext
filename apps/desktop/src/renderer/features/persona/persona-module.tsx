@@ -19,6 +19,7 @@
  */
 import { useEffect, useMemo, useState } from "react"
 import {
+  useChannels,
   useContactAvatars,
   usePersonaActivities,
   usePersonaConversations,
@@ -70,6 +71,14 @@ export function PersonaModule() {
   }
 
   const snapshot = usePersonaSnapshot()
+  /**
+   * 渠道连上了吗 —— 给顶部那条「未连接」横幅用（见下面 JSX 里的注释）。
+   *
+   * `undefined`（还在查）→ `null`：那时不下结论。
+   */
+  const channels = useChannels()
+  const dingtalkState = channels.data?.find((item) => item.id === "dingtalk")?.status.state
+  const channelConnected = dingtalkState === undefined ? null : dingtalkState === "authorized"
   const conversations = usePersonaConversations()
   const drafts = usePersonaDrafts()
   const saveConfig = useSavePersonaConfig()
@@ -276,6 +285,28 @@ export function PersonaModule() {
         用户看到的是能力静默变差。实测同事就在这个状态里
         （`opencode_version_unreadable`），而横幅一个字都没出现。
       */}
+      {/*
+        ★★ 渠道未连接的横幅 —— 与降级横幅**并列**，各说一件事。
+        这一条排在前面：没连上渠道时"模型降级"是次要的
+        （草稿写得再好也发不出去、收不到新消息）。
+
+        ## 为什么这里必须有
+
+        引导走完之后应用不再判授权（`onboarding.isDismissed()` 只看四步
+        走过没有，那是刻意的 —— 见 onboarding.service.ts 文件头）。于是
+        登录态过期时数字分身照常打开：有名字、有头像、会话列表还在，
+        而那些会话是**历史数据**，新消息一条也进不来、草稿也发不出去。
+        实测就是这个形态（设置页写着「未连接」，这里却什么都不说）。
+
+        判据用 `=== false` 而不是 `!connected`：`undefined`（还在查）时
+        不下结论，否则已连接的账号会闪一下这条横幅。
+      */}
+      {channelConnected === false ? (
+        <div className="typography-body-small-400 shrink-0 bg-[var(--status-fill-warning-container)] px-4 py-2 text-[var(--status-warning)]">
+          {t("channelDisconnected")}
+        </div>
+      ) : null}
+
       {snapshot.data?.degradedReason != null ? (
         <div className="typography-body-small-400 shrink-0 bg-[var(--bg-card-z0)] px-4 py-2 text-[var(--text-base-secondary)]">
           {explainDegradedReason(snapshot.data.degradedReason, t)}

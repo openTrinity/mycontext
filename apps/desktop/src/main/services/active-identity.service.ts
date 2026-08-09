@@ -93,8 +93,20 @@ export interface ActiveIdentityServiceOptions {
    *
    * ★ 必须是 `Promise` 且调用方**必须 await**：卸载里有"等在途采集收尾"
    * 与"等图谱服务让出端口"两件必须等的事（见 startup 的 unmountVault）。
+   *
+   * ## ★★ 第二个参数是「这个 vault 属于谁」，**不能**让 mount 自己去读
+   *
+   * 挂载内部要把渠道配置目录 seed 成这个 vault 的身份（身份隔离的主防线）。
+   * 而 seed 原来读的是 `currentIdentity()` —— 一个**在挂载完成后才被更新**
+   * 的内存态。于是切身份时 seed 拿到的是**上一个**身份（详见 `switch()`）。
+   *
+   * 显式传进来之后这个时序问题在类型层面就不存在了：mount 不再依赖
+   * "调用方有没有先更新内存态"这个不可见的前提。
+   *
+   * `null` = 这个 vault 还没绑身份（基础 vault，引导流程要往里写），
+   * 那时**不 seed** —— 授权本身还没发生，没有"属于谁"可言。
    */
-  mount: (vaultId: string) => Promise<void>
+  mount: (vaultId: string, identity: ChannelIdentityVaultRecord | null) => Promise<void>
 }
 
 export class ActiveIdentityService {
@@ -241,7 +253,23 @@ export class ActiveIdentityService {
         to: target.corpName,
         channelId: target.channelId,
       })
-      await this.options.mount(target.vaultId)
+      /**
+       * ★★ 目标身份**显式传给** mount —— 不能让它去读 `this.current`。
+       *
+       * 下面那行 `this.current = target` 在 await 之后（卸载阶段要用旧身份
+       * 退订，那是对的）。而 mount 内部要按"这个 vault 属于谁"去 seed 渠道
+       * 配置目录 —— 它原来读的正是 `currentIdentity()`，也就是**旧**身份。
+       *
+       * 实测后果（本机三个 vault 全部错配，两个正好对调）：
+       * · vault A 绑身份甲，其 dws-home 被 seed 成身份乙；
+       * · vault B 绑身份乙，其 dws-home 被 seed 成身份甲。
+       *
+       * 这不是显示问题，是**越权读取面**：渠道命令按 seed 出来的身份作答，
+       * 于是"拿着 A 的库去读 B 的会话"——正是 profile-seed 那道主防线
+       * 要structurally 排除掉的事，却被一个时序 bug 从内部打开了。
+       * 而它完全静默：两边都"有数据"，只是数据属于别人。
+       */
+      await this.options.mount(target.vaultId, target)
       // ★ 挂载完成之后才改内存态（卸载阶段要用旧身份退订）
       this.current = target
       const at = this.options.now().toISOString()

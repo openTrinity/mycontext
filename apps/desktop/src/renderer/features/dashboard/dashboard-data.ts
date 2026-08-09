@@ -94,16 +94,49 @@ export interface IngestCards {
   conversations: string
   media: string
   minutes: string
+  /**
+   * 听记覆盖面的一句话。null = 没问题（或还没跑过一轮）。
+   *
+   * ★ 光有听记条数不够：首版列表只取首页，条数会稳定停在 50，
+   * 与"这个账号一共 50 场会"完全同形。这一行是那个静默缺失的出口。
+   */
+  minutesHint: string | null
   storage: string
   lag: string
   lagTone: MetricTone
   probeHint: string
   /** 采集没在跑 / 被拦住时的一句话。null = 正常。 */
   problem: string | null
+  /**
+   * 渠道当前**没连上**，所以下面这些数字是**历史数据**。
+   *
+   * ## ★★ 为什么需要这一条
+   *
+   * 引导的完成判据是「四步都走过」（`onboarding.isDismissed()`，那是刻意的，
+   * 见 onboarding.service.ts 文件头）—— 与「**现在**授权还有效吗」无关。
+   * 于是登录态过期之后整个应用照常打开：仪表盘显示 8 万条消息、数字分身
+   * 有名字有头像，而设置页同时写着「未连接」。
+   *
+   * 两个画面互相矛盾，且**没有任何一处**告诉用户这些数字是过去采的、
+   * 现在一条新消息都进不来。实测就是这个形态（本机 84,367 条 + 「未连接」）。
+   *
+   * 这不是"多显示一句提示"的锦上添花：用户据此判断"采集正常"，
+   * 于是不会去重新授权，而数据从此停在过去 —— 又一个静默降级
+   * （CLAUDE.md §4）。
+   */
+  staleData: boolean
 }
 
-export function readIngest(snapshot: IngestSnapshot | null): IngestCards | null {
+/**
+ * @param channelConnected 渠道现在连上了吗。`null` = 还不知道（首帧、正在查）
+ *   —— 那时**不下结论**，否则已连接的账号会闪一下"历史数据"。
+ */
+export function readIngest(
+  snapshot: IngestSnapshot | null,
+  channelConnected: boolean | null = null,
+): IngestCards | null {
   if (snapshot === null) return null
+  const staleData = channelConnected === false
   const problem =
     snapshot.blockedReason === "session_expired"
       ? "钉钉登录已过期，去设置里重新授权"
@@ -111,14 +144,24 @@ export function readIngest(snapshot: IngestSnapshot | null): IngestCards | null 
         ? "钉钉侧需要一次授权确认"
         : snapshot.lastError !== null
           ? snapshot.lastError
-          : !snapshot.running
-            ? "采集未运行"
-            : null
+          : /**
+             * ★ 「未连接」排在 `!running` **之前**。
+             *
+             * 两者常常同时成立（没连上自然也不跑），而"渠道未连接"是
+             * **原因**，"采集未运行"只是它的表现。先说结果那句会让用户
+             * 去查采集器，而要做的事在设置页。
+             */
+            staleData
+            ? "钉钉未连接 —— 以下是历史数据，现在不会有新消息进来"
+            : !snapshot.running
+              ? "采集未运行"
+              : null
   return {
     messages: formatCount(snapshot.messages),
     conversations: formatCount(snapshot.conversations),
     media: formatCount(snapshot.mediaAssets),
     minutes: formatCount(snapshot.minutes),
+    minutesHint: minutesHint(snapshot.minutesCoverage),
     storage: formatBytes(snapshot.storage.mainBytes + snapshot.storage.walBytes),
     lag: formatCount(snapshot.ftsLag),
     lagTone: lagTone(snapshot.ftsLag),
@@ -126,7 +169,36 @@ export function readIngest(snapshot: IngestSnapshot | null): IngestCards | null 
       ? `${formatInterval(snapshot.probeIntervalMs)}（已退避）`
       : formatInterval(snapshot.probeIntervalMs),
     problem,
+    staleData,
   }
+}
+
+/**
+ * 听记覆盖面 → 一句话。`null` = 不显示。
+ *
+ * ## ★ 两种不完整分开说，因为处置不同
+ *
+ * · **列表没抽干** —— 会议本身少了（撞了页数预算）。等下一轮或放宽预算；
+ * · **转写没抽干** —— 会议都在，但某几场的逐句转写不全。那要用户
+ *   显式为那几场补拉，等下一轮没用（撞的是同一个上限）。
+ *
+ * 合成一句"覆盖不全"会让用户不知道该等还是该动手。
+ *
+ * `null` / `undefined`（还没跑过一轮，或主进程还是旧版没有这个字段）时
+ * **不说话**：那时是"未知"，而编一句"没问题"正是这次要消灭的那类静默。
+ *
+ * ★ `undefined` 也要判：dev 下渲染层热重载而主进程没重启时，快照里
+ * 压根没有这个键 —— 只判 `=== null` 会在 `coverage.drained` 上抛
+ * `Cannot read properties of undefined`，而那会让整个面板白屏。
+ */
+function minutesHint(coverage: IngestSnapshot["minutesCoverage"] | undefined): string | null {
+  if (coverage === null || coverage === undefined) return null
+  const parts: string[] = []
+  if (!coverage.drained) parts.push("会议列表未抽干，可能还有更早的会没采到")
+  if (coverage.transcriptTruncated > 0) {
+    parts.push(`${String(coverage.transcriptTruncated)} 场会的转写不完整`)
+  }
+  return parts.length === 0 ? null : parts.join("；")
 }
 
 /**

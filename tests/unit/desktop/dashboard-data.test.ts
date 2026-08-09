@@ -116,6 +116,8 @@ function ingestSnapshot(over: Partial<IngestSnapshot> = {}): IngestSnapshot {
     selfConfirmed: true,
     mediaAssets: 1085,
     minutes: 37,
+    // 抽干了、没有转写截断 → `minutesHint` 应当是 null（一切正常时不说话）
+    minutesCoverage: { drained: true, earliestStartedAt: null, transcriptTruncated: 0 },
     storage: {
       mainBytes: 1024 * 1024 * 40,
       walBytes: 1024 * 512,
@@ -167,9 +169,121 @@ describe("采集这一组", () => {
     expect(cards?.problem).toBe("采集未运行")
   })
 
+  /**
+   * ★★ 渠道未连接 → 必须说清"这些是历史数据"。
+   *
+   * ## 为什么这条是必要的，而不是锦上添花
+   *
+   * 引导的完成判据是「四步都走过」（`onboarding.isDismissed()`），
+   * 与「**现在**授权还有效吗」无关 —— 那是刻意的设计。于是登录态过期后
+   * 整个应用照常打开：仪表盘 8 万条消息、数字分身有名有像，
+   * 而设置页同时写着「未连接」。两个画面互相矛盾，且**没有任何一处**
+   * 说明这些数字是过去采的、现在一条新消息都进不来。
+   *
+   * 实测就是这个形态（本机 84,367 条 + 「未连接」）。用户据此判断
+   * "采集正常"于是不去重新授权，数据从此停在过去 —— 静默降级（§4）。
+   */
+  it("★★ 渠道未连接 → staleData 且提示说明是历史数据", () => {
+    const cards = readIngest(ingestSnapshot(), false)
+    expect(cards?.staleData).toBe(true)
+    expect(cards?.problem).toBe("钉钉未连接 —— 以下是历史数据，现在不会有新消息进来")
+    // 数字仍要给：用户问的是"我有多少数据"（与上一条同理）
+    expect(cards?.messages).toBe("10,385")
+  })
+
+  /**
+   * ★ 「未连接」要排在 `!running` **之前** —— 它是原因，后者只是表现。
+   *
+   * 两者常常同时成立。先说"采集未运行"会把用户推去查采集器，
+   * 而要做的事在设置页。
+   */
+  it("★ 未连接 + 采集未运行 → 报未连接（原因优先于表现）", () => {
+    const cards = readIngest(ingestSnapshot({ running: false }), false)
+    expect(cards?.problem).toContain("未连接")
+  })
+
+  /**
+   * ★ 还在查（null）时**不下结论**。
+   *
+   * 传 false 会让已连接的账号在首帧闪一下"历史数据"，
+   * 而那种一闪而过的错误状态比慢 200ms 更让人怀疑数据出了问题。
+   */
+  it("★ 连接状态未知（null）时不标 staleData", () => {
+    expect(readIngest(ingestSnapshot(), null)?.staleData).toBe(false)
+    expect(readIngest(ingestSnapshot(), null)?.problem).toBeNull()
+    // 已连接同理
+    expect(readIngest(ingestSnapshot(), true)?.staleData).toBe(false)
+  })
+
   it("库体积是主库 + WAL", () => {
     // 40 MiB + 512 KiB ≈ 40.5 MiB
     expect(readIngest(ingestSnapshot())?.storage).toBe("41 MiB")
+  })
+
+  /**
+   * ★★ 听记覆盖面 —— 「有多少」与「是不是全部」是两个问题。
+   *
+   * 首版列表只取首页，于是 `minutes` 这个计数会稳定停在 50，
+   * 与"这个账号一共 50 场会"在界面上无法区分。这一组锁的是那个出口。
+   */
+  it("一切正常时不说话（抽干了 + 没有转写截断）", () => {
+    expect(readIngest(ingestSnapshot())?.minutesHint).toBeNull()
+  })
+
+  it("★ 列表没抽干 → 说「还有更早的会没采到」", () => {
+    const cards = readIngest(
+      ingestSnapshot({
+        minutesCoverage: { drained: false, earliestStartedAt: null, transcriptTruncated: 0 },
+      }),
+    )
+    expect(cards?.minutesHint).toContain("未抽干")
+  })
+
+  /**
+   * ★ 两种不完整**分开说**：处置不同（等下一轮 vs 要用户动手）。
+   * 合成一句"覆盖不全"会让用户不知道该做什么。
+   */
+  it("★ 转写截断单独说，且能与列表未抽干同时出现", () => {
+    const only = readIngest(
+      ingestSnapshot({
+        minutesCoverage: { drained: true, earliestStartedAt: null, transcriptTruncated: 3 },
+      }),
+    )
+    expect(only?.minutesHint).toContain("3 场会")
+    expect(only?.minutesHint).not.toContain("未抽干")
+
+    const both = readIngest(
+      ingestSnapshot({
+        minutesCoverage: { drained: false, earliestStartedAt: null, transcriptTruncated: 2 },
+      }),
+    )
+    expect(both?.minutesHint).toContain("未抽干")
+    expect(both?.minutesHint).toContain("2 场会")
+  })
+
+  /**
+   * ★ 还没跑过一轮（null）时**不说话**。
+   *
+   * 那时是"未知"，而编一句"没问题"正是这次要消灭的那类静默。
+   */
+  it("★ 还没跑过一轮（null）→ 不说话（未知 ≠ 没问题）", () => {
+    expect(readIngest(ingestSnapshot({ minutesCoverage: null }))?.minutesHint).toBeNull()
+  })
+
+  /**
+   * ★ 字段缺失（旧主进程 + 热重载过的渲染层）不能白屏。
+   *
+   * 这一条挡的是一次真实的失败：只判 `=== null` 时 `undefined` 会走进
+   * `coverage.drained` 并抛 `Cannot read properties of undefined` ——
+   * 而那会让整个面板渲染不出来（不只是少一行提示）。
+   */
+  it("★ 快照里没有这个字段时不崩（旧主进程 + 新渲染层）", () => {
+    const legacy = ingestSnapshot()
+    delete (legacy as { minutesCoverage?: unknown }).minutesCoverage
+    expect(() => readIngest(legacy)).not.toThrow()
+    expect(readIngest(legacy)?.minutesHint).toBeNull()
+    // 别的数字照常给 —— 少一个字段不该影响整块
+    expect(readIngest(legacy)?.messages).toBe("10,385")
   })
 })
 

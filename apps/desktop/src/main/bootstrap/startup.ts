@@ -1087,7 +1087,23 @@ export function bootstrapApp(mainDir: string): AppContext {
    * 那是刻意的：漏接一个字段是编译错误，而不是"那一类数据仍写在公共目录"
    * 这种静默的跨身份写入（见 `VaultStore.paths()` 的注释）。
    */
-  const mountVault = async (vaultId: string): Promise<void> => {
+  /**
+   * @param seedIdentity 这个 vault 属于谁 —— **由调用方给**，不在这里读
+   *   `activeIdentity.currentIdentity()`。
+   *
+   *   ★★ 为什么必须是参数：切身份时 `ActiveIdentityService.switch()` 是
+   *   「先 await mount，再更新内存态」（卸载阶段要用旧身份退订，那个顺序是对的）。
+   *   于是在这里读 `currentIdentity()` 拿到的是**上一个**身份 —— 新 vault 的
+   *   渠道配置目录会被 seed 成别人，而渠道命令按 seed 出来的身份作答。
+   *   实测本机三个 vault 全部错配、两个正好对调。
+   *
+   *   `undefined` = 由本函数按当前内存态推断（登录初始化那两条路径：
+   *   `resolveOnLogin()` 在返回前就已经把内存态设好了，所以那里推断是对的）。
+   */
+  const mountVault = async (
+    vaultId: string,
+    seedIdentity?: { channelId: string; corpId: string; userId: string } | null,
+  ): Promise<void> => {
     await unmountVault()
 
     const handle = vaults.handle(vaultId)
@@ -1106,7 +1122,14 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 未绑身份（基础 vault）时不 seed：那时还没有"这个 vault 属于谁"，
      * 而授权流程本身要能跑（`dwsConfigDir` 那个 getter 会退回旧目录）。
      */
-    const identity = activeIdentity.currentIdentity()
+    /**
+     * ★ 身份来源：调用方给的优先，没给才退回内存态。
+     *
+     * 显式传 `null` 与不传是两件事：前者是"这个 vault 明确没有身份"，
+     * 后者是"你自己看着办"。用 `=== undefined` 判而不是 `??` —— 后者会把
+     * 显式的 `null` 也当成"没传"，于是又去读那个可能过期的内存态。
+     */
+    const identity = seedIdentity === undefined ? activeIdentity.currentIdentity() : seedIdentity
     if (identity !== null) {
       const seeded = seedChannelProfile(vp.dwsHome, {
         corpId: identity.corpId,
@@ -1228,7 +1251,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     settings,
     logger: logger.child("Identity"),
     now: () => new Date(systemClock.now()),
-    mount: (vaultId) => mountVault(vaultId),
+    mount: (vaultId, identity) => mountVault(vaultId, identity),
   })
 
   const auth = new AuthService({

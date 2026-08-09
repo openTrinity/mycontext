@@ -236,6 +236,54 @@ describe("切身份", () => {
   })
 
   /**
+   * ★★★ 但 mount **收到的**身份必须是**新**的 —— 这两件事同时成立。
+   *
+   * ## 上面那条与这条不矛盾，它们说的是不同的东西
+   *
+   * · 内存态（`currentProfile()`）在 mount 期间仍是旧的 —— 卸载阶段要用它
+   *   去退订，改早了会"退订错身份"（上面那条锁的就是这个）；
+   * · 而 mount 的**参数**必须是目标身份 —— 它要把新 vault 的渠道配置目录
+   *   seed 成这个 vault 的主人。
+   *
+   * ## 为什么必须锁住（这是一个真实的越权读取面）
+   *
+   * 修复前 `startup.ts` 的 `mountVault` 在内部读 `currentIdentity()` 来 seed，
+   * 而那时它还是旧身份。后果**不是**显示错乱，是渠道命令按错身份作答 ——
+   * "拿着 A 的库去读 B 的会话"，正是 profile-seed 那道主防线要
+   * 结构性排除的事，却被一个时序 bug 从内部打开了。而它完全静默：
+   * 两边都"有数据"，只是数据属于别人。
+   *
+   * 实测（本机三个真实 vault，2026-08-09）：库里绑的 user_id 与其
+   * dws-home 里 seed 的 user_id **三个全部不一致**，其中两个正好对调。
+   *
+   * 所以判据从"mount 自己去读"改成"调用方显式传" —— 时序问题在类型层面
+   * 就不存在了。这条断言锁的是那个参数。
+   */
+  it("★★ mount 收到的身份是**目标**身份（seed 不能用旧身份）", async () => {
+    bind(CORP_A, USER_A, "vault-a")
+    bind(CORP_B, USER_B, "vault-b", "组织乙")
+    let seededCorp: string | null | undefined
+    let seededUser: string | null | undefined
+    const service: ActiveIdentityService = makeService({
+      mount: (vaultId, identity) => {
+        mounted.push(vaultId)
+        seededCorp = identity?.corpId ?? null
+        seededUser = identity?.userId ?? null
+        return Promise.resolve()
+      },
+    })
+    service.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })
+
+    await service.switchTo(keyOf(CORP_B, USER_B))
+
+    // ★ 目标身份，不是切换前那个
+    expect(seededCorp).toBe(CORP_B)
+    expect(seededUser).toBe(USER_B)
+    // 反面：如果拿的是内存态就会是 A（那正是修复前的行为）
+    expect(seededCorp).not.toBe(CORP_A)
+  })
+
+  /**
    * ★ 挂载必须被 **await**。
    *
    * 挂载里有"等图谱服务让出 8200"与"等在途采集收尾"两件必须等的事。

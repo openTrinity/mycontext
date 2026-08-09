@@ -132,6 +132,7 @@
   "mediaUnindexed": "(image/file, not indexed yet)",
   "emptyMessage": "(empty message)",
   "send": "Send",
+  "channelDisconnected": "DingTalk isn't connected — the conversations below are historical, no new messages will arrive, and drafts can't be sent. Re-authorize in Settings → Channels.",
   "sendEdited": "Send edited",
   "sendFailed": "Not sent: {{reason}}",
   "sendReasonGrantMissing": "The channel refused this send (permission or session issue)",

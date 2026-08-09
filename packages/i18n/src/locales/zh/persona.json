@@ -132,6 +132,7 @@
   "mediaUnindexed": "（图片/文件，暂未建立索引）",
   "emptyMessage": "（空消息）",
   "send": "发送",
+  "channelDisconnected": "钉钉未连接 —— 下面是历史会话，新消息不会进来，草稿也发不出去。去「设置 → 渠道」重新授权。",
   "sendEdited": "发送（用编辑后的）",
   "sendFailed": "没发出去：{{reason}}",
   "sendReasonGrantMissing": "渠道拒绝了这次发送（权限或登录态问题）",
