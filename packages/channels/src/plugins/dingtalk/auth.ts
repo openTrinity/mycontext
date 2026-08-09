@@ -368,6 +368,25 @@ export class DingTalkAuth implements ChannelAuth {
     const args = ["auth", "logout"]
     // ★ 门禁：这个文件走自己的 processes.exec（不经 DwsCli），必须显式调
     assertAllowedCommand(args)
+    /**
+     * ★★ 没绑身份 → **不退**。这条漏了会退掉用户终端里的登录态。
+     *
+     * `dwsProfileArgs()` 在没绑身份时返回空数组，于是 `auth logout` 不带
+     * `--profile`，按渠道 CLI 的**全局 currentProfile** 执行 —— 而 token 的
+     * 密钥在系统钥匙串里、按系统用户存一份（见文件头），也就是**与用户
+     * 自己终端里的 dws 共用**。
+     *
+     * 后果：应用这边"清理一下自己的登录态"，实际把用户在终端里正在用的
+     * 那份退掉了。而我们的原则是只动用户在这个应用里授权过的那个身份 ——
+     * 没有身份时就没有我们该退的东西。
+     *
+     * 返回 false（= "没退成"）而不是抛：调用方（清数据流程）会据此决定
+     * 提示什么，而"本来就没有可退的"不是错误。
+     */
+    if (!this.options.runtime.hasPinnedIdentity()) {
+      this.options.logger.info("skip logout: no bound identity", {})
+      return false
+    }
     try {
       const result = await this.options.processes.exec({
         executable: binary.path,

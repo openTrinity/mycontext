@@ -74,7 +74,15 @@ function makeConsumer(
     runtime: {
       resolve: () => ({ path: "/fake/dws" }),
       buildEnv: () => ({}),
-      // 未绑身份 → 不钉 profile（钉住本身在 dws-profile-pinning.test.ts 里锁）
+      /**
+       * 这一组测的是长连接的状态机与投递，所以**必须**装成"已绑身份" ——
+       * 未绑身份时 `spawnOnce` 直接不起长连接（见那处注释：不钉 profile 会
+       * 订阅到 CLI 全局身份那个人的消息流）。
+       *
+       * `dwsProfileArgs` 仍给空数组：钉住的**参数**由
+       * dws-profile-pinning.test.ts 单独锁，这里只需要过那道闸。
+       */
+      hasPinnedIdentity: () => true,
       dwsProfileArgs: () => [],
     } as never,
     processes: fake.processes,

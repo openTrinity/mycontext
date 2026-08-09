@@ -274,6 +274,39 @@ describe("DingTalkAuth 钉住身份", () => {
     }).status()
     expect(seen).not.toContain("--profile")
   })
+
+  /**
+   * ★★★ 没绑身份时 `auth logout` **不执行** —— 否则会退掉用户终端里的登录态。
+   *
+   * token 的密钥在系统钥匙串里、按系统用户存一份（见 auth.ts 文件头），
+   * 也就是与用户自己终端里的 dws **共用同一份**。不钉 profile 时
+   * `auth logout` 按 CLI 的全局 currentProfile 执行 —— 于是应用这边
+   * "清理一下自己的登录态"会把用户在终端里正在用的那份退掉。
+   *
+   * 我们只该动用户在这个应用里授权过的那个身份；没有身份时就没有该退的东西。
+   */
+  it("★★ 没绑身份 → 不跑 auth logout（否则退掉用户终端的登录态）", async () => {
+    const calls: string[][] = []
+    const auth = new DingTalkAuth({
+      runtime: stubResolve(runtimeWith(undefined)),
+      processes: {
+        exec: async (input: { args: string[] }) => {
+          calls.push(input.args)
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ success: true, authenticated: false }),
+            stderr: "",
+            timedOut: false,
+          }
+        },
+      } as never,
+      logger: NOOP_LOGGER as never,
+      openExternal: async () => {},
+    })
+
+    expect(await auth.logout()).toBe(false)
+    expect(calls.find((args) => args.includes("logout"))).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------
@@ -345,5 +378,77 @@ describe("DingTalkEventConsumer 钉住身份", () => {
 
     expect(calls.length).toBeGreaterThan(0)
     for (const args of calls) expect(args).toContain("--profile")
+  })
+
+  /**
+   * ★★★ 没绑身份时**一个子进程都不许起** —— 这一组是「只做授权过的事」那条
+   * 原则在事件通路上的落点。
+   *
+   * ## 为什么"钉不上就不带 --profile"是错的兜底
+   *
+   * `dwsProfileArgs()` 在没绑身份时返回**空数组**，拼进 args 里毫无痕迹 ——
+   * 命令照样跑，只是跟着渠道 CLI 的**全局 currentProfile** 走。而那个值由
+   * 用户在终端里的最后一次操作决定，可能是另一个组织。
+   *
+   * 对长连接来说后果比一次性命令重得多：它在**服务端建立一个订阅**，
+   * 推来的是那个身份收到的「@我」消息。也就是说我们会订阅一个用户
+   * 从未在这个应用里授权过的人的消息流，然后用它唤醒数字人。
+   */
+  it("★★ 没绑身份 → 不起长连接（不借用 CLI 现成的登录态）", () => {
+    let spawned = 0
+    const consumer = consumerWith(undefined, {
+      spawnDuplex: (input: { onExit?: (info: unknown) => void }) => {
+        spawned += 1
+        return fakeDuplex(input)
+      },
+    })
+    consumer.start()
+    expect(spawned).toBe(0)
+    consumer.stop()
+  })
+
+  /**
+   * ★★ `event stop --all` 在没绑身份时**什么都不停**。
+   *
+   * 不钉 profile 时 `--all` 会去停 CLI 全局身份的全部订阅 —— 而那个身份
+   * 可能正是用户自己终端里在用的。也就是说一次"我们这边的清理"会把用户
+   * 在别处的订阅打掉，且这个方法整段吞异常，停错了不会有任何痕迹。
+   */
+  it("★★ 没绑身份 → 不跑 event stop --all（否则可能停掉别人的订阅）", async () => {
+    const calls: string[][] = []
+    const consumer = consumerWith(undefined, {
+      spawnDuplex: (input: { onExit?: (info: unknown) => void }) => fakeDuplex(input),
+      exec: async (input: { args: string[] }) => {
+        calls.push(input.args)
+        return { exitCode: 0, stdout: "{}", stderr: "", timedOut: false }
+      },
+    })
+    consumer.start()
+    await consumer.stop()
+    expect(calls.find((args) => args.includes("stop"))).toBeUndefined()
+  })
+
+  /**
+   * ★ 审计在没绑身份时给空，且**不问 CLI**。
+   *
+   * 不钉时问到的是别人订了什么，而这份审计的用途是"我们这个身份的实时通路
+   * 覆盖了多少"。拿别人的数字填进来会让状态页显示一个看起来正常、
+   * 实际与我们无关的覆盖率。
+   */
+  it("★ 没绑身份 → 审计返回空且不起子进程", async () => {
+    const calls: string[][] = []
+    const consumer = consumerWith(undefined, {
+      exec: async (input: { args: string[] }) => {
+        calls.push(input.args)
+        return { exitCode: 0, stdout: "[]", stderr: "", timedOut: false }
+      },
+    })
+    const audit = await consumer.audit()
+
+    expect(calls).toHaveLength(0)
+    expect(audit.activeSubscriptions).toBe(0)
+    expect(audit.catalog).toEqual([])
+    // ★ error 留 null：这不是读取失败，是"还没有身份可问"
+    expect(audit.error).toBeNull()
   })
 })

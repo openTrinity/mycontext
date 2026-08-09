@@ -451,6 +451,28 @@ export class RuntimeEnv {
   }
 
   /**
+   * 身份钉住了吗。`false` = 当前没有绑定身份。
+   *
+   * ## ★★ 为什么需要显式问一句，而不是看 `dwsProfileArgs()` 是不是空
+   *
+   * 那个方法在没绑身份时返回**空数组**，而空数组拼进 args 里是完全无害的
+   * —— 命令照样跑，只是**不带 `--profile`**，于是跟着渠道 CLI 的
+   * **全局 currentProfile** 走。而那个值由用户在终端里的最后一次操作决定，
+   * 可能是另一个组织。
+   *
+   * 也就是说「没绑身份」这个状态会静默降级成「用 CLI 里现成的登录态」——
+   * 而我们的原则是**只做用户在这个应用里授权过的事**，不借用环境里
+   * 已有的凭据（CLAUDE.md §5：不许扩大读取面）。
+   *
+   * 调用方拿 `[...args, ...dwsProfileArgs()]` 时看不出这个区别（两种情况
+   * 都"正常"），所以判据必须单独暴露出来、由每个起子进程的地方显式处置。
+   */
+  hasPinnedIdentity(): boolean {
+    const value = this.options.dwsProfile?.()
+    return value !== undefined && value.trim() !== ""
+  }
+
+  /**
    * 组装子进程环境变量。
    *
    * DWS_CONFIG_DIR 指向应用数据目录：把 profiles 与日志与用户自己终端里的

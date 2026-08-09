@@ -201,6 +201,26 @@ export class DingTalkEventConsumer implements ChannelEvents {
      * （定向补拉会一路失败，而失败看起来像网络问题）。
      */
     const finalArgs = [...args, ...this.options.runtime.dwsProfileArgs()]
+    /**
+     * ★★ 没绑身份 → **不起长连接**（而不是"用 CLI 现成的登录态起一条"）。
+     *
+     * `dwsProfileArgs()` 在没绑身份时返回空数组，拼进 args 里毫无痕迹 ——
+     * 命令照样跑，只是跟着渠道 CLI 的**全局 currentProfile** 走。
+     * 对长连接来说后果比一次性命令更重：它在**服务端建立了一个订阅**，
+     * 推来的是那个身份收到的「@我」消息。也就是说我们会订阅一个
+     * 用户从未在这个应用里授权过的人的消息流。
+     *
+     * 而这是本应用里最不该发生的一类事：数字人被那些消息唤醒、
+     * 定向补拉去捞库里根本不存在的会话，全程静默（失败看起来像网络问题）。
+     *
+     * 归位到 `stopped` 而不是 `backoff`：这不是故障、也不该被重试推着走，
+     * 是"还没到能起的时候"。授权完成后挂载链路会重新起数据流（`start()`）。
+     */
+    if (!this.options.runtime.hasPinnedIdentity()) {
+      this.options.logger.info("event stream not started: no bound identity", {})
+      this.state = "stopped"
+      return Promise.resolve()
+    }
     this.state = "starting"
 
     return new Promise<void>((resolve) => {
@@ -279,6 +299,17 @@ export class DingTalkEventConsumer implements ChannelEvents {
       activeSubscriptions: 0,
       error: null,
     }
+    /**
+     * ★ 没绑身份 → 直接给空，不去问 CLI。
+     *
+     * 不钉 profile 时问到的是**别人**订了什么，而这份审计的用途是
+     * "我们这个身份的实时通路覆盖了多少"。拿别人的数字填进来会让状态页
+     * 显示一个看起来正常、实际与我们无关的覆盖率。
+     *
+     * `error` 留 null：这不是读取失败，是"还没有身份可问"——
+     * 报成 error 会让状态页显示一个不存在的故障。
+     */
+    if (!this.options.runtime.hasPinnedIdentity()) return empty
     try {
       const binary = this.options.runtime.resolve("dws")
       const run = async (args: readonly string[]): Promise<unknown> => {
@@ -337,6 +368,18 @@ export class DingTalkEventConsumer implements ChannelEvents {
    */
   private async unsubscribeAll(): Promise<void> {
     const args = ["event", "stop", "--all"]
+    /**
+     * ★★★ 没绑身份 → **什么都不停**。这里漏了比别处更糟。
+     *
+     * `--all` 的语义是"停这个身份的全部订阅"。不钉 profile 时它按 CLI 的
+     * 全局 currentProfile 走 —— 于是我们会去停**另一个身份**的订阅，
+     * 而那个身份可能正是用户自己终端里在用的。也就是说一次
+     * "我们这边的清理"会把用户在别处的订阅打掉。
+     *
+     * 而没绑身份时本来就没有我们建立的订阅可停（`spawnOnce` 那道闸拦住了），
+     * 所以直接返回既安全又正确 —— 不是"跳过清理"，是"没有东西要清"。
+     */
+    if (!this.options.runtime.hasPinnedIdentity()) return
     try {
       assertAllowedCommand(args)
       const binary = this.options.runtime.resolve("dws")
