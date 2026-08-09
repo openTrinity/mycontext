@@ -143,6 +143,40 @@ function resolveDwsSourceValue(raw: string): string {
   }
 }
 
+/**
+ * kl 那条链要用的凭证（base + key），**含 env 兜底**。
+ *
+ * ## ★★ 为什么必须只有一处
+ *
+ * 「有没有 LLM 可用」这个问题原来有两个答案：`gateway()` 兜了一层真实 env，
+ * 而 `autoBuild.enabled` 只看 `resolved()`。于是只在 env 里配了凭证的机器上
+ * 手动建图能跑、自动建图关着、界面说「未配置」—— 三条信息互相矛盾，
+ * 而它们全都"按各自的判据"是对的。
+ *
+ * 抽成一个函数是为了让那种矛盾**不可能**再出现：兜底与判断读同一个源。
+ *
+ * ## 兜底的顺序
+ *
+ * 1. 用户在设置里存的 KL 专用项（`resolved()` 里 KL 留空时已回退主配置）；
+ * 2. 真实环境变量里的 `ANTHROPIC_*` —— 覆盖"只配了那个、没配 MYCONTEXT_*"
+ *    的情况（内部同学的常见形态）。
+ *
+ * 两个都空 = 真的没有凭证，那时 kl 的 LLM 调用必然失败，
+ * 所以自动建图应当**关着**而不是反复失败重试。
+ */
+export function resolveKlCredentials(runtimeConfig: RuntimeConfigService): {
+  base: string
+  key: string
+} {
+  const r = runtimeConfig.resolved()
+  const base = r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
+  const key =
+    r.klApiKey.trim() !== ""
+      ? r.klApiKey
+      : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
+  return { base: base.trim(), key: key.trim() }
+}
+
 export function bootstrapApp(mainDir: string): AppContext {
   const packaged = app.isPackaged
   // 配置要先于 paths：dataDir 覆盖项来自配置。
@@ -359,8 +393,27 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     autoBuild: {
       enabled: () => {
-        const r = runtimeConfig.resolved()
-        return r.klBaseUrl.trim() !== "" && r.klApiKey.trim() !== ""
+        /**
+         * ★★ 判据必须与 `gateway()` **同源** —— 这里曾经不是，而后果很难懂。
+         *
+         * 原来这里只读 `runtimeConfig.resolved()`，而 `gateway()` 在那之后
+         * 又兜了一层真实 env（`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`）。
+         * 于是只在 env 里配了凭证的机器上，同一个问题有两个答案：
+         *
+         * ```
+         * gateway()          → 有凭证  → 手动点建图能跑（hasGateway: true）
+         * autoBuild.enabled  → 没凭证  → 自动建图关闭 + 界面说「未配置」
+         * ```
+         *
+         * 实测撞上（用户日志）：`graph build started {hasGateway: true}` 与
+         * `llm not configured` 同时出现，而界面说「自动构建已关闭」+
+         * 「知识加工落后 28,819 条」。三条信息互相矛盾，用户完全无从判断
+         * 到底配没配 —— 而这不是配置问题，是我们两处判据不一致。
+         *
+         * 现在两处都走 `resolveKlCredentials()`：一处兜底，一处判断，同一个源。
+         */
+        const { base, key } = resolveKlCredentials(runtimeConfig)
+        return base !== "" && key !== ""
       },
       /**
        * ★ 两次建图之间至少隔多久（默认 1h，设置里可配 15min–6h）。
@@ -855,15 +908,8 @@ export function bootstrapApp(mainDir: string): AppContext {
      * （留空回退主配置）。用户在设置里改了网关后，下次 kl 重启就用新值。
      */
     gateway: () => {
+      const { base, key } = resolveKlCredentials(runtimeConfig)
       const r = runtimeConfig.resolved()
-      // KL base/key 留空时 resolved 已回退主配置；再兜一层真实 env 里的
-      // ANTHROPIC_*（用户只配了那个而没配 MYCONTEXT_* 的情况）。
-      const base =
-        r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
-      const key =
-        r.klApiKey.trim() !== ""
-          ? r.klApiKey
-          : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
       return {
         // ★ LLM 走 Anthropic 模式：base 不含 /v1（litellm 自己拼 /v1/messages），
         // 裸模型名（kl 的 extractor 自己拼 anthropic/ 前缀）。见 kl_graph/config.py。
