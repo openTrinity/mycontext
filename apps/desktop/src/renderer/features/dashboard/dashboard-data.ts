@@ -375,7 +375,19 @@ export function describeBuildSchedule(
   const { reason, etaMs, pendingMessages, messagesToThreshold, lagThreshold } = schedule
 
   if (!schedule.enabled) {
-    return { text: "自动构建已关闭 · 需手动触发", tone: "muted" }
+    /**
+     * ★★ 「关闭」不是一个开关，而是**没配 LLM** 的结果 —— 必须说出原因。
+     *
+     * `autoBuild.enabled` 的判据是 `klBaseUrl` 与 `klApiKey` 都非空
+     * （见 startup.ts）。所以这里的"关闭"读起来像"你自己关掉了"，
+     * 而实际是"缺配置"—— 两者的下一步完全不同：前者去找开关（找不到），
+     * 后者去设置里填模型。
+     *
+     * 实测撞上：用户看到「知识加工落后 28,819 条」+「自动构建已关闭」，
+     * 而这两句合起来完全没有指向"去配模型"。同一份日志里
+     * `llm not configured` 早就写着原因，只是没传到界面上。
+     */
+    return { text: "自动构建已关闭 · 需先配置模型（或手动触发）", tone: "muted" }
   }
   if (reason === "build-in-progress") {
     // ★ 措辞刻意不是"未就绪"：那会把人引去查环境，而实际是上一轮在跑。

@@ -1129,17 +1129,48 @@ export class KlServerService {
        * 0 行 —— 那正是我们踩过的坑（`kl ingest` 从没成功跑过，
        * 而 `/health` 一直回 ok）。显示成一个干净的空页会让人以为
        * "我的聊天里就是没什么可抽的"。
+       *
+       * ## ★★ 判据必须把 `facts` 单独判，不能挂在 `entities` 上
+       *
+       * 原来只有三档，`edges === 0` 那一档说的是「实体与事实已就绪，
+       * 关系边还没建（建图的最后一步）」—— 而它**根本没看 facts**。
+       *
+       * 实测撞上（用户截图 + 库里数字）：
+       *
+       * ```
+       * chunks 2296   entities 60   facts 0   edges 0
+       * ```
+       *
+       * 界面照旧说"事实已就绪、只差最后一步"，而事实是 0、差的是中间一大步。
+       * 那句话把用户引向"再等等就好"，于是他不会去查真正的原因。
+       *
+       * ## 为什么这个组合会出现（`entities>0` 而 `facts===0`）
+       *
+       * 两者来自建图的**不同阶段**：
+       * · `entities` 一部分在 Phase A（切块 + embedding）就能落；
+       * · `facts` 要 Phase B 的 **LLM 抽取**才有。
+       *
+       * 所以"Phase A 成功、Phase B 挂了"会稳定产出这个组合。实测那次的
+       * Phase B 是被网关打挂的（`Error 524: A timeout occurred`，
+       * Cloudflare 网关超时，整批 `Batch LLM error … transient`）。
+       *
+       * ★ 文案指向**那一步**而不是"再等等"：抽取失败要么重试、要么换网关，
+       * 而"最后一步"这个说法会让人什么都不做。
        */
-      const reason =
-        entities === 0
-          ? facts === 0
-            ? "图是空的 —— 建图没有成功跑过（点「重新建图」，注意它要几分钟且出网）"
-            : "实体还没建好（抽取已完成，建图阶段未完成）"
-          : edges === 0
-            ? "实体与事实已就绪，关系边还没建（建图的最后一步）"
-            : null
+      const reason = describeGraphStage({ entities, facts, edges })
 
       return {
+        /**
+         * ★ 判据保持 `entities > 0 || facts > 0` —— 刻意**不**要求 facts。
+         *
+         * 这个字段的语义是"图谱面板有东西可显示吗"，而只有实体也确实能显示
+         * （实体列表、类型分布、ego 图的节点）。要求 facts 会让一个
+         * 半成品图整块消失，而那比显示半成品更糟：用户看不到"已经建了 60 个
+         * 实体"这个事实，也就无法判断建图到底走到哪了。
+         *
+         * 真正需要区分的是**质量**，而那由上面的 `reason` 说清（facts=0 时
+         * 明确写"事实一条都没抽出来"）。可见 + 带原因，比不可见好。
+         */
         available: entities > 0 || facts > 0,
         reason,
         entities,
@@ -1992,7 +2023,66 @@ export class KlServerService {
  * 正是这次三份同事日志暴露的问题（见 `logKlLine`）。规则写错与规则生效
  * **外观完全相同**（都是日志里没那行），不测就等于没写。
  */
+/**
+ * 图谱处于哪个半成品阶段 → 给用户的一句话。`null` = 没问题，不必说。
+ *
+ * ★ **导出且是纯函数**：判据是一串 if-else，而"说错话"与"说对话"在界面上
+ * 长得一样（都是一行黄字）。不测就等于没写 —— 实测已经栽过一次：
+ * 原来 `edges === 0` 那一档没看 facts，于是 `facts=0` 时界面说
+ * 「实体与事实已就绪」，而那是假话。
+ *
+ * ★ 提出来而不是留在 `graphOverview()` 里，也是为了让测试不必开一个真 kl 库
+ * （那要 better-sqlite3 + 一个建好的图文件，而本项目为原生模块 ABI 反复踩过坑）。
+ */
+export function describeGraphStage(input: {
+  entities: number
+  facts: number
+  edges: number
+}): string | null {
+  const { entities, facts, edges } = input
+  /**
+   * ## ★★ `facts` 必须**单独判**，不能挂在 `entities` 上
+   *
+   * `entities>0 && facts===0` 不是罕见组合，而是一个**确定会出现**的状态：
+   * 两者来自建图的不同阶段（实体一部分在 Phase A 就能落，事实要 Phase B
+   * 的 LLM 抽取），所以"Phase A 成功、Phase B 挂了"稳定产出它。
+   * 实测那次 Phase B 是被网关打挂的（`Error 524: A timeout occurred`，
+   * 整批 `Batch LLM error … transient`）。
+   *
+   * ★ 文案指向**那一步**而不是"再等等"：抽取失败要么重试要么换网关，
+   * 而"最后一步"这种说法会让用户什么都不做。
+   */
+  if (entities === 0 && facts === 0) {
+    return "图是空的 —— 建图没有成功跑过（点「重新建图」，注意它要几分钟且出网）"
+  }
+  if (facts === 0) {
+    return "实体已建好，但事实一条都没抽出来 —— Phase B 的 LLM 抽取没成功（多为网关超时/限流，可重试或换网关）"
+  }
+  if (entities === 0) return "实体还没建好（抽取已完成，建图阶段未完成）"
+  if (edges === 0) return "实体与事实已就绪，关系边还没建（建图的最后一步）"
+  return null
+}
+
 export function klLogLevelFor(line: string): "warn" | "info" | "debug" {
+  /**
+   * ★★ 先把**纯噪音**降级 —— 它必须排在所有 warn 规则之前。
+   *
+   * 实测（用户日志 2026-08-09）：一次建图里
+   * `LiteLLM.Info: If you need to debug this error, use litellm._turn_on_debug()`
+   * 刷了**几十行连续 WARN**，而它一个字的信息量都没有 —— 它只是 litellm 在
+   * 每次调用失败后追加的一句固定提示。
+   *
+   * 它被提成 warn 是因为句中带 "error"，命中了下面那条宽松规则。后果不是
+   * "日志有点吵"，而是**真正的那行被埋掉**：同一批日志里
+   * `[ERROR] Batch LLM error … Error 524: A timeout occurred` 才是原因，
+   * 而它夹在几十条无用 WARN 中间，肉眼扫过去只看到一片黄。
+   *
+   * ★ 判据钉在 `LiteLLM.Info:` 这个前缀上而不是整句：上游的措辞会变，
+   * 而"以 LiteLLM.Info 开头的是提示不是错误"这一点是稳定的。
+   * （`LiteLLM.Error:` 之类**不**在此列 —— 那是真错误，照旧走下面的规则。）
+   */
+  if (/LiteLLM\.Info\b/.test(line)) return "debug"
+
   /**
    * ★★ `LLM errors: N` —— 这一行是"建图成功但 facts=0"的**唯一**线索。
    *
