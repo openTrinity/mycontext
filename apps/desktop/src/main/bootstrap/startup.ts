@@ -46,6 +46,7 @@ import {
   scopedChannelIdFor,
 } from "./post-auth-identity.js"
 import { ChannelPipelineManager } from "./channel-pipeline.js"
+import { ChannelRuntimeRegistry } from "./channel-runtime.js"
 import { teardownVault } from "./vault-teardown.js"
 import { DwsSourceService } from "../services/dws-source.service.js"
 import { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
@@ -607,11 +608,15 @@ export function bootstrapApp(mainDir: string): AppContext {
        * ★ 提到最前面是安全的：`reset` 是同步且快的（一条 DELETE + 清内存态），
        * 且**不依赖** purge / export / rebuild 的结果。
        *
-       * ★★ 但要**先判渠道**：蒸馏只在主渠道上跑（其余渠道是只读接入、
-       * 不进画像），所以只有主渠道改范围才需要重蒸。不判的话在飞书面板
-       * 保存一次范围会把主渠道刚建好的蒸馏任务全清掉。
+       * ★★ 但要**先判渠道**：蒸馏只在**支持数字人的渠道**上跑（其余是只读
+       * 接入、不进画像），所以只有那种渠道改范围才需要重蒸。不判的话在飞书
+       * 面板保存一次范围会把主渠道刚建好的蒸馏任务全清掉。
+       *
+       * ★ 判据用 `personaSupported` 而不是 `channelId === 主渠道 id`：
+       * 两者今天同值，但前者说的是**能力**。将来第二个渠道开数字人时，
+       * 改 registry 那一处即可，不必把所有这类比较重读一遍。
        */
-      if (channelId === dingtalk.meta.id) {
+      if (runtimes.find(channelId)?.personaSupported === true) {
         try {
           distill.reset()
         } catch (error) {
@@ -628,24 +633,25 @@ export function bootstrapApp(mainDir: string): AppContext {
          * 这个差异是既有装配决定的（主渠道那两个是应用级 + rebind，
          * 非主渠道是每次挂载新建），这里只是按渠道选对象。
          */
-        const primaryId = dingtalk.meta.id
         /**
-         * 这一步要么拿到主渠道的单例，要么拿到那个渠道管线里的实例 ——
-         * **没有第三种**。拿不到就退出（见下面那句 error）。
+         * ★★★ 从注册表取**那个渠道自己的**一套服务。
+         *
+         * 这里原来是一段手写的三分支（`channelId === primaryId ? 单例 :
+         * pipelines.find(...)`），而那个形状在这个仓库里出现过 **6 次** ——
+         * 每一处都要自己记得"主渠道走单例、其余走管线、找不到别落回主渠道"。
+         * 漏任何一条的表现都是静默做错对象（详见 `channel-runtime.ts` 文件头）。
+         *
+         * `find()` 而不是 `require()`：这条链是 fire-and-forget 的
+         * （保存范围不等它跑完），抛出去没人接 —— 所以显式判 null 并记 error。
          */
-        const resolved = ((): { feed: FeedService; kl: typeof klServer } | null => {
-          if (channelId === primaryId) return { feed, kl: klServer }
-          const pipeline = pipelines.all().find((item) => item.channelId === channelId)
-          if (pipeline === undefined) return null
-          return { feed: pipeline.parts.feed, kl: pipeline.parts.klServer }
-        })()
-        if (resolved === null) {
+        const runtime = runtimes.find(channelId)
+        if (runtime === null) {
           // ★ 宁可什么都不做，也不要拿主渠道的顶上（那会删错渠道的图）
           logger.error("scope change skipped: channel pipeline not mounted", { channelId })
           return
         }
-        const channelFeed = resolved.feed
-        const channelKl = resolved.kl
+        const channelFeed = runtime.feed
+        const channelKl = runtime.klServer
         logger.info("scope change pipeline start", { channelId })
         try {
           const report = dataPlane.applyScopeChange(channelId)
@@ -1694,6 +1700,68 @@ export function bootstrapApp(mainDir: string): AppContext {
       dbPath: item.parts.dbPath,
       feedDirs: item.parts.feedDirs,
     }))
+
+  /**
+   * ★★★ 渠道运行时注册表 —— 主渠道也是其中一条。
+   *
+   * ## 为什么在这里装
+   *
+   * 主渠道的 `feed` / `klServer` / `graphQuery` 是**应用级单例**（上面那三个
+   * `new`），而它们要到 `mountVault` 才 rebind 到具体 vault 的目录；
+   * 非主渠道那些由 `pipelines` 在登录后现造。两者都要"取值时才读" ——
+   * 所以 `runtimes` 是个函数（与 `MultiKlServerService.sources` 同一条理由）。
+   *
+   * ## ★ 主渠道那条的字段从哪来
+   *
+   * `db` / `dbPath` / `feedDirs` 全部派生自 `vaultPaths`（登录时填的那份），
+   * 与 `remountDataPlane` 传给 `dataPlane.attach` 的**完全同源** ——
+   * 不是另抄一遍，免得两处慢慢分叉。未登录时 `vaultPaths` 是 null，
+   * 那时 `all()` 返回空数组（`require()` 会抛，而那正确：没登录就没有渠道）。
+   *
+   * 完整设计与它要拆掉的两个前提见 `channel-runtime.ts` 的文件头。
+   */
+  const runtimes = new ChannelRuntimeRegistry({
+    primaryChannelId: dingtalk.meta.id,
+    runtimes: () => {
+      const db = mountedVault
+      const vp = vaultPaths
+      if (db === null || vp === null) return []
+      return [
+        {
+          channelId: dingtalk.meta.id,
+          plugin: dingtalk,
+          db,
+          dbPath: vp.database,
+          feedDirs: {
+            dataRoot: vp.root,
+            exportRoot: vp.exportRoot,
+            klRoot: vp.klRoot,
+            handoffFile: vp.handoffFile,
+          },
+          feed,
+          klServer,
+          graphQuery,
+          /**
+           * ★ 数字人 / 蒸馏只在主渠道上工作 —— 其余渠道是只读接入。
+           * 这个判据原来散在三处（渲染层一个常量、主进程多处 `!== dingtalk`、
+           * `onScopeChanged` 里一句 if），现在只有这一处。
+           */
+          personaSupported: true,
+        },
+        ...pipelines.all().map((item) => ({
+          channelId: item.channelId,
+          plugin: registry.get(item.channelId),
+          db: item.parts.db,
+          dbPath: item.parts.dbPath,
+          feedDirs: item.parts.feedDirs,
+          feed: item.parts.feed,
+          klServer: item.parts.klServer,
+          graphQuery: item.parts.graphQuery,
+          personaSupported: false,
+        })),
+      ]
+    },
+  })
 
   /**
    * 管线变动后让数据面重认一次（新渠道要起自己的 `IngestService`）。

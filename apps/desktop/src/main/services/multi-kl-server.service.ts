@@ -45,6 +45,50 @@ export class MultiKlServerService {
   }
 
   /**
+   * 「一个渠道 / 主渠道 / 全部」三分路 —— **只写一遍**。
+   *
+   * ## ★★ 为什么提成一个方法
+   *
+   * 下面五个动作（起 / 停 / 建图 / 优化 / 概览）原来各自手写一遍同样的三分支：
+   *
+   * ```ts
+   * if (channelId !== undefined && channelId !== this.primaryChannelId) {
+   *   const source = this.sources.find(…)
+   *   …            // ← 每处都要记得"找不到时别落回主渠道"
+   * }
+   * if (channelId === this.primaryChannelId) …
+   * …              // ← 全部
+   * ```
+   *
+   * 五处各写一遍意味着**五次机会漏掉那条判据**，而漏掉的表现是静默打错对象：
+   * 实测发生过"针对飞书的重建删掉了主渠道的图"。而这类错在 review 里极难看出
+   * —— 三个分支长得都对，错的是缺了第四种情况。
+   *
+   * 现在分支只存在于这里；调用方只回答三个问题："打给一个渠道时做什么"、
+   * "打给全部时做什么"、"那个渠道没挂时返回什么"。
+   *
+   * ★ 与 `ChannelRuntimeRegistry` 的分工：那一层管"哪些渠道存在"（含主渠道，
+   * 是应用级的单一真源）；这一层多一个 `enabled()` 的概念（没采到语料的渠道
+   * **刻意不起** kl），而那是 kl 特有的降级，不属于 registry。
+   *
+   * @param onOne 打给某一个渠道（`service` 是它自己的那个 kl 实例）
+   * @param onAll 不指定渠道 = 全部
+   * @param onMissing 指名了一个**没挂管线**的渠道 —— 必须显式给，
+   *   因为"静默落回主渠道"正是要防的那个 bug
+   */
+  private route<T>(
+    channelId: string | undefined,
+    onOne: (service: KlServerService) => T,
+    onAll: () => T,
+    onMissing: (channelId: string) => T,
+  ): T {
+    if (channelId === undefined) return onAll()
+    if (channelId === this.primaryChannelId) return onOne(this.primary)
+    const source = this.sources.find((item) => item.channelId === channelId)
+    return source === undefined ? onMissing(channelId) : onOne(source.service)
+  }
+
+  /**
    * 合并状态 + **逐渠道**摊开。
    *
    * ## ★★ 为什么必须有 `perChannel`
@@ -137,12 +181,13 @@ export class MultiKlServerService {
    * 不给 = 全部（登录时那条路走它）。
    */
   async ensureReady(channelId?: string): Promise<boolean> {
-    if (channelId !== undefined && channelId !== this.primaryChannelId) {
-      const source = this.sources.find((item) => item.channelId === channelId)
-      return source === undefined ? false : await source.service.ensureReady()
-    }
-    if (channelId === this.primaryChannelId) return await this.primary.ensureReady()
-    return await this.ensureAllReady()
+    return await this.route(
+      channelId,
+      (service) => service.ensureReady(),
+      () => this.ensureAllReady(),
+      // 没挂管线 → 起不来（false），而不是"顺手起了主渠道的"
+      () => Promise.resolve(false),
+    )
   }
 
   private async ensureAllReady(): Promise<boolean> {
@@ -157,16 +202,18 @@ export class MultiKlServerService {
 
   /** 停服务。★ 与 `ensureReady` 同款按渠道分流（见那里的注释）。 */
   async stop(channelId?: string): Promise<void> {
-    if (channelId !== undefined && channelId !== this.primaryChannelId) {
-      const source = this.sources.find((item) => item.channelId === channelId)
-      if (source !== undefined) await source.service.stop()
-      return
-    }
-    if (channelId === this.primaryChannelId) {
-      await this.primary.stop()
-      return
-    }
-    await Promise.all([this.primary.stop(), ...this.sources.map((source) => source.service.stop())])
+    await this.route(
+      channelId,
+      (service) => service.stop(),
+      async () => {
+        await Promise.all([
+          this.primary.stop(),
+          ...this.sources.map((source) => source.service.stop()),
+        ])
+      },
+      // 没挂管线 → 本来就没在跑，什么都不用停
+      () => Promise.resolve(),
+    )
   }
 
   /**
@@ -184,38 +231,39 @@ export class MultiKlServerService {
    * 不给 = 全部（存量行为，自动建图那条路走它）。
    */
   async rebuildGraph(fresh = false, channelId?: string): Promise<KlGraphBuildResult> {
-    if (channelId !== undefined && channelId !== this.primaryChannelId) {
-      const source = this.sources.find((item) => item.channelId === channelId)
-      if (source !== undefined) return await source.service.rebuildGraph(fresh)
-      // 那个渠道没挂管线 → 什么都不做，而不是"顺手建了主渠道的"
-      return { ok: false, reason: `渠道未就绪：${channelId}`, entities: 0, facts: 0, edges: 0 }
-    }
-    if (channelId === this.primaryChannelId) return await this.primary.rebuildGraph(fresh)
-
-    const results: KlGraphBuildResult[] = [await this.primary.rebuildGraph(fresh)]
-    // 顺序执行：两边同时 embedding/抽取会让桌面机持续高负载。
-    for (const source of this.sources) {
-      if (source.enabled()) results.push(await source.service.rebuildGraph(fresh))
-    }
-    return combineBuild(results)
+    return await this.route(
+      channelId,
+      (service) => service.rebuildGraph(fresh),
+      async () => {
+        const results: KlGraphBuildResult[] = [await this.primary.rebuildGraph(fresh)]
+        // 顺序执行：两边同时 embedding/抽取会让桌面机持续高负载。
+        for (const source of this.sources) {
+          if (source.enabled()) results.push(await source.service.rebuildGraph(fresh))
+        }
+        return combineBuild(results)
+      },
+      // ★★ 没挂管线 → 什么都不做。`fresh=true` 落回主渠道会**删掉它的图**
+      (id) =>
+        Promise.resolve({ ok: false, reason: `渠道未就绪：${id}`, entities: 0, facts: 0, edges: 0 }),
+    )
   }
 
   /** 优化图谱。★ 与 `rebuildGraph` 同款按渠道分流（见那里的注释）。 */
   async optimizeGraph(channelId?: string): Promise<KlGraphOptimizeResult> {
-    if (channelId !== undefined && channelId !== this.primaryChannelId) {
-      const source = this.sources.find((item) => item.channelId === channelId)
-      if (source !== undefined) return await source.service.optimizeGraph()
-      return {
-        ok: false,
-        reason: `渠道未就绪：${channelId}`,
-        factEdges: 0,
-        entityEdges: 0,
-        entityCommunities: 0,
-        factCommunities: 0,
-      }
-    }
-    if (channelId === this.primaryChannelId) return await this.primary.optimizeGraph()
-    return await this.optimizeAll()
+    return await this.route(
+      channelId,
+      (service) => service.optimizeGraph(),
+      () => this.optimizeAll(),
+      (id) =>
+        Promise.resolve({
+          ok: false,
+          reason: `渠道未就绪：${id}`,
+          factEdges: 0,
+          entityEdges: 0,
+          entityCommunities: 0,
+          factCommunities: 0,
+        }),
+    )
   }
 
   private async optimizeAll(): Promise<KlGraphOptimizeResult> {
@@ -243,13 +291,38 @@ export class MultiKlServerService {
    * 不给 = 合并全部（状态页那一块要的是"一共多大"）。
    */
   graphOverview(channelId?: string): KlGraphOverview {
-    if (channelId !== undefined && channelId !== this.primaryChannelId) {
-      const source = this.sources.find((item) => item.channelId === channelId)
-      // 那个渠道没挂管线 → 落回主渠道（它是唯一能读的）
-      if (source !== undefined) return source.service.graphOverview()
-    }
+    /**
+     * ★★ 指名了一个没挂管线的渠道 → **明确不可用**，不落回主渠道。
+     *
+     * 这里原来的注释写的是"落回主渠道（它是唯一能读的）"，而那会让用户在
+     * 飞书那栏看到**钉钉的**图谱规模（实体数、事实数、枢纽实体…）
+     * 并以为那是飞书的。与 `facts()` / `ego()` 里修掉的同一个形状。
+     *
+     * ★ `route` 的 `onAll` 返回 null，由下面那段合并逻辑接手 ——
+     * 三分路的判据仍然只有一份（在 `route` 里），这里只是"全部"那一支
+     * 的代码太长、不适合塞进回调。
+     */
+    const single = this.route<KlGraphOverview | null>(
+      channelId,
+      (service) => service.graphOverview(),
+      () => null,
+      (id) => ({
+        available: false,
+        reason: `渠道未就绪：${id}`,
+        entities: 0,
+        facts: 0,
+        edges: 0,
+        chunks: 0,
+        messages: 0,
+        entityTypes: [],
+        factTypes: [],
+        topEntities: [],
+        recentFacts: [],
+        buildSchedule: null,
+      }),
+    )
+    if (single !== null) return single
     const primary = this.primary.graphOverview()
-    if (channelId === this.primaryChannelId) return primary
     const results = [
       primary,
       ...this.sources
