@@ -1936,6 +1936,52 @@ export function bootstrapApp(mainDir: string): AppContext {
       // 管线建好之后再让数据面认识它们（IngestService 按 source 起）
       await remountDataPlane()
       /**
+       * ★★ 补一次**非主渠道的本人身份** —— 少了这一步它们的 ego 图恒不可用。
+       *
+       * ## 为什么必须在这里，而不是只在授权时
+       *
+       * 身份行原来**只有** `applyPostAuthIdentity` 会写（`onAuthorized` 那条路），
+       * 也就是只在「本次会话里刚点过重新授权」时。而常态是**上次授权、这次重启**
+       * —— 那条路一次都不跑。
+       *
+       * 实测（本机）：飞书图库里有 14 个实体、kl 就绪在 8201，而
+       * `channel_self_identity` **0 行** → `getSelfNames()` 返回空 →
+       * 仪表盘上一句「还不知道你在飞书里叫什么」，图整块空白。
+       * 图是建好的，只差"我是谁"这一行。
+       *
+       * 我上一轮把渠道 id 传进了 `applyPostAuthIdentity`（那是对的、也是必须的），
+       * 但只修了授权那条路 —— 于是用户不重新授权就永远看不到图。这一步补上。
+       *
+       * ## ★ 为什么 resolve 之后还要 confirm
+       *
+       * `is_self` 是在 confirm 时回填的。只 resolve 的话身份表有行、
+       * 而消息的归属判定全是 NULL —— 主渠道那边同一个坑踩过（9768 条全被拒）。
+       *
+       * ★ 已经确认过就不重复 confirm（那会再扫一遍全表回填）。
+       *
+       * ★ **不 await、失败只记日志**：这是一次子进程调用（`auth status --verify`），
+       * 而它失败的原因通常是环境性的（办公网拦了域名、凭据过期）。
+       * 那时该降级成"这个渠道的 ego 图不可用"，而不是让整条管线挂载失败 ——
+       * 后者会连带把已经建好的 kl 与采集一起拖掉。
+       */
+      for (const item of pipelines.all()) {
+        void (async () => {
+          const resolved = await dataPlane.resolveSelf(item.channelId)
+          if (!resolved.confirmed) dataPlane.confirmSelf(item.channelId)
+          logger.info("channel self identity ready", {
+            channelId: item.channelId,
+            // ★ 只记数量与布尔，不记名字（那是真实人名）
+            openIds: resolved.openIds.length,
+            matched: resolved.matchedMessageCount,
+          })
+        })().catch((error: unknown) => {
+          logger.warn("channel self identity unavailable", {
+            channelId: item.channelId,
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        })
+      }
+      /**
        * ★★ 起每条管线自己的 kl —— 少了这一步它们**永远是「未启动」**。
        *
        * 实测症状：状态页上飞书那一栏恒显示「未启动」，而日志里连一条

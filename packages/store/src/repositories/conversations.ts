@@ -304,6 +304,66 @@ export class ConversationRepository {
       this.db.prepare<[], { c: number }>("SELECT count(*) AS c FROM conversations").get()?.c ?? 0
     )
   }
+
+  /**
+   * 从**已入库的消息**里补齐单聊的会话名。
+   *
+   * ## ★★ 为什么需要它（渠道接口给不出的东西，库里其实有）
+   *
+   * 飞书的单聊在消息搜索响应里**没有会话名**（`chat_partner` 只有 open_id，
+   * `chat_name` 在 p2p 上不存在）。而每条消息的 `sender_display_name`
+   * **是有真名的** —— 也就是"这个单聊叫什么"这个信息一直在库里，
+   * 只是没人把它汇总到会话行上。
+   *
+   * 实测：飞书库 4 个单聊全无名字，而它们的 8 条消息每条都有发送者名。
+   * 界面上只能显示 id 尾段（`#2c78b681` 这种），用户在采集范围里没法选。
+   *
+   * ## ★ 判据：单聊里"不是我"的那个发送者
+   *
+   * 单聊只有两个人，所以"不是我"就唯一确定了对端。用 `is_self = 0`
+   * 而不是"sender != 本人 id"：前者是 confirm 时回填好的**结论**，
+   * 而后者要求调用方再传一次身份，两处判据会分叉。
+   *
+   * ★ 因此**必须在 `confirmSelf` 之后调**（那时 `is_self` 才有值）。
+   * `is_self` 还是 NULL 时这个查询什么都不做 —— 那是正确的降级：
+   * 宁可继续显示 id，也不要在"还不知道我是谁"时把某个名字当成对端。
+   *
+   * ## ★ 只补 NULL，不覆盖已有名字
+   *
+   * `WHERE title IS NULL` —— 渠道给出的名字（群名、或后来补到的单聊名）
+   * 永远优先于我们从消息里推的。这也让它天然幂等。
+   *
+   * @returns 补上了几行
+   */
+  backfillDirectTitlesFromSenders(channelId: string): number {
+    return this.db
+      .prepare(
+        `UPDATE conversations
+            SET title = (
+              SELECT m.sender_display_name
+                FROM messages m
+               WHERE m.conversation_id = conversations.id
+                 AND m.is_self = 0
+                 AND m.sender_display_name IS NOT NULL
+                 AND m.sender_display_name <> ''
+               /* 同一个对端可能有多条 —— 取最近那条（显示名会改） */
+               ORDER BY m.sent_at DESC
+               LIMIT 1
+            )
+          WHERE channel_id = ?
+            AND type = 'direct'
+            AND title IS NULL
+            /* 子查询取不到时不要把 title 写成 NULL→NULL（无谓的写） */
+            AND EXISTS (
+              SELECT 1 FROM messages m2
+               WHERE m2.conversation_id = conversations.id
+                 AND m2.is_self = 0
+                 AND m2.sender_display_name IS NOT NULL
+                 AND m2.sender_display_name <> ''
+            )`,
+      )
+      .run(channelId).changes
+  }
 }
 
 export class ActorRepository {

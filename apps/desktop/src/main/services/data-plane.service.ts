@@ -922,10 +922,29 @@ export class DataPlaneService {
       mentionsBackfilled = messages.backfillSelfMentions(hits)
     }
 
+    /**
+     * ★★ 顺手补齐单聊的会话名 —— 那个信息一直在库里，只是没人汇总。
+     *
+     * 飞书的单聊在渠道接口里**没有会话名**，而每条消息的
+     * `sender_display_name` 有真名。判据是"这个单聊里 `is_self = 0` 的那个人"
+     * —— 而 `is_self` 正是**上面这一步**刚回填好的，所以只能放在这里。
+     *
+     * 实测（本机）：飞书 4 个单聊全无名字，界面上只能显示 id 尾段
+     * （`#2c78b681`），用户在采集范围里没法选。
+     *
+     * ★ 只补 `title IS NULL` 的行，渠道给的名字永远优先 —— 幂等，
+     * 重复 confirm 不会改动已有名字。完整判据见
+     * `ConversationRepository.backfillDirectTitlesFromSenders`。
+     */
+    const titlesBackfilled = new ConversationRepository(db).backfillDirectTitlesFromSenders(
+      channelId,
+    )
+
     this.options.logger.info("self identity confirmed", {
       channelId,
       backfilled,
       mentionsBackfilled,
+      titlesBackfilled,
     })
     this.pushSnapshot()
     return { backfilled, mentionsBackfilled }
