@@ -857,49 +857,6 @@ export class PersonaRunRepository {
       }))
   }
 
-  /** 生成完成后、落草稿/自动发送前检查该轮是否仍未被本人回复。 */
-  isReplyTurnOpen(
-    conversationId: string,
-    replyToExternalId: string | null,
-    cutoff?: number,
-  ): boolean {
-    if (replyToExternalId === null) return true
-    const row = this.db
-      .prepare<[string, string, number | null, number | null], { closed: number }>(
-        `SELECT EXISTS (
-           SELECT 1
-             FROM messages trigger_message
-            WHERE trigger_message.conversation_id = ?
-              AND trigger_message.external_id = ?
-              AND (
-                (
-                  ? IS NOT NULL
-                  AND trigger_message.sent_at < ?
-                  AND EXISTS (
-                    SELECT 1
-                      FROM conversations c
-                      JOIN probe_snapshots p
-                        ON p.channel_id = c.channel_id
-                       AND p.conversation_external_id = c.external_id
-                     WHERE c.id = trigger_message.conversation_id
-                       AND p.unread_count = 0
-                       AND p.observed_at >= trigger_message.sent_at
-                  )
-                )
-                OR EXISTS (
-                  SELECT 1
-                    FROM messages reply
-                   WHERE reply.conversation_id = trigger_message.conversation_id
-                     AND reply.is_self = 1
-                     AND reply.sent_at > trigger_message.sent_at
-                )
-              )
-        ) AS closed`,
-      )
-      .get(conversationId, replyToExternalId, cutoff ?? null, cutoff ?? null)
-    return row?.closed !== 1
-  }
-
   /**
    * 按 id 取一条草稿（**不限 state**）。
    *

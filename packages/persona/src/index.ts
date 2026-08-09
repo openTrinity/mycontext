@@ -24,6 +24,47 @@ export type {
 export { evaluateScene, riskFromScene, SCENE_RULES, MAX_AUTO_LENGTH } from "./scene.js"
 export type { SceneRule, SceneInput, SceneVerdict } from "./scene.js"
 
+/**
+ * 四个模块之间的契约（只有形状，没有逻辑）。见 `contracts.ts` 的文件头。
+ *
+ * ★ 只导出 type：这个文件里**不该**有任何运行时值 —— 一旦有，
+ * "契约"就会开始携带行为，而行为迟早要求一个真源，那就又回到了
+ * 现在这种"同一件事在四个地方各判一遍"的形态。
+ */
+export type {
+  ContextMessage,
+  TurnRequest,
+  TurnFreshness,
+  ReplyProposal,
+  MessageClassification,
+  RecipientTraits,
+  TraitCoverage,
+  TurnUnderstanding,
+  GuardPolicy,
+  SendDecision,
+} from "./contracts.js"
+
+/** ① intake —— 收消息与上下文装配。见 `intake.ts` 的文件头。 */
+export { TurnAssembler, DEFAULT_INTAKE_POLICY } from "./intake.js"
+export type { IntakePolicy, MediaDownloader, TurnAssemblerOptions } from "./intake.js"
+
+/** ③ guard —— 唯一决策点。见 `guard.ts` 的文件头。 */
+export {
+  PersonaGuard,
+  evaluateGate,
+  defaultGuardPolicy,
+  DEFAULT_ALWAYS_REVIEW_ASK_KINDS,
+} from "./guard.js"
+export type {
+  GateAction,
+  GateVerdict,
+  ForgeAdvice,
+  DraftReview,
+  LagVerdict,
+  RuntimeGates,
+  GuardOptions,
+} from "./guard.js"
+
 export { SendGuard, contentHash, assertMentionPlaceholders, SEND_SCOPE } from "./send-guard.js"
 export type {
   SendInput,

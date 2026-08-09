@@ -490,7 +490,14 @@ export function OnboardingView() {
                      * 正文回答"为什么要管它"。挤成一段时用户只读前半句。
                      */
                     <div className="flex flex-col gap-[var(--gap-component-sm)] rounded-[var(--radius-md)] bg-[var(--status-fill-warning-container)] p-[var(--gap-component-md)]">
-                      <span className="typography-body-small-500 text-[var(--status-warning)]">
+                      {/*
+                       * ★ `typography-title-small-500`，不是 `body-small-500`
+                       * —— 后者**不存在**（排版表里没有这一档），写上去不会生成
+                       * 任何样式：文字静默退回浏览器默认字号，且不报错。
+                       * 这里要的是"小号粗标题"，而表里对应的就是 title-small-500
+                       * （15px/500），与下面那行 body-small-400（13px）正好成对。
+                       */}
+                      <span className="typography-title-small-500 text-[var(--status-warning)]">
                         {t("channel.identityPendingTitle")}
                       </span>
                       <p className="typography-body-small-400 text-[var(--text-base-secondary)]">

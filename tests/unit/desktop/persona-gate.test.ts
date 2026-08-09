@@ -196,7 +196,7 @@ describe("参数拼装", () => {
       messageId: "m9",
     })
 
-    expect(verdict).toEqual({
+    expect(verdict).toMatchObject({
       verdict: "reply",
       because: ["measured default"],
       // 理解类字段：这个 stdout 里没有，于是各自的"没有"形态。
@@ -206,6 +206,34 @@ describe("参数拼装", () => {
       respondingTo: null,
       precedents: [],
     })
+    /**
+     * ★★ 测量面缺失时的**每一个**缺省方向。
+     *
+     * 这个 stdout 只有 `verdict` + `because`（老形态），所以它同时是
+     * "上游把这些字段删了"的负例。三条缺省方向各有理由，混了任一条
+     * 都会让"该拦的没拦"：
+     */
+    // ① 能力元数据 → false（判不了 → guard 必须更保守）。
+    //    给 true 的话"上游改了字段名"会变成"风险检测恒通过"。
+    expect(verdict?.classification.riskDetectable).toBe(false)
+    expect(verdict?.classification.askKindDetectable).toBe(false)
+    // ② 三态字段 → null（**判不了**），而不是 false（"确实不是"）。
+    //    forge 自己的口径也是这个：every "cannot tell" is reported as null.
+    expect(verdict?.classification.genuineAsk).toBeNull()
+    expect(verdict?.classification.chitchat).toBeNull()
+    // ③ 收件人认不出 → resolved false + band 视作最保守那一档
+    expect(verdict?.recipient.resolved).toBe(false)
+    // ④ 建议表为空 → defaultAction 退回 draft（一律出草稿，安全的那一侧）
+    expect(verdict?.advice.defaultAction).toBe("draft")
+    /**
+     * ⑤ ★ 没有 context 段 → 当成**不是当前的**。
+     *
+     * 这一条方向最容易搞反：`source` 认不出时给 `"live"` 就是拿几小时前的
+     * 语料当实时读。而 `degraded` 在真实产物里是**字符串**
+     * （`"no live read available"`），写 `=== true` 会把它读成 false ——
+     * `scripts/check-gate-parity.mjs` 拿真产物锁住了这一点。
+     */
+    expect(verdict?.context).toEqual({ source: "none", degraded: true })
     const args = runner.specs[0]?.args ?? []
     expect(args).toContain("brief")
     // 会话与消息都传**本地** id —— 判定层读的是我们自己的库
@@ -249,7 +277,8 @@ describe("参数拼装", () => {
 
     const review = await gate.check(dir, "我来处理，明天给你")
 
-    expect(review).toEqual({ verdict: "block", issues: ["states a commitment"] })
+    expect(review?.verdict).toBe("block")
+    expect(review?.issues).toEqual(["states a commitment"])
     const args = runner.specs[0]?.args ?? []
     expect(args).toContain("--text")
     expect(args).toContain("我来处理，明天给你")
@@ -282,7 +311,7 @@ describe("参数拼装", () => {
      * 坏形状不该让整轮失败：那会让 supervisor 重试三次，而重试改不了
      * 一个格式问题。降级成"没有细节"，判定本身仍然可用。
      */
-    expect(await gate.check(dir, "收到")).toEqual({ verdict: "pass", issues: [] })
+    expect(await gate.check(dir, "收到")).toMatchObject({ verdict: "pass", issues: [] })
   })
 
   /**
@@ -360,7 +389,13 @@ describe("★★ check 读产物真实字段（result / problems）", () => {
         guidance: "Matches the measured shape.",
       }),
     })
-    expect(await gate.check(dir, "不知道")).toEqual({ verdict: "pass", issues: [] })
+    expect(await gate.check(dir, "不知道")).toMatchObject({
+      verdict: "pass",
+      issues: [],
+      // ★ 正文长度从产物读（guard 拿它与硬上限比，见 CheckVerdict 的注释）
+      codepoints: 3,
+      riskTags: [],
+    })
   })
 
   it("★ `result: block` + problems 是对象数组 → 取每条的 detail 给用户看", async () => {
@@ -379,10 +414,49 @@ describe("★★ check 读产物真实字段（result / problems）", () => {
      * 直接 `stringList()` 会全部过滤掉，于是草稿卡上"为什么被扣下"是空的。
      * 用户看到一个没有原因的待审草稿，只会以为功能坏了。
      */
-    expect(await gate.check(dir, "我来处理")).toEqual({
+    expect(await gate.check(dir, "我来处理")).toMatchObject({
       verdict: "block",
       issues: ["states a commitment", "longer than measured median"],
     })
+  })
+
+  /**
+   * ★ 结构化字段必须带出来，而不是让 guard 去匹配英文句子。
+   *
+   * `check` 在新架构里是**对草稿正文的测量**（见 docs/persona-architecture.md
+   * 4.5）：它回答"这段正文里有什么"，由 guard 决定"那意味着什么"。
+   * 只给 `issues`（人话）的话 guard 只能靠字符串匹配判断命中了哪一类 ——
+   * 而那正是 `isScopeOnlyDowngrade` 当年干的事，也正是这次要消灭的形态。
+   */
+  it("★ risk_in_draft 以结构化形态带出（guard 不靠匹配英文句子判断）", async () => {
+    const dir = publishedSkill()
+    const { gate } = makeGate({
+      stdout: JSON.stringify({
+        result: "block",
+        codepoints: 42,
+        problems: [
+          { severity: "block", kind: "risk_in_draft", detail: "the draft touches commitment" },
+          { severity: "warn", kind: "joined_clauses", detail: "they would split this" },
+        ],
+      }),
+    })
+
+    const review = await gate.check(dir, "我来处理，明天给你")
+
+    expect(review?.riskTags).toEqual(["the draft touches commitment"])
+    expect(review?.codepoints).toBe(42)
+    // `problems` 保留 kind/severity —— guard 按 severity 判"要不要人看"
+    expect(review?.problems).toEqual([
+      { severity: "block", kind: "risk_in_draft", detail: "the draft touches commitment" },
+      { severity: "warn", kind: "joined_clauses", detail: "they would split this" },
+    ])
+  })
+
+  it("codepoints 缺失时按正文长度兜底（而不是 0 —— 那会让长度闸恒通过）", async () => {
+    const dir = publishedSkill()
+    const { gate } = makeGate({ stdout: JSON.stringify({ result: "pass", problems: [] }) })
+    // 产物没报 codepoints 时不能给 0：guard 拿它与上限比，0 意味着"永远不超长"
+    expect((await gate.check(dir, "四个字啊"))?.codepoints).toBe(4)
   })
 
   it("`verdict` / `issues` 的老命名仍然认（留给产物改名）", async () => {
@@ -390,7 +464,7 @@ describe("★★ check 读产物真实字段（result / problems）", () => {
     const { gate } = makeGate({
       stdout: JSON.stringify({ verdict: "warn", issues: ["something"] }),
     })
-    expect(await gate.check(dir, "收到")).toEqual({ verdict: "warn", issues: ["something"] })
+    expect(await gate.check(dir, "收到")).toMatchObject({ verdict: "warn", issues: ["something"] })
   })
 
   it("★ 反面：两个名字都没有 → 仍然 null（fail closed，不当成 pass）", async () => {
@@ -398,6 +472,75 @@ describe("★★ check 读产物真实字段（result / problems）", () => {
     // 只有 problems、没有任何判定字段 —— 那是我们读不懂的输出
     const { gate } = makeGate({ stdout: JSON.stringify({ problems: [], codepoints: 3 }) })
     expect(await gate.check(dir, "收到")).toBeNull()
+  })
+
+  /**
+   * ★★ 形状读不懂时**不能**静默变成"没有风险"。
+   *
+   * 压成 `[]` 在**字段缺失**时安全（那时 `riskDetectable` 必然 false）。
+   * 但**类型不对**时不安全：上游哪天把 `"commitment"` 从数组改成标量，
+   * 而 `riskDetectable` 仍正确地是 `true` —— 那时会得到"零个风险类"**且**
+   * 没有第 ⑦ 条降级，于是判 reply。Python 侧会逐元素降级。
+   *
+   * 修法：形状读不懂时连带把 `riskDetectable` 打成 false，让 guard 走第 ⑦ 条。
+   */
+  it("★★ riskTags 是标量（上游改了形状）→ riskDetectable 打成 false", async () => {
+    const dir = publishedSkill()
+    const { gate } = makeGate({
+      stdout: JSON.stringify({
+        verdict: "reply",
+        because: [],
+        classification: {
+          askKind: "status_chase",
+          // 上游把它从数组改成了标量
+          riskTags: "commitment",
+          riskDetectable: true,
+          askKindDetectable: true,
+        },
+      }),
+    })
+    const verdict = await gate.brief(dir, target({ messageId: "m1" }))
+    expect(verdict?.classification.riskTags).toEqual([])
+    expect(
+      verdict?.classification.riskDetectable,
+      "读不懂 riskTags 却仍报「风险可判」→ 该拦的一条都不拦",
+    ).toBe(false)
+  })
+
+  it("★ 数组里混进非字符串 → 同样打成 false（那也是「读不懂」）", async () => {
+    const dir = publishedSkill()
+    const { gate } = makeGate({
+      stdout: JSON.stringify({
+        verdict: "reply",
+        because: [],
+        classification: {
+          riskTags: ["commitment", 42],
+          riskDetectable: true,
+          askKindDetectable: true,
+        },
+      }),
+    })
+    expect(
+      (await gate.brief(dir, target({ messageId: "m1" })))?.classification.riskDetectable,
+    ).toBe(false)
+  })
+
+  it("★ 反面：形状正常时 riskDetectable 照实透出", async () => {
+    const dir = publishedSkill()
+    const { gate } = makeGate({
+      stdout: JSON.stringify({
+        verdict: "reply",
+        because: [],
+        classification: {
+          riskTags: ["commitment"],
+          riskDetectable: true,
+          askKindDetectable: true,
+        },
+      }),
+    })
+    const verdict = await gate.brief(dir, target({ messageId: "m1" }))
+    expect(verdict?.classification.riskDetectable).toBe(true)
+    expect(verdict?.classification.riskTags).toEqual(["commitment"])
   })
 
   it("★ 反面：`result` 是认不出的取值 → null（不猜）", async () => {

@@ -31,6 +31,8 @@ import {
   MAX_CONCURRENT_TURNS,
   MAX_RESIDENT_AGENTS,
   SEND_SCOPE,
+  UNEVALUATED_CONFIDENCE,
+  DEFAULT_INTAKE_POLICY,
 } from "@mycontext/persona"
 import {
   ConversationRepository,
@@ -40,12 +42,25 @@ import {
   ProfileFacetRepository,
 } from "@mycontext/store"
 import { PersonaService } from "../../../apps/desktop/src/main/services/persona.service.js"
-import { isScopeOnlyDowngrade } from "../../../apps/desktop/src/main/services/persona.service.js"
 import type { PersonaGateLike } from "../../../apps/desktop/src/main/services/persona-gate.js"
 import { openTestVault } from "../../helpers/vault.js"
 
 const NOW = 1_785_000_000_000
 const logger = createLogger("Test", { level: "error" })
+
+/**
+ * 推进多久才保证 `takeBatch` 取得出批次。
+ *
+ * ★ **从 `DEFAULT_INTAKE_POLICY` 派生**，不写字面量。
+ *
+ * 曾经这里是硬编码的 `10_000`，而合批的静默期后来从 6 秒提到了 25 秒
+ * （见 `DEFAULT_INTAKE_POLICY.quietMs` 的注释）—— 于是 40 条用例一起变红，
+ * 症状是"一轮都没跑起来"（`llmCalls === 0`），看起来像调度坏了。
+ *
+ * 从真源派生之后，那个值再怎么调这些用例都不需要改。
+ */
+const PAST_BATCH_WINDOW_MS =
+  Math.max(DEFAULT_INTAKE_POLICY.batchWindowMs, DEFAULT_INTAKE_POLICY.quietMs) + 1_000
 const dirs: string[] = []
 
 afterEach(() => {
@@ -277,7 +292,7 @@ async function runOneTurn(
     config: new PersonaConfigRepository(vault.db).get("conv-1"),
     mentionsSelf: false,
   })
-  clock.advance(10_000)
+  clock.advance(PAST_BATCH_WINDOW_MS)
   await service.tick()
 }
 
@@ -655,16 +670,29 @@ describe("★ 决策与草稿都落库，且未自动发时必有原因", () => 
     vault.close()
   })
 
-  it("没配 LLM → 出占位草稿且置信度 0（policy 必然拦住）", async () => {
+  it("没配 LLM → 出占位草稿，置信度记「未评估」而不是一个编出来的 0", async () => {
     const vault = seed()
     const { service, clock } = makeService(vault, { forgeSkillRoot: makeForgeSkillRoot() })
     await runOneTurn(service, vault, clock)
 
     const runs = new PersonaRunRepository(vault.db)
     const recent = runs.recentRuns("conv-1", 10)
-    expect(recent[0]?.confidence).toBe(0)
     /**
-     * 置信度 0 而不是"什么都不做"：用户在草稿箱看到
+     * ★ 从 `0` 改成哨兵 `UNEVALUATED_CONFIDENCE`。**这是一次刻意的口径修正。**
+     *
+     * 没配模型时压根没有生成过，所以"置信度 0"与当年那个 `0.6` 是同一类东西
+     * —— 一个**编出来的分数**。`policy.ts` 的 `UNEVALUATED_CONFIDENCE` 注释
+     * 写明了为什么那样不行：看日志的人会以为模型评估过并给了 0 分，
+     * 而那是假的；一个假分数事后也无法审计"为什么当时判了不能发"。
+     *
+     * 安全性没有变化 —— 挡住它的不再是"低置信度"这条假判定，而是
+     * `holdForReview: true`（生成层明确报了 `generation_unavailable`）。
+     * 下面那条断言锁的就是这一点：它仍然只出草稿。
+     */
+    expect(recent[0]?.confidence).toBe(UNEVALUATED_CONFIDENCE)
+    expect(recent[0]?.decision, "没配模型却判了能自动发").not.toBe("auto_sent")
+    /**
+     * 出占位草稿而不是"什么都不做"：用户在草稿箱看到
      * "需要人工撰写（未配置模型）"就知道该去配什么；
      * 什么都看不到的话他只会以为功能坏了。
      */
@@ -768,7 +796,7 @@ describe("★ 审核反馈只进入当前 resident session", () => {
         mentionsSelf: false,
       })
       // 推过合并窗口与静默期（见 runOneTurn 的注释）
-      clock.advance(10_000)
+      clock.advance(PAST_BATCH_WINDOW_MS)
       await service.tick()
     }
 
@@ -1364,7 +1392,7 @@ describe("★ 运行参数（LRU / 并发 / 批次上限）", () => {
     }
     service.limitsSave({ maxBatchSize: 2 })
     // 推过合并窗口与静默期（这个用例验的是批次上限，不是时序）
-    clock.advance(10_000)
+    clock.advance(PAST_BATCH_WINDOW_MS)
 
     /**
      * 判据是 `takeBatch` 真的按新上限切 —— 而不是"设置存进库了"。
@@ -1665,9 +1693,18 @@ describe("★ 投递即处理：wake() 排唤醒而不是等 8 秒兜底", () =>
       })
       service.onDelivered()
 
-      // 两条线都没到（窗口 3s / 静默期 6s）—— 这时不该有人取件
-      await vi.advanceTimersByTimeAsync(2_000)
-      clock.advance(2_000)
+      /**
+       * 两条线都没到 —— 这时不该有人取件。
+       *
+       * ★ 推进量从 `DEFAULT_INTAKE_POLICY` 派生（取窗口与静默期里更小的那个
+       * 的一半），不写字面量：这两个值改过一次（静默期 6s → 25s），
+       * 而硬编码的 2 秒会让这条断言在某个取值下变成恒真。
+       */
+      const beforeAnyWindow = Math.floor(
+        Math.min(DEFAULT_INTAKE_POLICY.batchWindowMs, DEFAULT_INTAKE_POLICY.quietMs) / 2,
+      )
+      await vi.advanceTimersByTimeAsync(beforeAnyWindow)
+      clock.advance(beforeAnyWindow)
       expect(supervisor.mailbox.takeBatch("conv-1").entries).toHaveLength(0)
 
       /**
@@ -1680,14 +1717,15 @@ describe("★ 投递即处理：wake() 排唤醒而不是等 8 秒兜底", () =>
        * `takeBatch` 的静默判据 → 每次都空批次 → 这一批要等 8 秒兜底才动，
        * 也就是唤醒白接了（"修了个假"的另一种形态）。
        */
-      clock.advance(5_000)
-      await vi.advanceTimersByTimeAsync(5_000)
+      // 补足到「窗口 + 余量」之后 —— 唤醒该触发了（同样从真源派生）
+      clock.advance(PAST_BATCH_WINDOW_MS)
+      await vi.advanceTimersByTimeAsync(PAST_BATCH_WINDOW_MS)
 
       /**
        * 判据：那一批**已经被取走了**（pending 空了）。
        *
        * 断言"取走了"而不是"生成了草稿"：这个用例没配 LLM，
-       * 而 pending 空掉恰好证明有人在 3.2 秒处调了 tick。
+       * 而 pending 空掉恰好证明唤醒真的调了一次 tick。
        */
       expect(supervisor.mailbox.pendingConversations()).toHaveLength(0)
       vault.close()
@@ -1747,8 +1785,8 @@ describe("★ 投递即处理：wake() 排唤醒而不是等 8 秒兜底", () =>
 
       // 那一次唤醒要把 5 条**一起**带走（合并语义不能因为唤醒而变）。
       // 推进量要同时过合并窗口与静默期 —— 与 runOneTurn 同一个理由。
-      clock.advance(10_000)
-      await vi.advanceTimersByTimeAsync(10_000)
+      clock.advance(PAST_BATCH_WINDOW_MS)
+      await vi.advanceTimersByTimeAsync(PAST_BATCH_WINDOW_MS)
       expect(ticks).toBe(1)
       expect(supervisor.mailbox.pendingConversations()).toHaveLength(0)
       vault.close()
@@ -2119,12 +2157,49 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
             },
             respondingTo: { sender: "我", text: "推了吗" },
             precedents: [{ given: "[them] 推了吗", theyReplied: "好 推了说一声" }],
+            /**
+             * ★★ 测量面。形状与真实 `brief` 一致（`check-gate-parity.mjs`
+             * 拿真产物验过每一个字段），因为 host 现在**自己出政策判定** ——
+             * 它读的是这几组，不再读 `verdict`。
+             *
+             * 少给任一项的后果不是报错，而是 guard 按 fail-closed 降级
+             * （比如 `askKindDetectable: false` → "this build cannot classify"），
+             * 于是这一组用例会因为**别的原因**不发 —— 那时断言就恒真了。
+             */
+            classification: {
+              genuineAsk: true,
+              chitchat: false,
+              askKind: "status_chase",
+              riskTags: [],
+              riskDetectable: true,
+              askKindDetectable: true,
+            },
+            // band A：`autoAnswer: "low-risk allowed"` —— 不是 manual-only
+            recipient: { resolved: true, toneBand: "A", sensitive: false },
+            coverage: { askKinds: true, riskTags: true, replyShapes: true, unavailable: null },
+            advice: {
+              byAskKind: { status_chase: "answer" },
+              defaultAction: "draft",
+              thinAskKinds: [],
+              alwaysDraftKinds: [],
+              bands: { A: { autoAnswer: "low-risk allowed" }, S: { autoAnswer: "manual only" } },
+            },
+            clarifyOptions: [],
+            // 实时读且未降级 —— 否则 guard 会因为"上下文不是当前的"而不发
+            context: { source: "live" as const, degraded: false },
           })
         },
         check: (dir: string, text: string) => {
           seen.push(`check:${text}`)
           dirs.push(dir)
-          return Promise.resolve({ verdict: "pass" as const, issues: [] })
+          return Promise.resolve({
+            verdict: "pass" as const,
+            issues: [],
+            // ★ 结构化字段：guard 按它们判，而不是匹配 issues 里的英文句子
+            riskTags: [],
+            codepoints: [...text].length,
+            problems: [],
+          })
         },
         fresh: (dir: string, target: { lastSeenId: string | null }) => {
           seen.push(`fresh:${target.lastSeenId ?? ""}`)
@@ -2267,7 +2342,7 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
       mentionsSelf: false,
     })
     // 推过合并窗口**与静默期**（见上面 runOneTurn 的注释）
-    clock.advance(10_000)
+    clock.advance(PAST_BATCH_WINDOW_MS)
     await service.tick()
   }
 
@@ -2724,7 +2799,20 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
       const blocking: PersonaGateLike = {
         ...gate.gate,
         check: () =>
-          Promise.resolve({ verdict: "block" as const, issues: ["states a commitment"] }),
+          Promise.resolve({
+            verdict: "block" as const,
+            issues: ["states a commitment"],
+            /**
+             * ★ `riskTags` 空而 `verdict: block` —— 刻意的组合。
+             *
+             * 它验的是"guard 尊重产物的总判定"这一条：如果只看我们重新
+             * 解释的那三项（风险类 / 长度 / severity），这条会被放过去。
+             * 真实产物里 block 的原因不止那三种。
+             */
+            riskTags: [],
+            codepoints: 8,
+            problems: [],
+          }),
       }
       const { service, clock } = serviceReadyToAutoSend(vault, runner, shortReplyLlm(), blocking)
 
@@ -2768,6 +2856,17 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
           } as unknown as Response)
         },
       })
+      /**
+       * ★★ 「这一轮没什么要答的」现在由**测量**推出来，而不是照抄 forge 的 verdict。
+       *
+       * 判据是 `chitchat === true && genuineAsk !== true`（纯应声、不是真在问事）
+       * —— 与 `persona.py` 的 `decide_action` 第 8 条逐字同源，
+       * 而 `check-gate-parity.mjs` 拿真产物验过两边一致。
+       *
+       * 这个改动是刻意的：`verdict` 是 forge 的**政策产物**，而 host 现在
+       * 只消费它的**测量**。所以替身要给的是"这条消息是什么"，
+       * 而不是"forge 觉得该怎么办"。
+       */
       const silentGate: PersonaGateLike = {
         brief: () =>
           Promise.resolve({
@@ -2776,8 +2875,34 @@ describe("★ 自动发送：auto_sent 必须真的发出去", () => {
             answering: { text: "收到", lastText: "收到", messageCount: 1, sender: "对方" },
             respondingTo: null,
             precedents: [],
+            classification: {
+              genuineAsk: false,
+              chitchat: true,
+              askKind: "other_ask",
+              riskTags: [],
+              riskDetectable: true,
+              askKindDetectable: true,
+            },
+            recipient: { resolved: true, toneBand: "A", sensitive: false },
+            coverage: { askKinds: true, riskTags: true, replyShapes: true, unavailable: null },
+            advice: {
+              byAskKind: { other_ask: "answer" },
+              defaultAction: "draft",
+              thinAskKinds: [],
+              alwaysDraftKinds: [],
+              bands: { A: { autoAnswer: "low-risk allowed" } },
+            },
+            clarifyOptions: [],
+            context: { source: "live" as const, degraded: false },
           }),
-        check: () => Promise.resolve({ verdict: "pass" as const, issues: [] }),
+        check: () =>
+          Promise.resolve({
+            verdict: "pass" as const,
+            issues: [],
+            riskTags: [],
+            codepoints: 2,
+            problems: [],
+          }),
         fresh: () => Promise.resolve({ stale: false, reason: null }),
       }
       const { service, clock } = serviceReadyToAutoSend(vault, runner, countingLlm, silentGate)
@@ -2945,87 +3070,26 @@ describe("★ agent 自产消息的来源标记", () => {
 })
 
 /**
- * ★ 「永远不可达的 gate」—— brief 的 scope=draft_only 单独降级
+ * ★★ scope-only 降级那一整套已经**删掉**了。
  *
- * ## 为什么这组测试重要
+ * ## 为什么这里留一段注释而不是直接消失
  *
- * `forge.service.ts:427` 硬写 `autonomy.scope = "draft_only"`，所以
- * `persona.py brief` 每次都追加同一句 downgrade。表现是**每一条 run**
- * 的 `risks_json` 都含 `agent_allows_auto` —— 用户明明设了 auto+白名单+
- * 工作时间都对，但 agent 层永不通。这就是"永远不可达的 gate"。
+ * 曾经有一个 `isScopeOnlyDowngrade()` 与它的 8 条测试：`forge.service.ts`
+ * 硬写 `autonomy.scope = "draft_only"` → `persona.py brief` 每轮追加同一句
+ * 英文 downgrade → host 用 `includes("autonomy scope is draft_only")`
+ * 按**原文**把它顶回来。上游改一个词，自动发送就静默全失效。
  *
- * `isScopeOnlyDowngrade` 识别"降级理由只有这一条"的情况，让 host 的白名单
- * 授权顶掉这次挡；有别的降级理由时（风险类、band、recipient 未 resolve），
- * forge 挡得对，host 就不越权。
+ * 现在 host **不再消费 forge 的 `verdict`**（只消费它的测量），而"用户有没有
+ * 授权自动发送"由 `replyMode` 唯一表达 —— 那条降级在 TS 侧根本不存在，
+ * 所以也不需要任何字符串匹配来抵消它。
+ *
+ * 替代它的覆盖在两处，都比原来强：
+ * · `scripts/check-gate-parity.mjs` —— 拿**真的** forge 产物验 TS 与 Python
+ *   给出相同 verdict（原来那 8 条用的是我们自己编的 because 字符串）；
+ * · `tests/unit/persona/guard.test.ts` —— 12 条降级逐条穷举。
+ *
+ * 见 `docs/persona-architecture.md` 第 5 节的搬迁清单第 12 条。
  */
-describe("★ isScopeOnlyDowngrade：把「forge 那边 allowlist 没配」这类挡去掉", () => {
-  it("brief=null → false（判定不可得，不能当作 scope-only）", () => {
-    expect(isScopeOnlyDowngrade(null)).toBe(false)
-  })
-
-  it("verdict=reply → false（本来就通了，不用顶掉）", () => {
-    expect(isScopeOnlyDowngrade({ verdict: "reply", because: ["all clear"] })).toBe(false)
-  })
-
-  it("★ verdict=draft 且 because 只含 scope-only + measured-default → true", () => {
-    // "measured default …" 是分类记录（persona.py:200），不是 downgrade 原因
-    expect(
-      isScopeOnlyDowngrade({
-        verdict: "draft",
-        because: [
-          "measured default for `technical_question` is answer",
-          "autonomy scope is draft_only — sending is disabled",
-        ],
-      }),
-    ).toBe(true)
-  })
-
-  it("★ 反证：只要含**别的** downgrade 就不能算 scope-only", () => {
-    // 风险类是 forge 的独立判定 —— host 侧的白名单授权顶不了它
-    expect(
-      isScopeOnlyDowngrade({
-        verdict: "draft",
-        because: [
-          "risk class `commitment` — never settled by the owner alone",
-          "autonomy scope is draft_only — sending is disabled",
-        ],
-      }),
-    ).toBe(false)
-  })
-
-  it("★ 反证：band S 的降级不能被顶掉（那是对接收方的判定）", () => {
-    expect(
-      isScopeOnlyDowngrade({
-        verdict: "draft",
-        because: [
-          "tone band S — most conservative handling",
-          "autonomy scope is draft_only — sending is disabled",
-        ],
-      }),
-    ).toBe(false)
-  })
-
-  it("verdict=handoff / silent → false（不是要求人看，而是别的判定）", () => {
-    expect(
-      isScopeOnlyDowngrade({
-        verdict: "handoff",
-        because: ["autonomy scope is draft_only — sending is disabled"],
-      }),
-    ).toBe(false)
-    expect(
-      isScopeOnlyDowngrade({
-        verdict: "silent",
-        because: ["pure acknowledgement, not an ask"],
-      }),
-    ).toBe(false)
-  })
-
-  it("空 because → false（这本不该发生，但要 fail closed）", () => {
-    // brief 走到 verdict=draft 的路径 `downgrade()` 都会 append 一条，
-    // 空 because 意味着我们对不上这个输出的形状 —— 当读不懂而不是当放行。
-    expect(isScopeOnlyDowngrade({ verdict: "draft", because: [] })).toBe(false)
-  })
-})
 
 /**
  * ★★ 触发点过时了 → **改回最新那条**，而不是跳过这一轮。
@@ -3108,7 +3172,7 @@ describe("★ 触发点过时时改回最新那条", () => {
       },
     ])
 
-    clock.advance(10_000)
+    clock.advance(PAST_BATCH_WINDOW_MS)
     await service.tick()
 
     // ① 确实起草了（不是跳过 —— 跳过就是那个消息丢失的坑）
@@ -3176,7 +3240,7 @@ describe("★ 触发点过时时改回最新那条", () => {
       },
     ])
 
-    clock.advance(10_000)
+    clock.advance(PAST_BATCH_WINDOW_MS)
     await service.tick()
 
     const run = vault.db

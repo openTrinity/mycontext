@@ -7,7 +7,7 @@
  * 能查图谱。所以隔离与降级不是可选特性，而是这条路径能不能上线的前提。
  *
  * 1. **opencode 缺失 → `available()` 返回 false**。降级到 LlmClient 直连
- *    必须一眼可判（PersonaService.generateDraft 据此选路），不能靠调用方
+ *    必须一眼可判（PersonaComposer.compose 据此选路），不能靠调用方
  *    自己去 catch 一个模糊的错误。
  * 2. **turn 失败 → 返回 null 而不是抛**。抛出会让上层把它当成"我们自己
  *    的逻辑错"，日志里刷 error，用户看到红条。而 opencode 起不来是
@@ -219,7 +219,7 @@ describe("★ 降级信号：opencode 缺失时 available() 是 false", () => {
     expect(acp.available()).toBe(true)
   })
 
-  it("★ 没装 → false（PersonaService.generateDraft 据此走直连）", () => {
+  it("★ 没装 → false（PersonaComposer.compose 据此走直连）", () => {
     const acp = makeAcp({ hasOpencode: false })
     /**
      * 反面：这个断言在别处很可能被写成"没装时 turn() 抛错"—— 但那时上层

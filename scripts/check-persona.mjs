@@ -96,7 +96,7 @@ try {
   console.log("")
   console.log("处理前：")
   console.log(
-    `  白名单 ${report.before.whitelist} · 待处理 ${report.before.pendingInbox} · 草稿 ${report.before.pendingDrafts}`,
+    `  可自动发 ${report.before.autoReply} · 待处理 ${report.before.pendingInbox} · 草稿 ${report.before.pendingDrafts}`,
   )
   console.log("")
   console.log(
@@ -106,7 +106,7 @@ try {
   console.log("")
   console.log("处理后：")
   console.log(
-    `  白名单 ${report.after.whitelist} · 待处理 ${report.after.pendingInbox} · 草稿 ${report.after.pendingDrafts}`,
+    `  可自动发 ${report.after.autoReply} · 待处理 ${report.after.pendingInbox} · 草稿 ${report.after.pendingDrafts}`,
   )
   console.log(`  workspace 物化了 ${report.materializedFiles} 个文件（画像进 agent 上下文）`)
   console.log(`  reply skill 已装入：${String(report.skillInstalled)}`)

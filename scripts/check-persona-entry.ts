@@ -304,7 +304,15 @@ export async function runPersonaCheck(options: {
 function snapshotCounts(persona: PersonaService) {
   const snapshot = persona.snapshot()
   return {
-    whitelist: snapshot.whitelistCount,
+    /**
+     * ★ `autoReplyCount`，不是 `whitelistCount`。
+     *
+     * 白名单那道门删掉之后契约里就没有后者了，而这个探针用 esbuild 打包
+     * （**只剥类型、不做类型检查**），所以读一个不存在的字段不会报错 ——
+     * 它静默打印 `undefined`。而它又不在任何 tsconfig 的 references 里，
+     * `pnpm typecheck` 也看不见它。两层掩盖叠起来 = 一个悄悄坏掉的探针。
+     */
+    autoReply: snapshot.autoReplyCount,
     pendingInbox: snapshot.pendingInbox,
     pendingDrafts: snapshot.pendingDrafts,
   }

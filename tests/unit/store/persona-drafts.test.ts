@@ -70,20 +70,29 @@ function seedDrafts(
 }
 
 /**
- * 「本人已回过」这一轮的语义。
+ * 「本人已回过」这一轮 —— **只挡自动发，不动草稿状态**。
  *
- * ## ★ 它现在**只影响要不要自动发**，不再作废草稿
+ * ## ★ 曾经有三处执行点，全都删了
  *
- * 曾经有三处执行点（生成后丢弃 / 点发送时拒 / 后台扫描作废），合起来的效果是
- * 草稿在用户眼前自己消失、或者按下发送被告知"已过期"。而那条规则的前提
- * （"你回过了就说明不需要它了"）不成立：用户可能想补一句、换个说法。
+ * 生成后丢弃 / 点发送时拒 / 后台扫描作废 —— 合起来的效果是草稿在用户眼前
+ * 自己消失、或者按下发送被告知"已过期"。而那条规则的前提（"你回过了就说明
+ * 不需要它了"）不成立：用户可能想补一句、换个说法。
  *
- * 所以 `expireAnsweredDrafts` / `expireDraftIfAnswered` **已删除**，
- * 只留 `isReplyTurnOpen` —— 它是自动发的前置判据（发一条冗余消息不可逆），
- * 草稿一律保留。这个 describe 锁的就是"判据还在、但不再动草稿状态"。
+ * 所以 `expireAnsweredDrafts` / `expireDraftIfAnswered` / `isReplyTurnOpen`
+ * **全部已删除**，草稿一律保留。
+ *
+ * ## ★★ 判据搬去哪了（这是这段注释最要紧的一句）
+ *
+ * 搬到 `TurnFreshness.ownerRepliedAfter`（`packages/persona/src/intake.ts`
+ * 算，`guard.ts` 的 `freshnessBlocksAutoSend` 用）。搬的时候顺带修正了判据：
+ * **区分分身代发** —— 分身自己发出去的消息也是本人 id，把它当成"本人已经
+ * 回了"会静默压掉第一次自动回复之后的每一次跟进。
+ * 那一条由 `tests/unit/persona/intake.test.ts` 正反两面锁住。
+ *
+ * 这个 describe 现在只锁存储层的那一半：**本人回了之后草稿照样是 pending**。
  */
-describe("待审草稿：本人已回过 → 只挡自动发，草稿保留", () => {
-  it("★ 本人回复之后，草稿仍然是 pending（不再被作废）", () => {
+describe("待审草稿：本人已回过 → 草稿仍然保留（不再被作废）", () => {
+  it("★ 本人回复之后，草稿仍然是 pending", () => {
     const { vault, messages, runs } = setup()
     messages.upsertMany([
       {
@@ -100,9 +109,7 @@ describe("待审草稿：本人已回过 → 只挡自动发，草稿保留", ()
       },
     ])
 
-    // 唯一还剩的判据：这一轮已经被回过 → 自动发那条路不该走。
-    expect(runs.isReplyTurnOpen("conv-1", "msg-in")).toBe(false)
-    // ★ 但草稿**照样在**（这是本次改动的核心）。
+    // ★ 草稿**照样在** —— 存储层没有任何东西会因为"本人回过"去动它
     expect(runs.pendingDrafts()).toHaveLength(1)
     const state = vault.db
       .prepare<[], { state: string }>("SELECT state FROM dh_drafts WHERE id = 'draft-1'")
@@ -111,7 +118,7 @@ describe("待审草稿：本人已回过 → 只挡自动发，草稿保留", ()
     vault.close()
   })
 
-  it("别人的后续消息不算本人已回复（这一轮仍然开着）", () => {
+  it("别人的后续消息同样不动草稿", () => {
     const { vault, messages, runs } = setup()
     messages.upsertMany([
       {
@@ -128,29 +135,7 @@ describe("待审草稿：本人已回过 → 只挡自动发，草稿保留", ()
       },
     ])
 
-    expect(runs.isReplyTurnOpen("conv-1", "msg-in")).toBe(true)
     expect(runs.pendingDrafts()).toHaveLength(1)
-    vault.close()
-  })
-
-  it("生成结束前已回复时，reply turn 判为关闭", () => {
-    const { vault, messages, runs } = setup()
-    expect(runs.isReplyTurnOpen("conv-1", "msg-in")).toBe(true)
-    messages.upsertMany([
-      {
-        id: "self-reply",
-        channelId: "dingtalk",
-        conversationId: "conv-1",
-        externalId: "msg-self",
-        contentText: "我已经回了",
-        sentAt: NOW + 1000,
-        direction: "outbound",
-        isSelf: true,
-        origin: "human",
-        createdAt: NOW + 1000,
-      },
-    ])
-    expect(runs.isReplyTurnOpen("conv-1", "msg-in")).toBe(false)
     vault.close()
   })
 })

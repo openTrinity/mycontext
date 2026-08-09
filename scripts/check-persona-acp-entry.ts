@@ -91,7 +91,7 @@ export async function runPersonaAcpCheck(options: {
   /**
    * 从日志里抓"走了哪条路"。
    *
-   * ★ 这是这个脚本能不能**信**的关键：ACP 起不来时 `generateDraft` 会静默
+   * ★ 这是这个脚本能不能**信**的关键：ACP 起不来时 `PersonaComposer.compose` 会静默
    * 落回直连并照样出草稿 —— 那时草稿可能是对的，但我们验的东西一个都没验到。
    * 抓 `via` 让"其实没走 ACP"变成一个可见的失败，而不是一次假绿。
    */
@@ -162,7 +162,7 @@ export async function runPersonaAcpCheck(options: {
      * 注入一条**对方发来的**消息（`isSelf: false`）。
      *
      * 直接写 messages + changelog，与采集侧同一个落点 —— 这样后面走的
-     * 就是真的 Outbox 消费者 → 准入闸 → 调度 → generateDraft。
+     * 就是真的 Outbox 消费者 → 准入闸 → 调度 → PersonaComposer.compose。
      */
     const now = systemClock.now()
     const messageId = `probe-${String(now)}`

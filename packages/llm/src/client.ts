@@ -512,10 +512,40 @@ export class LlmClient {
        * 表现是每轮工具调用都慢三倍，而日志里只有几条 retry。
        */
       if (content.trim() === "" && toolCalls.length === 0) {
+        /**
+         * ★★ 必须带上 `finish_reason` 与推理长度 —— 它们指向**完全不同**的处置。
+         *
+         * 真机实测（`glm-5.2`）：推理模型先把预算花在 `reasoning_content` 上，
+         * 正文是思考完才写的。预算不够时它给的是
+         * `finish_reason: "length"` + `content: ""`，而**不报错**：
+         *
+         * ```
+         * max_tokens=20   → length, content="",  reasoning="1. **分析请求：**…"
+         * max_tokens=2000 → stop,   content="好"
+         * ```
+         *
+         * 两种"空内容"要做的事正好相反：
+         * · `length` —— **我们给的 `maxTokens` 太小**，调用方该调大；
+         * · `stop`   —— 模型真的没写正文，该去查 prompt。
+         *
+         * 只报"返回空内容"的话这两者长得一样，而我查这个问题时只能靠手动
+         * curl 打网关才看出区别 —— 那正是 CLAUDE.md §4 说的"报告了结果、
+         * 但没报告原因"。
+         */
+        const finishForEmpty =
+          typeof choice?.finish_reason === "string" ? choice.finish_reason : "unknown"
+        const reasoningLength =
+          typeof message?.reasoning_content === "string" ? message.reasoning_content.length : 0
         throw new AppError("PARSE_FAILED", "LLM 返回空内容", {
           messageKey: "errors:byCode.PARSE_FAILED",
           // 空内容偶发（截断/过滤），值得重试一次
-          context: { retryable: true },
+          context: {
+            retryable: true,
+            finishReason: finishForEmpty,
+            /** >0 = 预算被推理吃掉了（那时 `finishReason` 多半是 `length`）。 */
+            reasoningLength,
+            maxTokens: input.maxTokens ?? null,
+          },
         })
       }
 

@@ -39,9 +39,7 @@ import type { ChatItem } from "@mycontext/agent-runtime"
 import { AGENT_ENTRY_FILENAME, renderEntry } from "@mycontext/distill"
 import {
   ConversationRepository,
-  FtsIndexRepository,
   MessageRepository,
-  type MessageRow,
   PersonaConfigRepository,
   PersonaRunRepository,
   type PersonaTraceInput,
@@ -49,23 +47,22 @@ import {
 } from "@mycontext/store"
 import {
   PersonaSupervisor,
-  GrantManager,
-  SendGuard,
-  contentHash,
-  evaluatePolicy,
-  evaluateScene,
-  riskFromScene,
+  TurnAssembler,
+  PersonaGuard,
+  evaluateGate,
+  defaultGuardPolicy,
   UNEVALUATED_CONFIDENCE,
   DEFAULT_BATCH_WINDOW_MS,
-  DEFAULT_QUIET_MS,
+  DEFAULT_INTAKE_POLICY,
   DEFAULT_WORK_HOURS,
   DEFAULT_RATE_LIMIT,
   IDLE_EVICT_MS,
   MAX_BATCH_SIZE,
   MAX_CONCURRENT_TURNS,
   MAX_RESIDENT_AGENTS,
-  READ_REPLY_EXPIRY_MS,
-  SEND_SCOPE,
+  type GateVerdict,
+  type ReplyProposal,
+  type TurnUnderstanding,
   type RateLimit,
   type ReplyMode,
   type WorkHours,
@@ -84,20 +81,20 @@ import {
   type PersonaRuntimeLimits,
   type MessageMediaView,
 } from "@mycontext/ipc-contract"
-import { createSendExecutor, type MediaRunner } from "@mycontext/channels"
+import type { MediaRunner } from "@mycontext/channels"
 import type { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 import { PersonaAcp } from "./persona-acp.js"
-import { extractDraftEnvelope } from "./persona-draft.js"
-import { PersonaMemory, type MemoryHit, type MemorySource } from "./persona-memory.js"
-import { PERSONA_SKILL_DIRNAME, type BriefVerdict, type PersonaGateLike } from "./persona-gate.js"
-import { RECALL_TOOL, createRecallExecutor } from "./persona-recall-tool.js"
-import { isPreviewable } from "./media.service.js"
+import { PersonaComposer } from "./persona-compose.js"
+import { PersonaDelivery } from "./persona-delivery.js"
+import { PersonaMemory, type MemorySource } from "./persona-memory.js"
 import {
-  collectPromptImages,
-  renderTranscript,
-  MAX_PROMPT_IMAGES,
-  type PromptMedia,
-} from "./persona-media-prompt.js"
+  PERSONA_SKILL_DIRNAME,
+  WORK_LAYER_SKILL_PATH,
+  type BriefVerdict,
+  type PersonaGateLike,
+} from "./persona-gate.js"
+import { isPreviewable } from "./media.service.js"
+import { MAX_PROMPT_IMAGES } from "./persona-media-prompt.js"
 import { toLocalFileUrl } from "../windows/local-file-url.js"
 
 /**
@@ -207,6 +204,17 @@ export interface PersonaServiceOptions {
   klPort?: number
   /** 生成回复用的 LLM。provider.get() 为 null 时降级成"只出占位草稿" */
   llmProvider: LlmProvider
+  /**
+   * agent（ACP）路用哪个模型 —— `runtimeConfig.resolved().modelMain`。
+   *
+   * ★ 与 `llmProvider` 是**两条路各自的模型**，而现在统一到同一个值：
+   * 常态走 ACP 子进程（读这个），起不来时降级走 `llmProvider` 直连
+   * （`LlmHolder` 用的也是 `modelMain`）。统一之前这两条路是两个不同的模型，
+   * 而用户一个都改不动 —— "回复风格突然变了"就是那时的症状。
+   *
+   * 不给 = ACP 侧退回 env（`MYCONTEXT_MODEL_MAIN`）再退回内置默认。
+   */
+  getModel?: () => string
   getWindow: () => BrowserWindow | null
   /**
    * 合并窗口。只在测试里传（要用假时钟压缩等待），生产用缺省值。
@@ -451,7 +459,7 @@ export class PersonaService {
    * opencode 编排。null = 没接（未配置 runtime/processes）→ 全部走直连。
    *
    * ★ 可选注入而不是必需：`PersonaAcp` 要 `RuntimeEnv` 与 `ProcessRunner`，
-   * 而单测里那两样都是假的。不给它时 `generateDraft` 直接走 LlmClient ——
+   * 而单测里那两样都是假的。不给它时 `PersonaComposer.compose` 直接走 LlmClient ——
    * 也就是这一整块的降级路径，而那条路本来就必须始终可用
    * （opencode 102MB 不随包分发，"没装"是常态而非异常）。
    */
@@ -506,6 +514,14 @@ export class PersonaService {
              * 每次真起 opencode 时现读；蒸馏一发布，下次 turn 就用上。
              */
             getSkillPaths: () => this.personaSkillPaths(),
+            /**
+             * ★ 用哪个模型 —— 同样是回调（见 `PersonaAcpOptions.getModel`）：
+             * opencode 懒启动，传值会锁死在构造那一刻，而设置页改完模型后
+             * 应当"下次起 agent 就生效"。
+             *
+             * 不给（单测）时退回 env 再退回内置默认。
+             */
+            ...(options.getModel === undefined ? {} : { getModel: options.getModel }),
             /**
              * agent 的过程（thinking / 正文 / tool 调用）—— 两个去处：
              * ① 实时推给 UI（「正在处理」那个 tab 里滚动显示）；
@@ -581,7 +597,16 @@ export class PersonaService {
     if (this.supervisor === null) return
 
     const window = this.options.batchWindowMs ?? DEFAULT_BATCH_WINDOW_MS
-    const quiet = this.options.quietMs ?? DEFAULT_QUIET_MS
+    /**
+     * ★★ 缺省取 `DEFAULT_INTAKE_POLICY.quietMs`，**不是** mailbox 的
+     * `DEFAULT_QUIET_MS`。
+     *
+     * 静默期的真源在 `IntakePolicy`（那是这次把"三个数字回答同一个问题"
+     * 收成一处的落点）。这里若沿用 mailbox 的 6 秒，唤醒会在**静默期没满时**
+     * 触发 → `takeBatch` 返回空批次 → 这一批要等 8 秒兜底才动。
+     * 也就是"唤醒白接了"，而且看不出来 —— 与那个坑同一形态。
+     */
+    const quiet = this.options.quietMs ?? DEFAULT_INTAKE_POLICY.quietMs
     // debounce：新消息把唤醒推后，而不是让旧定时器提前跑到一个空批次上
     if (this.wakeTimer !== null) clearTimeout(this.wakeTimer)
     this.wakeTimer = setTimeout(
@@ -670,8 +695,15 @@ export class PersonaService {
       ...(this.options.batchWindowMs === undefined
         ? {}
         : { batchWindowMs: this.options.batchWindowMs }),
-      // 静默期同理：与 `wake()` 读的必须是同一个值
-      ...(this.options.quietMs === undefined ? {} : { quietMs: this.options.quietMs }),
+      /**
+       * ★★ 静默期**总是显式给** —— 与 `wake()` 和 intake 读的是同一个值。
+       *
+       * 原来是"只在显式传时才给，否则用 Mailbox 自己的缺省"。而 intake 的
+       * 缺省已经从 6 秒提到 25 秒（见 `DEFAULT_INTAKE_POLICY`），
+       * 不给的话 Mailbox 仍按 6 秒攒批 —— 三处口径立刻分叉，
+       * 而那正是这次重构要消灭的东西。
+       */
+      quietMs: this.options.quietMs ?? DEFAULT_INTAKE_POLICY.quietMs,
     })
 
     // 从库里恢复 kill switch：它是"用户明确按下的开关"，重启后必须还在
@@ -1049,30 +1081,6 @@ export class PersonaService {
     this.options.logger.info("persona limits saved", { ...next })
     this.emitSnapshot()
     return next
-  }
-
-  /**
-   * 造一个 GrantManager。
-   *
-   * `downgradeToDraft` 是它的必填回调：授权失效时**立刻**把该会话降回
-   * 只出草稿。不接这个回调的话，授权过期后那个会话会一直尝试自动发、
-   * 一直失败 —— 而用户看到的是"数字人不回了"，看不出是授权问题。
-   */
-  private grantManager(db: SqliteDatabase): GrantManager {
-    return new GrantManager({
-      db,
-      clock: this.options.clock,
-      logger: this.options.logger.child("Grant"),
-      downgradeToDraft: (conversationId, reason) => {
-        new PersonaConfigRepository(db).upsert(
-          conversationId,
-          { replyMode: "draft" },
-          this.options.clock.now(),
-        )
-        this.options.logger.warn("conversation downgraded to draft", { conversationId, reason })
-        this.emitSnapshot()
-      },
-    })
   }
 
   /**
@@ -1641,185 +1649,25 @@ export class PersonaService {
   }
 
   /**
-   * 走 `SendGuard` 发一条草稿，并把结果记进 `dh_send_attempts`。
+   * 发一条草稿 —— **委托给 delivery**。
    *
-   * ## ★ 幂等键按 draftId 派生，不是随机的
+   * ## ★ 为什么这个薄壳还留着
    *
-   * `--uuid` 是服务端幂等键（24h 内同值不重复投递）。用随机值的话
-   * "点了发送、超时、再点一次"就会真的发两条。按 draftId 派生之后
-   * 重试天然复用同一个键。
+   * 三个入口（自动发 / 用户批准草稿 / 用户自撰）都要发送，而它们对
+   * `PersonaService` 内部状态的依赖不同（`sendingDraftIds` 的加解、
+   * 草稿状态回填、快照推送）。留一个方法名让那三处调用点不各自拼一遍
+   * delivery 的装配 —— 装配漏一项（比如忘了传 `killSwitchActive`）的表现是
+   * **急停按钮对那条路无效**，而那是静默的。
    *
-   * 加上 contentHash：用户改了正文再发是**另一条消息**，该给新键
-   * （否则服务端会把它当重复投递吞掉，而用户以为改后的发出去了）。
+   * 真正的发送逻辑（目标解析、幂等键、SendGuard 四层、审计、发后回拉）
+   * 全在 `persona-delivery.ts`。这里一行都不重复。
    */
   private async sendDraft(
     db: SqliteDatabase,
     draft: { id: string; conversationId: string; text: string; editedText: string | null },
     source: "agent_auto" | "user_approved",
   ): Promise<{ state: string; reason?: string }> {
-    const cli = this.options.cli
-    if (cli === null || cli === undefined) {
-      return { state: "failed", reason: "channel_unavailable" }
-    }
-    const conversations = new ConversationRepository(db)
-    const conversation = conversations.findById(draft.conversationId)
-    if (conversation === null) return { state: "failed", reason: "conversation_not_found" }
-
-    const runs = new PersonaRunRepository(db)
-    const grants = this.grantManager(db)
-    const text = draft.editedText ?? draft.text
-    const hash = contentHash(text)
-    const idempotencyKey = `${draft.id}-${hash.slice(0, 16)}`
-    /**
-     * 目标：群聊用 `--group <openConversationId>`，单聊用
-     * `--open-dingtalk-id <对端 openDingTalkId>`。
-     *
-     * ## ★ 单聊**不能**用 `conversations.external_id`（我原来就是这么写的，是错的）
-     *
-     * 原注释说「实测单聊的 external_id 与 openDingTalkId 同形」——不成立。
-     * 实测本库 52 个单聊：`external_id` 是 `cid…`（47 字符，**会话** id），
-     * 对端 openDingTalkId 是 `D…`（33-34 字符）。传错的表现不是发错人，而是
-     * 服务端回「单聊时 receiverUid 不能为空」：它没把 cid 认成一个人，
-     * 于是点「发送」100% 失败，且错误信息指向一个我们压根没传的参数名。
-     *
-     * 所以单聊要**另查**对端身份（第一条非本人消息的 sender_external_id）。
-     * 查不到 → 直接失败，不退回用 cid 猜：那只会把一个明确的
-     * "找不到对端"变回刚才那个含义不明的服务端报错。
-     */
-    const isGroup = conversation.type === "group"
-    const targetExternalId = isGroup
-      ? conversation.externalId
-      : conversations.findPeerExternalId(draft.conversationId)
-    if (targetExternalId === null || targetExternalId === "") {
-      this.options.logger.warn("send target unresolved", {
-        conversationId: draft.conversationId,
-        type: conversation.type,
-      })
-      return { state: "failed", reason: "peer_not_resolved" }
-    }
-    const targetKind = isGroup ? ("group" as const) : ("open_id" as const)
-
-    const guard = new SendGuard({
-      drafts: {
-        get: (draftId) => {
-          const row = runs.findDraft(draftId)
-          return row === null ? null : { text: row.text, editedText: row.editedText }
-        },
-      },
-      grants,
-      executor: createSendExecutor(cli),
-      clock: this.options.clock,
-      logger: this.options.logger.child("Send"),
-      // 急停覆盖**所有**发送路径（手动那条不过 policy）
-      killSwitchActive: () => this.supervisor?.killSwitchActive ?? false,
-      ...(this.options.forceSendShortCircuit === undefined
-        ? {}
-        : { forceShortCircuit: this.options.forceSendShortCircuit }),
-      downgradeToDraft: (conversationId, reason) => {
-        new PersonaConfigRepository(db).upsert(
-          conversationId,
-          { replyMode: "draft" },
-          this.options.clock.now(),
-        )
-        this.options.logger.warn("conversation downgraded to draft", { conversationId, reason })
-      },
-    })
-
-    const attemptedAt = this.options.clock.now()
-    /**
-     * 记一次授权 id，用来填审计行。
-     *
-     * ★ 在 `guard.send` **之前**读：守卫在授权被撤销时会 `markRevoked`，
-     * 之后再读就是 null 了 —— 而那一行审计恰恰最需要说清"当时用的是哪个
-     * 授权"。读不到（无授权）时是 null，那也是诚实的：守卫会同样判断，
-     * 于是 state 会是 `blocked_no_grant`，两列自洽。
-     */
-    const grantAtAttempt = grants.requireValid(draft.conversationId, SEND_SCOPE)
-    const outcome = await guard.send({
-      draftId: draft.id,
-      conversationId: draft.conversationId,
-      target: { kind: targetKind, externalId: targetExternalId },
-      // @人 一期不带：正文里的占位符要与 mentions 严格对应，
-      // 而草稿是模型写的自由文本 —— 拼错的表现是"发出去但没 @ 到人"
-      mentions: [],
-      idempotencyKey,
-      dryRun: false,
-    })
-
-    /**
-     * ★ 每次都写这张表 —— 成功与失败都写。
-     *
-     * 漏了它的后果不是"少一张审计表"，而是 policy 的频率限制**永远
-     * 不触发**（它读 `state = 'sent'` 的行）。而那是唯一防连发的一条。
-     */
-    runs.recordSendAttempt({
-      idempotencyKey,
-      draftId: draft.id,
-      conversationId: draft.conversationId,
-      targetKind,
-      /**
-       * ★★ 记**真正发出去的那个**目标，不是会话 id。
-       *
-       * 这里原来写的是 `conversation.externalId` —— 于是单聊的审计行记的是
-       * `cid…`（会话 id，47 字符），而实际传给 CLI 的是对端的
-       * `openDingTalkId`（`D…`，33-34 字符）。两个值不同，而这张表的
-       * **唯一用途**就是事后追"这条发给了谁"。
-       *
-       * 实测踩到过（本机 2026-08-06 21:55 那条）：`target_kind=open_id` 而
-       * `target_external_id=cidTuLn1kt…`，也就是一行自相矛盾的审计 ——
-       * 声称"按人发"却记了个会话 id。真要追一次误发，那个值指向的东西
-       * **在钉钉里根本不是一个人**，而 `target_kind` 又让人以为它是。
-       *
-       * ★ 会话 id 并没有丢：它就在同一行的 `conversation_id` 列里。
-       * 也就是说改这一处不损失任何信息，只是让两列各自说真话。
-       */
-      targetExternalId,
-      atExternalIds: [],
-      contentHash: hash,
-      /**
-       * ★ 真实的授权 id，不是 null。
-       *
-       * 恒 null 时这张表无法回答"这条是凭哪个授权发出去的" —— 而授权
-       * 是可撤销、可过期的，事后追一条误发时那正是第一个要问的问题。
-       */
-      grantId: grantAtAttempt?.id ?? null,
-      state:
-        outcome.state === "sent"
-          ? "sent"
-          : outcome.state === "blocked_no_grant"
-            ? "blocked_no_grant"
-            : "failed",
-      sentMessageExternalId: outcome.sentExternalId ?? null,
-      /**
-       * ★ taskId 也落库 —— 换消息 id 那一跳失败时它是唯一的线索。
-       *
-       * `send` 只返回 `openTaskId`（钉钉实测），消息 id 要再走
-       * `query-send-status`。那一跳可能失败，而没有 taskId 的话
-       * "发出去了但没标上分身发送"就无从追查、也无法事后补。
-       */
-      sendTaskId: outcome.sentTaskId ?? null,
-      usedDryRun: outcome.state === "short_circuited",
-      error: outcome.reason ?? null,
-      attemptedAt,
-      // 只有真发成功才填 —— 频率判定读的正是这一列
-      sentAt: outcome.state === "sent" ? this.options.clock.now() : null,
-      source,
-    })
-
-    /**
-     * ★ 真发成功 → 让数据面定向补拉这个会话，把刚发的那条秒级拉回来。
-     *
-     * 用 `conversation.externalId`（数据面按它找会话、渠道命令也认它）。
-     * 只在 `sent` 时触发：失败/短路时没有新消息要拉。回调是**同步 fire-and-forget**
-     * —— 补拉的成败不该阻塞或影响发送结果的返回。
-     */
-    if (outcome.state === "sent") {
-      this.options.onSentMessage?.(conversation.externalId)
-    }
-
-    return outcome.reason === undefined
-      ? { state: outcome.state }
-      : { state: outcome.state, reason: outcome.reason }
+    return this.delivery().send(db, draft, source)
   }
 
   /**
@@ -1872,14 +1720,14 @@ export class PersonaService {
      * ## 判据是 `available()` 而不是 `this.acp !== null`
      *
      * `acp` 非 null 只说明装配层给了 runtime/processes；opencode 二进制
-     * 没装时 `turn()` 会返回 null，`generateDraft` 落回 `LlmClient` 直连 ——
+     * 没装时 `turn()` 会返回 null，`PersonaComposer.compose` 落回 `LlmClient` 直连 ——
      * 那时说"你能跑 kl"就又是一次谎报（正是这次要修的 bug）。
-     * `available()` 查的是二进制在不在，与 `generateDraft` 的选路同源。
+     * `available()` 查的是二进制在不在，与 `PersonaComposer.compose` 的选路同源。
      *
      * ## 残余的误报窗口（不可能完全消除，所以写清）
      *
      * `AGENTS.md` 是**文件**，措辞在 createAgent 这一刻定下；而"这一轮
-     * 到底走哪条路"要到 `generateDraft` 才知道（ACP 可能装了却起不来/超时）。
+     * 到底走哪条路"要到 `PersonaComposer.compose` 才知道（ACP 可能装了却起不来/超时）。
      * 于是"装了 opencode 但本轮落回直连"时，模型会以为自己能查图谱。
      *
      * 那个方向是**保守**的：它去查、查不到（工具不存在），然后按指引说
@@ -2040,7 +1888,26 @@ export class PersonaService {
     }
   }
 
-  /** `handleBatch` 的本体。抽出来是为了让在途登记只有一处（见那里的注释）。 */
+  /**
+   * `handleBatch` 的本体 —— **接线**，不是逻辑。
+   *
+   * ## ★ 这个方法曾经有 594 行，做了四件事
+   *
+   * 装配上下文、跑三个判定子进程、调模型生成、决定发不发并落库。
+   * 于是"为什么这条没发"要在同一个方法里跨四百行来回翻，而
+   * "本人已回"/kill switch/内容审查各判了三遍（判据还不一致）。
+   *
+   * 现在它只做编排，四段各归其位（见 `docs/persona-architecture.md`）：
+   *
+   * ```
+   *   ① intake   TurnAssembler.assemble()   → TurnRequest
+   *   ② compose  PersonaComposer.compose()  → ReplyProposal
+   *   ③ guard    PersonaGuard.decide()      → SendDecision
+   *   ④ delivery PersonaDelivery.send()
+   * ```
+   *
+   * 落库仍在这里 —— 那是接线层的职责（四个模块都不碰 `dh_agent_runs`）。
+   */
   private async runBatch(
     db: SqliteDatabase,
     conversationId: string,
@@ -2050,143 +1917,60 @@ export class PersonaService {
     const runs = new PersonaRunRepository(db)
     const configs = new PersonaConfigRepository(db)
     const config = configs.get(conversationId)
-    const messages = new MessageRepository(db)
-
-    const triggerId = messageIds.at(-1) ?? null
     const runId = randomUUID()
     /**
      * 登记这一轮的 runId，供 `onAgentTrace` 落库时取（见 `activeRunIds`）。
-     * `runBatch` 有好几处中途 return，所以清理放在 `handleBatch` 的 finally 里
-     * 与 `inFlightBatches` 同步 —— 只在末尾删会让它泄漏。
+     * 清理在 `handleBatch` 的 finally 里与 `inFlightBatches` 同步。
      */
     this.activeRunIds.set(conversationId, runId)
 
-    // 上下文：会话内最近 30 条（模型读的是对话顺序，所以正序）
-    let context = messages.recentInConversation(conversationId, 30)
-    let trigger = triggerId === null ? null : messages.findById(triggerId)
-    let effectiveTriggerId = triggerId
-    /**
-     * 会话行提前查。
-     *
-     * 原来在生成之后才查（只为了给场景判定说明群/单聊），现在判定闸也要用
-     * 它的 `external_id` 与类型 —— 而那一次判定必须在**生成之前**跑完
-     * （`verdict: silent` 时连模型都不必调）。
-     */
-    const conversation = new ConversationRepository(db).findById(conversationId)
-
-    /**
-     * ★ 触发点过时了 → **改回最新那条**，而不是跳过这一轮。
-     *
-     * ## 为什么不能跳过
-     *
-     * 跳过看起来安全（"这批过时了，不回了"），实测是一个**消息丢失**的坑：
-     * `takeBatch` 取走这批时 `dh_inbox` 已经标成 `done`，而 `restore()` 只捞
-     * `pending` 的。于是"草稿被作废"之后那几条消息既不在草稿箱、也不在队列里 ——
-     * 实测形态：一串连发留下 4 条等回复的消息，本人一条没回，而系统永远不会
-     * 再为它们起草。
-     *
-     * 作废草稿与消息重新入队是两件事，而它们**没有接起来**。所以这里不跳过：
-     * 把触发点推进到最新那条对方消息，这一轮就回那个。
-     *
-     * ## 为什么是"改目标"而不是"退回队列"
-     *
-     * 退回 pending 也能修，但要多一次往返，而且依赖"退回后还有人来取" ——
-     * 多一个可能漏的环节。改目标一轮就收敛：新的触发点之后不可能再有更新的
-     * 对方消息（它就是最新的），所以事后清理也不会再作废它。
-     *
-     * `context` 要一起重取：它是起草的上下文，而库里现在多了几条。
-     * 不重取的话模型会拿着旧上下文回一条它看不见的消息。
-     */
-    if (trigger !== null) {
-      const newest = this.latestInboundAfter(db, conversationId, trigger.sentAt)
-      if (newest !== null) {
-        this.options.logger.info("persona retargeting to a newer inbound message", {
-          conversationId,
-          from: effectiveTriggerId,
-          to: newest.id,
-        })
-        trigger = newest
-        effectiveTriggerId = newest.id
-        context = messages.recentInConversation(conversationId, 30)
-      }
+    // ── ① intake ──────────────────────────────────────────────────────
+    const turn = await this.assembler(db).assemble(conversationId, messageIds)
+    if (turn === null) {
+      this.options.logger.warn("intake could not assemble this turn", { conversationId })
+      return
     }
 
     /**
-     * ★ 判定闸第一关：`brief`。
+     * 判定闸：`brief` 一次调用，产出**两个面**。
      *
-     * 判据来自 forge 编译的 `rules.json`（问的是哪类事、命中哪些风险类、
-     * 对方是哪个 band、autonomy scope、这次 build 有没有能力判），
-     * 由产物自带的 `persona.py` 消费 —— 见 `persona-gate.ts` 的文件头。
+     * · `understanding`（测量/理解）→ 给 compose；
+     * · `gate`（政策判定）→ 给 guard。
      *
-     * `null`（缺 Python / 还没蒸馏过 / 输出读不懂）与 `reply` 之外的一切
-     * 都意味着**不能自己发**。两者的区别只在记的原因上，不在行为上。
+     * 一次子进程两处消费 —— 于是"判定看到的"与"模型看到的"永远是同一批事实。
      */
-    const brief = await this.runBrief(db, conversationId, conversation, trigger)
-
-    let draftText: string | null = null
-    /**
-     * 「这条要不要人来看一眼」。
-     *
-     * 初值 true 是刻意的：下面每一条通路都只能把它**留在** true 或
-     * 在拿到明确的放行判定后置 false。生成抛异常时它仍是 true。
-     */
-    let holdForReview = true
-    let reviewReason: string | null = null
-    let confidence = 0
-    let error: string | null = null
-    /**
-     * agent 这一轮调过的工具与用量。
-     *
-     * `undefined` = 这条路没报告（直连路的工具调用形状不同，见 generateDraft），
-     * 落库时存 null；`[]` 是**结论**（确实没调），要存下来。
-     */
-    let toolNames: readonly string[] | undefined
-    let agentTokens: number | null | undefined
+    const brief = await this.runBrief(
+      db,
+      conversationId,
+      { type: turn.conversationKind },
+      {
+        id: turn.trigger.messageId,
+      },
+    )
+    const gate = this.toGateVerdict(brief, config?.replyMode ?? "draft")
 
     /**
-     * ★ `autonomy.scope = draft_only` 的一次"能力性 downgrade"由 host 顶掉。
+     * 判定层说这一轮没什么要答的 → 记一条 `silent` 就结束，**不调模型**。
      *
-     * forge 蒸馏时硬写 `autonomy.scope = "draft_only"`（`forge.service.ts:427`），
-     * 于是 `persona.py brief` 每次都 downgrade 到 `draft`，`agent_allows_auto`
-     * 永远失败 —— 库里最近 20 条 run 的 `risks_json` 都含它。
-     *
-     * 这条 downgrade 的原文是 forge 里唯一一处，措辞稳定：
-     * `"autonomy scope is draft_only — sending is disabled"`。
-     *
-     * 语义上它问的是"用户有没有授权自动发送"—— 这个信号在 host 侧本来就有：
-     * `replyMode === "auto"` 就是那次显式授权（白名单那道门已删，见 policy.ts
-     * 文件头「白名单已删」）。forge 侧的 allowlist 是**同一件事的另一处配置**，
-     * 而 host 侧的入口更清晰、也是唯一真接了的。
-     *
-     * 所以：**仅**这一条 downgrade 时，把它当"授权由 host 负责"，看当前会话
-     * 是否已授权。别的 downgrade 原因（risk class、band、recipient not resolved
-     * 等）仍然是 forge 的判定，host 不该越权。
+     * 这与"生成失败"必须分开记：前者是正常工作，后者要修。
      */
-    const briefScopeOnly = isScopeOnlyDowngrade(brief)
-    /**
-     * ★ `yolo` 同样是"用户授权了自动发送"—— 它比 auto 更强的一档。
-     * 只判 `=== "auto"` 会让 yolo 在这条 downgrade 上被当成"没授权"。
-     * （即便如此 yolo 也发得出去：policy 的 yolo 旁路不看 `agentAllowsAuto`。
-     *  但这里的语义得对，否则 `reviewReason` 会记一个假原因。）
-     */
-    const userAuthorizedAutoSend = config?.replyMode === "auto" || config?.replyMode === "yolo"
-    const gateAllows =
-      brief !== null && (brief.verdict === "reply" || (briefScopeOnly && userAuthorizedAutoSend))
-    if (!gateAllows) {
-      reviewReason = briefReviewReason(brief)
-    }
-
-    // `silent` = 判定层说这一轮没什么要答的（纯客套）。不调模型，也不出草稿。
-    if (brief !== null && brief.verdict === "silent") {
+    if (gate !== null && gate.action === "silent") {
       runs.insertRun(
         {
           id: runId,
           conversationId,
-          triggerMessageId: effectiveTriggerId,
+          triggerMessageId: turn.trigger.messageId,
           draftText: null,
           confidence: UNEVALUATED_CONFIDENCE,
           decision: "silent",
-          decisionReason: reviewReason ?? "gate_silent",
+          /**
+           * ★ 记**决定了动作**的那条理由，不是 `because[0]`。
+           *
+           * 后者永远是分类记录（"measured default for `other_ask` is answer"）
+           * —— 拿它当原因会让草稿卡上写着「默认动作是 answer」而这条恰恰
+           * 没有 answer。实测踩到过。见 `GateVerdict.decidingReason`。
+           */
+          decisionReason: (gate.decidingReason ?? gate.because[0])?.slice(0, 160) ?? "gate_silent",
           failedConditions: [],
           latencyMs: this.options.clock.now() - startedAt,
           costTokens: null,
@@ -2194,154 +1978,97 @@ export class PersonaService {
         },
         startedAt,
       )
-      // run 行已在 → 落这一轮的 trace（外键要求它先在，见 pendingTraces）。
       this.flushTrace(db, conversationId, runId)
       this.emitSnapshot()
       return
     }
 
+    // ── ② compose ─────────────────────────────────────────────────────
+    let proposal: ReplyProposal | null = null
+    let error: string | null = null
     try {
-      /**
-       * ★ 媒体在**这里**才挂上，而不是跟着 `recentInConversation` 一起查。
-       *
-       * 理由是范围：`context` 在上面可能被重取一次（触发点过时那条路），
-       * 而媒体查询要按最终的那批消息做。挂在调用点前一步 = 只有一处、
-       * 且必然对应真正送进模型的那批。
-       *
-       * `withMedia` 里顺便**按需下载**：库里 1915 张图只有 242 张在本地
-       * （13%），不下载等于绝大多数轮次仍然看不到图。
-       */
-      const contextWithMedia = await this.attachMedia(db, context)
-      const generated = await this.generateDraft(
-        conversationId,
-        contextWithMedia,
-        trigger,
-        brief,
-        conversation?.externalId ?? "",
-      )
-      draftText = generated.text
-      confidence = generated.confidence
-      toolNames = generated.toolNames
-      agentTokens = generated.totalTokens
-      /**
-       * ★ 模型只能收紧，不能放宽。
-       *
-       * `gateAllows` 是判定层的结论，`generated.holdForReview` 是模型自己的
-       * 刹车。两者**或**起来：模型说要人看就一定要人看，而模型说不用
-       * 并不能让判定层的 draft 变成 reply。产物的 SKILL.md 里写着同一句话
-       * （「`false` grants nothing」），这里是它的执行点。
-       */
-      holdForReview = !gateAllows || generated.holdForReview
-      if (generated.holdForReview) reviewReason ??= generated.reviewReason
+      proposal = await this.composer().compose({
+        turn,
+        understanding: briefUnderstanding(brief),
+        reviewFeedback: this.reviewFeedback.get(conversationId) ?? [],
+      })
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
     }
 
-    /**
-     * ★ 判定闸第二关：`check`，复核**草稿正文本身**。
-     *
-     * 与 `brief` 的区别：那一关判的是"别人问的这件事能不能自己拍板"，
-     * 这一关判的是"我们准备说的这句话本身有没有问题"（陈述了一个受限
-     * 风险类、超了发送长度上限、或者是这个人不会用的句式）。
-     * 只在还打算自动发时跑 —— 已经要人看了就没必要多起一个进程。
-     *
-     * ★ yolo 档不跑：它的结论只喂给 `agentAllowsAuto`，而 policy 的 yolo
-     * 旁路根本不看那一条 —— 跑了也影响不了结果，只是白起一个进程（实测
-     * 每次几秒）。这不是"为了 yolo 少一道闸"，是那道闸在 yolo 下已经无效。
-     */
-    if (
-      (config?.replyMode ?? "draft") !== "yolo" &&
-      !holdForReview &&
-      draftText !== null &&
-      draftText.trim() !== ""
-    ) {
-      const review = await this.runCheck(conversationId, draftText)
-      if (review === null || review.verdict === "block") {
-        holdForReview = true
-        reviewReason =
-          review === null ? "review_gate_unavailable" : (review.issues[0] ?? "draft_review_blocked")
-      }
-    }
-
-    /**
-     * 走真正的 `evaluatePolicy`（8 条），不是自己判一遍。
-     *
-     * 即使没生成出草稿也要过一遍并记 run：用户要能看到"这一轮发生了什么"。
-     */
+    // ── ③ guard ───────────────────────────────────────────────────────
     const limits = this.readLimits(configs)
     const now = this.options.clock.now()
+    const replyMode = config?.replyMode ?? "draft"
+    const text = proposal?.text ?? null
 
     /**
-     * ★ 场景判定：这条草稿**所处的场景**适不适合自动发。
+     * `check` 只在**还打算自动发**时跑 —— 已经要人看了就没必要多起一个进程。
      *
-     * 首版这里是写死的 `sceneAllowsAuto: false` + `risk: "medium"` ——
-     * 两个假值在假装判定，而它们的作用只是"恒挡住自动发送"。
-     * 现在由 `evaluateScene` 给出，`risk` 从同一个判定派生
-     * （见 `riskFromScene`：同源才不会出现"场景说能发、风险说 high"）。
-     *
-     * 输入是**草稿正文**而不是收到的消息：要判的是"我们准备说的这句话"
-     * 危不危险，而不是"别人说的那句"。
-     *
-     * ★ 与判定闸**并存**而不是被它取代：`scene` 是我们自己的确定性白名单
-     * （不许有问号、不许含承诺、不许超 60 字），forge 的 `check` 是按
-     * **这个人的实测习惯**复核。两者的失效原因不相关 —— forge 没蒸出
-     * 风险词表时 `check` 会放行，而 scene 的五条仍然拦得住。
+     * ★ yolo 档不跑：它的结论只喂给 `agentAllowsAuto`，而 policy 的 yolo
+     * 旁路根本不看那一条 —— 跑了也影响不了结果，只是白起一个进程（实测每次
+     * 几秒）。这不是"为了 yolo 少一道闸"，是那道闸在 yolo 下已经无效。
      */
-    /**
-     * 这一批里有没有 @我。
-     *
-     * 从 `message_mentions` 读而不是在正文里找 —— 采集时已经解析并落库了
-     * （`is_self = 1` 那一列），在正文里再匹配一遍会与准入闸用的判据不一致，
-     * 而"两处判据不同"是最难查的那类 bug。
-     *
-     * 空批次时给 false（那时 `IN ()` 是非法 SQL，而且没消息也谈不上被 @）。
-     */
-    const mentionsSelf =
-      messageIds.length > 0 &&
-      db
-        .prepare<string[], { hit: number }>(
-          `SELECT 1 AS hit FROM message_mentions
-            WHERE is_self = 1 AND message_id IN (${messageIds.map(() => "?").join(",")})
-            LIMIT 1`,
-        )
-        .get(...messageIds) !== undefined
-    const scene = evaluateScene({
-      conversationKind: conversation?.type === "group" ? "group" : "direct",
-      mentionsSelf,
-      draftText: draftText ?? "",
-    })
+    const wantsAuto = replyMode === "auto" || replyMode === "yolo"
+    const review =
+      replyMode !== "yolo" && wantsAuto && text !== null && text.trim() !== ""
+        ? await this.runCheck(conversationId, text)
+        : null
 
-    const verdict = evaluatePolicy(
-      {
-        replyMode: config?.replyMode ?? "draft",
-        sceneAllowsAuto: scene.allowsAuto,
-        /**
-         * ★ 判定层 + 模型刹车合成的那一条。
-         *
-         * `holdForReview` 已经把三件事或起来了：`brief` 的 verdict、
-         * 模型自己的刹车、`check` 的复核。这里取反是因为 policy 那一条
-         * 问的是"允不允许自动"，而它记的 reason 是 `agent_requires_review`。
-         */
-        agentAllowsAuto: !holdForReview,
-        confidence,
-        risk: riskFromScene(scene),
-        /**
-         * 禁止词命中：在**草稿正文**上匹配。
-         *
-         * 空正文时不匹配（那时也不会发）。匹配是子串而不是分词 ——
-         * 禁止词的用途是"这几个字不许出现"，分词会让"报价"匹配不到
-         * "报价格"，而那正是用户加它时想拦的。
-         */
-        bannedPhraseHits: limits.bannedPhrases.filter(
-          (phrase) => draftText !== null && draftText.includes(phrase),
-        ),
-        /**
-         * ★ 从 `dh_send_attempts` 读真实发送记录，不是传空数组。
-         *
-         * 传空数组时 `rate_limited` 这条判定**恒通过** —— 也就是限流
-         * 完全没生效，而外观与"限流正常"一模一样（没触上限时行为相同）。
-         * 而这是 8 条里唯一防"数字人在群里连发"的一条。
-         */
+    /**
+     * `fresh` 只在**真要发之前**跑，且只取它**独有**的那一条（采集滞后）。
+     *
+     * "本人已回"与"有更新消息"已经由 intake 算好放在 `turn.freshness` 里
+     * （原来这两条各判三遍且判据不一致）。而滞后阈值在 `rules.json` 里 ——
+     * host 抄一份就又是一个"两个真源"。
+     */
+    const lag =
+      wantsAuto && text !== null && text.trim() !== ""
+        ? await this.runFresh(
+            db,
+            conversationId,
+            { type: turn.conversationKind },
+            {
+              id: turn.trigger.messageId,
+            },
+          )
+        : null
+
+    const decision = this.guard().decide({
+      turn,
+      proposal: proposal ?? {
+        text: null,
+        noReplyReason: error === null ? "generation_returned_nothing" : "generation_failed",
+        holdForReview: true,
+        reviewReason: error,
+        provenance: {
+          via: "unavailable",
+          toolNames: null,
+          totalTokens: null,
+          degradedReason: null,
+        },
+      },
+      gate,
+      review:
+        review === null
+          ? null
+          : {
+              // ★ 总判定也要传 —— guard 尊重 `block`（见 DraftReview.verdict）
+              verdict: review.verdict,
+              riskTags: review.riskTags,
+              codepoints: review.codepoints,
+              problems: review.problems,
+              issues: review.issues,
+            },
+      lag: lag === null ? null : { stale: lag.stale, reason: lag.reason },
+      policy: {
+        ...defaultGuardPolicy(replyMode),
+        // 政策的第 ② 档：用户自己配的（长度上限沿用 guard 的缺省）
+      },
+      runtime: {
+        workHours: limits.workHours,
+        rateLimit: limits.rateLimit,
+        bannedPhrases: limits.bannedPhrases,
         recentSendsInConversation: runs.recentSendTimestamps({
           conversationId,
           sinceMs: now - limits.rateLimit.perConversationWindowMs,
@@ -2351,188 +2078,86 @@ export class PersonaService {
         }),
         killSwitchActive: this.supervisor?.killSwitchActive ?? false,
         /**
-         * ★ 读**真实**授权，不再硬编码 null。
-         *
-         * 这里曾经恒 `null`，注释的理由是「`GrantManager` 已实现但还没有
-         * 用户可见的授权入口，所以恒 null 是唯一诚实的取值」。那个入口
-         * 现在有了（设置页的「申请授权」→ `requestGrant` → `dh_send_grants`），
-         * 于是同一行代码从"诚实的默认"变成了"把已完成的功能挡在门外"：
-         * 用户点了授权、勾了白名单、把模式调成 auto，policy 仍判
-         * `grant_missing` —— 而没有任何东西解释为什么。
-         *
-         * 传 `get()` 的整行而不是 `requireValid()` 的结果：后者把"过期"
-         * 与"从未授权"都压成 null，而 policy 的 `evaluateGrant` 会用同一套
-         * 阈值把两者分成 `grant_expired` / `grant_missing`。区别对用户有意义
-         * —— 前者是「去续一下」，后者是「还没授过」。
+         * ★ 传 `get()` 的整行而不是 `requireValid()` 的结果：后者把"过期"与
+         * "从未授权"都压成 null，而 policy 会用同一套阈值把两者分成
+         * `grant_expired` / `grant_missing`。区别对用户有意义 —— 前者是
+         * 「去续一下」，后者是「还没授过」。
          */
-        grant: this.grantManager(db).get(conversationId),
-        dryRun: false,
-        workHours: limits.workHours,
-        rateLimit: limits.rateLimit,
+        grant: this.delivery().grants(db).get(conversationId),
       },
-      this.options.clock,
-    )
+    })
 
     /**
      * 先落 run。
      *
-     * ★ 顺序被外键锁死：`dh_drafts.run_id` 引用 `dh_agent_runs(id)`，
-     * 所以 run 必须先落，才能落草稿，才能发（守卫第 ② 层要按 draftId
-     * 重读库比对 contentHash）。第一版把 run 放在发送之后落，表现是
-     * `FOREIGN KEY constraint failed` —— 而 supervisor 会 catch 掉它，
-     * 于是整轮静默失败：没有 run、没有草稿、也没有发送。
-     *
-     * 代价是 `decision` 此刻还不知道发送结果，所以发完要回填一次
-     * （见下面的 `finalizeRunDecision`）。
+     * ★ 顺序被外键锁死：`dh_drafts.run_id` 引用 `dh_agent_runs(id)`，所以 run
+     * 必须先落，才能落草稿，才能发（守卫要按 draftId 重读库比对 contentHash）。
+     * 第一版把 run 放在发送之后落，表现是 `FOREIGN KEY constraint failed` ——
+     * 而 supervisor 会 catch 掉它，于是整轮静默失败。
      */
+    const decidedAsSend = decision.action === "send"
     runs.insertRun(
       {
         id: runId,
         conversationId,
-        triggerMessageId: effectiveTriggerId,
-        draftText,
-        confidence,
-        decision: error !== null ? "error" : verdict.decision,
-        /**
-         * ★ 未自动发送时必填：静默降级是最难调试的产品行为。
-         *
-         * 这里存的是 policy 的**枚举** reason（`agent_requires_review` 这类），
-         * 而判定层给的那句人话（`because[0]`）存进草稿的 `not_sent_reason`。
-         * 分开的理由：运行日志按枚举分组统计，而草稿卡要给用户看一句能读懂
-         * 的话。两处存同一个串会让其中一边必然是错的形态。
-         */
+        triggerMessageId: turn.trigger.messageId,
+        draftText: text,
+        confidence: UNEVALUATED_CONFIDENCE,
+        decision:
+          error !== null
+            ? "error"
+            : decidedAsSend
+              ? "auto_sent"
+              : decision.action === "drop"
+                ? "silent"
+                : "drafted",
         decisionReason:
           error !== null
             ? "generation_failed"
-            : (verdict.reason ?? (verdict.decision === "auto_sent" ? null : "unspecified")),
+            : (decision.primaryReason ?? (decidedAsSend ? null : "unspecified")),
+        failedConditions: [...decision.detail.failedConditions],
         /**
-         * 全部未通过的条件，不只是第一个。
+         * ★ `toolNames` 三态：`undefined` = 这条路不报告（落库存 null），
+         * `[]` = **结论**（确实没调工具，要存下来）。
          *
-         * `reason` 是 `reasons[0]` —— 用户看到"不在工作时间"会以为改个时间
-         * 就能发，而实际还差授权、还超了频率。一次看到全部才能判断
-         * "这功能现在到底能不能用"。
+         * 混成一个的话"agent 到底调了什么"只能靠推断 —— 而我推断错过一次
+         * （把"ACP 从未建立"当成"agent 不听话"）。
          */
-        failedConditions: verdict.failedConditions,
-        ...(toolNames === undefined ? {} : { toolNames }),
+        ...(proposal === null || proposal.provenance.toolNames === null
+          ? {}
+          : { toolNames: proposal.provenance.toolNames }),
         latencyMs: this.options.clock.now() - startedAt,
         /**
-         * ★ ACP 路的用量优先用它自己报的。
-         *
-         * 直连那个 LlmClient 的 `usage()` 只统计它自己 —— 走 ACP 时它恒为 0，
-         * 于是库里 `cost_tokens=0` 看起来像"没花钱"，而实际花在 opencode 进程里。
-         * `?? null` 而不是 `?? 0`：对端没报用量与真的没花是两件事。
-         *
-         * 直连那一路沿用 provider 取实例（reconfigure 后 usage 会随新实例归零，
-         * costTokens 显示可能重置，可接受）。
+         * ★ ACP 路的用量优先用它自己报的。直连那个 LlmClient 的 `usage()`
+         * 走 ACP 时恒为 0，于是库里 `cost_tokens=0` 看起来像"没花钱"，
+         * 而实际花在 opencode 进程里。`?? null` 而不是 `?? 0`：
+         * 对端没报用量与真的没花是两件事。
          */
-        costTokens: agentTokens ?? this.options.llmProvider.get()?.usage().totalTokens ?? null,
+        costTokens:
+          proposal?.provenance.totalTokens ??
+          this.options.llmProvider.get()?.usage().totalTokens ??
+          null,
         error,
       },
       startedAt,
     )
-    // run 行已在 → 落这一轮的 trace（外键要求它先在，见 pendingTraces）。
     this.flushTrace(db, conversationId, runId)
 
-    /**
-     * 模型调用期间用户可能已经在渠道里回复。
-     *
-     * ## ★ 这**只挡自动发，不再丢草稿**
-     *
-     * 曾经这里是 `finalizeRunDecision(silent)` + `return` —— 也就是把**已经
-     * 跑完、已经花了钱**的 agent 产出整个扔掉，用户永远看不到它。而"你已经
-     * 回过了"完全不意味着这条草稿没价值：你可能想补一句、想换个说法、
-     * 或者只是想看看它会怎么答。
-     *
-     * 现在的分工与同一个方法里的 `fresh` 闸一致（见下面那段）：
-     * · **不自动发** —— 发一条冗余消息是不可逆的社交后果，这一半必须留着；
-     * · **照样落草稿** + `notSentReason: "already_answered"` —— 留着零成本，
-     *   发不发由用户决定。
-     *
-     * 两件事之前被同一个判据绑在一起，于是"别自动发"顺手变成了"你也别想发"。
-     */
-    const replyToExternalId = trigger?.externalId ?? null
-    const alreadyAnswered = !runs.isReplyTurnOpen(
-      conversationId,
-      replyToExternalId,
-      this.options.clock.now() - READ_REPLY_EXPIRY_MS,
-    )
+    // 判定层说这一轮不必回（或没有正文）→ 不落草稿
+    if (decision.action === "drop" || text === null || text.trim() === "") {
+      this.emitSnapshot()
+      return
+    }
 
-    /**
-     * ★ 判定说能自动发 → **真的去发**，而不是只把结论记下来。
-     *
-     * `evaluatePolicy` 全过时返回 `decision: "auto_sent"`。曾经这个值被
-     * 原样写进 `dh_runs` 就结束了 —— `sendDraft` 的唯一调用者是用户在
-     * 草稿箱手点。那时因为 `grant` 恒 null，这个状态到不了，所以问题是
-     * 潜伏的；上面把授权接上之后它会立刻浮出来：
-     *
-     * `dh_runs.decision = 'auto_sent'`，而 `dh_send_attempts` 里没有对应行、
-     * 消息也没发出去。那比不发更坏 —— **审计表在说谎**，而 policy 的
-     * 频率限制读的正是那张表，于是限流也跟着失效。
-     */
-    let sendOutcome: { state: string; reason?: string } | null = null
-    /**
-     * ★ yolo 档：连 policy 之外那两关（已回过这轮 / 新鲜度）也放宽。
-     *
-     * 那两关不在 `evaluatePolicy` 里，所以 policy 的 yolo 旁路管不到它们 ——
-     * 漏了这一步的表现是"选了 yolo 还是在出草稿"（`not_fresh` /
-     * 已回过时不发），而那正是用户加这一档要摆脱的东西。
-     *
-     * 用 `config?.replyMode` 而不是看 `verdict`：verdict 只说"能发"，
-     * 说不出"用户要的是哪一档"。
-     */
-    const yolo = (config?.replyMode ?? "draft") === "yolo"
-    /**
-     * ★ `!alreadyAnswered` 是自动发的前置条件之一（见上面那段）：
-     * 你已经回过这轮时**不自动发**，但草稿照样落（走下面的 insertDraft）。
-     * yolo 时不受它限制。
-     */
-    if (
-      verdict.decision === "auto_sent" &&
-      (yolo || !alreadyAnswered) &&
-      draftText !== null &&
-      draftText.trim() !== ""
-    ) {
-      /**
-       * ★ 判定闸第三关：`fresh`，就在真发之前。
-       *
-       * 上面 `isReplyTurnOpen` 那一步只判得到「本人已回」（那是我们自己的
-       * SQL 能看出来的全部）。`fresh` 还判另外两条：
-       *
-       * · **有更新消息到达** —— 我们要回的那条已经不是最新的了；
-       * · **采集滞后超阈值** —— 库落后于平台（`sync_cursors.watermark` 与
-       *   `rules.json` 的 `policy.freshness.maxLagSeconds` 比，未知也算 stale）。
-       *
-       * 第三条尤其只能由它判：那个阈值在产物里，各写一遍会让"库落后时
-       * 照样发"这个失效悄悄回来。判定不可得（null）时**不发** ——
-       * 这是唯一直接挡在真发送前面的一关，读不懂输出就不该往下走。
-       *
-       * ★ yolo 跳过这一关（用户显式要"不过判定直接发"）。跳过的代价要说清：
-       * 可能回一条已经被后续消息盖过的话，或在库落后于平台时回。
-       */
-      const freshness = yolo ? null : await this.runFresh(db, conversationId, conversation, trigger)
-      if (!yolo && (freshness === null || freshness.stale)) {
-        const reason = freshness === null ? "freshness_unknown" : (freshness.reason ?? "stale")
-        runs.insertDraft(
-          {
-            id: randomUUID(),
-            runId,
-            conversationId,
-            replyToExternalId,
-            text: draftText,
-            citations: messageIds,
-            notSentReason: reason,
-          },
-          startedAt,
-        )
-        runs.finalizeRunDecision(runId, "drafted", "not_fresh")
-        this.emitSnapshot()
-        return
-      }
+    const replyToExternalId =
+      new MessageRepository(db).findById(turn.trigger.messageId)?.externalId ?? null
 
+    // ── ④ delivery ────────────────────────────────────────────────────
+    if (decidedAsSend) {
       /**
-       * 先落草稿再发：`SendGuard` 第 ② 层要按 draftId 重读库比对
-       * contentHash，所以那一行必须**先存在**。这也让"发失败了"
-       * 之后草稿仍留在箱里可以人工补发 —— 而不是凭空消失。
+       * 先落草稿再发：守卫要按 draftId 重读库比对 contentHash，所以那一行
+       * 必须**先存在**。这也让"发失败了"之后草稿仍留在箱里可以人工补发 ——
+       * 而不是凭空消失。
        */
       const autoDraftId = randomUUID()
       runs.insertDraft(
@@ -2541,98 +2166,176 @@ export class PersonaService {
           runId,
           conversationId,
           replyToExternalId,
-          text: draftText,
+          text,
           citations: messageIds,
           notSentReason: null,
         },
         startedAt,
       )
-      // ★ 标记正在发送：挡住并发 prune 把这条按数量上限裁成 expired
-      // （见 sendingDraftIds 的注释）。finally 里移除。
+      // ★ 挡住并发 prune 把这条按数量上限裁成 expired（见 sendingDraftIds）
       this.sendingDraftIds.add(autoDraftId)
+      let outcome: { state: string; reason?: string }
       try {
-        sendOutcome = await this.sendDraft(
+        outcome = await this.delivery().send(
           db,
-          {
-            id: autoDraftId,
-            conversationId,
-            text: draftText,
-            editedText: null,
-          },
+          { id: autoDraftId, conversationId, text, editedText: null },
           "agent_auto",
         )
       } finally {
         this.sendingDraftIds.delete(autoDraftId)
       }
-      /**
-       * 发成功 → 草稿标 `sent`（否则它会留在草稿箱里，用户会再发一次）。
-       * 发失败 → **留在 pending**，并把原因写进 `not_sent_reason`：
-       * 那时用户在草稿箱看到的是一条可以改一改再试的草稿，
-       * 而不是一条"以为发过了"的记录。
-       */
-      if (sendOutcome.state === "sent") {
+      if (outcome.state === "sent") {
         runs.resolveDraft(autoDraftId, "sent", this.options.clock.now())
       } else {
-        runs.saveDraftNotSentReason(autoDraftId, sendOutcome.reason ?? sendOutcome.state)
+        /**
+         * 发失败 → 草稿**留在 pending**，原因写进 `not_sent_reason`：那时
+         * 用户在草稿箱看到的是一条可以改一改再试的草稿，而不是一条
+         * "以为发过了"的记录。
+         *
+         * ★ 回填 run 的决策：只有**真的发出去了**才留着 `auto_sent`。
+         * 失败时改成 `drafted` 并带上渠道给的原因 —— 那是唯一能回答
+         * "为什么它判了能发却没发出去"的地方。
+         */
+        runs.saveDraftNotSentReason(autoDraftId, outcome.reason ?? outcome.state)
+        runs.finalizeRunDecision(runId, "drafted", `send_failed:${outcome.reason ?? outcome.state}`)
       }
-
-      /**
-       * ★ 回填真实结果。
-       *
-       * 只有**真的发出去了**才留着 `auto_sent`。失败时改成 `drafted`
-       * 并把渠道给的原因带上 —— 那是唯一能回答"为什么它判了能发
-       * 却没发出去"的地方。
-       */
-      if (sendOutcome.state !== "sent") {
-        runs.finalizeRunDecision(
-          runId,
-          "drafted",
-          `send_failed:${sendOutcome.reason ?? sendOutcome.state}`,
-        )
-      }
+      this.emitSnapshot()
+      return
     }
 
     /**
-     * 落草稿。
+     * 只出草稿。
      *
-     * ★ `sendOutcome !== null` 表示自动发送那条路已经落过一条了 ——
-     * 再落一条会让草稿箱里出现两条一模一样的，其中一条已经发出去了
-     * 而另一条等着用户点，于是同一句话很可能被发两次。
+     * `notSentReason` 优先给**判定层那句人话**（"risk class `commitment` —
+     * never settled by the owner alone"），退回 policy 的枚举 code。
+     * 用户看到前者能立刻判断该不该发，而 `agent_requires_review` 只是
+     * 告诉他"有个闸拦住了"。
      */
-    if (sendOutcome === null && draftText !== null && draftText.trim() !== "") {
-      runs.insertDraft(
-        {
-          id: randomUUID(),
-          runId,
-          conversationId,
-          replyToExternalId,
-          text: draftText,
-          citations: messageIds,
-          /**
-           * 为什么没自动发 —— 草稿箱里直接看得到。
-           *
-           * ★ 「你已经回过这轮」优先于其它原因：它是最容易让用户困惑的那个
-           * （"我明明开了自动发，怎么没发"），而且它**不是**一个需要修的问题
-           * —— 说清就够，草稿仍然可以手动发。
-           *
-           * ★ 判定层那句人话（`because[0]` / `check` 的 issue）优先于
-           * policy 的枚举 code：用户看到「risk class `commitment` —
-           * never settled by the owner alone」能立刻判断该不该发，
-           * 而 `agent_requires_review` 只是告诉他"有个闸拦住了"。
-           * 判定层没话说时（policy 自己拦的，比如不在工作时间）
-           * 才退回 `verdict.reason`。
-           */
-          notSentReason: alreadyAnswered
-            ? "already_answered"
-            : holdForReview
-              ? (reviewReason ?? "agent_requires_review")
-              : verdict.reason,
-        },
-        startedAt,
-      )
-    }
+    runs.insertDraft(
+      {
+        id: randomUUID(),
+        runId,
+        conversationId,
+        replyToExternalId,
+        text,
+        citations: messageIds,
+        notSentReason:
+          decision.detail.humanReason ?? decision.primaryReason ?? "agent_requires_review",
+      },
+      startedAt,
+    )
 
     this.emitSnapshot()
+  }
+
+  // ---------------------------------------------------------------
+  // 四个模块的装配。**每轮现造**而不是构造时建一次 —— 它们都要 db，
+  // 而 db 随登录挂/卸（见 attach/detach）。造它们只是拼几个引用，
+  // 比"持一个可能指向已关闭连接的实例"安全得多。
+  // ---------------------------------------------------------------
+
+  /** ① intake。 */
+  private assembler(db: SqliteDatabase): TurnAssembler {
+    return new TurnAssembler({
+      db,
+      clock: this.options.clock,
+      logger: this.options.logger.child("Intake"),
+      /**
+       * ★ 窗口口径必须与 `wake()` / supervisor 读的是**同一份值**。
+       * 不同源的话唤醒会排在窗口没满时跑 → 取到空批次 → 这批仍要等 8 秒
+       * 兜底，也就是唤醒白接了（而且看不出来）。
+       */
+      policy: {
+        ...(this.options.batchWindowMs === undefined
+          ? {}
+          : { batchWindowMs: this.options.batchWindowMs }),
+        ...(this.options.quietMs === undefined ? {} : { quietMs: this.options.quietMs }),
+        maxPromptImages: MAX_PROMPT_IMAGES,
+      },
+      ...(this.options.downloadMedia === undefined
+        ? {}
+        : { downloadMedia: this.options.downloadMedia }),
+    })
+  }
+
+  /** ② compose —— 唯一含 LLM 的一层。 */
+  private composer(): PersonaComposer {
+    return new PersonaComposer({
+      clock: this.options.clock,
+      logger: this.options.logger.child("Compose"),
+      llmProvider: this.options.llmProvider,
+      acp: this.acp,
+      memory: this.memory,
+      ...(this.options.getSelfNames === undefined
+        ? {}
+        : { getSelfNames: this.options.getSelfNames }),
+      ...(this.options.getModel === undefined ? {} : { getModel: this.options.getModel }),
+      /**
+       * `readGuidance` 留在 service：它读的是 forge 产物与 `AGENTS.md`，
+       * 而"产物落在哪"是接线层才知道的事（随 vault 变，见 attach）。
+       */
+      readGuidance: (cwd, opts) => this.readGuidance(cwd, opts),
+      workspaceFor: (conversationId) =>
+        join(this.requireDirs().workspaceRoot, "persona", conversationId),
+      db: () => this.requireDb(),
+    })
+  }
+
+  /** ③ guard —— 唯一决策点。 */
+  private guard(): PersonaGuard {
+    return new PersonaGuard({
+      clock: this.options.clock,
+      logger: this.options.logger.child("Guard"),
+    })
+  }
+
+  /** ④ delivery。 */
+  private delivery(): PersonaDelivery {
+    return new PersonaDelivery({
+      clock: this.options.clock,
+      logger: this.options.logger.child("Delivery"),
+      ...(this.options.cli === undefined ? {} : { cli: this.options.cli }),
+      ...(this.options.forceSendShortCircuit === undefined
+        ? {}
+        : { forceSendShortCircuit: this.options.forceSendShortCircuit }),
+      // 急停覆盖**所有**发送路径（手动那条不过 policy）
+      killSwitchActive: () => this.supervisor?.killSwitchActive ?? false,
+      ...(this.options.onSentMessage === undefined ? {} : { onSent: this.options.onSentMessage }),
+      onDowngrade: () => this.emitSnapshot(),
+    })
+  }
+
+  /**
+   * `brief` 的政策面 → guard 的 `GateVerdict`。
+   *
+   * ## ★★ 这里是"停止消费 forge 的政策判定"那件事的落点
+   *
+   * 曾经 host 直接拿 `brief.verdict`，然后为了对付 forge 硬写的
+   * `autonomy.scope = draft_only`，用 `isScopeOnlyDowngrade()` 去
+   * **匹配英文原文** `includes("autonomy scope is draft_only")` 把它顶回来。
+   * 上游改一个词，自动发送就静默全失效。
+   *
+   * 现在改为：把 forge 的**测量**（`classification` / `recipient` /
+   * `coverage`）喂给我们自己的 `evaluateGate`，由 `GuardPolicy` 出政策。
+   * scope 那条降级**在 TS 侧根本不存在**（授权由 `replyMode` 唯一表达），
+   * 所以不需要任何字符串匹配来抵消它。
+   *
+   * ## 过渡期：`brief.verdict` 保留但**不消费**
+   *
+   * forge 照常算它（我们不改 vendor），host 显式丢弃。留着它是为了做
+   * 对照验证。**丢弃是显式的** —— 默默不取会让下一个人以为它还生效。
+   */
+  private toGateVerdict(brief: BriefVerdict | null, replyMode: ReplyMode): GateVerdict | null {
+    if (brief === null) return null
+    // ★ 显式丢弃 forge 的政策判定。见方法头 —— 不是忘了取。
+    void brief.verdict
+    return evaluateGate({
+      classification: brief.classification,
+      recipient: brief.recipient,
+      coverage: brief.coverage,
+      advice: brief.advice,
+      policy: defaultGuardPolicy(replyMode),
+    })
   }
 
   /**
@@ -2784,99 +2487,6 @@ export class PersonaService {
    * 那时 transcript 里那条会标「（图片，未下载）」—— agent 知道有张图看不到，
    * 而这一轮照样出草稿。为了一张图让整轮生成失败是错的取舍。
    */
-  private async attachMedia(
-    db: SqliteDatabase,
-    context: readonly MessageRow[],
-  ): Promise<
-    (Omit<MessageRow, never> & {
-      media: readonly PromptMedia[]
-    })[]
-  > {
-    if (context.length === 0) return []
-
-    /** 先读一遍，看哪些消息挂了还没下载的图 —— 只为它们付下载的钱。 */
-    const read = (): Map<string, PromptMedia[]> => {
-      const placeholders = context.map(() => "?").join(",")
-      const rows = db
-        .prepare<
-          string[],
-          {
-            message_id: string
-            kind: string
-            path: string | null
-            mime: string | null
-            bytes: number | null
-            original_name: string | null
-          }
-        >(
-          `SELECT message_id, kind, path, mime, bytes, original_name
-             FROM media_assets WHERE message_id IN (${placeholders})`,
-        )
-        .all(...context.map((row) => row.id))
-      const byMessage = new Map<string, PromptMedia[]>()
-      for (const row of rows) {
-        const list = byMessage.get(row.message_id) ?? []
-        list.push({
-          kind: row.kind,
-          // ★ 真磁盘路径（**不**转 mycontext-file://）—— 这份要被 readFileSync 读
-          path: row.path,
-          mime: row.mime,
-          bytes: row.bytes,
-          originalName: row.original_name,
-        })
-        byMessage.set(row.message_id, list)
-      }
-      return byMessage
-    }
-
-    let mediaByMessage = read()
-
-    const download = this.options.downloadMedia
-    if (download !== undefined) {
-      /**
-       * 从新到旧挑出「有未下载的图」的消息，最多 `MAX_PROMPT_IMAGES` 条。
-       *
-       * 从新到旧与 `collectPromptImages` 的取图顺序一致 —— 不一致的话
-       * 会去下一批这一轮根本用不上的图。
-       */
-      const needs: string[] = []
-      for (
-        let index = context.length - 1;
-        index >= 0 && needs.length < MAX_PROMPT_IMAGES;
-        index -= 1
-      ) {
-        const row = context[index]
-        if (row === undefined) continue
-        const assets = mediaByMessage.get(row.id) ?? []
-        if (assets.some((asset) => asset.kind === "image" && asset.path === null)) {
-          needs.push(row.id)
-        }
-      }
-      if (needs.length > 0) {
-        const startedAt = this.options.clock.now()
-        try {
-          await download(needs)
-          // 下完重读一遍：`path` 现在应该有值了
-          mediaByMessage = read()
-        } catch (error) {
-          /**
-           * ★ 不抛。见方法头：为了一张图让整轮生成失败是错的取舍。
-           * 记 warn 而不是 debug —— "agent 看不到图"值得能被查到。
-           */
-          this.options.logger.warn("persona media download for prompt failed", {
-            detail: error instanceof Error ? error.message : String(error),
-            messages: needs.length,
-          })
-        }
-        this.options.logger.debug("persona media prepared for prompt", {
-          messages: needs.length,
-          ms: this.options.clock.now() - startedAt,
-        })
-      }
-    }
-
-    return context.map((row) => ({ ...row, media: mediaByMessage.get(row.id) ?? [] }))
-  }
 
   /**
    * 生成一条回复草稿。
@@ -2905,312 +2515,6 @@ export class PersonaService {
    *
    * 这里只补产物不可能知道的那一件事：本会话内用户刚刚的审核偏好。
    */
-  private async generateDraft(
-    conversationId: string,
-    context: readonly {
-      senderDisplayName: string | null
-      contentText: string | null
-      isSelf: boolean | null
-      /**
-       * 这条消息挂的媒体（**prompt 侧**的形状：`path` 是真磁盘路径）。
-       *
-       * 没有它的话 transcript 只能拿到渠道塞在正文里的
-       * `[图片消息](mediaId=…) 注意：如需下载使用dws…` —— 那既让 agent
-       * 看不到图，又用一句它执行不了的命令误导它。见
-       * `persona-media-prompt.ts` 的文件头。
-       */
-      media: readonly PromptMedia[]
-    }[],
-    trigger: { contentText: string | null } | null,
-    /**
-     * 判定闸算出来的理解。`null` = 判定不可得（缺 Python / 没蒸馏过 / 输出
-     * 读不懂），那时任务段退回"回最后一条"—— 见 `renderBriefTask`。
-     */
-    brief: BriefVerdict | null,
-    /**
-     * 会话的**平台** external id —— 记忆检索限本会话要用它（图谱按
-     * `conversation_id` 存的是这个）。空串 = 拿不到，那时不查记忆。
-     */
-    conversationExternalId: string,
-  ): Promise<{
-    text: string
-    confidence: number
-    /** 模型自己的刹车。**只能收紧**，见 `handleBatch` 里合成那一处。 */
-    holdForReview: boolean
-    reviewReason: string | null
-    /**
-     * 这一轮调过的工具名。`[]` = 确实没调；`undefined` = 这条路不报告
-     * （直连路的工具调用由 `recallCalls` 单独计，形状不同）。
-     */
-    toolNames?: readonly string[]
-    /** 这一轮的 token 用量；null = 对端没给（**不是** 0） */
-    totalTokens?: number | null
-  }> {
-    const client = this.options.llmProvider.get()
-    if (client === null) {
-      return {
-        text: "（未配置模型，需要人工撰写回复）",
-        // 置信度 0：policy 的置信度门槛会拦住它，绝不会被自动发出去
-        confidence: 0,
-        holdForReview: true,
-        reviewReason: "generation_unavailable",
-      }
-    }
-
-    const cwd = join(this.requireDirs().workspaceRoot, "persona", conversationId)
-    const reviewContext = this.renderReviewFeedback(conversationId)
-
-    /**
-     * ★ 图片：挑出能送的、读成 base64，并拿到 `[图片 N]` 的编号映射。
-     *
-     * 顺序上必须在 transcript **之前** —— transcript 要用它的 slot 编号
-     * 才能让文字里的 `[图片 1]` 与真正送出去的第一张图对上。
-     * 错位比不给更糟：模型会把 A 发的图当成 B 发的。
-     */
-    const { images, slotsByMessage } = collectPromptImages(context)
-    const transcript = renderTranscript(context, slotsByMessage)
-    if (images.length > 0) {
-      this.options.logger.info("persona prompt carries images", {
-        conversationId,
-        images: images.length,
-      })
-    }
-
-    /**
-     * ★ 检索工具：声明与执行器都来自 `persona-recall-tool.ts`（唯一一份）。
-     *
-     * 单独一个模块的理由不是整洁，而是**端到端脚本要探同一个东西**：
-     * 探针如果自己抄一份声明，产品里的声明改坏了它照样绿。
-     *
-     * 隔离的落点是执行器**闭包捕获 conversationId** —— 工具的 JSON Schema
-     * 里只有 `query`，模型连"换个会话"这个动作都表达不出来。
-     */
-    const db = this.requireDb()
-    const repos = { fts: new FtsIndexRepository(db), messages: new MessageRepository(db) }
-
-    /**
-     * ★ 先试 opencode（每会话一个 ACP session），起不来才退回 LlmClient 直连。
-     *
-     * ## 为什么 agent 优先
-     *
-     * 直连是"一次模型调用 + 一个写死的 FTS 工具"：agent 想查图谱查不了、
-     * 想多查一轮也不行。走 opencode 之后它拿到的是 workspace 里那一整套
-     * skill（`kl` 图谱查询 + 蒸馏出的画像与判定层），并且能自己决定
-     * 查几次、查什么 —— 那才是"conversation agent"这个说法的实际内容。
-     *
-     * ## 降级必须**明示**，且形状与直连一致
-     *
-     * 返回 null = 没起来 / 超时 / 0-token（见 PersonaAcp.turn 的注释）。
-     * 那时继续往下走直连那条路，产出形状完全一样（同一个信封解析、
-     * 同一套 holdForReview 语义）—— 于是"用哪条路"不改变下游任何判断。
-     *
-     * 静默降级是这个项目里反复出现的那类失效，所以两条路都记日志：
-     * 走通了记 `via: "acp"`，落回了记 `via: "llm"` + 原因。
-     */
-    /**
-     * ★ 两条路的 guidance 不同，所以提示词分别拼。
-     *
-     * 变的只有"参考件由谁提供"（见 `readGuidance` 的 `agentReadsSkills`）：
-     * ACP 路 agent 能自己读 `skills.paths`，直连路不能。**任务段
-     * （`renderBriefTask`）两条路完全相同** —— 它是本轮特有的事实，
-     * 与 agent 有没有 shell 无关，而两条路产出同一个信封形状是下游
-     * 全部判断的前提。
-     */
-    /**
-     * ★ 记忆：把对方提到的东西先查出来（见 persona-memory.ts 的文件头）。
-     *
-     * 查的是 `brief.answering.text`（折叠后的整串）而不是最后一条 —— 要认的词
-     * 可能出现在任何一条里，而 forge 已经把"这几条是一件事"判好了。
-     * `brief` 不可得时退回触发消息的正文：那时没有折叠，但词还是要查。
-     *
-     * 排除本人与**对方**的名字：`people.md` 已经按人给了语气，再解释一遍"对话的
-     * 这个人是谁"是噪声，还会挤掉真正不认识的那个词。
-     *
-     * ★ 对方的名字取 `answering.sender`（发这一串的人），不是
-     * `respondingTo.sender`（这一串在回谁的话 —— 那几乎总是本人）。
-     * 用错的那个等于把本人排除两遍、对方一次没排除。
-     *
-     * ★ 会话的 external id 是**必需**参数：记忆限本会话，见
-     * `graph-query.service.ts` 的 `factsInConversation`。取不到时（会话行还没
-     * 查到）传空串，那时 `lookup` 返回空 —— 宁可没有记忆，也不跨会话取。
-     */
-    const memory = this.memory.lookup(
-      brief?.answering?.text ?? trigger?.contentText ?? "",
-      [...(this.options.getSelfNames?.() ?? []), brief?.answering?.sender ?? ""],
-      conversationExternalId,
-    )
-    if (memory.length > 0) {
-      this.options.logger.info("persona recalled from the knowledge graph", {
-        conversationId,
-        terms: memory.map((hit) => hit.term),
-      })
-    }
-
-    const task = [
-      ...(reviewContext === "" ? [] : [reviewContext]),
-      `最近的对话：\n${transcript}`,
-      renderBriefTask(brief, trigger?.contentText ?? "", memory),
-    ]
-    const acpPrompt = [this.readGuidance(cwd, { agentReadsSkills: true }), ...task].join("\n\n")
-    const acpResult =
-      this.acp === null
-        ? null
-        : await this.acp.turn({
-            conversationId,
-            prompt: acpPrompt,
-            /**
-             * ★ 只在真有图时传 —— `exactOptionalPropertyTypes` 下
-             * `images: []` 与不传是两种类型，而空数组会让 prompt 数组
-             * 多出一次无意义的 map。
-             */
-            ...(images.length === 0 ? {} : { images }),
-          })
-
-    /**
-     * ★ `text` 为 null 但 `acpResult` 非 null = 起来了但 0-token。
-     *
-     * 那时**过程 items 仍然有价值**（`turn()` 刻意带回来了）：它是"为什么没
-     * 产出正文"的唯一线索。落库那一步在 `onTrace` 回调里已经做过，
-     * 这里只判要不要走直连那条路。
-     */
-    if (acpResult !== null && acpResult.text !== null) {
-      const viaAcp = extractDraftEnvelope(acpResult.text)
-      this.options.logger.info("persona draft generated", {
-        conversationId,
-        via: "acp",
-        length: viaAcp.text.length,
-        /**
-         * ★ 工具名与用量一起记。
-         *
-         * 这两个数长期是 null，于是"agent 到底调了什么"只能靠推断 —— 而我
-         * 推断错过一次（把"ACP 从未建立"当成"agent 不听话"）。`tools: []`
-         * 现在的语义是**确实没调**，而不是"没记录"。
-         */
-        tools: viaAcp.text === "" ? [] : acpResult.toolNames,
-        tokens: acpResult.totalTokens,
-      })
-      return {
-        text: viaAcp.text,
-        confidence: UNEVALUATED_CONFIDENCE,
-        holdForReview: viaAcp.holdForReview,
-        reviewReason: viaAcp.reviewReason,
-        toolNames: acpResult.toolNames,
-        totalTokens: acpResult.totalTokens,
-      }
-    }
-    if (this.acp !== null) {
-      /**
-       * ★ warn 而不是 info：ACP 声称可用（`this.acp !== null`）却 turn 出空 ——
-       * 那是**降级**，不是常态。带上具体降级原因（版本太老 / 起不来 / 0-token），
-       * 否则用户只看到"怎么都在出草稿不自动发"而查不到根因（实测踩过：
-       * 日志里只有一行 info「falling back」，没人知道是模型没配还是 opencode 版本问题）。
-       */
-      this.options.logger.warn("persona draft falling back to direct llm", {
-        conversationId,
-        reason: this.acp.degradedReason() ?? "acp_turn_empty",
-      })
-    }
-
-    let recallCalls = 0
-    const completion = await client.completeWithTools({
-      messages: [
-        // 直连路没有 skill 机制，参考件必须给全（见 readGuidance 的判据）
-        { role: "system", content: this.readGuidance(cwd, { agentReadsSkills: false }) },
-        /**
-         * 本会话内用户刚刚的审核偏好。
-         *
-         * 产物不可能知道它（那是这一个 session 里刚发生的事），所以这一段
-         * 由宿主补。刻意**只有这一段** —— 输出协议在产物里，见方法头。
-         * 空的时候整条 message 不发：一条只写着"（无）"的 system
-         * 会让模型以为这里本该有内容而它没读到。
-         */
-        ...(reviewContext === "" ? [] : [{ role: "system" as const, content: reviewContext }]),
-        {
-          // ★ 语料只进 user，永不拼进 system（与 map 阶段同一条安全性质）
-          //
-          // 任务段与 ACP 路**同一个** `renderBriefTask` —— 两条路看到的
-          // "要回什么"必须一致，否则降级会静默改变回复的依据。
-          role: "user",
-          content: `最近的对话：\n${transcript}\n\n${renderBriefTask(
-            brief,
-            trigger?.contentText ?? "",
-            memory,
-          )}`,
-          /**
-           * ★ 图**两条路都要给**。
-           *
-           * 不给的话会出现"agent 路能看图、降级路看不到" —— 而降级是常态
-           * （opencode 缺失 / 冷启动超时 / 0-token）。那种不一致最难查：
-           * 同一个会话同一张图，有时草稿提到了图里的内容、有时完全没提，
-           * 而两次的日志都是"生成成功"。
-           *
-           * 形状差异（ACP 用 `{type:"image",data}`、这里用
-           * `{type:"image_url",image_url:{url:"data:…"}}`）由各自那一层
-           * 转写 —— 见 `LlmMessage.images` 的注释。
-           */
-          ...(images.length === 0
-            ? {}
-            : {
-                images: images.map((image) => ({
-                  base64: image.base64,
-                  mimeType: image.mimeType,
-                })),
-              }),
-        },
-      ],
-      tools: [RECALL_TOOL],
-      execute: createRecallExecutor({
-        repos,
-        conversationId,
-        onCall: () => {
-          recallCalls += 1
-        },
-      }),
-      temperature: 0.4,
-      maxTokens: 400,
-      json: true,
-    })
-
-    if (recallCalls > 0) {
-      this.options.logger.info("persona recalled history", {
-        conversationId,
-        calls: recallCalls,
-        rounds: completion.rounds,
-      })
-    }
-
-    const extracted = extractDraftEnvelope(completion.text)
-    if (extracted.reviewReason === "agent_output_unstructured") {
-      /**
-       * 实测过一次：模型把 414 个字符的**思考过程**当成正文返回了
-       * （"根据对话历史和用户画像，我需要起草一条回复。让我分析一下：1. 用户是…"）。
-       * 那条草稿如果被发出去，收到的人会看到我们的提示词内容。
-       */
-      this.options.logger.warn("persona draft looked like reasoning; trimmed", {
-        conversationId,
-        originalLength: completion.text.length,
-        keptLength: extracted.text.length,
-      })
-    }
-
-    return {
-      text: extracted.text,
-      /**
-       * ★ 哨兵，不是分数。
-       *
-       * 原来给 `0.6` —— 一个"恰好低于 `MIN_CONFIDENCE` 0.75"的假值，
-       * 作用只是恒挡住自动发送。它有两个问题：看日志的人会以为模型
-       * 真的评估过并评了 0.6；接真发送时它会变成唯一的闸，那时只能
-       * 要么调高（凭空放行）要么删掉（少一道闸）。
-       *
-       * 现在显式表示"没评估过"，把关交给场景判定（确定性、可审计）。
-       * 见 `UNEVALUATED_CONFIDENCE` 的注释。
-       */
-      confidence: UNEVALUATED_CONFIDENCE,
-      holdForReview: extracted.holdForReview,
-      reviewReason: extracted.reviewReason,
-    }
-  }
 
   private rememberReview(
     conversationId: string,
@@ -3226,21 +2530,6 @@ export class PersonaService {
     const current = this.reviewFeedback.get(conversationId) ?? []
     const withoutDuplicate = current.filter((item) => item.draftId !== feedback.draftId)
     this.reviewFeedback.set(conversationId, [...withoutDuplicate, feedback].slice(-8))
-  }
-
-  private renderReviewFeedback(conversationId: string): string {
-    const feedback = this.reviewFeedback.get(conversationId) ?? []
-    if (feedback.length === 0) return ""
-    const lines = feedback.map((item) => {
-      const original = item.original.replace(/\s+/g, " ").trim().slice(0, 120)
-      if (item.action === "discarded") return `- 用户丢弃过草稿：${original}`
-      if (item.action === "edited") {
-        const finalText = (item.finalText ?? "").replace(/\s+/g, " ").trim().slice(0, 120)
-        return `- 用户把草稿「${original}」改成「${finalText}」后发送`
-      }
-      return `- 用户直接采用过草稿：${original}`
-    })
-    return ["当前 agent session 内的审核偏好（只用于本会话）：", ...lines].join("\n")
   }
 
   /**
@@ -3306,13 +2595,25 @@ export class PersonaService {
      *
      * ★ 判据只区分"能不能自取"，不区分"想不想省钱"：省 token 是结果，
      * 而正确性依据是"这条路上 agent 有没有别的途径拿到同一份内容"。
+     *
+     * ## ★★ `work.md` 必须在这个名单里
+     *
+     * 它是 work 层（LLM 抽的职责/任务/流程/规矩）唯一的产物。漏掉它的后果
+     * 不是报错，而是**整层白做**：文件写在磁盘上、每轮蒸馏照常付费抽取，
+     * 而回复时没有任何人读它 —— 这正是 LLM 那半当年被整个关掉的形态
+     * （见 `distill.service.ts` 文件头：产出没人读、成本照付、且不报错）。
+     *
+     * ★ ACP 路靠 `SKILL.md` 里那张文件索引表让 agent 知道有哪些参考件，
+     * 所以那边的登记在 `vendor/forge/templates/persona/SKILL.md`，
+     * 不在这里。两处**都要**，缺一处就有一条路读不到。
+     * `tests/unit/desktop/persona-guidance.test.ts` 同时断言这两处。
      */
     const forgeRefs =
       this.forgeSkillRoot === null ? null : join(this.forgeSkillRoot, PERSONA_SKILL_DIRNAME)
     if (forgeRefs !== null) {
       const rels = opts.agentReadsSkills
         ? ["SKILL.md"]
-        : ["references/style.md", "references/decisions.md", "SKILL.md"]
+        : ["references/style.md", "references/decisions.md", WORK_LAYER_SKILL_PATH, "SKILL.md"]
       for (const rel of rels) {
         const path = join(forgeRefs, rel)
         if (existsSync(path)) parts.push(readFileSync(path, "utf8"))
@@ -3364,7 +2665,7 @@ export class PersonaService {
      *
      * 曾经它只被写出来、没有任何人读 —— `render.ts` 的注释说 harness 的
      * `instructionFiles` 会加载它，那在走 opencode/ACP 的时代成立，而现在
-     * 这一层是自己拼 prompt（见 generateDraft），没有任何东西去扫 cwd。
+     * 这一层是自己拼 prompt（见 PersonaComposer.compose），没有任何东西去扫 cwd。
      * 后果是**用户在设置里写的额外指示完全失效**：落库了、进了 AGENTS.md、
      * 然后停在那里。那正是这个项目里反复出现的静默失效。
      *
@@ -3534,49 +2835,6 @@ export class PersonaService {
     return this.db
   }
 
-  /**
-   * 触发消息之后对方说的**最新**那条；没有就返回 null。
-   *
-   * ## ★ 判据与事后清理逐字一致
-   *
-   * 判据是「同会话 + `is_self = 0` + `sent_at >` 触发消息」。
-   *
-   * `is_self = 0` 是关键：本人自己发的新消息由 `expireAnsweredDrafts` 覆盖
-   * （语义是"本人已经自己回了"），混进来会让两条规则互相掩盖，而"哪条规则
-   * 生效了"决定了给用户看什么原因。
-   *
-   * ★ 已知缺口（review 指出，未修）：这里只筛 `is_self = 0`，**不看 @提及**，
-   * 而 `admit()` 在群聊的缺省 `mention` 模式下是要求被 @ 的。于是一个热闹的群里
-   * 可能改到一条没 @ 本人的消息上。另外新目标那条消息仍留在队列里，下一轮会被
-   * 再取一次 —— 也就是可能重复起草。两者都该修，但牵动准入判据，值得单独一轮。
-   *
-   * 用 `sent_at` 而不是入库时间：判的是"对方在那之后说了话"，而入库时间受
-   * 采集时机影响 —— 回填一段历史会让每一条都看起来"更新"。
-   *
-   * 返回**整行**而不是布尔：调用方要把触发点改到它身上（见那里的注释），
-   * 只回答"有没有"的话还得再查一次，而两次查询之间库可能又变了。
-   *
-   * ★ 直接查库、`ORDER BY sent_at DESC LIMIT 1`，而不是在 `recentInConversation(30)`
-   * 的结果里筛：那个窗口是给**起草上下文**用的固定条数，一个刷屏的群里
-   * 30 条可能全是别人的对话，于是真正更新的那条落在窗口外 —— 判据就变成
-   * "最近 30 条里有没有"，而它想问的是"库里有没有"。
-   */
-  private latestInboundAfter(
-    db: SqliteDatabase,
-    conversationId: string,
-    sentAt: number,
-  ): MessageRow | null {
-    const row = db
-      .prepare<[string, number], { id: string }>(
-        `SELECT id FROM messages
-          WHERE conversation_id = ? AND is_self = 0 AND sent_at > ?
-          ORDER BY sent_at DESC LIMIT 1`,
-      )
-      .get(conversationId, sentAt)
-    if (row === undefined) return null
-    return new MessageRepository(db).findById(row.id)
-  }
-
   /** 推快照给渲染层（新消息提醒与草稿数都靠它）。 */
   private emitSnapshot(): void {
     const window = this.options.getWindow()
@@ -3710,192 +2968,6 @@ export class PersonaService {
 }
 
 /**
- * 判定层为什么不放行 —— 一句给**用户**看的话。
- *
- * ## ★ 为什么优先用 `because[0]` 而不是一个枚举
- *
- * `persona.py` 的 `decide_action` 把命中的每一条规则原文放进 `because`
- * （"risk class `commitment` — never settled by the owner alone"、
- * "band S — most conservative handling"）。那正是用户判断"这条该不该发"
- * 需要的信息，而 `agent_requires_review` 只告诉他"有个闸拦住了"。
- *
- * `null`（判定不可得）与拿不到 because 的情况分成两个不同的串：
- * 前者是**可操作的**（装个 Python / 先蒸一次），后者是"判定层说了不行
- * 但没说为什么"—— 那时报一个可操作的下一步是在骗他。
- */
-function briefReviewReason(brief: { verdict: string; because: string[] } | null): string {
-  if (brief === null) return "review_gate_unavailable"
-  const first = brief.because[0]
-  // 160 字与 `reviewReason` 同一个上限：草稿卡上那一行放得下的长度
-  if (first !== undefined && first.trim() !== "") return first.trim().slice(0, 160)
-  return `gate_${brief.verdict}`
-}
-
-/**
- * 起草任务段：把判定闸算好的**理解**写成提示词。
- *
- * ## ★ 为什么这一段必须由 `brief` 驱动
- *
- * 原来这里是一行字：`请起草对最后一条（<单条正文>）的回复。`
- * 而它与 `brief` 刚算完的东西是矛盾的 —— forge 侧按
- * `rules.json → policy.burst` 把对方连发的几条折成**一个单位**，判定也是在
- * 整串上做的（"合同金额签一下 / 今天就要 / 谢谢"，只看最后一条会读成
- * "谢谢"）。提示词却只放最后一条，于是判定与起草看的**不是同一个东西**。
- *
- * 实测后果：一个活跃会话连续九轮，草稿全是一两个字的应声词 —— 语气全对
- * （`style.md` 通过 guidance 进了 system），但每一条都只是对最后一句的条件
- * 反射。同期 `tool_calls_json` 全为 null：agent 手上有整个 skill 包、
- * `SKILL.md` 里加粗写着"Step 1 跑 brief"，它一次没调。
- *
- * 这正是 forge 自己写下的那条判断 ——「A weaker model given five reference
- * files will skip the live context… **orchestration belongs in a script**」。
- * 所以不靠指导 agent 去读，而是宿主把结论摆进提示词。
- *
- * ## 只放**本轮特有**的事实
- *
- * 静态画像（长度/气泡/标记/tone band）已经由 `readGuidance` 把 `style.md`
- * 原文拼进 system 了。这里再放一份 `styleTargets` 是同一批数字的第二个副本
- * —— 模型会同时读到两份，而冲突时无从判断。所以这一段只放 guidance
- * **不可能知道**的四样：整串、指向、真实先例、可查证的词。
- *
- * ## `null` 时退回原来的行为
- *
- * 判定不可得（缺 Python / 没蒸馏过 / 输出读不懂）时不能假装有理解。
- * 那时退回"回最后一条"，与改动前一致 —— 降级要可见且行为已知，
- * 而不是产出一个空的引用块。
- */
-export function renderBriefTask(
-  brief: BriefVerdict | null,
-  triggerText: string,
-  memory: readonly MemoryHit[] = [],
-): string {
-  if (brief === null || brief.answering === null) {
-    return `请起草对最后一条（${triggerText}）的回复。`
-  }
-
-  const { text, messageCount } = brief.answering
-  const lines: string[] = []
-
-  if (messageCount > 1) {
-    // 条数要说出来：模型据此判断"这是一件事还是几件事"，而这决定回几条。
-    // 多少条回复算像本人是 `style.md` 里的 multiBubblePct，不在这里重复。
-    lines.push(
-      `对方连发了 ${String(messageCount)} 条，这些**合起来**是你要回的一个整体：`,
-      text,
-      "",
-      "其中可能有多个需要回答的点。**每个需要回答的都要回到**，不要只回最后一句。",
-    )
-  } else {
-    lines.push("你要回的是：", text)
-  }
-
-  if (brief.respondingTo !== null) {
-    lines.push("", `这是在回你（${brief.respondingTo.sender}）之前说的：${brief.respondingTo.text}`)
-  }
-
-  if (brief.precedents.length > 0) {
-    lines.push("", "他以前在类似情境下对**这个人**的真实回复（照这个感觉写，不要照抄）：")
-    for (const item of brief.precedents.slice(0, PROMPT_PRECEDENT_LIMIT)) {
-      const given = item.given.replace(/\n/g, " / ").slice(0, PROMPT_PRECEDENT_CONTEXT)
-      lines.push(`- 当时对方说「${given}」，他回「${item.theyReplied}」`)
-    }
-  }
-
-  /**
-   * ★ 记忆：对方提到的东西，图谱里查到的事实。
-   *
-   * 放在先例**之后**、防编造之前 —— 顺序是刻意的：先例决定"怎么说"，
-   * 记忆决定"说什么"，而防编造那句约束的是记忆**之外**的一切。
-   *
-   * 只放够置信的（见 `PersonaMemory.MIN_CONFIDENCE`）。写明"这是你知道的事"
-   * 而不是"资料显示"：这些是本人自己聊天记录里的事实，用第三人称的口气
-   * 引用会让模型把它们当外部资料，从而在回复里解释来源 —— 而本人不会
-   * 对自己的狗解释"根据记录"。
-   */
-  if (memory.length > 0) {
-    lines.push("", "你已经知道的事（对方提到的东西，来自你自己的聊天记录）：")
-    for (const hit of memory) {
-      lines.push(`- ${hit.term}：${hit.facts.join("；")}`)
-    }
-    lines.push("直接把这些当已知的事用，不要说「根据记录」或解释你是怎么知道的。")
-  }
-
-  /**
-   * ★ 防编造这一条**无条件**给，且不列具体词。
-   *
-   * 曾经这里会写「这些说法在他的历史记录里查得到：<terms>」。而 forge 给的 term
-   * 是滑窗切出来的 n-gram 碎片，不是主题词 —— 无分词语言里那些碎片往往是
-   * 半个词组。于是那一行的实际内容对模型零信息，还会稀释紧跟其后的「不要编」，
-   * 而后者是这一段唯一真正重要的指令。
-   *
-   * 语料里查得到什么由 `facts` 命令回答（agent 手上有），不该由一串碎片
-   * 冒充。所以只留下约束本身。
-   */
-  lines.push(
-    "",
-    "涉及具体事实（时间、数字、谁负责、什么状态）的，**没把握就不要写** —— " +
-      "说一句稍后确认，比编一个具体的错答案好。",
-  )
-
-  lines.push("", "请起草回复。")
-  return lines.join("\n")
-}
-
-/** 提示词里放几条先例。够示范语气，又不至于挤掉对话本身。 */
-const PROMPT_PRECEDENT_LIMIT = 4
-
-/** 单条先例的上下文截断长度。先例的重点是**他回了什么**，不是当时的全文。 */
-const PROMPT_PRECEDENT_CONTEXT = 80
-
-/**
- * brief 的降级理由**只**是 `autonomy.scope = draft_only` 那一条吗？
- *
- * ## 为什么这条要单独识别
- *
- * `forge.service.ts:427` 硬写 `autonomy.scope = "draft_only"`，于是
- * `persona.py brief`（`vendor/forge/templates/persona/scripts/persona.py:251`）
- * 每次都追加同一句 downgrade。表现是**每一条 run 都 `agent_requires_review`**
- * —— 而其他 policy 条件（模式、工作时间、场景、频率…）都已过。
- * 这条 gate 对**用了自动发送的用户**永远不可达，正是所谓"永远不可达的 gate"。
- *
- * 语义上它问"用户有没有授权自动发送"—— 而 host 侧有更清晰的入口
- * （`replyMode === "auto"`，白名单那道门已删）。所以这一条 downgrade 由 host 顶掉；
- * 但**别的**降级理由（risk class、band、ownership …）是 forge 的独立判定，
- * host 不越权。
- *
- * ## 匹配的是原文
- *
- * `persona.py:251` 里的措辞在整个 forge 里唯一，`grep` 过：只这一处会写这句。
- * 用 `includes` 而不是 `startsWith` —— brief 的 `because[0]` 可能带前缀
- * （测量类默认那一行会先出来），但只要**任何一条**是这句，且**没有别的**
- * downgrade 原因，就算作"scope-only"。
- *
- * ★ 反面：如果 because 里同时有别的 downgrade（"risk class `commitment`" 等），
- * 这个函数返回 false —— 那时 forge 挡它有独立理由，host 不该放行。
- */
-export function isScopeOnlyDowngrade(
-  brief: { verdict: string; because: string[] } | null,
-): boolean {
-  if (brief === null) return false
-  if (brief.verdict !== "draft") return false
-  const SCOPE_LINE = "autonomy scope is draft_only"
-  const downgrades = brief.because.filter((line) => {
-    // "measured default for `X` is answer/reply" / "measured default for … is draft"
-    // —— 那一行是**分类记录**（"我们量出这类问题的默认动作是啥"），不是 downgrade。
-    // downgrade 由 `downgrade()` 追加，全部都是**否定式**（"is disabled" / "cannot" /
-    // "is always the owner's call" / "recipient not resolved" 等）。
-    // 分类记录以 "measured default" / "ask kind not in the measured table" 开头，
-    // 排掉这两个即可。见 persona.py:200-210。
-    const trimmed = line.trim()
-    if (trimmed.startsWith("measured default")) return false
-    if (trimmed.startsWith("ask kind not in the measured table")) return false
-    return true
-  })
-  if (downgrades.length === 0) return false
-  return downgrades.every((line) => line.includes(SCOPE_LINE))
-}
-
-/**
  * `ChatItem` → 传输/落库形态（`PersonaTraceItem`）。
  *
  * 唯一的实质转换是 `content` 数组 → `contentJson` 字符串：传输层与存储层
@@ -3916,5 +2988,41 @@ function toTraceItem(item: ChatItem): PersonaTraceItem {
     toolStatus: item.toolStatus ?? null,
     turnId: item.turnId ?? null,
     createdAt: item.createdAt,
+  }
+}
+
+/**
+ * `brief` 的**测量面** → compose 的 `TurnUnderstanding`。
+ *
+ * ## ★ 这个函数就是"forge 只管生成内容"那条边界的另一半
+ *
+ * `toGateVerdict` 把 forge 的测量喂给我们自己的政策层；这个函数把**同一次**
+ * `brief` 调用的理解字段喂给生成层。两者共用一次子进程 —— 于是"判定看到的"
+ * 与"模型看到的"永远是同一批事实。
+ *
+ * 一次调用两处消费是刻意的：各调一次会让两边看到不同时刻的会话状态，
+ * 而那种不一致的表现是"判定说该回 A，草稿回的是 B"。
+ *
+ * `null`（判定不可得）时 compose 的任务段退回"回最后一条" —— 降级可见
+ * 且行为已知，而不是产出一个空的引用块。
+ */
+function briefUnderstanding(brief: BriefVerdict | null): TurnUnderstanding | null {
+  if (brief === null) return null
+  return {
+    answering: brief.answering,
+    respondingTo: brief.respondingTo,
+    precedents: brief.precedents,
+    /**
+     * ★ `factLeads` 暂时给空数组。
+     *
+     * `brief` 的 payload 里有它，但它的用途是"跑 `facts` 命令去查证" ——
+     * 而那条路（agent 自己调 `facts`）在嵌入模式下由宿主的记忆检索替代
+     * （见 `persona-memory.ts` 的文件头）。给一个我们不消费的字段会让
+     * 下一个人以为它接上了。要接的话应当显式加一条查证步骤，而不是
+     * 让这个字段悄悄躺在契约里。
+     */
+    factLeads: [],
+    clarifyOptions: brief.clarifyOptions,
+    context: brief.context,
   }
 }

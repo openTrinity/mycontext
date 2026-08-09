@@ -36,10 +36,16 @@
  * 而 `persona.py send` 会去调它自己的 dws 客户端，绕过全部四层。
  * vault 源为此声明了 `CAPS.send = false`，这里与它同一个口径。
  */
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { Logger } from "@mycontext/kernel"
 import type { ProcessRunner, ResolvedPython } from "@mycontext/runtime-env"
+import type {
+  ForgeAdvice,
+  MessageClassification,
+  RecipientTraits,
+  TraitCoverage,
+} from "@mycontext/persona"
 
 /**
  * forge 发布的 persona 包在 workspace 里的目录名。
@@ -49,6 +55,25 @@ import type { ProcessRunner, ResolvedPython } from "@mycontext/runtime-env"
  * 会如实返回 false（而不是让子进程去报一个 Python 的 FileNotFoundError）。
  */
 export const PERSONA_SKILL_DIRNAME = "persona-persona"
+
+/**
+ * work 层产物在 persona 包里的相对路径。
+ *
+ * ## ★ 为什么这个常量在这里，而不在 `forge.service.ts`
+ *
+ * 它有**三个**消费者，分属不装配在一起的三处：
+ *
+ * · `forge.service.ts` —— 写进 forge 配置的 `externalSkillFiles`（让 publish
+ *   的 `_prune` 不把它当残留删掉）；
+ * · `startup.ts` —— 落盘时拼路径；
+ * · `persona.service.ts` —— 直连路的参考件白名单（漏了整层白做）。
+ *
+ * 放在 `persona-gate.ts` 是因为它已经持有同族的 `PERSONA_SKILL_DIRNAME`，
+ * 且**不 import 任何 service** —— 让 `persona.service` 去 import
+ * `forge.service` 只为拿一个字符串常量，会把"回复"与"蒸馏"这两条本该独立的
+ * 链路绑成依赖，而它们互相 import 迟早成环。
+ */
+export const WORK_LAYER_SKILL_PATH = "references/work.md"
 
 /**
  * 单次判定的超时。
@@ -123,6 +148,26 @@ export interface BriefVerdict {
    * 也是唯一能让草稿从"套语气"变成"像那个人在回这件事"的输入。
    */
   precedents: Array<{ given: string; theyReplied: string }>
+  /**
+   * ★★ 以下是 forge 的**测量面** —— 新架构里 guard 据此自己出政策判定。
+   *
+   * 这几个字段一直在 `brief` 的 payload 里（`classification` / `recipient` /
+   * `coverage`），而 host 从来只取了 `verdict` + `because`（政策产物）。
+   * 于是"该不该自己回"这件事的权威在 forge 那边，而 forge 的政策里混着
+   * 与蒸馏无关的硬编码规则（`signals.json` 的 `alwaysDraftKinds`）。
+   *
+   * 取到它们之后 host 就能"只要测量、自己定政策" ——
+   * 见 `docs/persona-architecture.md` 第 4 节。
+   */
+  classification: MessageClassification
+  recipient: RecipientTraits
+  coverage: TraitCoverage
+  /** forge 给的**建议**默认动作（不是判定 —— 见 `ForgeAdvice` 的注释）。 */
+  advice: ForgeAdvice
+  /** 本人自己问澄清问题的原话。空数组是**结论**（没这个习惯），不是缺省。 */
+  clarifyOptions: string[]
+  /** 这一轮读到的上下文有多新。`corpus` + degraded = **不是当前的**。 */
+  context: { source: "live" | "hostStore" | "corpus" | "none"; degraded: boolean }
 }
 
 /** `check` 的判定：草稿正文本身的机械复核。 */
@@ -130,6 +175,25 @@ export interface CheckVerdict {
   verdict: "block" | "warn" | "pass"
   /** 命中的问题（`block` 时用来解释为什么被挡） */
   issues: string[]
+  /**
+   * 草稿正文本身命中的风险类，与正文长度。
+   *
+   * ## ★ 为什么要把这两个**结构化**带出来（而不只是 `issues` 那几句话）
+   *
+   * `check` 的角色在新架构里从**政策闸**变成了**对草稿正文的测量**
+   * （见 `docs/persona-architecture.md` 4.5）。也就是说：它回答"这段正文里
+   * 有什么"，由 guard 决定"那意味着什么"。
+   *
+   * 只带 `issues`（人话）的话 guard 只能去**匹配英文句子**来判断命中了哪一类
+   * —— 而那正是 `isScopeOnlyDowngrade` 当年干的事，也正是这次要消灭的形态。
+   *
+   * 取不到时 `riskTags: []` + `codepoints: 0`：那时 guard 仍有 `issues` 与
+   * `verdict` 可用（`block` 一律要人看），只是少了一条更精确的原因。
+   */
+  riskTags: string[]
+  codepoints: number
+  /** 每条问题的结构化形态（`kind` / `severity` / `detail`）。 */
+  problems: { kind: string; severity: string; detail: string }[]
 }
 
 /**
@@ -256,6 +320,138 @@ export class PersonaGate implements PersonaGateLike {
       answering: answeringOf(payload["answering"]),
       respondingTo: respondingToOf(payload["respondingTo"]),
       precedents: precedentsOf(payload["precedents"]),
+      // ★ 测量面。这几组一直在 payload 里而 host 从来没取过 —— 见 BriefVerdict。
+      classification: classificationOf(payload["classification"]),
+      recipient: recipientOf(payload["recipient"]),
+      /**
+       * ★★ `coverage` 与 `advice` 从 `rules.json` 读，**不是**从 brief 的 payload。
+       *
+       * 实测（真跑 `persona.py brief`，见下）：payload 里**没有** `policy` /
+       * `bands` / `coverage` 三个键 —— 它们在 `references/rules.json` 里，
+       * 而 brief 只发布 `classification` / `recipient` / `styleTargets` 那几组。
+       *
+       * ```
+       * KEYS: answering because burst clarifyOption classification context
+       *       conversation factLeads mayAutoSend nextSteps precedents
+       *       recipient respondingTo rulesVersion styleTargets verdict
+       * coverage = null      ← 不在 payload 里
+       * ```
+       *
+       * 从 payload 读的后果不报错：`adviceOf` 会拿到空表 → `defaultAction`
+       * 退回 `"draft"` → **一切都只出草稿**。方向是安全的，但那是一次静默的
+       * 能力丢失（测量出来的 `byAskKind` 永远用不上），而外观与"这些消息本来
+       * 就该人工"完全一样 —— 正是这个仓库里最贵的那类 bug。
+       */
+      coverage: this.readCoverage(skillDir),
+      advice: this.readAdvice(skillDir),
+      clarifyOptions: stringList(payload["clarifyOption"]),
+      context: contextOf(payload["context"]),
+    }
+  }
+
+  /**
+   * `rules.json` 的 `coverage` 段。读不出来时**每一项都算判不了**（fail closed）。
+   *
+   * 与 `available()` 读同一个文件 —— 那个方法已经确认过它存在，所以这里
+   * 读失败是"文件坏了/形状变了"，而不是"还没蒸馏过"。两者都该保守处理。
+   */
+  private readCoverage(skillDir: string): TraitCoverage {
+    const rules = this.readRules(skillDir)
+    if (rules === null) {
+      return {
+        askKinds: false,
+        riskTags: false,
+        replyShapes: false,
+        unavailable: "rules.json unreadable",
+      }
+    }
+    const raw = (rules["coverage"] ?? {}) as Record<string, unknown>
+    /**
+     * ★★ 判据是「**只有 `undefined` 才算有能力**，其余一切 falsy 都算判不了」
+     * —— 与 Python 的 `if not coverage.get(k, True)` 逐字对齐。
+     *
+     * 曾经写的是 `!== false`，那与 Python 有一处实测出来的分歧：
+     * `replyShapes: null`（或 `0` / `""`）时 **Python 降级、TS 不降级**。
+     * 而 `rules.json` 自己发布的 `coverage._comment` 写着「False means this
+     * build cannot judge that layer. Every false here must make the consumer
+     * MORE conservative.」—— 一个 `null` 表达的是同一件事。
+     *
+     * "老产物没有这一段"那个理由由 `=== undefined` 单独满足就够了；
+     * 把宽容度扩到全部 falsy 才是那处分歧的来源。
+     */
+    const capable = (key: string): boolean => (raw[key] === undefined ? true : Boolean(raw[key]))
+    return {
+      askKinds: capable("askKinds"),
+      riskTags: capable("riskTags"),
+      replyShapes: capable("replyShapes"),
+      unavailable: typeof rules["_unavailable"] === "string" ? rules["_unavailable"] : null,
+    }
+  }
+
+  /** `rules.json` 的 `policy` / `bands` 段 —— forge 的**建议**，不是判定。 */
+  private readAdvice(skillDir: string): ForgeAdvice {
+    const rules = this.readRules(skillDir)
+    const policy = ((rules?.["policy"] ?? {}) as Record<string, unknown>) ?? {}
+    const byAskKind: Record<string, string> = {}
+    const rawBy = policy["byAskKind"]
+    if (typeof rawBy === "object" && rawBy !== null) {
+      for (const [key, item] of Object.entries(rawBy as Record<string, unknown>)) {
+        if (typeof item === "string") byAskKind[key] = item
+      }
+    }
+    const bands: Record<string, { autoAnswer: string }> = {}
+    const rawBands = rules?.["bands"]
+    if (typeof rawBands === "object" && rawBands !== null) {
+      for (const [key, item] of Object.entries(rawBands as Record<string, unknown>)) {
+        const auto = (item as { autoAnswer?: unknown } | null)?.autoAnswer
+        if (typeof auto === "string") bands[key] = { autoAnswer: auto }
+      }
+    }
+    return {
+      byAskKind,
+      /**
+       * ★ 缺省 `"draft"` —— 与 forge 的 `policy.defaultAction` 缺省一致。
+       * 读不到时一律出草稿是安全的那一侧，且 `because` 会写明
+       * "ask kind not in the measured table"，所以它可见。
+       */
+      defaultAction:
+        typeof policy["defaultAction"] === "string" ? policy["defaultAction"] : "draft",
+      thinAskKinds: Array.isArray(policy["thinAskKinds"])
+        ? policy["thinAskKinds"].filter((item): item is string => typeof item === "string")
+        : [],
+      /**
+       * ★★ 产物**发布的** `alwaysDraftKinds` 也要读进来。
+       *
+       * 政策的真源在 host（`GuardPolicy.alwaysReviewAskKinds`），但产物可能
+       * 发布一份**更长**的名单。只用 host 那份的话，那些多出来的类型会被
+       * 静默忽略 —— 而它们是"永远该人工"的类型，忽略的方向是危险的那一侧。
+       *
+       * 所以两份取**并集**（见 `guard.ts` 第 ④ 条）：host 的政策是下界，
+       * 产物只能让它更严，不能更松。
+       */
+      alwaysDraftKinds: Array.isArray(policy["alwaysDraftKinds"])
+        ? policy["alwaysDraftKinds"].filter((item): item is string => typeof item === "string")
+        : [],
+      bands,
+    }
+  }
+
+  /**
+   * 读 `references/rules.json`。**每次读**而不是缓存。
+   *
+   * 蒸馏会覆盖这个文件，而缓存的代价是"重新蒸馏之后仍然用旧规则判"——
+   * 那正是 `profileGeneration` 那一整套机制要解决的问题（见 supervisor）。
+   * 一次读盘（几十 KB）比一个可能过期的缓存便宜。
+   */
+  private readRules(skillDir: string): Record<string, unknown> | null {
+    try {
+      const raw = readFileSync(join(skillDir, "references", "rules.json"), "utf8")
+      const parsed: unknown = JSON.parse(raw)
+      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null
+    } catch {
+      return null
     }
   }
 
@@ -292,20 +488,40 @@ export class PersonaGate implements PersonaGateLike {
      * 取 `detail` 那一段给用户看。`issues` 同上：留给将来的改名。
      */
     const problems = payload["problems"]
+    const structured = Array.isArray(problems)
+      ? problems.flatMap((item) => {
+          if (typeof item !== "object" || item === null) return []
+          const row = item as { kind?: unknown; severity?: unknown; detail?: unknown }
+          return [
+            {
+              kind: typeof row.kind === "string" ? row.kind : "",
+              severity: typeof row.severity === "string" ? row.severity : "",
+              detail: typeof row.detail === "string" ? row.detail : "",
+            },
+          ]
+        })
+      : []
     const issues = Array.isArray(problems)
-      ? problems
-          .map((item) =>
-            typeof item === "object" &&
-            item !== null &&
-            typeof (item as { detail?: unknown }).detail === "string"
-              ? (item as { detail: string }).detail
-              : typeof item === "string"
-                ? item
-                : "",
-          )
-          .filter((detail) => detail !== "")
+      ? structured.map((item) => item.detail).filter((detail) => detail !== "")
       : stringList(payload["issues"])
-    return { verdict, issues }
+    /**
+     * ★ `risk_in_draft` 那条问题的 `detail` 里带着风险类名，但**不解析它** ——
+     * 解析英文句子就是 `isScopeOnlyDowngrade` 那个形态。改为读 `check` 自己
+     * 报的字段；产物当前不单独发布 `riskTags`，所以从 `kind` 判断有没有命中，
+     * 具体类名留在 `detail` 里给人看。
+     *
+     * 这样 guard 拿到的是**结构**（"命中了风险类"这个事实），
+     * 而不是一句要靠字符串匹配去理解的话。
+     */
+    const riskTags = structured
+      .filter((item) => item.kind === "risk_in_draft")
+      .map((item) => item.detail)
+    const rawCodepoints = payload["codepoints"]
+    const codepoints =
+      typeof rawCodepoints === "number" && Number.isFinite(rawCodepoints)
+        ? rawCodepoints
+        : [...text].length
+    return { verdict, issues, riskTags, codepoints, problems: structured }
   }
 
   /**
@@ -474,4 +690,123 @@ function precedentsOf(value: unknown): BriefVerdict["precedents"] {
     out.push({ given: str(item, "given"), theyReplied: replied })
   }
   return out
+}
+
+/**
+ * `classification` —— 这一条消息**是什么**（纯测量）。
+ *
+ * ## ★★ 这个函数里每一个默认值都是安全判断，不是"兜底"
+ *
+ * 三个字段的缺省方向必须分开看：
+ *
+ * · `genuineAsk` / `chitchat` 缺失 → `null`（**判不了**），不是 false。
+ *   forge 自己的口径也是这个（`classify` 的注释：every "cannot tell" is
+ *   reported as null, never as a negative）。给 false 会让"这个 build 没有
+ *   客套词表"变成"这条确实不是客套"—— 一个我们没有依据的断言。
+ *
+ * · `riskTags` 缺失 → `[]`。这看起来像"没有风险"，但它是安全的，
+ *   **因为紧跟着的 `riskDetectable` 会是 false**，而 guard 见到 false 就
+ *   降级（"no risk lexicon in this build, so risk cannot be ruled out"）。
+ *   两个字段必须一起读 —— 这正是下面那条的意义。
+ *
+ * · `riskDetectable` / `askKindDetectable` 缺失 → **`false`**。
+ *   这是整个文件里最要紧的一行：它们是"这个 build 判不判得了"的元数据，
+ *   而 `false` 让 guard 更保守。给 `true`（"乐观默认"）会让**上游改了字段名**
+ *   变成"风险检测恒通过" —— 也就是该拦的一条都不拦，而外观与一切正常完全一样。
+ */
+function classificationOf(value: unknown): MessageClassification {
+  const row = (value ?? {}) as Record<string, unknown>
+  const tri = (key: string): boolean | null => {
+    const raw = row[key]
+    return typeof raw === "boolean" ? raw : null
+  }
+  const askKind = typeof row["askKind"] === "string" ? row["askKind"] : null
+  /**
+   * ★★ `riskTags` 形状不对时**不能**静默压成 `[]`。
+   *
+   * 压成空数组在**字段缺失**时是安全的（那时 `riskDetectable` 必然是 false，
+   * 而 guard 见到它就走第 ⑦ 条降级）。但在**类型不对**时不安全：上游哪天把
+   * `"commitment"` 从数组改成标量，而 `riskDetectable` 仍然正确地是 `true` ——
+   * 那时 TS 得到"零个风险类"**且**没有第 ⑦ 条降级，于是判 reply，
+   * 而 Python 侧会逐元素降级。也就是**该拦的一条都不拦**。
+   *
+   * 所以：形状读不懂时连带把 `riskDetectable` 打成 false（"这个 build 的
+   * 风险判定不可信"），让 guard 走那条降级。数组里混进非字符串同理。
+   */
+  const rawTags = row["riskTags"]
+  const tagsWellFormed =
+    rawTags === undefined ||
+    (Array.isArray(rawTags) && rawTags.every((item) => typeof item === "string"))
+  const riskTags = Array.isArray(rawTags)
+    ? rawTags.filter((item): item is string => typeof item === "string")
+    : []
+  return {
+    genuineAsk: tri("genuineAsk"),
+    chitchat: tri("chitchat"),
+    askKind: askKind === "" ? null : askKind,
+    riskTags,
+    // ★ 缺失一律 false（fail closed）—— 见函数头第三条。
+    //   形状读不懂时也是 false —— 见上面 `tagsWellFormed`。
+    riskDetectable: row["riskDetectable"] === true && tagsWellFormed,
+    askKindDetectable: row["askKindDetectable"] === true,
+  }
+}
+
+/**
+ * `recipient` —— 收件人的**观察结果**（不是授权）。
+ *
+ * ★ `resolved` 缺失 → false（"没按 id 认出来"），而 guard 对未认出的收件人
+ * 一律降级。`toneBand` 缺失 → null，而 `evaluateGate` 把 null 当 `"S"`
+ * （最保守那一档）—— 与 Python 侧 `person.get("toneBand") or "S"` 逐字一致。
+ */
+function recipientOf(value: unknown): RecipientTraits {
+  const row = (value ?? {}) as Record<string, unknown>
+  const band = typeof row["toneBand"] === "string" ? row["toneBand"] : null
+  return {
+    resolved: row["resolved"] === true,
+    toneBand: band === "" ? null : band,
+    sensitive: row["sensitive"] === true,
+  }
+}
+
+/**
+ * 上下文有多新。
+ *
+ * ★ `source` 认不出时给 `"none"` 而不是 `"live"`：把一个读不懂的来源当成
+ * "实时读"，正是"corpus 冒充当前"那类失效（forge 的 `cmd_context` 注释：
+ * "current" and "all I have" must never look alike）。
+ *
+ * ## ★★ `degraded` 是**字符串**，不是布尔（真跑过才发现）
+ *
+ * 实测 `persona.py brief` 的输出：
+ *
+ * ```json
+ * "context": { "source": "corpus",
+ *              "degraded": "no live read available",
+ *              "warning": "NOT current — nothing after unknown is here." }
+ * ```
+ *
+ * 写成 `degraded === true` 的话这一句会被读成 `false` —— 也就是把
+ * **"这不是当前的上下文"当成"是当前的"**。方向正好是危险的那一侧：
+ * 拿几小时前的语料当实时读，然后以本人身份回一条已经过时的话。
+ *
+ * 所以判据是「有没有这个字段且非空」：产物只在真降级时写它
+ * （`_context_payload` 里那几处），不降级时整个键不出现。
+ */
+function contextOf(value: unknown): BriefVerdict["context"] {
+  const row = (value ?? {}) as Record<string, unknown>
+  const raw = row["source"]
+  const source =
+    raw === "live" || raw === "hostStore" || raw === "corpus" || raw === "none" ? raw : "none"
+  const degradedRaw = row["degraded"]
+  const degraded =
+    degradedRaw === true || (typeof degradedRaw === "string" && degradedRaw.trim() !== "")
+  return {
+    source,
+    /**
+     * ★ `corpus` 本身就意味着"不是当前的"，即使产物没写 degraded。
+     * 那个来源的定义就是"我只有语料库"，而语料库永远落后于平台。
+     */
+    degraded: degraded || source === "corpus" || source === "none",
+  }
 }
