@@ -131,6 +131,56 @@ export interface FeedServiceOptions {
 /** 图谱同步的默认周期。见 options 注释。 */
 const GRAPH_SYNC_INTERVAL_MS = 10 * 60_000
 
+/** `autoBuild` 快照需要的那几个 getter（`FeedServiceOptions["autoBuild"]` 的非空形态）。 */
+type AutoBuildHooks = NonNullable<FeedServiceOptions["autoBuild"]>
+
+/**
+ * 把 `autoBuild` 的几个 getter + 建图水位拼成 `decideAutoBuild` 的输入。
+ *
+ * ## ★★ 为什么是导出的纯函数而不是留在 attach 里的闭包
+ *
+ * 这里是**设置项到判据之间唯一的一段接线**：用户在设置里改「建图最小间隔」，
+ * 值经 `data-plane` → `startup.ts` 的 `minIntervalMs` getter 走到这里，
+ * 再进 `decideAutoBuild`。判据本身锁得很细（`auto-build-min-interval.test.ts`
+ * 九条），但**这一段**原来没有任何断言 —— 反证时发现：把
+ * `...(minIntervalMs === undefined ? {} : { minIntervalMs })` 整行删掉，
+ * 1023 条测试里一条都不红。
+ *
+ * 那种断线是静默的最坏形态：判据仍然正确、设置仍然存得进库、界面仍然显示
+ * 用户选的值，只是**那个值再也到不了判据**，于是永远用缺省 1h。
+ * 用户把它调成 6h，建图照旧每小时跑一次，而没有任何地方说过谎 ——
+ * 只是没有人把话传过去。
+ *
+ * 提成纯函数之后这段接线可以直接断言（与 `buildIngestRequestBody` 同一个
+ * 理由：那次也是"测试替身只看参数，于是 body 拼错了没人发现"）。
+ *
+ * ★ `minIntervalMs` 用**省略**而不是传 `undefined`：`decideAutoBuild` 里是
+ * `input.minIntervalMs ?? AUTO_BUILD_MIN_INTERVAL_MS`，两者行为相同，
+ * 但省略能让"没配过"与"配了个 undefined"在快照里长得不一样。
+ */
+export function buildAutoBuildSnapshot(
+  hooks: AutoBuildHooks,
+  mark: { seq: number; at: number | null },
+): {
+  lastBuiltSeq: number
+  lastBuiltAt: number | null
+  graphExists: boolean
+  enabled: boolean
+  ready: boolean
+  minIntervalMs?: number
+} {
+  // 现读：设置里改完下一轮生效（见 options 里的注释）
+  const minIntervalMs = hooks.minIntervalMs?.()
+  return {
+    lastBuiltSeq: mark.seq,
+    lastBuiltAt: mark.at,
+    graphExists: hooks.graphExists(),
+    enabled: hooks.enabled(),
+    ready: hooks.ready(),
+    ...(minIntervalMs === undefined ? {} : { minIntervalMs }),
+  }
+}
+
 export class FeedService {
   private server: FeedServer | null = null
   private db: SqliteDatabase | null = null
@@ -207,19 +257,11 @@ export class FeedService {
       ...(auto === undefined
         ? {}
         : {
-            autoBuild: () => {
-              const mark = this.graphSync?.buildWatermark() ?? { seq: 0, at: null }
-              const minIntervalMs = auto.minIntervalMs?.()
-              return {
-                lastBuiltSeq: mark.seq,
-                lastBuiltAt: mark.at,
-                graphExists: auto.graphExists(),
-                enabled: auto.enabled(),
-                ready: auto.ready(),
-                // 现读：设置里改完下一轮生效（见 options 里的注释）
-                ...(minIntervalMs === undefined ? {} : { minIntervalMs }),
-              }
-            },
+            autoBuild: () =>
+              buildAutoBuildSnapshot(
+                auto,
+                this.graphSync?.buildWatermark() ?? { seq: 0, at: null },
+              ),
             triggerIngest: async () => {
               const started = await auto.trigger()
               return started
