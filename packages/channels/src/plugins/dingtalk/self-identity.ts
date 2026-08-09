@@ -178,6 +178,97 @@ function toCandidateArray(payload: unknown): SearchCandidate[] {
 }
 
 /**
+ * 「拿不到 `get-self` 时，从授权态里取本人身份」的注入点。
+ *
+ * 返回 null = 也拿不到（未授权 / 字段缺失），那时 `resolveSelf` 才抛。
+ *
+ * ★ 为什么是注入而不是在这里直接调 `auth status`：这个模块只拿到 `cli`，
+ * 而解析授权态是 `DingTalkAuth` 的职责（它还管 profile 钉住与状态归类）。
+ * 让身份模块自己再解析一遍等于把那段逻辑抄第二份。
+ */
+export type AuthIdentityFallback = () => Promise<{
+  userId: string
+  userName: string | null
+  corpId: string | null
+  corpName: string | null
+} | null>
+
+/**
+ * 读本人档案：先 `get-self`，失败退到授权态。
+ *
+ * ★ 两者的字段形状不同，所以统一压成 `flattenSelfPayload` 的产物形态
+ * （`userId` / `orgUserName` / `corpId` / `corpName`），让下游一视同仁。
+ *
+ * ★ `get-self` 仍然**优先**：它可能带 `openDingTalkId` 与花名，
+ * 而授权态只有 userId 与真名。退路是为了"总比整条链断掉好"，
+ * 不是为了省一次调用。
+ */
+async function readSelfProfile(
+  cli: Pick<DwsCli, "json">,
+  channelId: string,
+  authIdentity: AuthIdentityFallback | undefined,
+): Promise<GetSelfPayload> {
+  try {
+    return flattenSelfPayload(
+      await cli.json<unknown>(["contact", "user", "get-self"], { establishingIdentity: true }),
+    )
+  } catch (error) {
+    if (authIdentity === undefined) throw error
+    const fromAuth = await authIdentity()
+    /**
+     * 退路也拿不到 → 把**原来那个错**抛出去，而不是换成一句
+     * "无法获取本人 userId"。前者带着服务端的真实原因
+     * （`ENTERPRISE_NOT_AUTHORIZED` → "请在设置里换一份客户端"），
+     * 后者会把用户引向"是不是我名字有问题"。
+     */
+    if (fromAuth === null) throw error
+    return {
+      userId: fromAuth.userId,
+      orgUserName: fromAuth.userName,
+      corpId: fromAuth.corpId,
+      corpName: fromAuth.corpName,
+      // ★ 刻意不造 openDingTalkId：授权态里没有它，编一个会让下游
+      //   以为拿到了真值。缺它时后面两条兜底路会去推断（那才是对的）。
+    }
+  }
+}
+
+/**
+ * 跑 `contact user search`；**失败不抛，返回空数组**。
+ *
+ * ## ★★ 为什么只吞异常，而**不是**"路 2 有结论就跳过"
+ *
+ * 我第一版写成"`inferred !== null` 就直接 return []"，理由是"已经有答案了，
+ * 何必冒没权限的风险"。那是错的，而现有测试当场驳回了它：
+ * search 与单聊交集是**两条独立判据**，两者一致才采用、冲突就抛错
+ * （见文件头 §5 与 `resolveSelf` 里的交叉校验）。跳过 search 等于把
+ * 那道交叉校验废掉 —— 而它防的是"把别人的消息当本人语料"，
+ * 那种污染是不可逆的。
+ *
+ * 所以正确做法是**照常调**，只把"调不通"与"调通了但没结论"合并处理：
+ *
+ * · 有权限 → 照旧交叉校验（安全性不变）；
+ * · 没权限（实测 `contact/search_contact_by_key_word` 报
+ *   `ENTERPRISE_NOT_AUTHORIZED`）→ 视作"这条路没结论"，
+ *   让下游用 `inferred` 兜底，而不是让整条链断掉。
+ *
+ * ★ search 是三条路里最不可靠的一条（靠姓名当检索词），
+ * 它挂掉不该比它不存在更糟。
+ */
+async function searchCandidatesOrEmpty(
+  cli: Pick<DwsCli, "json">,
+  orgName: string,
+): Promise<unknown> {
+  try {
+    return await cli.json<unknown>(["contact", "user", "search", "--query", orgName], {
+      establishingIdentity: true,
+    })
+  } catch {
+    return []
+  }
+}
+
+/**
  * 解析本人身份。
  *
  * ## 三条路，按可靠性排序（详见文件头 §5）
@@ -194,7 +285,7 @@ function toCandidateArray(payload: unknown): SearchCandidate[] {
 export async function resolveSelf(
   cli: Pick<DwsCli, "json">,
   channelId = "dingtalk",
-  options: { inferFromMessages?: InferSelfFromMessages } = {},
+  options: { inferFromMessages?: InferSelfFromMessages; authIdentity?: AuthIdentityFallback } = {},
 ): Promise<ResolvedSelfIdentity> {
   /**
    * ★ 必须压平：真实形状是数组 + orgEmployeeModel 嵌套（见文件头 §4）。
@@ -203,10 +294,27 @@ export async function resolveSelf(
    * 本身，所以要显式解除 `DwsCli` 那道"必须先有身份"的前置（见 cli.ts 里
    * 那段注释）。不传的话「用这个身份」/首次授权后的自动确认会被自己的
    * 守卫拦掉，而上层 catch 把异常吞掉 —— 表现是"点了没反应"。
+   *
+   * ## ★★ `get-self` 失败**不再是致命的** —— 这是一次实测过的死锁
+   *
+   * 实测（用户日志 2026-08-09）：随包那份客户端对某企业的 `contact` 域没开通，
+   * `contact/get_current_user_profile` 报 `ENTERPRISE_NOT_AUTHORIZED`。
+   * 而它原本是**硬前置**（抛出即整个函数结束），于是：
+   *
+   *     点「用这个身份」→ resolveSelf → get-self 被服务端拒
+   *       → 抛错 → 后面两条兜底路（单聊交集 / search）一条都到不了
+   *       → 身份行永远写不成 → 引导页那两句提示永远不消失
+   *
+   * ★ 关键是**这一步要的东西 `auth status` 已经有了**：
+   * 它返回 `user_id` / `user_name` / `corp_id` / `corp_name`，
+   * 而那条命令走的是 auth 域（不需要 contact 权限）——
+   * 实测同一份客户端、同一个企业，`auth status` 正常返回。
+   *
+   * 也就是说我们为了拿一个已经在手边的值，去调了一个可能没权限的接口，
+   * 并且让它的失败终止了整条链。所以现在：`get-self` 失败 → 退到
+   * `authIdentity()`，拿不到才抛。
    */
-  const self = flattenSelfPayload(
-    await cli.json<unknown>(["contact", "user", "get-self"], { establishingIdentity: true }),
-  )
+  const self = await readSelfProfile(cli, channelId, options.authIdentity)
   const userId = str(self.userId, self.user_id)
   if (userId === null) {
     throw new AppError("SELF_IDENTITY_AMBIGUOUS", "无法从渠道获取本人 userId", {
@@ -271,9 +379,7 @@ export async function resolveSelf(
 
   const candidates = toCandidateArray(
     // 同 get-self：这是"确定我是谁"的一部分（见那里的注释）
-    await cli.json<unknown>(["contact", "user", "search", "--query", orgName], {
-      establishingIdentity: true,
-    }),
+    await searchCandidatesOrEmpty(cli, orgName),
   )
 
   // ★ 只按 userId 精确匹配。姓名相同的候选实测有 6 个。

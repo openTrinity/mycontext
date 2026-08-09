@@ -24,6 +24,7 @@ export function createDingTalkPlugin(options: DingTalkAuthOptions): ChannelPlugi
     processes: options.processes,
     logger: options.logger,
   })
+  const auth = new DingTalkAuth(options)
 
   return {
     meta: {
@@ -40,9 +41,28 @@ export function createDingTalkPlugin(options: DingTalkAuthOptions): ChannelPlugi
       sendAs: ["self"],
       domains: ["chat", "contact", "doc", "minutes"],
     },
-    auth: new DingTalkAuth(options),
+    auth,
     ingest: createDingTalkIngest(cli),
-    identity: createDingTalkIdentity(cli),
+    /**
+     * ★ 给身份解析一条**授权态退路**。
+     *
+     * `contact user get-self` 需要 contact 域权限，而实测有客户端对某些企业
+     * 没开通它（`ENTERPRISE_NOT_AUTHORIZED`）—— 那时它原本会让整条身份链
+     * 断掉，「用这个身份」永远成不了。
+     *
+     * 而 `auth status` 走 auth 域、本来就返回 `user_id`/`user_name`，
+     * 也就是我们要的东西已经在手边。完整的 why 见 `resolveSelf` 的注释。
+     */
+    identity: createDingTalkIdentity(cli, async () => {
+      const status = await auth.status()
+      if (status.state !== "authorized") return null
+      return {
+        userId: status.userId,
+        userName: status.userName,
+        corpId: status.corpId,
+        corpName: status.corpName,
+      }
+    }),
     minutes: createDingTalkMinutes(cli),
     /**
      * 文档（知识库 wiki + 钉盘最近访问）。

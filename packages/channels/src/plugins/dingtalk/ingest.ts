@@ -23,7 +23,7 @@ import type {
 import type { DwsCli } from "./cli.js"
 import { formatDwsLocalTime, normalizeUnix } from "./time.js"
 import { parseMessageListPage } from "./message-parse.js"
-import { resolveSelf } from "./self-identity.js"
+import { resolveSelf, type AuthIdentityFallback } from "./self-identity.js"
 
 interface UnreadConversationPayload {
   openConversationId?: unknown
@@ -243,13 +243,23 @@ export function createDingTalkIngest(cli: Pick<DwsCli, "json">): ChannelIngest {
   }
 }
 
-export function createDingTalkIdentity(cli: Pick<DwsCli, "json">): ChannelIdentity {
+/**
+ * @param authIdentity 「`get-self` 拿不到时从授权态取本人身份」的退路。
+ *   不给 = 老行为（`get-self` 失败即整条链失败）。
+ *   ★ 强烈建议给：实测有客户端对 `contact` 域没开通权限，而那时
+ *   `auth status` 里本来就有 `user_id`（见 `resolveSelf` 的注释）。
+ */
+export function createDingTalkIdentity(
+  cli: Pick<DwsCli, "json">,
+  authIdentity?: AuthIdentityFallback,
+): ChannelIdentity {
   return {
     resolveSelf: (options) =>
       resolveSelf(cli, "dingtalk", {
         ...(options?.inferFromMessages === undefined
           ? {}
           : { inferFromMessages: options.inferFromMessages }),
+        ...(authIdentity === undefined ? {} : { authIdentity }),
       }),
   }
 }
