@@ -31,6 +31,54 @@ import {
 } from "react"
 import { cn } from "../lib/cn.js"
 
+/**
+ * 浮层到视口边缘的最小间距。
+ *
+ * ★ 有它是因为触发器可能本身就贴着窗口边（渠道选择器在右上角，
+ * 实测离右缘只剩 ~8px）—— 那时按 `align` 严格对齐会让浮层看起来被切掉。
+ */
+const VIEWPORT_MARGIN = 8
+
+/** 浮层下限（见 `menuMinWidth`）。 */
+const MENU_MIN_WIDTH = 140
+
+/** 浮层的偏好宽度上限（见 `menuMaxWidth`）。 */
+const MENU_PREFERRED_WIDTH = 280
+
+/**
+ * 浮层的**实际**宽度（用于把它夹进视口）。
+ *
+ * ★ 与下面 style 里的 `minWidth` / `maxWidth` **同源**：三处各算一遍
+ * 迟早分叉，而分叉的表现是"夹的位置不对、仍然溢出一点"。
+ *
+ * 取 `min(maxWidth, max(minWidth, 触发器宽))` —— 也就是浮层在没有内容
+ * 撑宽时的稳定宽度。内容更宽时由 `maxWidth` 兜住，而那个值本身已经
+ * 减过视口留边，所以不会溢出。
+ */
+function menuWidth(rect: { triggerWidth: number }): number {
+  return Math.min(menuMaxWidth(rect), menuMinWidth(rect))
+}
+
+/**
+ * 下限：不窄于触发器，且至少放得下一行短文本。
+ *
+ * 140px 是给"图标 + 两字渠道名 + 勾选标记"留的 —— 再窄会让它们挤在一起。
+ */
+function menuMinWidth(rect: { triggerWidth: number }): number {
+  return Math.max(rect.triggerWidth, MENU_MIN_WIDTH)
+}
+
+/**
+ * 上限：不超过 280px，也不超过视口留边。
+ *
+ * ★ 有上限是因为 `fixed` 定位让包含块变成**视口**（而不是父容器），
+ * 于是长文本（邮箱、组织名）不再换行、菜单能横向撑到大半个窗口 ——
+ * 实测账号菜单发生过这个。
+ */
+function menuMaxWidth(rect: { triggerWidth: number }): number {
+  return Math.min(Math.max(rect.triggerWidth, MENU_PREFERRED_WIDTH), window.innerWidth - 24)
+}
+
 export interface DropdownMenuProps {
   /** 触发器。收到 props 后要自己渲染成可聚焦元素 */
   trigger: (props: {
@@ -219,7 +267,40 @@ export function DropdownMenu({
                 { visibility: "hidden" }
               : {
                   top: rect.top,
-                  ...(align === "start" ? { left: rect.left } : { right: rect.right }),
+                  /**
+                   * ★★★ 对齐之后还要**夹进视口** —— 否则宽于触发器的菜单会溢出。
+                   *
+                   * ## 这一条修的是"picker 被截断"
+                   *
+                   * 三个使用点（渠道 picker / 账号菜单 / Select）**全都是
+                   * `align="start"`**，也就是菜单左边缘对齐触发器左缘。而菜单
+                   * 通常比触发器宽（`minWidth` 至少 140px，渠道 picker 的触发器
+                   * 只有 ~90px）——于是它向**右**多出去几十像素。
+                   *
+                   * 仪表盘那个 picker 在页头右上角、离窗口右缘只剩十几像素，
+                   * 于是多出去的部分直接跑到窗口外，视觉上就是"被切了一刀"
+                   * （用户截图）。
+                   *
+                   * ★ 我第一版只给 `left`/`right` 的**起点**加了 `Math.max`，
+                   * 那是错的：`align="start"` 走的是 `left` 分支，而问题在
+                   * **右边缘**溢出 —— 起点本来就够靠左，夹它不解决任何事。
+                   * （而 `align="end"` 那个分支压根没有使用点。）
+                   *
+                   * 正确的判据是"菜单的**右边缘**不能超过视口右缘减留边"，
+                   * 超了就把它整体左移。这对其余两个使用点是无害的：
+                   * 侧栏账号菜单与 Select 都在左侧/中部，`Math.min` 不生效。
+                   */
+                  ...(align === "start"
+                    ? {
+                        left: Math.max(
+                          VIEWPORT_MARGIN,
+                          Math.min(
+                            rect.left,
+                            window.innerWidth - VIEWPORT_MARGIN - menuWidth(rect),
+                          ),
+                        ),
+                      }
+                    : { right: Math.max(rect.right, VIEWPORT_MARGIN) }),
                   // side=top：把自己整体上移一个身高，从而贴在触发器上方
                   transform: side === "top" ? "translateY(calc(-100% - 4px))" : undefined,
                   marginTop: side === "top" ? undefined : 4,
@@ -228,10 +309,7 @@ export function DropdownMenu({
                    * 并且不超过视口留边 —— 于是长文本回到换行，而窄触发器
                    * （如一个图标按钮）也不会得到一个 40px 的菜单。
                    */
-                  maxWidth: Math.min(
-                    Math.max(rect.triggerWidth, 280),
-                    window.innerWidth - 24,
-                  ),
+                  maxWidth: menuMaxWidth(rect),
                   /**
                    * ★★ 最小宽度**跟着触发器**，而不是恒定 220px。
                    *
@@ -248,7 +326,7 @@ export function DropdownMenu({
                    * 140px 这个下限是给"图标 + 两字渠道名 + 勾选标记"留的：
                    * 再窄会让「钉钉」和右侧的勾挤在一起。
                    */
-                  minWidth: Math.max(rect.triggerWidth, 140),
+                  minWidth: menuMinWidth(rect),
                 }
           }
           className={cn(
