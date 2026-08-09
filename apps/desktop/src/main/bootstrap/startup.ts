@@ -362,6 +362,23 @@ export function bootstrapApp(mainDir: string): AppContext {
         const r = runtimeConfig.resolved()
         return r.klBaseUrl.trim() !== "" && r.klApiKey.trim() !== ""
       },
+      /**
+       * ★ 两次建图之间至少隔多久（默认 1h，设置里可配 15min–6h）。
+       *
+       * **现读**而不是启动时取值：用户在设置页改完应当下一轮就生效。
+       * 传静态值的话改完得重启，而"改了没反应"会被当成功能坏了 ——
+       * 与上面 `RuntimeEnv` 那两个 getter 同一个理由。
+       *
+       * ★ 只管**自动**触发：手动点建图按钮走 `rebuildGraph()`，不经过这里。
+       * 挡住一次明确的点击就是"点了没反应"，那比多跑一次建图糟得多。
+       */
+      /**
+       * ★ 返回类型**必须显式写**（与下面 `buildSchedule` 同一个理由）：
+       * 这个闭包引用 `dataPlane`，而 `dataPlane` 的构造又引用 `feed` ——
+       * 不标注的话 tsc 判定循环推断（TS7022/7023），报的位置还在别处
+       * （`feed`/`dataPlane` 的声明行），很难看出根因在这一行。
+       */
+      minIntervalMs: (): number => dataPlane.intervals().graphBuildMinIntervalMs,
       ready: () => {
         const status = klServer.status()
         // building 中不再触发（rebuildGraph 自己也会挡，这里省一次无效调用）
@@ -1269,22 +1286,36 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     if (dataFlowsAllowed) persona.start()
     search.attach(handle.db, agentDirs)
-    if (dataFlowsAllowed) {
-      await dataPlane
-        .attach(handle.db, vp.database, {
+    /**
+     * ★★ 数据面**总是** attach，但没身份时**不起定时器与长连接**。
+     *
+     * 这两件事的前置条件不同（见 `DataPlaneService.attach` 的注释）：
+     * 挂库是"解析身份"的前置（`resolveSelf` 要写身份行、要拿库里的单聊
+     * 做交集判据），而拉数据必须等到有身份之后。
+     *
+     * 整个跳过 attach 的后果（实测，用户日志）：点「用这个身份」时
+     * `resolveSelf()` 抛「尚未登录，无法解析身份」——**挂库是获得身份的前置，
+     * 而我把它挡在了"要先有身份"后面**。那是这道闸造成的第二个死锁。
+     */
+    await dataPlane
+      .attach(
+        handle.db,
+        vp.database,
+        {
           dataRoot: vp.root,
           exportRoot: vp.exportRoot,
           klRoot: vp.klRoot,
           handoffFile: vp.handoffFile,
+        },
+        { pollingEnabled: dataFlowsAllowed },
+      )
+      .catch((error: unknown) => {
+        // 数据面挂载失败不该阻止登录：用户仍能用设置页与授权，
+        // 状态页会显示 lastError。把它变成"登录失败"才是过度反应。
+        logger.error("data plane attach failed", {
+          detail: error instanceof Error ? error.message : String(error),
         })
-        .catch((error: unknown) => {
-          // 数据面挂载失败不该阻止登录：用户仍能用设置页与授权，
-          // 状态页会显示 lastError。把它变成"登录失败"才是过度反应。
-          logger.error("data plane attach failed", {
-            detail: error instanceof Error ? error.message : String(error),
-          })
-        })
-    }
+      })
   }
 
   /**

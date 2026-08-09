@@ -32,6 +32,7 @@ import {
   type IngestSnapshot,
   type SelfIdentityView,
 } from "@mycontext/ipc-contract"
+import { AUTO_BUILD_MIN_INTERVAL_MS } from "@mycontext/knowledge-feed"
 import { IngestService } from "./ingest.service.js"
 import type { FeedDirs, FeedService } from "./feed.service.js"
 
@@ -79,6 +80,15 @@ interface IngestIntervals {
   minutesMs?: number
   documentsMs?: number
   activeScanMs?: number
+  /**
+   * 建图最小间隔。**与上面几项不同：它不是"多久跑一次"，而是"至少隔多久"**
+   * —— 完整的 why 见契约里 `graphBuildMinIntervalMs` 的注释。
+   *
+   * ★ 它也不由 `IngestService` 消费（那是采集），而是被自动建图的判据
+   * （`auto-build.ts` 的 `decide()`）读走。放在同一组是因为存取链与
+   * 用户心智都一致，不是因为消费者相同。
+   */
+  graphBuildMinIntervalMs?: number
 }
 
 /**
@@ -100,12 +110,14 @@ function readIngestIntervals(db: SqliteDatabase): IngestIntervals | undefined {
     const minutesMs = num(parsed["minutesMs"])
     const documentsMs = num(parsed["documentsMs"])
     const activeScanMs = num(parsed["activeScanMs"])
+    const graphBuildMinIntervalMs = num(parsed["graphBuildMinIntervalMs"])
     if (probeBaseMs !== undefined) iv.probeBaseMs = probeBaseMs
     if (probeMaxMs !== undefined) iv.probeMaxMs = probeMaxMs
     if (pullMs !== undefined) iv.pullMs = pullMs
     if (minutesMs !== undefined) iv.minutesMs = minutesMs
     if (documentsMs !== undefined) iv.documentsMs = documentsMs
     if (activeScanMs !== undefined) iv.activeScanMs = activeScanMs
+    if (graphBuildMinIntervalMs !== undefined) iv.graphBuildMinIntervalMs = graphBuildMinIntervalMs
     return Object.keys(iv).length === 0 ? undefined : iv
   } catch {
     // 表还不存在（迁移没跑完）/ JSON 坏了 → 用默认，不让它挡住采集启动。
@@ -120,6 +132,10 @@ const SNAPSHOT_THROTTLE_MS = 250
  * 采集周期的缺省值。**必须与 `IngestService` 里那几个常量同源**
  * （probe 10s / max 120s / pull 2min / minutes 30min）——
  * 两处各写一份会让设置页显示的默认值与实际跑的不一致，而那种偏差查不出来。
+ *
+ * ★ `graphBuildMinIntervalMs` 是例外：它的消费者不是 `IngestService` 而是
+ * 自动建图的判据（`auto-build.ts`），所以同源对象是那边的
+ * `AUTO_BUILD_MIN_INTERVAL_MS`。两处必须一致，同理由。
  */
 const INTERVAL_DEFAULTS: Required<IngestIntervals> = {
   probeBaseMs: 10_000,
@@ -128,6 +144,7 @@ const INTERVAL_DEFAULTS: Required<IngestIntervals> = {
   minutesMs: 30 * 60_000,
   documentsMs: 60 * 60_000,
   activeScanMs: 30_000,
+  graphBuildMinIntervalMs: AUTO_BUILD_MIN_INTERVAL_MS,
 }
 
 /** 生效的采集周期（全字段都有值 —— 缺省与用户配置合并后的结果）。 */
@@ -192,8 +209,31 @@ export class DataPlaneService {
    *
    * `feedDirs` 只是**透传**给 `FeedService`（导出与 handoff 的落点按 vault 分）。
    * 本服务不自己存一份 —— 多一个副本就多一个可能过期的真源。
+   *
+   * ## ★★ `pollingEnabled: false` —— 挂上库但**不拉数据**
+   *
+   * 这两件事原来绑在一起，而它们的前置条件不同：
+   * · **挂库**（`this.db = db`）是"解析身份"的前置 —— `resolveSelf()` 要写
+   *   身份行、要拿库里的单聊做交集判据；
+   * · **拉数据**（定时器 + 事件长连接）必须等到**有身份之后**，否则渠道命令
+   *   不带 `--profile`，会跟着 CLI 的全局身份读到别人的数据。
+   *
+   * 绑在一起的后果（实测，用户日志）：未绑身份时装配层整个跳过 `attach`
+   * → `this.db` 为 null → 点「用这个身份」时 `resolveSelf()` 抛
+   * 「尚未登录，无法解析身份」→ 采纳失败。**又是一个死锁**：
+   * 挂库是获得身份的前置，而我把它挡在了"要先有身份"后面。
+   *
+   * 所以拆开：未绑身份时仍然挂库（纯本地、无副作用），只是不起定时器与长连接。
+   * 绑上身份后走 `switchTo()` → `mount()`，那时 `pollingEnabled` 为真，
+   * `attach` 重跑一遍把它们起起来。
    */
-  async attach(db: SqliteDatabase, dbPath: string, feedDirs: FeedDirs): Promise<void> {
+  async attach(
+    db: SqliteDatabase,
+    dbPath: string,
+    feedDirs: FeedDirs,
+    options: { pollingEnabled?: boolean } = {},
+  ): Promise<void> {
+    const pollingEnabled = options.pollingEnabled !== false
     await this.detach()
     this.db = db
     this.dbPath = dbPath
@@ -266,7 +306,14 @@ export class DataPlaneService {
     // 窗口推进不一定产生新行；activeWindow / floor / stalled 仍要实时推给 UI。
     ingest.events.on("backfill.changed", () => this.pushSnapshotThrottled())
 
-    ingest.start()
+    /**
+     * ★ 没身份时**不起定时器** —— 但 `this.ingest` 仍然赋值。
+     *
+     * `ingest` 这个实例本身是无副作用的（构造只是读几个仓储），而快照、
+     * `resolveSelf`/`confirmSelf` 都要经过它。不赋值的话状态页与身份解析
+     * 一起失效，而那正是这次要修的死锁。
+     */
+    if (pollingEnabled) ingest.start()
     this.ingest = ingest
     /**
      * ★ 导出落点跟着 vault 走（见 FeedDirs）—— 由这一层透传。
@@ -288,7 +335,7 @@ export class DataPlaneService {
      * events 工厂 → 不起流；生产的钉钉插件给 → 起真长连接。这样单测可以
      * 注入一个假 events 工厂来验接线，而不会误起真的 `dws` 子进程。
      */
-    if (this.options.plugin.events !== undefined) {
+    if (this.options.plugin.events !== undefined && pollingEnabled) {
       const stream = this.options.plugin.events({
         clock: this.options.clock,
         onSignal: (signal) => void this.refreshConversation(signal.conversationExternalId),

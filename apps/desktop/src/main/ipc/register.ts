@@ -7,6 +7,8 @@
  * - handler 表由 MyContextApi 的类型反推，漏注册会在编译期报错
  */
 import { app, ipcMain } from "electron"
+import { randomUUID } from "node:crypto"
+import { scopedChannelId, sourceKeyOf } from "@mycontext/channels"
 import { attempt, AppError, type Logger } from "@mycontext/kernel"
 import {
   IPC_CHANNELS,
@@ -63,7 +65,11 @@ import type { DistillSourceService } from "../services/distill-source.service.js
 import type { DistillService } from "../services/distill.service.js"
 import type { MediaService } from "../services/media.service.js"
 import { toLocalFileUrl } from "../windows/local-file-url.js"
-import { adoptExistingSession, describeAdoptableSession } from "../bootstrap/post-auth-identity.js"
+import {
+  adoptExistingSession,
+  describeAdoptableSession,
+  routeAuthorizedIdentity,
+} from "../bootstrap/post-auth-identity.js"
 import type { PersonaService } from "../services/persona.service.js"
 import type { PreferencesService } from "../services/preferences.service.js"
 import type { StatusService } from "../services/status.service.js"
@@ -232,6 +238,36 @@ export function registerIpc(deps: IpcDependencies): void {
    */
   ipcMain.handle(IPC_CHANNELS.channelAdoptSession, () =>
     attempt(async () => {
+      /**
+       * ★★ 先把身份**路由到它自己的 vault**，再落身份行 —— 与正常授权
+       * （`onAuthorized`）走同一条顺序，理由也一样（见 `routeAuthorizedIdentity`）。
+       *
+       * 漏了这一步的后果（实测，用户日志）：采纳只往当前挂载的库里写一行
+       * 身份，而 control 库里**没有** `(account, channel, corp, user) → vault`
+       * 那条映射 → `activeIdentity.currentIdentity()` 仍是 null →
+       * 渠道命令不钉 profile、采集不起、界面继续显示"未连接"。
+       * 也就是说采纳"成功"了但整个应用不认。
+       *
+       * 路由完成时若真的切了 vault，`mount()` 会带着目标身份重新 attach，
+       * 那时 `pollingEnabled` 为真 —— 采集与事件流在这一步才起来。
+       */
+      const status = await channels.safeStatus("dingtalk")
+      if (status.state === "authorized") {
+        const session = auth.currentSession()
+        const vaultId = auth.currentVaultId()
+        await routeAuthorizedIdentity({
+          identity: activeIdentity,
+          logger,
+          session:
+            session === null || vaultId === null
+              ? null
+              : { accountId: session.accountId, baseVaultId: vaultId },
+          newVaultId: () => randomUUID(),
+          // 同 onAuthorized：必须带「来源应用」那一段（见那里的注释）
+          channelId: scopedChannelId("dingtalk", sourceKeyOf(dwsSource.path() ?? undefined)),
+          status,
+        })
+      }
       const adopted = await adoptExistingSession({
         dataPlane,
         media,
