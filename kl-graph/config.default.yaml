@@ -73,6 +73,7 @@ pipelines:
     extraction:
       batch_size: ${oc.env:KL_LLM_BATCH_SIZE,10}
       batch_timeout: ${oc.env:KL_LLM_BATCH_TIMEOUT,300}
+      concurrency: ${oc.env:KL_LLM_CONCURRENCY,50}
       cache_max_entries: ${oc.env:KL_EXTRACTION_CACHE_MAX_ENTRIES,100000}
 
     entity_description:

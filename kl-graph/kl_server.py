@@ -480,7 +480,7 @@ def _incremental_adjacency(
         dirty_nodes.add((target_type, target_id))
 
     dirty_ids = {node_id for _node_type, node_id in dirty_nodes}
-    if len(base) >= 1_000 and len(dirty_ids) > len(base) // 4:
+    if len(base) == 0 or len(dirty_ids) > max(250, len(base) // 4):
         logger.info(
             "Adjacency frontier is broad (%d/%d keys); using full rebuild",
             len(dirty_ids),
@@ -864,7 +864,9 @@ class IngestRequest(BaseModel):
 
     input_dir: str
     source_id: str = Field(min_length=1)
-    concurrency: int = Field(default=50, ge=1)  # concurrent extraction LLM calls
+    concurrency: int = Field(
+        default=int(cfg.pipelines.ingestion.extraction.concurrency), ge=1
+    )
     improve_mode: Literal["off", "auto", "incremental", "full"] = "auto"
 
 

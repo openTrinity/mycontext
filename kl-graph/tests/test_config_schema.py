@@ -46,6 +46,7 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.embedding.timeout",
     "pipelines.ingestion.extraction.batch_size",
     "pipelines.ingestion.extraction.batch_timeout",
+    "pipelines.ingestion.extraction.concurrency",
     "pipelines.ingestion.extraction.cache_max_entries",
     "pipelines.ingestion.entity_description.summarize",
     "pipelines.ingestion.entity_description.concurrency",
@@ -111,4 +112,12 @@ def test_schema_rejects_unknown_fields() -> None:
     value["storage"]["vector"]["mystery_backend"] = {}
 
     with pytest.raises(ValidationError, match="mystery_backend"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_nonpositive_extraction_concurrency() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["concurrency"] = 0
+
+    with pytest.raises(ValidationError, match="concurrency"):
         AppConfig.model_validate(value)

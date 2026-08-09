@@ -193,32 +193,40 @@ class LadybugGraphDB(GraphDB):
 
     @staticmethod
     def _open_database(ladybug, db_path: str, db_opts: dict[str, object]):
-        """Open the ladybug DB, recovering from an orphaned write-ahead log.
+        """Open LadybugDB, discarding a WAL only when no main DB pre-existed.
 
-        A hard-killed or crashed build can leave a ``<db>.wal`` whose database id
-        no longer matches a freshly (re)created ``<db>`` file. ladybug then
-        refuses to open with a ``RuntimeError`` mentioning the temporary/WAL
-        file, which would brick every subsequent build until someone deletes it
-        by hand. Since the project rebuilds rather than migrates, an orphaned WAL
-        carries no committed state we need: delete it and retry once.
+        When the main path was absent before open, a leftover ``<db>.wal``
+        cannot be applied to an authoritative database. If LadybugDB rejects
+        that WAL, remove it and retry once. If the main database already
+        existed, preserve both files and propagate the error: the WAL may hold
+        recoverable state. Lock errors always propagate; OS locks are released
+        when their owning process exits and must never be inferred stale from a
+        sidecar file alone.
         """
+        main_db_existed = FsPath(db_path).exists()
         try:
             return ladybug.Database(db_path, **db_opts)
         except RuntimeError as exc:
             msg = str(exc).lower()
             wal = FsPath(f"{db_path}.wal")
             stale_wal = (
-                wal.exists()
-                and ("does not match" in msg or ".wal" in msg
-                     or "left behind" in msg or "temporary file" in msg
-                     or "wal file" in msg or "checksum" in msg
-                     or "corrupted" in msg)
+                not main_db_existed
+                and wal.exists()
+                and (
+                    "does not match" in msg
+                    or ".wal" in msg
+                    or "left behind" in msg
+                    or "temporary file" in msg
+                    or "wal file" in msg
+                    or "checksum" in msg
+                    or "corrupted" in msg
+                )
             )
             if not stale_wal:
                 raise
             logger.warning(
-                "ladybug refused to open due to an orphaned WAL (%s); removing "
-                "%s and retrying (rebuild-not-migrate, no committed state lost)",
+                "LadybugDB rejected an orphaned WAL with no pre-existing main "
+                "database (%s); removing %s and retrying",
                 exc, wal,
             )
             wal.unlink()

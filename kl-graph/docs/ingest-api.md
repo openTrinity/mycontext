@@ -118,6 +118,31 @@ unit is processed normally.
 A same-ID/different-content source unit is currently warned about and skipped;
 replacement/deletion semantics remain a separate feature.
 
+### Crash recovery
+
+If the server process is killed mid-ingestion (OOM, kill -9, power loss):
+
+- **Extraction cache** (`extraction_cache.db`): preserved. Phase B re-extraction
+  hits the cache for already-extracted chunks, so those chunks are not billed
+  twice. Chunks that had not reached the cache before the crash remain misses
+  and still require LLM extraction.
+- **Checkpoint**: persists which steps completed. On retry, completed steps are
+  skipped. The checkpoint JSON is written atomically (write-tmp + rename).
+- **Workset** (`ingest_batches` / `ingest_batch_chunks` tables): if the chunk
+  count is inconsistent (e.g. due to external deletion or disk corruption), the
+  server raises a RuntimeError with an actionable message. The workset is NOT
+  automatically recovered — SQLite transactions are atomic, so a mismatch
+  indicates external corruption, not a mid-transaction crash. Use `--fresh-db`
+  to start a clean rebuild (extraction cache is preserved).
+- **LadybugDB lock**: the backend uses an OS-level database lock, which the OS
+  releases when the owning process exits. A lock error therefore indicates a
+  live concurrent owner or a permissions/filesystem problem; startup fails
+  without deleting database-related files.
+- **LadybugDB WAL**: automatic removal is limited to a rejected WAL found when
+  no main database existed before open. If a main database already exists, the
+  WAL may contain recoverable state, so both files are preserved and startup
+  fails loudly for manual diagnosis.
+
 ## Cost analysis by step
 
 Variables used below:

@@ -796,6 +796,8 @@ class LLMExtractor:
         cache_max_entries: int = EXTRACTION_CACHE_MAX_ENTRIES,
         legacy_cache_db: Path | None = None,
     ):
+        if max_concurrent <= 0:
+            raise ValueError("max_concurrent must be greater than zero")
         self.cache_db = Path(cache_db)
         self.cache_max_entries = int(cache_max_entries)
         self.legacy_cache_db = (

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kl_graph.config import DATA_DIR
+from kl_graph.config import DATA_DIR, cfg
 from kl_graph.ingest.checkpoint import IngestCheckpoint
 from kl_graph.ingest.improvement import (
     ImprovementResult,
@@ -36,9 +36,13 @@ class IngestOptions:
 
     input_dir: Path
     source_id: str
-    concurrency: int = 50
+    concurrency: int = int(cfg.pipelines.ingestion.extraction.concurrency)
     improve_mode: ImproveMode = "auto"
     keep_cache: bool = KEEP_EXTRACTION_CACHE
+
+    def __post_init__(self) -> None:
+        if self.concurrency <= 0:
+            raise ValueError("concurrency must be greater than zero")
 
 
 @dataclass(frozen=True)

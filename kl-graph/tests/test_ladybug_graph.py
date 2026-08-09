@@ -78,8 +78,8 @@ def test_open_recovers_from_orphaned_wal(tmp_path):
     """A hard-killed build leaves a stale ``<db>.wal`` that bricks reopen.
 
     LadybugGraphDB must detect the orphaned/corrupt WAL, delete it, and reopen
-    (rebuild-not-migrate: an uncommitted WAL holds no state we keep). Without
-    this, every subsequent build fails until the file is removed by hand.
+    The recovery is safe only because the main database is absent before open;
+    there is no authoritative store to which the WAL could be applied.
     """
     from kl_graph.storage.ladybug_graph import LadybugGraphDB
 
@@ -96,6 +96,44 @@ def test_open_recovers_from_orphaned_wal(tmp_path):
     # Must recover rather than raise.
     db2 = LadybugGraphDB(db_path=str(db_path))
     db2.upsert_entity_node("B", "B", "person", 1)  # writable after recovery
+
+
+def test_open_preserves_rejected_wal_when_main_database_exists(tmp_path):
+    """An existing main DB makes automatic WAL deletion unsafe."""
+    from kl_graph.storage.ladybug_graph import LadybugGraphDB
+
+    db_path = tmp_path / "g"
+    wal_path = tmp_path / "g.wal"
+    db_path.write_bytes(b"authoritative-main")
+    wal_path.write_bytes(b"possibly-recoverable-wal")
+
+    class RejectingLadybug:
+        @staticmethod
+        def Database(_path, **_opts):
+            raise RuntimeError("WAL file is corrupted")
+
+    with pytest.raises(RuntimeError, match="corrupted"):
+        LadybugGraphDB._open_database(RejectingLadybug, str(db_path), {})
+
+    assert db_path.read_bytes() == b"authoritative-main"
+    assert wal_path.read_bytes() == b"possibly-recoverable-wal"
+
+
+@skip_no_ladybug
+def test_live_database_lock_does_not_delete_sidecar_files(tmp_path):
+    """A second opener must fail without guessing that any file is stale."""
+    from kl_graph.storage.ladybug_graph import LadybugGraphDB
+
+    db_path = tmp_path / "g"
+    sidecar = tmp_path / "g.lock"
+    first = LadybugGraphDB(db_path=str(db_path))
+    sidecar.write_text("do-not-delete", encoding="utf-8")
+    try:
+        with pytest.raises(RuntimeError, match="(?i)lock"):
+            LadybugGraphDB(db_path=str(db_path))
+        assert sidecar.read_text(encoding="utf-8") == "do-not-delete"
+    finally:
+        first.close()
 
 
 @skip_no_ladybug

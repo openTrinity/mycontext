@@ -1673,7 +1673,10 @@ class IngestionPipeline:
         if len(chunks) != expected:
             raise RuntimeError(
                 f"Ingestion batch {self.batch_id!r} is corrupt: expected "
-                f"{expected} chunks, loaded {len(chunks)}"
+                f"{expected} chunks, loaded {len(chunks)}. The workset was "
+                "likely damaged by an external crash or manual deletion. "
+                "Use --fresh-db to start a clean rebuild (extraction cache "
+                "is preserved in extraction_cache.db)."
             )
         self.messages = [c for c in chunks if c.source_type == "message"]
         self.extra_chunks = [c for c in chunks if c.source_type != "message"]

@@ -82,6 +82,15 @@ def test_cache_key_matches_llm_extractor_helper(tmp_path) -> None:
     assert ExtractionCacheStore.cache_key(chunk.id) == ext._cache_key(chunk)
 
 
+def test_llm_extractor_rejects_nonpositive_concurrency(tmp_path) -> None:
+    from kl_graph.ingest.llm_extractor import LLMExtractor
+
+    with pytest.raises(ValueError, match="greater than zero"):
+        LLMExtractor(
+            cache_db=tmp_path / "extraction_cache.db", max_concurrent=0
+        )
+
+
 # ─── put / get roundtrip + idempotence ───────────────────────────────────────
 
 

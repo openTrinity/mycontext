@@ -6,8 +6,15 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from kl_graph.ingest.improvement import ImprovementResult, ImprovementTargets
 from kl_graph.ingest.runner import IngestOptions, IngestResult, run_ingestion
+
+
+def test_ingest_options_reject_nonpositive_concurrency(tmp_path) -> None:
+    with pytest.raises(ValueError, match="greater than zero"):
+        IngestOptions(tmp_path, "slack-prod", concurrency=0)
 
 
 def test_runner_constructs_unit_incremental_pipeline(tmp_path) -> None:

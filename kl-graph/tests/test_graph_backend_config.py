@@ -32,6 +32,31 @@ def test_application_graph_backend_defaults_to_ladybug() -> None:
     assert result.stdout.strip() == "ladybug"
 
 
+def test_ingest_cli_rejects_nonpositive_concurrency(tmp_path: Path) -> None:
+    input_dir = tmp_path / "export"
+    input_dir.mkdir()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.ingest",
+            "--input-dir",
+            str(input_dir),
+            "--source-id",
+            "test-source",
+            "--concurrency",
+            "0",
+        ],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--concurrency must be greater than zero" in result.stderr
+
+
 def test_fresh_db_removes_ladybug_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

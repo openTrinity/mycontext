@@ -158,8 +158,9 @@ async def main():
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=8,
-        help="Max concurrent LLM calls (default: 8, recommended: 50)",
+        default=int(cfg.pipelines.ingestion.extraction.concurrency),
+        help="Max concurrent LLM calls (default: %(default)s, "
+        "override via KL_LLM_CONCURRENCY)",
     )
     parser.add_argument(
         "--fresh-db",
@@ -182,6 +183,9 @@ async def main():
         "only steps matching that prefix.",
     )
     args = parser.parse_args()
+
+    if args.concurrency <= 0:
+        parser.error("--concurrency must be greater than zero")
 
     input_dir = args.input_dir.expanduser().resolve()
     if not input_dir.is_dir():
