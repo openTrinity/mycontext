@@ -311,10 +311,23 @@ export function useRestartOnboarding() {
 // 蒸馏资料源
 // ---------------------------------------------------------------
 
-export function useDistillSources(enabled = true) {
+/**
+ * 读某个渠道的资料源与范围。
+ *
+ * ★★ `channelId` **必须进 queryKey**：不进的话切渠道会命中同一份缓存，
+ * 界面上表现为"切到飞书还显示钉钉的范围" —— 而用户点保存就把钉钉那批
+ * 会话 id 存成了飞书的（实测：飞书白名单里 24/28 个是 `cid…` 钉钉形状）。
+ * 与 `useFeedInfo` 同一条理由。
+ */
+export function useDistillSources(enabled = true, channelId?: string) {
   return useQuery({
-    queryKey: QUERY_KEYS.distillSources,
-    queryFn: async () => unwrap(await window.mycontext.distill.sources()),
+    queryKey: [...QUERY_KEYS.distillSources, channelId ?? "primary"] as const,
+    queryFn: async () =>
+      unwrap(
+        await window.mycontext.distill.sources(
+          channelId === undefined ? undefined : { channelId },
+        ),
+      ),
     enabled,
   })
 }

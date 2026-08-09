@@ -80,9 +80,66 @@ export class VaultStore {
     return join(this.directory(vaultId), "core.sqlite")
   }
 
+  /**
+   * 一个非主渠道的**根目录** —— 它的库、导出、图谱、交接文件全在这下面。
+   *
+   * ★ 有了这个方法，"一个渠道的东西全在它自己的目录下"这条不变式就有了
+   * 单一落点：新增一类产物时在这里派生，而不是各处 `join` 一遍
+   * （那正是 `exports/dws/feishu` 那个错误路径的来源）。
+   */
+  sourceRoot(vaultId: string, channelId: string): string {
+    return join(this.directory(vaultId), "sources", channelId)
+  }
+
   /** A physically separate database for one external data source. */
   sourcePath(vaultId: string, channelId: string): string {
-    return join(this.directory(vaultId), "sources", channelId, "core.sqlite")
+    return join(this.sourceRoot(vaultId, channelId), "core.sqlite")
+  }
+
+  /**
+   * 非主渠道的**导出目录**（喂它自己那个图谱的语料投影）。
+   *
+   * ## ★★ 为什么不是 `exports/dws/<channelId>`
+   *
+   * 那是改动前的拼法（`join(vp.exportRoot, channelId)`），而 `vp.exportRoot`
+   * 已经是 `exports/dws` —— `dws` 是**主渠道 CLI 的名字**。于是飞书的导出物
+   * 落在 `exports/dws/feishu`，读起来像"dws 的飞书子目录"，而两者毫无关系。
+   *
+   * 更糟的是那个目录下本来是**内容类型**的分层
+   * （`exports/dws/chat` / `wiki` / `minutes`），于是一个渠道名和三个内容类型
+   * 并列成了兄弟 —— 语义上就是错的，而下一个人按那个布局推断"飞书也是一种
+   * 内容类型"会写出更多错位。
+   *
+   * ★ 现在与 `sourcePath` 同一个命名空间：`sources/<channelId>/…`。
+   * 那条惯例的收益是"一个渠道的东西全在它自己的目录下" ——
+   * 删一个渠道就是删一个目录，而且不可能与别的渠道互相覆盖。
+   */
+  sourceExportRoot(vaultId: string, channelId: string): string {
+    return join(this.sourceRoot(vaultId, channelId), "exports")
+  }
+
+  /**
+   * 非主渠道的图谱数据目录。
+   *
+   * ★ 与 `sourceExportRoot` 同一条理由，收进同一个命名空间。
+   * 改动前是 `kl/<channelId>` —— 那个**不算错**（`kl/` 下面本来就没有
+   * 内容类型分层，飞书与 `qdrant_data` / `extraction_cache` 并列只是有点乱），
+   * 但既然导出那边要归位，两者一起收比留一半更容易理解。
+   */
+  sourceKlRoot(vaultId: string, channelId: string): string {
+    return join(this.sourceRoot(vaultId, channelId), "kl")
+  }
+
+  /**
+   * 那个渠道的交接文件（给算法团队的一页运行时事实）。
+   *
+   * ★ 主渠道那份在 vault 根下（`handoff.json`，上游按固定路径读它，
+   * 动它要改他们那侧）；非主渠道各自一份，收在自己的目录里。
+   * 改动前它是根下的 `handoff.<channelId>.json` —— 与主渠道那份并列，
+   * 于是 vault 根随渠道数量长出一堆同名前缀的文件。
+   */
+  sourceHandoffFile(vaultId: string, channelId: string): string {
+    return join(this.sourceRoot(vaultId, channelId), "handoff.json")
   }
 
   sourceHandle(vaultId: string, channelId: string): StoreHandle {

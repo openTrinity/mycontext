@@ -70,7 +70,7 @@ const api: MyContextApi = {
     restart: () => ipcRenderer.invoke(IPC_CHANNELS.onboardingRestart),
   },
   distill: {
-    sources: () => ipcRenderer.invoke(IPC_CHANNELS.distillSources),
+    sources: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSources, input ?? {}),
     sourceSave: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSourceSave, input),
     sourceReset: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSourceReset, input),
     progress: () => ipcRenderer.invoke(IPC_CHANNELS.distillProgress),

@@ -34,6 +34,20 @@ import { SourcesStep, type SourcesDraft } from "../onboarding/sources-step.js"
 const PRIMARY_CHANNEL_ID = "dingtalk"
 
 /** 把库里存的 scope 还原成这个面板的草稿。 */
+/**
+ * 今天 00:00 的时间戳 —— `since` 的**唯一**基准。
+ *
+ * ★★ `toDraft`（库 → 天数）与 `submit`（天数 → 库）必须用同一个基准，
+ * 否则"打开面板、什么都不改、直接保存"会算出一个不同的 `since`，
+ * 而主进程侧 `scopeChanged()` 判 `since` 不等就跑一整轮清语料 + 删图重建。
+ * 两处各用 `Date.now()` 时这个不一致是必然的（相差几秒到几分钟）。
+ */
+function midnightToday(): number {
+  const date = new Date()
+  date.setHours(0, 0, 0, 0)
+  return date.getTime()
+}
+
 function toDraft(
   scope: DistillScopeInput | undefined,
   enabledSources: readonly DistillSourceId[],
@@ -45,10 +59,12 @@ function toDraft(
    *
    * 算不出整天数（自定义区间存的）时给 null（= 不限），
    * 而不是猜一个最近的预设 —— 猜错会在用户点保存时**悄悄改小范围**。
+   *
+   * ★ 基准用 `midnightToday()` 而不是 `Date.now()` —— 见那个函数的注释。
    */
   const since = scope?.since
   const rangeDays =
-    since === undefined ? null : Math.max(1, Math.round((Date.now() - since) / 86_400_000))
+    since === undefined ? null : Math.max(1, Math.round((midnightToday() - since) / 86_400_000))
   return {
     rangeDays,
     customRange: null,
@@ -66,7 +82,24 @@ export interface CollectionScopePanelProps {
 export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
   const { t } = useDynamicTranslation("settings")
   const errorText = useErrorText()
-  const sources = useDistillSources()
+  /**
+   * 这一页当前在编辑**哪个渠道** —— picker 没选过（null）时就是主渠道。
+   *
+   * ★ 提成一个常量而不是各处写 `channelId ?? PRIMARY`：读库、存库、
+   * 草稿归属、会话过滤、已保存提示**五处**都要用它，而其中任意两处不一致
+   * 都会造成一次跨渠道错位（那正是这一整轮 bug 的形状）。
+   */
+  const activeChannel = channelId ?? PRIMARY_CHANNEL_ID
+  /**
+   * ★★ 读**这个渠道**的资料源与范围。
+   *
+   * 不带渠道的后果（实测）：切到飞书时显示的是**钉钉的**范围，用户以为那就是
+   * 飞书的、点保存又把钉钉那 24 个 `cid…` 存成了飞书的白名单 ——
+   * 而它们在飞书库里是不存在的 id，按它们过滤会静默漏采。
+   *
+   * ★ `channelId` 为 null（还没选过）时读主渠道 —— 与 `channelFilter` 一致。
+   */
+  const sources = useDistillSources(true, activeChannel)
   const save = useSaveDistillSource()
 
   const chat = (sources.data ?? []).find((item) => item.kind === "chat")
@@ -82,8 +115,25 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
    * 冲掉（实测过这类 bug 的形状：勾了几个会话，后台一轮采集推来新快照，
    * 勾选全没了）。改成"打开时取一次"。
    */
-  const [draft, setDraft] = useState<SourcesDraft | null>(null)
-  const [saved, setSaved] = useState(false)
+  /**
+   * 草稿 + **它属于哪个渠道**。`null` = 还没编辑过 → 用库里的值。
+   *
+   * ★ 带渠道是必须的：这一页的 picker 会切渠道，而 React state 不会自己
+   * 跟着变。只存 `SourcesDraft` 时切过去看到的是上一个渠道的勾选。
+   */
+  const [draft, setDraft] = useState<{ channelId: string; value: SourcesDraft } | null>(null)
+  /**
+   * 上一次保存成功的**渠道**（null = 这一页还没保存过）。
+   *
+   * ★★ 为什么不是一个 boolean：那个版本一旦为 true 就**永远**显示，
+   * 而且切到另一个渠道后仍然挂着 —— 用户在飞书栏看到「已保存」，
+   * 而那句话说的是刚才在钉钉栏那次。记下渠道之后就能只在对应的栏显示。
+   *
+   * ★ 用户报的问题是"点完没有状态变化，感知不到点击生效了"。
+   * 根因有两个，这是其中之一（另一个是 `since` 每次现算导致重复触发，
+   * 见 `submit` 里那段）。
+   */
+  const [savedChannel, setSavedChannel] = useState<string | null>(null)
 
   /**
    * 首帧还没拿到 `sources` 时草稿是 null；拿到之后**只初始化一次**。
@@ -92,13 +142,44 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
    * 后者会在每次 query 刷新时把用户正在编辑的草稿冲掉（实测过这类 bug 的
    * 形状：勾了几个会话，后台一轮采集推来新快照，勾选全没了）。
    */
-  const effective = draft ?? (sources.data === undefined ? null : toDraft(chat?.scope, enabledSources))
+  /**
+   * ★★ 草稿是**按渠道**的 —— 切渠道时必须丢掉上一个渠道的编辑。
+   *
+   * `draft` 记下它属于哪个渠道；渠道一变就当作没有草稿，从新渠道的库值
+   * 重新初始化。不这么做的话切到飞书看到的是钉钉的勾选，
+   * 而点保存就把它存成飞书的（用户报的"先选钉钉又选飞书就出问题"）。
+   */
+  const effective =
+    (draft !== null && draft.channelId === activeChannel ? draft.value : null) ??
+    (sources.data === undefined ? null : toDraft(chat?.scope, enabledSources))
 
   const submit = () => {
     if (effective === null) return
     const draft = effective
+    /**
+     * ★★ `since` 按**天**对齐（当天 00:00:00），不是 `Date.now() - N 天`。
+     *
+     * ## 这一条修的是一次真实的重复重建
+     *
+     * 主进程侧 `scopeChanged()` 的判据里有 `before.since !== after.since`，
+     * 而现算的 `Date.now() - N*86400000` **每次点击都是不同的毫秒值** ——
+     * 于是"同一个『近 30 天』"被判成"范围变了"，每点一次就跑一整轮
+     * 清语料 + 删图重建（分钟级、出网烧 LLM）。
+     *
+     * 实测（本机日志）：连点三次保存 → `scope change pipeline start`
+     * 出现 3 次（06:57:59 / 06:58:00 / 06:58:01），而后两次
+     * `purgedMessages: 0` —— 白干两轮，且第一轮的建图被后面两次打断。
+     * 库里存下的 `since` 是 `2026-07-08 14:58:01`，正是第三次点击那一刻减 30 天。
+     *
+     * 按天对齐之后，同一天内重复保存同一个选择得到**同一个** `since`，
+     * 判据自然为假、回调不再触发。
+     *
+     * ★ 用当天 00:00 而不是"上一个整小时"：用户选的语义是"最近 N 天"，
+     * 而那本来就是按天数的。对齐到天还顺带让 `since` 可读
+     * （日志与库里看到的是一个整点，而不是一串随机毫秒）。
+     */
     const since =
-      draft.rangeDays === null ? undefined : Date.now() - draft.rangeDays * 86_400_000
+      draft.rangeDays === null ? undefined : midnightToday() - draft.rangeDays * 86_400_000
     /**
      * ★★★ 白名单**统一**放 `scope.conversationIds`，并把渠道显式告诉主进程。
      *
@@ -120,7 +201,7 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
      */
     save.mutate(
       {
-        channelId: channelId ?? PRIMARY_CHANNEL_ID,
+        channelId: activeChannel,
         kind: "chat",
         enabled: true,
         scope: {
@@ -129,7 +210,7 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           conversationIds: draft.conversationIds,
         },
       },
-      { onSuccess: () => setSaved(true) },
+      { onSuccess: () => setSavedChannel(activeChannel) },
     )
   }
 
@@ -157,7 +238,7 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           <ScopeEditor
             channelId={channelId}
             draft={effective}
-            onDraftChange={setDraft}
+            onDraftChange={(next) => setDraft({ channelId: activeChannel, value: next })}
             sources={(sources.data ?? []).map((item) => ({
               kind: item.kind,
               status: item.status,
@@ -172,15 +253,28 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
         )}
 
         <div className="flex items-center gap-3">
-          <Button size="sm" disabled={effective === null || save.isPending} onClick={submit}>
+          {/*
+            ★★ `loading` 而不只是 `disabled` —— 用户报的正是"点完没有状态变化，
+            感知不到点击生效了"。保存要走一次 IPC + 写库，虽然快但不是零延迟，
+            而一个只变灰的按钮读起来像"没反应"。
+          */}
+          <Button
+            size="sm"
+            disabled={effective === null}
+            loading={save.isPending}
+            onClick={submit}
+          >
             {t("status.scope.save", { defaultValue: "保存范围" })}
           </Button>
           {/*
             ★ 保存后必须说清**会发生什么** —— 这个动作会删数据（越界的消息
             连带它的 FTS/向量/媒体行一起清），而那是不可逆的。
             只显示一个"已保存"会让用户以为它只是记下了一个偏好。
+
+            ★★ 只在**保存过的那个渠道**上显示：这个提示原来是一个 boolean，
+            于是切到另一个渠道后仍然挂着，而它说的是上一个渠道那次保存。
           */}
-          {saved ? (
+          {savedChannel === activeChannel ? (
             <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
               {t("status.scope.savedHint", {
                 defaultValue: "已保存。越界的消息正在清理，图谱会重建（分钟级）。",

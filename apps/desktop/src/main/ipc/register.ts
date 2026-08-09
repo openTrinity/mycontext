@@ -367,7 +367,17 @@ export function registerIpc(deps: IpcDependencies): void {
 
   // ---------------- 蒸馏资料源 ----------------
 
-  ipcMain.handle(IPC_CHANNELS.distillSources, () => attempt(() => distillSources.list()))
+  /**
+   * ★ 读**某个渠道**的资料源。不给 = 主渠道（存量调用点行为不变）。
+   * 不带渠道的后果：采集范围面板切到飞书却显示钉钉的范围，
+   * 保存时又把钉钉那批 id 存成飞书的（见 `DistillSourceService.list`）。
+   */
+  ipcMain.handle(IPC_CHANNELS.distillSources, (_event, payload: unknown) =>
+    attempt(() => {
+      const channelId = (payload as { channelId?: unknown } | null)?.channelId
+      return distillSources.list(typeof channelId === "string" ? channelId : undefined)
+    }),
+  )
   ipcMain.handle(IPC_CHANNELS.distillSourceSave, (_event, payload: unknown) =>
     attempt(() => distillSources.save(parse(distillSourceSaveInputSchema, payload))),
   )

@@ -1294,15 +1294,65 @@ export function bootstrapApp(mainDir: string): AppContext {
       const vp = vaults.paths(spec.vaultId)
       const handle = vaults.sourceHandle(spec.vaultId, spec.channelId)
       /**
-       * ★ 每渠道自己的落点：图库与导出都在主 `klRoot` / `exportRoot` 下
-       * 各开一个以 channelId 命名的子目录。同一个 vault 内互不覆盖，
-       * 而删 vault 仍然是删一个目录（`VaultStore.paths()` 那条收益不变）。
+       * ★★ 每渠道自己的落点，全部收在 `sources/<channelId>/` 下。
+       *
+       * ## 这里原来的拼法是错的
+       *
+       * 旧代码是 `join(vp.exportRoot, channelId)` + `join(vp.klRoot, channelId)`，
+       * 而 `vp.exportRoot` 已经是 `exports/dws` —— `dws` 是**主渠道 CLI 的
+       * 名字**。于是飞书的导出物落在 `exports/dws/feishu`，读起来像
+       * "dws 的飞书子目录"，而两者毫无关系。
+       *
+       * 更糟的是那个目录下本来是**内容类型**的分层
+       * （`exports/dws/chat` / `wiki` / `minutes`），于是一个渠道名与三个
+       * 内容类型并列成了兄弟。下一个人按那个布局推断"飞书也是一种内容类型"
+       * 会写出更多错位。
+       *
+       * 现在与 `sourcePath`（那个渠道自己的库）同一个命名空间 ——
+       * 一个渠道的**全部**东西都在它自己的目录下：
+       *   sources/feishu/core.sqlite   ← 库
+       *   sources/feishu/exports/      ← 四件套
+       *   sources/feishu/kl/           ← 图谱数据
+       *   sources/feishu/handoff.json  ← 交接文件
+       *
+       * 删一个渠道 = 删一个目录，且不可能与别的渠道互相覆盖。
        */
       const feedDirs = {
         dataRoot: vp.root,
-        exportRoot: join(vp.exportRoot, spec.channelId),
-        klRoot: join(vp.klRoot, spec.channelId),
-        handoffFile: join(vp.root, `handoff.${spec.channelId}.json`),
+        exportRoot: vaults.sourceExportRoot(spec.vaultId, spec.channelId),
+        klRoot: vaults.sourceKlRoot(spec.vaultId, spec.channelId),
+        /**
+         * ★ handoff 也收进那个目录（原来是 vault 根下的
+         * `handoff.feishu.json`，与主渠道的 `handoff.json` 并列）。
+         * 主渠道那个保持原位 —— 上游按固定路径读它，动它要改他们那侧。
+         */
+        handoffFile: vaults.sourceHandoffFile(spec.vaultId, spec.channelId),
+      }
+      /**
+       * ★ 清掉**旧布局**留下的目录（`exports/dws/<channelId>` /
+       * `kl/<channelId>` / `handoff.<channelId>.json`）。
+       *
+       * 不做数据迁移而是直接删：那三样全是**可重建的派生物** ——
+       * 导出是库的投影、kl 是建图产物、handoff 是一页运行时事实。
+       * 实测存量只有 1.3 MB，而下一轮采集/建图会把它们重新生成。
+       * 搬过来反而要处理"两处都有、哪个更新"这类问题。
+       *
+       * ★ 逐个 catch 不中断：删不掉只是留下几个孤儿目录（可观测、可再清），
+       * 而让它阻断管线挂载会把一个清理动作变成"这个渠道用不了"。
+       */
+      for (const stale of [
+        join(vp.exportRoot, spec.channelId),
+        join(vp.klRoot, spec.channelId),
+        join(vp.root, `handoff.${spec.channelId}.json`),
+      ]) {
+        try {
+          rmSync(stale, { recursive: true, force: true })
+        } catch (error) {
+          logger.warn("stale channel dir cleanup failed", {
+            channelId: spec.channelId,
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
       }
       // klServer 要在 feed 的 autoBuild 里被引用，而 feed 又是它的
       // exportDir 来源 —— 与主渠道同款的后填引用（那里有完整推理）。

@@ -223,8 +223,26 @@ export class DistillSourceService {
     this.sourceDbs.clear()
   }
 
-  list(): DistillSourceView[] {
-    const db = this.db
+  /**
+   * 读**某个渠道**的资料源与范围。
+   *
+   * ## ★★★ `channelId` 决定读哪个库
+   *
+   * 这个方法原来恒读主库，而采集范围面板一次只看一个渠道 —— 于是切到飞书时
+   * 显示的是**钉钉的**范围，用户以为那就是飞书的、点保存又把它存成飞书的。
+   *
+   * 实测（本机库）：飞书的白名单里 28 个 id 有 **24 个是 `cid…`**
+   * （钉钉形状），只有 4 个是 `oc_…`。那 24 个在飞书库里是不存在的 id，
+   * 按它们过滤会让结果偏小 —— 静默漏采，而日志里一个错都没有。
+   *
+   * ★ 拿不到那个渠道的库时返回"全部未启用"而不是抛：设置页在管线还没挂上
+   * 时也会渲染，抛错会让整页显示错误横幅，而实际只是还没就绪。
+   */
+  list(channelId?: string): DistillSourceView[] {
+    const db =
+      channelId === undefined || channelId === this.options.primaryChannelId
+        ? this.db
+        : (this.sourceDbs.get(channelId) ?? null)
     if (db === null) {
       // 未登录时返回"全部未启用"而不是抛错：设置页在登录前也可能渲染。
       return DISTILL_SOURCE_KINDS.map((kind) => ({

@@ -19,10 +19,7 @@
  * 用真 sqlite 而不是假 repo：这个 bug 的形状是"写进了另一个库"，
  * 而假 repo 天然只有一个存储，那种错误根本表现不出来。
  */
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it } from "vitest"
 import { createLogger, ManualClock } from "@mycontext/kernel"
 import { isAppError } from "@mycontext/kernel"
 import type { ChannelPlugin } from "@mycontext/channels"
@@ -38,7 +35,6 @@ const SOURCE = "feishu"
 const PRIMARY_CONVS = ["cidFAKE0001==", "cidFAKE0002==", "cidFAKE0003=="]
 const SOURCE_CONVS = ["ocFAKE0001", "ocFAKE0002"]
 
-let dir: string
 let primaryVault: ReturnType<typeof openTestVault>
 let sourceVault: ReturnType<typeof openTestVault>
 let service: DistillSourceService
@@ -48,7 +44,6 @@ let scopeChangedFor: string[]
 const plugin = { meta: { id: PRIMARY } } as unknown as ChannelPlugin
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "mycontext-scope-"))
   primaryVault = openTestVault()
   sourceVault = openTestVault()
   scopeChangedFor = []
@@ -62,11 +57,11 @@ beforeEach(() => {
   service.attach(primaryVault.db, [{ channelId: SOURCE, db: sourceVault.db }])
 })
 
-afterEach(() => {
-  primaryVault.close()
-  sourceVault.close()
-  rmSync(dir, { recursive: true, force: true })
-})
+/**
+ * ★ 不需要自己 close/清目录 —— `openTestVault()` 自带 `afterEach` 兜底清理
+ * （见 `tests/helpers/vault.ts` 末尾）。重复 close 会让第二次抛
+ * "database is not open"，而那会把整个文件的用例全带红。
+ */
 
 /** 直接从某个库里读出 chat 那一行的范围。 */
 function scopeOf(vault: ReturnType<typeof openTestVault>) {
@@ -201,5 +196,110 @@ describe("★★★ 采集范围按渠道隔离", () => {
     }
     // 主库一点没被碰
     expect(scopeOf(primaryVault)).toEqual(before)
+  })
+})
+
+/**
+ * ## ★★ `list()` 必须按渠道读，否则面板显示的是**另一个渠道**的范围
+ *
+ * 用户报的形态：「先选了钉钉又选了飞书，好像就这样」。
+ * 根因是 `list()` 恒读主库 —— 切到飞书时面板显示钉钉的范围，
+ * 而用户以为那就是飞书的、点保存又把它存成了飞书的。
+ *
+ * 实测（本机库）：飞书的白名单里 28 个 id 有 **24 个是 `cid…`**（钉钉形状），
+ * 只有 4 个是 `oc_…`。那 24 个在飞书库里不存在，按它们过滤会静默漏采。
+ */
+describe("★★ list() 按渠道读", () => {
+  it("★★ 读飞书拿到的是飞书那份，不是主库的", () => {
+    service.save({
+      channelId: PRIMARY,
+      kind: "chat",
+      enabled: true,
+      scope: { conversationIds: PRIMARY_CONVS },
+    })
+    service.save({
+      channelId: SOURCE,
+      kind: "chat",
+      enabled: true,
+      scope: { conversationIds: SOURCE_CONVS },
+    })
+
+    const fromPrimary = service.list(PRIMARY).find((row) => row.kind === "chat")
+    const fromSource = service.list(SOURCE).find((row) => row.kind === "chat")
+
+    expect(fromPrimary?.scope.conversationIds).toEqual(PRIMARY_CONVS)
+    expect(fromSource?.scope.conversationIds).toEqual(SOURCE_CONVS)
+    // ★ 反证：两边**不同** —— 恒读主库时这条会失败
+    expect(fromSource?.scope.conversationIds).not.toEqual(PRIMARY_CONVS)
+  })
+
+  it("不给渠道 → 主渠道（存量调用点行为不变）", () => {
+    service.save({
+      channelId: PRIMARY,
+      kind: "chat",
+      enabled: true,
+      scope: { conversationIds: PRIMARY_CONVS },
+    })
+    expect(service.list().find((row) => row.kind === "chat")?.scope.conversationIds).toEqual(
+      PRIMARY_CONVS,
+    )
+  })
+
+  /**
+   * ★ 那个渠道的库还没挂上 → 返回"全部未启用"而不是抛。
+   * 设置页在管线就绪前也会渲染，抛错会让整页显示错误横幅。
+   */
+  it("★ 未挂载的渠道返回全未启用（不抛，设置页要能渲染）", () => {
+    const rows = service.list("not-mounted")
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((row) => !row.enabled)).toBe(true)
+  })
+})
+
+/**
+ * ## ★★ 同一个选择重复保存**不该**再触发一轮清理 + 重建
+ *
+ * `scopeChanged()` 的判据里有 `before.since !== after.since`，而渲染层原来用
+ * `Date.now() - N*86400000` **现算** —— 每次点击都是不同的毫秒值，
+ * 于是"同一个『近 30 天』"恒被判成变了。
+ *
+ * 实测（本机日志）：连点三次 → `scope change pipeline start` 出现 3 次
+ * （06:57:59 / 06:58:00 / 06:58:01），后两次 `purgedMessages: 0` ——
+ * 白跑两轮删图重建（分钟级、出网烧 LLM），且第一轮被后面两次打断。
+ *
+ * 渲染层的修法是把 `since` 对齐到当天 00:00（`midnightToday()`）。
+ * 这一层锁的是**服务侧的判据本身**：同一个 scope 存两次，只触发一次。
+ */
+describe("★★ 重复保存同一个范围只触发一次回调", () => {
+  it("★★ since 相同 → 第二次不触发（避免白跑一轮删图重建）", () => {
+    const scope = {
+      since: 1_783_400_000_000,
+      chatKinds: ["direct" as const, "group" as const],
+      conversationIds: SOURCE_CONVS,
+    }
+    service.save({ channelId: SOURCE, kind: "chat", enabled: true, scope })
+    service.save({ channelId: SOURCE, kind: "chat", enabled: true, scope })
+    service.save({ channelId: SOURCE, kind: "chat", enabled: true, scope })
+    expect(scopeChangedFor).toEqual([SOURCE])
+  })
+
+  /**
+   * ★ 反证：`since` 差一毫秒就会触发 —— 这正是渲染层现算时发生的事。
+   * 保留这条是为了说明"服务侧判据是对的，问题在调用方传了抖动的值"。
+   */
+  it("★ since 差 1ms 就算变了（所以调用方必须给稳定的值）", () => {
+    service.save({
+      channelId: SOURCE,
+      kind: "chat",
+      enabled: true,
+      scope: { since: 1_783_400_000_000, conversationIds: SOURCE_CONVS },
+    })
+    service.save({
+      channelId: SOURCE,
+      kind: "chat",
+      enabled: true,
+      scope: { since: 1_783_400_000_001, conversationIds: SOURCE_CONVS },
+    })
+    expect(scopeChangedFor).toEqual([SOURCE, SOURCE])
   })
 })

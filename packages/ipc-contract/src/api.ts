@@ -179,7 +179,13 @@ export interface MyContextApi {
     restart(): Promise<Result<true>>
   }
   distill: {
-    sources(): Promise<Result<DistillSourceView[]>>
+    /**
+     * 读**某个渠道**的资料源与范围。不给 = 主渠道。
+     *
+     * ★ 必须能按渠道读：采集范围面板一次只看一个渠道，而恒读主库会让它
+     * 在飞书栏显示钉钉的范围（实测后果：飞书白名单里 24/28 个是钉钉的 id）。
+     */
+    sources(input?: { channelId?: string }): Promise<Result<DistillSourceView[]>>
     /**
      * 存**一个渠道**的资料源范围。
      *
