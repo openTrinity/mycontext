@@ -107,23 +107,51 @@ export function useChannels() {
   })
 }
 
-/** 授权成功后要刷三处：渠道列表、bootstrap（账号 session + 头像）、self-identity（渠道花名）。 */
+/**
+ * 授权 / 取消授权之后作废缓存。
+ *
+ * ## ★★ 全失效，不列举
+ *
+ * 这里原来列了三个 key（`channels` / `bootstrap` / `selfIdentity`），
+ * 注释写的是「授权成功后要刷三处」。而**列举必然漏** —— 上一次补
+ * `selfIdentity` 就是补的这个漏，这次补的是 `channelConversations`。
+ *
+ * ### 漏掉它的真实表现（引导第 4 步会话列表恒空）
+ *
+ * 授权前 `DistillSourceService.conversations()` 会被**明确拒绝**：
+ * 身份没绑时不许跑渠道命令（否则会跟着 CLI 的全局身份读到别人的数据 ——
+ * 那是安全边界，拒绝是对的）。于是列表降级成"只有本地已采的部分"，
+ * 而新装的机器上本地是空的 → 0 项 + 「列表可能不完整」。
+ *
+ * 那份空结果带着 `staleTime: 5 * 60_000` 进了缓存，**而授权成功后没有
+ * 任何一处失效它**。实测日志（新环境首次授权）：
+ *
+ *     warn | channel conversation list failed | 还没绑定渠道身份，拒绝执行渠道命令   ×3
+ *     info | channel login start
+ *     info | channel identity bound
+ *     info | self identity confirmed after auth
+ *
+ * 三次失败全在授权之前，之后一次都没再拉过 —— 用户看到的就是一个
+ * 永远空的会话列表，而采集其实在正常跑（同一份日志里有
+ * `ingest reconciling stale conversations`）。这正是本仓库最贵的那类：
+ * 不报错，只是答错。
+ *
+ * ### 为什么全失效才是对的判据
+ *
+ * 授权改的不是"三个字段"，而是**能不能跑渠道命令这道闸**——
+ * 也就是所有要问渠道的查询（会话列表、采集快照、可采纳登录态、
+ * 图谱状态…）。逐个列举的话，以后每加一个这样的查询都要记得回来加一行，
+ * 而漏掉的代价是"某一块永远显示授权前的状态"。
+ *
+ * 对照组就在本文件里：`useSwitchChannelIdentity` 用的正是全失效，
+ * 理由同款（漏一个 key 就是显示上一个身份的数据）。
+ */
 function useChannelMutation<TInput>(perform: (input: TInput) => Promise<unknown>) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: perform,
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.channels })
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.bootstrap })
-      /**
-       * ★ selfIdentity 也必须失效 —— 授权改的身份不止 bootstrap 里那份**账号**
-       * session（displayName/avatarUrl），还有这份**渠道**身份（钉钉花名、
-       * openId 列表，见 self-identity-panel / dashboard）。漏掉它的表现是：
-       * 重新授权后侧栏头像刷新了，而身份面板里的渠道花名还是旧的 ——
-       * 两份身份分别缓存，只失效一份就只刷一半。
-       */
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.selfIdentity })
-    },
+    // ★ 全清：见上面的注释（列举必然漏，而漏掉的表现是静默答错）
+    onSettled: () => void queryClient.invalidateQueries(),
   })
 }
 
@@ -188,20 +216,16 @@ export function useAdoptableSession(enabled = true) {
  * 授权换组织时会撞 `SELF_IDENTITY_CONFLICT`，也就是自动补跑自己制造了
  * 那个冲突；以及它在用户没操作时就 spawn 2-3 次子进程。
  *
- * 走 `useChannelMutation` 复用那套失效逻辑（渠道列表 + bootstrap +
- * selfIdentity）—— 采纳改的正是同样那几样东西，与授权那条路一致。
- * 顺带把 `adoptableSession` 也失效掉：采纳成功后它应该变成 null。
+ * ★★ 全失效，与授权那条路同一个判据（见 `useChannelMutation` 的注释）。
+ * 采纳做的正是**落身份行**这一步，也就是解开 `identity_unbound` 那道闸 ——
+ * 于是所有要问渠道的查询（会话列表尤其）都必须重取。原来这里列了四个 key，
+ * 而 `channelConversations` 不在其中：采纳完成后引导第 4 步仍是空列表。
  */
 export function useAdoptSession() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async () => unwrap(await window.mycontext.channels.adoptSession()),
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.channels })
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.bootstrap })
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.selfIdentity })
-      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.adoptableSession })
-    },
+    onSettled: () => void queryClient.invalidateQueries(),
   })
 }
 
