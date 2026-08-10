@@ -319,6 +319,8 @@ export class MultiKlServerService {
         topEntities: [],
         recentFacts: [],
         buildSchedule: null,
+        // 渠道都没就绪，自然没有"这一轮建了多少"
+        lastBuild: null,
       }),
     )
     if (single !== null) return single
@@ -353,7 +355,17 @@ export class MultiKlServerService {
       // 自动建图调度目前由主数据面统一管理；多图库只合并图数据，
       // 不重新推导水位，避免与 FeedService 的真实触发判据漂移。
       buildSchedule: primary.buildSchedule,
-      // 「这一轮建了多少」取主渠道那份，不求和（见后续提交里那段完整注释）
+      /**
+       * ★ 「这一轮建了多少」取**主渠道那份**，不合并。
+       *
+       * 与 `buildSchedule` 同一条理由，但更强：这个字段回答的是"刚刚那次建图
+       * 的增量"，而各渠道各自建图、各有自己的一轮。把两个渠道的增量加起来
+       * 得到的是一个**没有对应任何一次真实建图**的数 —— 用户看到"本轮 +24 个
+       * 实体"却找不到是哪一次建的。
+       *
+       * ★ 不给 null：那会让主渠道刚建完的增量在多渠道下**消失**
+       *（用户的常态视图就是这条合并路径）。
+       */
       lastBuild: primary.lastBuild,
     }
   }

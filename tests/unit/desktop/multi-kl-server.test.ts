@@ -5,6 +5,7 @@ import type {
   KlGraphOverview,
   KlServerStatus,
 } from "@mycontext/ipc-contract"
+import { klGraphOverviewSchema } from "@mycontext/ipc-contract"
 import type { KlServerService } from "@main/services/kl-server.service"
 import { MultiKlServerService } from "@main/services/multi-kl-server.service"
 
@@ -46,6 +47,16 @@ function server(channel: string, count: number) {
     factTypes: [{ type: "STATUS", count: count * 2 }],
     topEntities: [{ name: "共享项目", type: "Project", mentions: count }],
     recentFacts: [{ text: `${channel}事实`, type: "STATUS", confidence: 0.9, at: count }],
+    /** 「这一轮建了多少」—— 每个渠道各有自己的一轮，所以值不同。 */
+    lastBuild: {
+      entities: count,
+      facts: count * 2,
+      edges: count * 3,
+      unitsDiscovered: count * 6,
+      unitsSkipped: 0,
+      unitsProcessed: count * 6,
+      chunksCreated: count * 4,
+    },
   }
   return {
     status: vi.fn(() => status),
@@ -58,6 +69,62 @@ function server(channel: string, count: number) {
 }
 
 describe("MultiKlServerService", () => {
+  /**
+   * ★★★ 门面返回的 `graphOverview` 必须带**契约要求的全部字段**。
+   *
+   * ## 这一条锁的是「上游加字段、门面没跟」这个形状
+   *
+   * `MultiKlServerService` 是我们这侧加的合并层，而 `KlGraphOverview` 的形状
+   * 由契约（`packages/ipc-contract`）定、由上游演进。上游加一个必填字段时，
+   * 单渠道那条路自动就有（它直接转发 `KlServerService.graphOverview()`），
+   * 而**合并路径与"渠道未就绪"那条兜底路径是手写的对象字面量** ——
+   * 漏一个字段 typecheck 会报，但那要等到有人跑 typecheck；
+   * 而如果那个字段恰好可选，就连 typecheck 都不报，直接静默丢数据。
+   *
+   * 实测过一次：上游 `1ec1ca4f` 加了 `lastBuild`（「这一轮建了多少」），
+   * 两条手写路径都没给 —— 这条门禁就是那次的回归锁。
+   *
+   * ★ 判据用 zod schema 的键集而不是硬编码字段名：上游再加字段时**自动**
+   * 覆盖，不需要有人记得来改这条测试。
+   */
+  it("★★★ graphOverview 的键集与契约一致（合并路径 + 未就绪兜底）", () => {
+    const expected = Object.keys(klGraphOverviewSchema.shape).sort()
+
+    const dingtalk = server("钉钉", 2)
+    const feishu = server("飞书", 3)
+    const service = new MultiKlServerService(dingtalk as unknown as KlServerService, () => [
+      { service: feishu as unknown as KlServerService, enabled: () => true },
+    ])
+
+    // ① 合并路径（不给 channelId）
+    expect(Object.keys(service.graphOverview()).sort()).toEqual(expected)
+    // ② 「那个渠道没挂上」的兜底路径
+    expect(Object.keys(service.graphOverview("未挂载的渠道")).sort()).toEqual(expected)
+  })
+
+  /**
+   * ★★ `lastBuild` 取主渠道那份，**不求和**。
+   *
+   * 它回答的是"刚刚那次建图的增量"，而各渠道各自建图、各有自己的一轮。
+   * 把两个渠道的增量加起来得到的是一个**没有对应任何一次真实建图**的数 ——
+   * 用户看到「本轮 +24 个实体」却找不到是哪一次建的。
+   *
+   * ★ 也不能给 null：那会让主渠道刚建完的增量在多渠道下消失，
+   * 而合并路径正是用户的常态视图。
+   */
+  it("★★ lastBuild 取主渠道那份（求和会得到一个不存在的「一轮」）", () => {
+    const dingtalk = server("钉钉", 2)
+    const feishu = server("飞书", 3)
+    const service = new MultiKlServerService(dingtalk as unknown as KlServerService, () => [
+      { service: feishu as unknown as KlServerService, enabled: () => true },
+    ])
+
+    const out = service.graphOverview().lastBuild
+    // 主渠道 count=2 → entities 2；求和会是 5，给 null 会是 null
+    expect(out?.entities).toBe(2)
+    expect(out).not.toBeNull()
+  })
+
   it("渠道有数据时分别建图，统计只在上层合并", async () => {
     const dingtalk = server("钉钉", 2)
     const feishu = server("飞书", 3)
