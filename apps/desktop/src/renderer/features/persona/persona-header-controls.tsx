@@ -33,13 +33,19 @@ import { ChannelPicker } from "../shell/channel-picker.js"
 import { ChannelBadge } from "./channel-badge.js"
 
 /**
- * 数字分身**只**在这个渠道上工作。
+ * 主渠道 id —— 只当**兜底**用（渠道列表还没加载时落在哪）。
  *
- * 其余渠道是只读接入：不进自动回复、不进发消息链路（结构上就没挂
- * `personaSupervisor`，见 `DataPlaneService.attach` 里非主渠道那个分支）。
- * 所以这不是"还没做"，而是一条刻意的边界 —— 只读渠道不该能替用户说话。
+ * ## ★ 「能不能跑分身」不看这个常量，看 `canRunPersona`
+ *
+ * 判据是渠道能力 `sendAs`（能不能以本人身份发消息）：只读接入的渠道不进
+ * 自动回复、不进发消息链路（结构上就没挂 `personaSupervisor`，见
+ * `DataPlaneService.attach` 里非主渠道那个分支）—— 那是一条刻意的边界，
+ * 而**它的真源在插件的 capabilities 里**，不在这个常量里。
+ *
+ * 这个常量原来叫 `PERSONA_SUPPORTED_CHANNEL` 并被当成判据用，于是同一个事实
+ * 在渲染层有七份拷贝。改名是为了让"兜底值"与"判据"不再被混为一谈。
  */
-export const PERSONA_SUPPORTED_CHANNEL = "dingtalk"
+export const PRIMARY_CHANNEL_ID = "dingtalk"
 
 export interface PersonaHeaderControlsProps {
   snapshot: PersonaSnapshotView | undefined
@@ -51,6 +57,13 @@ export interface PersonaHeaderControlsProps {
    * 而"为什么飞书不在这里"就成了一个没有答案的问题。
    */
   authorizedChannelIds?: readonly string[]
+  /**
+   * 其中**能跑数字分身**的那些（按 `sendAs` 能力算，见 `canRunPersona`）。
+   *
+   * ★ 缺省空数组 = 一个都不支持。给"全都支持"当缺省更危险：忘了传的表现会是
+   * 选择器上一个警示都不显示，而用户点进去才发现整页是"暂未开通"。
+   */
+  personaCapableChannelIds?: readonly string[]
   activeChannelId?: string | null
   onChannelChange?: (id: string) => void
   killSwitchBusy: boolean
@@ -61,6 +74,7 @@ export function PersonaHeaderControls({
   snapshot,
   channelIds,
   authorizedChannelIds = [],
+  personaCapableChannelIds = [],
   activeChannelId = null,
   onChannelChange,
   killSwitchBusy,
@@ -88,7 +102,14 @@ export function PersonaHeaderControls({
           options={authorizedChannelIds.map((id) => ({
             id,
             label: tc(`${id}.label`, { defaultValue: id }),
-            unsupported: id !== PERSONA_SUPPORTED_CHANNEL,
+            /**
+             * ★ 由上层按**能力**算好传进来（`personaCapableChannelIds`）。
+             *
+             * 这个组件只拿到 id 字符串，拿不到 `ChannelSummary`，所以不能在
+             * 这里问 `sendAs`。原来是 `id !== PERSONA_SUPPORTED_CHANNEL` ——
+             * 那就是那七份拷贝之一。
+             */
+            unsupported: !personaCapableChannelIds.includes(id),
           }))}
           activeId={activeChannelId}
           onChange={onChannelChange}

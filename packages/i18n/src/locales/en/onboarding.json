@@ -123,7 +123,8 @@
       "enablePart": "Turn on {{part}}",
       "styleSection": "Style",
       "detailSection": "Fine-tune"
-    }
+    },
+    "noPersonaHost": "The channel you connected is read-only — its chat history only answers your questions; it is never used to reply on your behalf. What you fill in here is saved, and takes effect once you connect DingTalk."
   },
   "sourcesStep": {
     "range30": "Last 30 days",
@@ -209,7 +210,8 @@
     "graphFacts": "conclusions retained",
     "graphEdges": "links between them",
     "graphBuilding": "Organizing — needs a model, takes minutes. You can close this page",
-    "graphAbsent": "Not organized yet: {{reason}}. It runs automatically on next launch once a model is set."
+    "graphAbsent": "Not organized yet: {{reason}}. It runs automatically on next launch once a model is set.",
+    "corpusChannelMissing": "The chat history to learn from comes from DingTalk, which isn't connected — starting now would finish having learned nothing. Go back to step 1 to connect it, or skip this step."
   },
   "sourceKinds": {
     "chat": "Chat messages",

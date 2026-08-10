@@ -1529,6 +1529,28 @@ export const channelSummarySchema = z.object({
   status: authStatusSchema,
   /** 是否正在授权中（用于 UI 禁用按钮与显示进度） */
   loginInProgress: z.boolean(),
+  /**
+   * 渠道能力 —— 只暴露渲染层真正要用的那两项。
+   *
+   * ## ★★ `sendAs` 是「数字分身能不能在这个渠道上跑」的判据
+   *
+   * 分身的本质就是**以我的身份发消息**，所以这不是一个新造的标记，
+   * 而是本来就该问的那个问题。空数组 = 只读接入（飞书刻意如此，
+   * 见 `plugins/feishu/index.ts` 头注释第一行：`deliberately no persona/send`）。
+   *
+   * ★ 没有新加一个 `personaCapable: boolean`：那会让「这个渠道能不能发消息」
+   * 有**两个真源**，而它们迟早分叉 —— 而渲染层原来的做法更糟：
+   * 七处各写一份 `channelId === "dingtalk"`，也就是七份拷贝。
+   *
+   * ## 为什么不整份透传 `ChannelCapabilities`
+   *
+   * 那里面还有 `ingest` / `changeProbe` / `media` —— 采集层的实现细节，
+   * 渲染层不该看见（看见了就会有人拿它做 UI 判据，而它随实现变）。
+   */
+  capabilities: z.object({
+    sendAs: z.array(z.enum(["self", "bot"])),
+    domains: z.array(z.enum(["chat", "doc", "minutes", "contact"])),
+  }),
 })
 
 export type ChannelSummary = z.infer<typeof channelSummarySchema>

@@ -54,6 +54,7 @@ import { DistillStep } from "./distill-step.js"
 import { PersonaStep, type PersonaDraft } from "./persona-step.js"
 import { SourcesStep, type SourcesDraft } from "./sources-step.js"
 import { ModelConfigForm } from "../settings/model-config-form.js"
+import { personaCapableChannels } from "../../lib/channel-capability.js"
 
 const STEP_ORDER: readonly OnboardingStepId[] = [
   "channel",
@@ -235,6 +236,21 @@ export function OnboardingView() {
   const list: ChannelSummary[] = channels.data ?? []
   const dingtalk = list.find((channel) => channel.id === "dingtalk")
   const authorized = dingtalk?.status.state === "authorized"
+  /**
+   * 有没有一个**已授权、且能跑数字分身**的渠道。
+   *
+   * ## ★★ 判据是渠道能力（`sendAs`），不是渠道 id
+   *
+   * 分身的本质是"以我的身份发消息"，而只读接入的渠道刻意不给这个能力
+   * （飞书 `sendAs: []`）。第 3 步（数字分身）与第 5 步（开始学习）都要据此
+   * 说话 —— 只连了只读渠道时它们**做不了**，而原来什么都不说：
+   * · 第 3 步填完名字与形象，之后分身一直不说话且找不到原因；
+   * · 第 5 步跑完得到 0 条结论，也不报错（`DistillService` 只读主库）。
+   *
+   * ★ 用 `canRunPersona` 而不是 `=== PRIMARY_CHANNEL_ID`：将来某个渠道开了
+   * 发送能力时这里一行都不用改。
+   */
+  const personaHost = personaCapableChannels(list)[0]
 
   /**
    * 本人身份是否已确认——授权后才有意义，所以只在 authorized 时订阅快照。
@@ -602,6 +618,7 @@ export function OnboardingView() {
                   setPersonaTouched(false)
                 }}
                 showNameError={personaTouched}
+                personaHostConnected={personaHost !== undefined}
               />
             ) : null}
 
@@ -610,6 +627,20 @@ export function OnboardingView() {
                 value={sources}
                 onChange={setSources}
                 sources={distillSources.data ?? []}
+                /**
+                 * ★★ 只列**主渠道**的会话。
+                 *
+                 * 这一步喂给的是第 5 步「开始学习」（蒸馏），而 `DistillService`
+                 * 只有一个 `this.db`（主库）、**没有渠道概念** —— 非主渠道的语料
+                 * 在 `sources/<channelId>/core.sqlite` 里，蒸馏压根不读。
+                 *
+                 * 不过滤的表现（用户截图）：列表里混着飞书的会话，勾上它们是一个
+                 * **不会兑现的动作** —— 界面上有勾、学习时不算，且不报错。
+                 *
+                 * ★ 飞书的采集范围在运行状态页单独设（那里一次只管一个渠道，
+                 * 见 `collection-scope-panel.tsx` 传同一个 `channelFilter`）。
+                 */
+                channelFilter={PRIMARY_CHANNEL_ID}
               />
             ) : null}
 
@@ -622,6 +653,15 @@ export function OnboardingView() {
                  * 所以它为 true 就意味着抽取型任务真的能跑。
                  */
                 modelConfigured={personaSnapshot.data?.agentAvailable ?? false}
+                /**
+                 * ★ 语料来自主渠道的库（`DistillService` 只有一个 `this.db`）。
+                 *
+                 * 这里复用 `personaHost` 而不是单独判主渠道：能跑分身的渠道
+                 * 与"语料所在的渠道"目前是同一个（都是主渠道），而**两者分叉
+                 * 的那天**这个字段该跟着语料走 —— 到时把判据换成显式的
+                 * 主渠道授权态（`authorized`），别让它继续跟着分身能力漂。
+                 */
+                corpusChannelConnected={authorized}
               />
             ) : null}
           </div>

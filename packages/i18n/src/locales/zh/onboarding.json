@@ -123,7 +123,8 @@
       "enablePart": "打开{{part}}",
       "styleSection": "风格",
       "detailSection": "细节调整"
-    }
+    },
+    "noPersonaHost": "你连接的渠道是只读接入 —— 它的聊天记录只用来回答你的提问，不会用来替你回复。这里填的名字与形象会存下来，等你连上钉钉后才生效。"
   },
   "sourcesStep": {
     "range30": "最近 30 天",
@@ -209,7 +210,8 @@
     "graphFacts": "记住的结论",
     "graphEdges": "它们之间的联系",
     "graphBuilding": "正在整理 —— 要调模型，分钟级。可以关掉页面",
-    "graphAbsent": "还没整理：{{reason}}。配好模型后下次启动会自动整理。"
+    "graphAbsent": "还没整理：{{reason}}。配好模型后下次启动会自动整理。",
+    "corpusChannelMissing": "要学的聊天记录来自钉钉，而它还没连接 —— 现在开始会跑完但什么都学不到。回第 1 步连上钉钉，或先跳过这步。"
   },
   "sourceKinds": {
     "chat": "聊天消息",

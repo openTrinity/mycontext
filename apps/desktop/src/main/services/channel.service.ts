@@ -70,6 +70,19 @@ export class ChannelService {
         stepKeys: plugin.auth.describeStepKeys(),
         status,
         loginInProgress: this.options.host.isLoginInProgress(plugin.meta.id),
+        /**
+         * ★ 直接取 plugin 的值，**不在这里重新推导**。
+         *
+         * 「这个渠道能不能以本人身份发消息」的真源是插件自己
+         * （`ChannelCapabilities.sendAs`）。这一层若写成
+         * `sendAs: plugin.meta.id === "dingtalk" ? ["self"] : []`
+         * 就等于在这里造了第二份判据 —— 而那正是渲染层原来的病
+         * （七处各写一份 `=== "dingtalk"`）。
+         */
+        capabilities: {
+          sendAs: [...plugin.capabilities.sendAs],
+          domains: [...plugin.capabilities.domains],
+        },
       })
     }
     return summaries

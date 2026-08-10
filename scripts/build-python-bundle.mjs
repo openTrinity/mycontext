@@ -199,7 +199,31 @@ for f in files:
         line = line.split("#")[0].strip()
         if not line or line.startswith("-"):
             continue
-        name = line.split("==")[0].split(">=")[0].split("<")[0].split("[")[0].strip()
+        # ★★ 先切掉 PEP 508 的环境标记（分号之后那段），并且按它决定要不要验。
+        #
+        # 不切的后果（实测 2026-08-10，打包在这里失败）：
+        # kl-graph/requirements.txt 里有一行
+        #     tzdata; sys_platform == "win32"
+        # 整条被当成包名，于是在 macOS 上永远报「缺依赖：tzdata; sys_platform」
+        # —— 而那个包本来就不该装（它只在 Windows 上需要）。
+        #
+        # 判据不是"忽略带标记的行"，而是用当前解释器求值那个标记：
+        # 忽略的话会漏掉真正该验的平台相关依赖（比如
+        # pywin32 在 Windows 上打包时要验）。
+        #
+        # ★ 这段活在 JS 模板字符串里 —— 注释里不许出现反引号（会提前终止模板，
+        #   表现是 node 报一个指向 Python 注释行的 SyntaxError）。
+        spec, _, marker = line.partition(";")
+        if marker.strip():
+            try:
+                from packaging.markers import Marker
+                if not Marker(marker.strip()).evaluate():
+                    continue
+            except ImportError:
+                # packaging 不在 bundle 里 → 保守跳过带标记的行（宁可漏验，
+                # 不要误报一个"缺了本来就不该装的包"）
+                continue
+        name = spec.split("==")[0].split(">=")[0].split("<")[0].split("[")[0].strip()
         if name:
             want.append(name)
 have = {d.metadata["Name"].lower().replace("_", "-") for d in md.distributions() if d.metadata["Name"]}

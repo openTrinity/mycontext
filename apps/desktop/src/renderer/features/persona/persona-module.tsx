@@ -34,7 +34,8 @@ import {
 import { useErrorText } from "../../lib/use-error-text.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { ConversationRail } from "./conversation-rail.js"
-import { PERSONA_SUPPORTED_CHANNEL, PersonaHeaderControls } from "./persona-header-controls.js"
+import { PRIMARY_CHANNEL_ID, PersonaHeaderControls } from "./persona-header-controls.js"
+import { canRunPersona, personaCapableChannels } from "../../lib/channel-capability.js"
 import { useHeaderSlot } from "../shell/header-slot.js"
 import { ReplyDock } from "./reply-dock.js"
 import { ChatHeader } from "./chat-header.js"
@@ -261,8 +262,30 @@ export function PersonaModule() {
    * 那是一条刻意的边界而不是"还没做"。
    */
   const [pickedChannel, setPickedChannel] = useState<string | null>(null)
-  const personaChannel = pickedChannel ?? PERSONA_SUPPORTED_CHANNEL
-  const unsupportedChannel = personaChannel === PERSONA_SUPPORTED_CHANNEL ? null : personaChannel
+  /**
+   * ★ 默认落在**第一个能跑分身的已授权渠道**上，而不是写死主渠道 id。
+   *
+   * 判据是能力（`sendAs`，见 `canRunPersona`）—— 将来某个渠道开了发送能力时
+   * 这里一行都不用改。取不到（都没授权 / 列表还没加载）时退回主渠道：
+   * 那时整页会显示"未连接"那一支，与改动前一致。
+   */
+  const personaHosts = useMemo(
+    () => personaCapableChannels(channels.data ?? []),
+    [channels.data],
+  )
+  const personaChannel = pickedChannel ?? personaHosts[0]?.id ?? PRIMARY_CHANNEL_ID
+  /**
+   * 选中的这个渠道不支持分身吗（支持 → null）。
+   *
+   * ★ 判据同样是能力：在列表里找到它并问 `sendAs`。找不到（id 不在列表里）
+   * 时**当成不支持** —— 那是"渠道列表还没加载"或"这个 id 已经不存在"，
+   * 两种都不该让分身页假装能用。
+   */
+  const unsupportedChannel = canRunPersona(
+    (channels.data ?? []).find((item) => item.id === personaChannel),
+  )
+    ? null
+    : personaChannel
   const activeDrafts = allDrafts.filter(
     (draft) => activeId === null || draft.conversationId === activeId,
   )
@@ -291,6 +314,7 @@ export function PersonaModule() {
         snapshot={snapshot.data}
         channelIds={channelIds}
         authorizedChannelIds={authorizedChannelIds}
+        personaCapableChannelIds={personaHosts.map((item) => item.id)}
         activeChannelId={personaChannel}
         onChannelChange={setPickedChannel}
         killSwitchBusy={killSwitch.isPending}

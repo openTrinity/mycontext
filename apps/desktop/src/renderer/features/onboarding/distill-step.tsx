@@ -58,6 +58,19 @@ export interface DistillStepProps {
   rangeDays: number | null
   /** 是否配了模型。没配时抽取型任务会失败 —— 要提前说 */
   modelConfigured: boolean
+  /**
+   * 语料所在的那个渠道连上了吗。
+   *
+   * ## ★★ 为什么这一步要知道渠道
+   *
+   * 学习的语料来自**主渠道**的库：`DistillService` 只有一个 `this.db`，
+   * 非主渠道（只读接入）的语料在 `sources/<channelId>/core.sqlite` 里，
+   * 蒸馏压根不读。
+   *
+   * 所以「只连了飞书」时点开始学习会**跑完并得到 0 条结论，且不报错** ——
+   * 正是这个仓库最贵的那类静默降级。要提前说清。
+   */
+  corpusChannelConnected: boolean
 }
 
 /**
@@ -72,7 +85,11 @@ const FORGE_PHASES = [
   { id: "publish", labelKey: "distillStep.phasePublish" },
 ] as const
 
-export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
+export function DistillStep({
+  rangeDays,
+  modelConfigured,
+  corpusChannelConnected,
+}: DistillStepProps) {
   const { t } = useDynamicTranslation("onboarding")
   const errorText = useErrorText()
   const progress = useDistillProgress()
@@ -106,6 +123,17 @@ export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
       {modelConfigured ? null : (
         <p className="typography-body-small-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--text-base-tertiary)]">
           {t("distillStep.noModel")}
+        </p>
+      )}
+
+      {/*
+        ★★ 语料所在的渠道没连 → 现在开始学习会得到 0 条结论（见 props 注释）。
+
+        用 warning 色而不是 tertiary：这不是"顺便一提"，而是"这一步现在做不了"。
+      */}
+      {corpusChannelConnected ? null : (
+        <p className="typography-body-small-400 rounded-[var(--radius-md)] bg-[var(--status-fill-warning-container)] px-3 py-2 text-[var(--status-warning)]">
+          {t("distillStep.corpusChannelMissing")}
         </p>
       )}
 
@@ -268,7 +296,13 @@ export function DistillStep({ rangeDays, modelConfigured }: DistillStepProps) {
            * 缺 Python 返回），而按钮看起来是好的 —— 用户会反复点。
            * 原因已经在上面写着了，所以这里只需要拦住动作。
            */
-          disabled={start.isPending || running || forge?.available === false}
+          disabled={
+            start.isPending ||
+            running ||
+            forge?.available === false ||
+            // ★ 语料渠道没连 → 跑了也是 0 条（软门：底部「跳过这步」仍可用）
+            !corpusChannelConnected
+          }
           onClick={() => {
             setRunBaseline(forge?.lastRunAt ?? null)
             start.mutate({ days: rangeDays })

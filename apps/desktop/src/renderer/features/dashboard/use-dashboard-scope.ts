@@ -35,9 +35,16 @@ import {
   useKlServerStatus,
   usePersonaSnapshot,
 } from "../../lib/queries.js"
+import { canRunPersona } from "../../lib/channel-capability.js"
 
-/** 数字分身只在这个渠道上工作 —— 其余是只读接入，见 `personaSupported`。 */
-const PERSONA_SUPPORTED_CHANNEL = "dingtalk"
+/**
+ * 主渠道 id —— 「语料归属」的判据（不是「谁能跑分身」，那个走 `canRunPersona`）。
+ *
+ * ★ 这两件事曾经共用一个常量，而它们会分叉：将来某个非主渠道开了发送能力时
+ * 「能跑分身」变成两个渠道，而「语料来自哪个库」仍然只有主渠道一个
+ * （`DistillService` 只有一个 `this.db`）。
+ */
+const PRIMARY_CHANNEL_ID = "dingtalk"
 
 /**
  * 把顶层快照替换成**某个渠道**的那一份。
@@ -161,7 +168,15 @@ export function useDashboardScope(pickedChannelId: string | null): DashboardScop
   const ego = useKlGraphEgo(building, channelId)
   const overview = useKlGraphOverview(building, channelId)
 
-  const personaSupported = channelId === undefined || channelId === PERSONA_SUPPORTED_CHANNEL
+  /**
+   * ★ 判据是**能力**（`sendAs`）而不是渠道 id —— 见 `canRunPersona`。
+   *
+   * `channelId === undefined`（渠道列表还没加载）时给 `true`：那一刻界面
+   * 还没决定展示哪个渠道，给 false 会让分身那一块先闪一下"暂未开通"。
+   */
+  const personaSupported =
+    channelId === undefined ||
+    canRunPersona(channels.data?.find((item) => item.id === channelId))
   /**
    * ★ 判据是**主渠道**的授权态，而不是"当前选中的渠道连没连"。
    *
@@ -169,9 +184,12 @@ export function useDashboardScope(pickedChannelId: string | null): DashboardScop
    * 引导走完之后应用不再判授权（`onboarding.isDismissed()` 只看四步走过没有），
    * 所以登录态过期时仪表盘会一直显示历史数据而不给任何说明。
    * 见 `readIngest` 的 `staleData`。
+   *
+   * ★ 这里问的是「主渠道是谁」，与上面那个「谁能跑分身」是**两件事**，
+   * 所以仍然用 `PRIMARY_CHANNEL_ID` 而不是能力判据：采集这条链的语料
+   * 归属确实是按主渠道定的（`DistillService` 只读主库）。
    */
-  const primaryState = channels.data?.find((item) => item.id === PERSONA_SUPPORTED_CHANNEL)?.status
-    .state
+  const primaryState = channels.data?.find((item) => item.id === PRIMARY_CHANNEL_ID)?.status.state
   const channelConnected = primaryState === undefined ? null : primaryState === "authorized"
 
   return {

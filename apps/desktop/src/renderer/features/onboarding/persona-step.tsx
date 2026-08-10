@@ -61,9 +61,28 @@ export interface PersonaStepProps {
   onChange: (next: PersonaDraft) => void
   /** 名字为空时提交过一次 —— 用它决定是否显示必填提示 */
   showNameError: boolean
+  /**
+   * 有没有一个**能跑数字分身**的已授权渠道。
+   *
+   * ## ★★ 判据是渠道能力（`sendAs`），不是渠道 id
+   *
+   * 分身的本质是"以我的身份发消息"，而只读接入的渠道刻意不给这个能力
+   * （飞书 `sendAs: []`，见它的 `index.ts` 头注释）。所以只连了那类渠道时
+   * 这一步填的东西**暂时不会生效** —— 要说清，否则用户填完名字与形象，
+   * 之后发现分身一直不说话而找不到原因。
+   *
+   * ★ 只显示说明、**不禁用表单**：填了仍然有意义（连上主渠道后立刻生效），
+   * 而禁用会让用户以为"这个功能坏了"。
+   */
+  personaHostConnected: boolean
 }
 
-export function PersonaStep({ value, onChange, showNameError }: PersonaStepProps) {
+export function PersonaStep({
+  value,
+  onChange,
+  showNameError,
+  personaHostConnected,
+}: PersonaStepProps) {
   const { t } = useDynamicTranslation("onboarding")
   const { t: tc } = useDynamicTranslation("common")
   /** 文案由调用方注入 —— design 包不该知道语言（见 use-figure-labels.ts） */
@@ -94,6 +113,17 @@ export function PersonaStep({ value, onChange, showNameError }: PersonaStepProps
 
   return (
     <div className="flex flex-col gap-[var(--gap-section-md)]">
+      {/*
+        ★★ 没有能跑分身的渠道 → 说清"填了暂时不生效"（见 props 注释）。
+
+        放在最前面：它是读下面这些表单的**前提**，放在末尾等于让用户填完才知道。
+      */}
+      {personaHostConnected ? null : (
+        <p className="typography-body-small-400 rounded-[var(--radius-md)] bg-[var(--status-fill-warning-container)] px-3 py-2 text-[var(--status-warning)]">
+          {t("personaStep.noPersonaHost")}
+        </p>
+      )}
+
       <StepSection title={t("personaStep.nameSection")}>
         <Field
           label={t("personaStep.nameLabel")}
