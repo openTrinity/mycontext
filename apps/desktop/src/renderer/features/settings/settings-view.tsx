@@ -17,6 +17,7 @@ import {
   useChannels,
   useSetLanguage,
   useSetQuitConfirmSuppressed,
+  useSetWorkLayerEnabled,
   useStatusReport,
 } from "../../lib/queries.js"
 import { useErrorText } from "../../lib/use-error-text.js"
@@ -527,7 +528,56 @@ function ModelSection() {
   return (
     <Section title={t("sections.model")} description={t("model.description")}>
       <ModelConfigForm />
+      <WorkLayerRow />
     </Section>
+  )
+}
+
+/**
+ * 工作层抽取开关。
+ *
+ * ## 为什么放在「模型」这一栏
+ *
+ * 它是唯一一个**打开就开始花模型调用**的偏好，而这一栏是用户理解"钱花在
+ * 哪"的地方（上面就是网关与模型名）。放在「通用」里会让一个有成本的开关
+ * 混在语言/主题这类零成本偏好中间。
+ *
+ * ## 为什么成本提示是常显的，不是 tooltip
+ *
+ * 蒸馏在后台跑（6 小时一轮），开着之后**界面上不会再提醒**任何一次调用。
+ * 也就是说这段文字是用户唯一一次看到成本的机会 —— 藏进 hover 等于没写。
+ */
+function WorkLayerRow() {
+  const { t } = useDynamicTranslation("settings")
+  const bootstrap = useBootstrapState()
+  const setWorkLayer = useSetWorkLayerEnabled()
+  /**
+   * ★ 默认 false。读不出来（还没登录 / bootstrap 在飞）时显示"关"——
+   * 与主进程 `workLayerEnabled()` 的回落一致（见那里的注释：一个读值失败
+   * 就自动开始花钱的开关是不可接受的）。两处默认必须同向，否则 UI 会显示
+   * "开"而后台其实没跑。
+   */
+  const enabled = bootstrap.data?.workLayerEnabled ?? false
+
+  return (
+    <div className="flex flex-col gap-[var(--gap-section-sm)]">
+      <Row label={t("model.workLayer.title")} description={t("model.workLayer.description")}>
+        <Switch
+          ariaLabel={t("model.workLayer.toggle")}
+          checked={enabled}
+          disabled={setWorkLayer.isPending}
+          onChange={(next) => setWorkLayer.mutate(next)}
+        />
+      </Row>
+      <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+        {t("model.workLayer.cost")}
+      </p>
+      {enabled ? (
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("model.workLayer.note")}
+        </p>
+      ) : null}
+    </div>
   )
 }
 

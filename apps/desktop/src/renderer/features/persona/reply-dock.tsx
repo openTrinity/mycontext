@@ -36,7 +36,7 @@
  * 这里的 `DRAFT_TAB_LIMIT` 只是再兜一个**渲染上限**，防止后端上限被调很高时
  * tab 栏被撑爆。
  */
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { Button, Tag, cn } from "@mycontext/design"
 import type { PersonaDraftView } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
@@ -464,6 +464,19 @@ function GeneratingPanel({
   // agent 的真实过程（thinking / 正文 / tool 调用），随事件实时来。
   const trace = usePersonaTrace(conversationId)
   const items = useMemo(() => toChatItems(trace.items), [trace.items])
+  /**
+   * 跟随滚动的依赖。
+   *
+   * ★ **不能用 `items.length`** —— thinking 是流式**追加进同一个 item** 的，
+   * 一段几百字的思考从头到尾 `length` 都是 1。用它做依赖的话跟随只在
+   * "新增一个块"时触发，而那恰好错过了最需要跟随的那段（一个块内部
+   * 持续变长）。所以取**总字符数**：它随每个 delta 变，才是"内容长了"的真身。
+   */
+  const traceLength = useMemo(
+    () => items.reduce((sum, item) => sum + JSON.stringify(item).length, 0),
+    [items],
+  )
+  const scrollRef = useStickToBottom(traceLength)
 
   return (
     <div className="flex flex-col gap-2 rounded-[var(--radius-md)] bg-[var(--bg-base-normal)] p-3">
@@ -485,8 +498,31 @@ function GeneratingPanel({
         ★ 真实过程。`busy` 让"还没有任何输出"的那几秒显示思考中指示器
         （实测首字要 ~3.8s，空白不给反馈会被当成卡死）；一旦有了 item
         它自己就不显示了（见 EventStream 里那段判据）。
+
+        ## ★★ 必须**限高 + 内滚**，否则这一块会把消息流挤出屏幕
+
+        用户报的「起草时看思考过程无法正常滚动」就是这里：整条 dock 是
+        `shrink-0`（见本文件 270 行那个容器 —— 它不该被消息流压缩），
+        而这一段过去**没有任何高度上限**。于是 thinking 越长 dock 越高，
+        把上面的对话一路顶出可视区，而它自己又不是滚动容器 ——
+        用户既滚不动这段过程，也看不见刚才的消息。
+
+        与 `ComposePanel` 同一套判据（见 `COMPOSE_MAX_PX` 上方那段）：
+        限一个最大高度，超了**内部滚动**，而不是 auto-grow 到几屏高。
+        `overscroll-contain` 让滚到底时不把滚动甩给背后的消息流 ——
+        否则用户想再看一行 thinking，结果整条对话跳走了。
+
+        ★ 限高**只加在这里**，不加进 `EventStream`：那个组件是与搜索模块
+        共用的（见它的文件头），搜索那一侧占的是整个中栏，限高会把它
+        变成一个 240px 的小窗口。高度约束属于**布局**，归各自的调用方。
       */}
-      <EventStream items={items} busy />
+      <div
+        ref={scrollRef}
+        className="min-h-0 overflow-y-auto overscroll-contain"
+        style={{ maxHeight: `${String(TRACE_MAX_PX)}px` }}
+      >
+        <EventStream items={items} busy />
+      </div>
       {messageIds.length === 0 ? null : (
         <Button
           size="sm"
@@ -679,6 +715,53 @@ function DraftPanel({
       <p className="typography-caption-400 text-[var(--text-base-tertiary)]">{t("sendBoundary")}</p>
     </div>
   )
+}
+
+/**
+ * 生成过程那一段的最大高度（px）。
+ *
+ * ## ★ 为什么比输入框（`COMPOSE_MAX_PX` = 240）矮
+ *
+ * 这一块住在消息流**底部**，它占多少就从对话里拿走多少。而这一段是
+ * **过程**、上面的对话才是用户要回复的东西 —— 过程不该比它解释的对话占得多。
+ *
+ * 200px 约等于 thinking 的 6–7 行，够看清"它现在在干什么"这一件事；
+ * 想读完整经过有草稿卡上的「看生成过程」弹窗（那里是全屏级空间，
+ * 见 `run-trace-dialog.tsx` 文件头为什么它必须是弹窗）。
+ */
+const TRACE_MAX_PX = 200
+
+/**
+ * 跟着最新事件走的滚动容器。
+ *
+ * ## ★★ 为什么限高之后**必须**加这个
+ *
+ * 限高把"看不见对话"换成了"看不见最新一行"：thinking 一直在追加，而滚动
+ * 位置停在顶部，于是用户盯着一段静止的文字，以为它卡住了 —— 那正是这一块
+ * 存在的理由的反面（它要回答的就是"它还在动吗"）。
+ *
+ * ## ★ 但用户往上翻时**不许**把他拽回底部
+ *
+ * 用户往上滚一定是在读刚才那几行。此时每来一个新事件就 `scrollTop = max`
+ * 会让他读的那一行被抢走 —— 这个反模式在聊天界面里很常见，且比不自动滚更烦。
+ *
+ * 判据是"当前是不是贴着底"（留 24px 容差，覆盖行高不整与亚像素误差）：
+ * 贴底 → 跟随；已经往上翻了 → 一动不动，等他自己滚回底部再恢复跟随。
+ */
+function useStickToBottom(dep: unknown): React.RefObject<HTMLDivElement | null> {
+  const ref = useRef<HTMLDivElement>(null)
+  /**
+   * ★ 用 layout effect 而不是 effect：要在**浏览器绘制之前**改 scrollTop，
+   * 否则用户会看到一帧"跳到旧位置又弹到底"的闪动。
+   */
+  useLayoutEffect(() => {
+    const node = ref.current
+    if (node === null) return
+    // 贴底容差 24px —— 见函数注释
+    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight <= 24
+    if (atBottom) node.scrollTop = node.scrollHeight
+  }, [dep])
+  return ref
 }
 
 /**

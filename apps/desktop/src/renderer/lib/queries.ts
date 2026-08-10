@@ -1017,6 +1017,22 @@ export function useSetQuitConfirmSuppressed() {
 }
 
 /**
+ * 开/关工作层抽取。
+ *
+ * 与上面两个偏好同构（读值随 bootstrap 下发，写完 invalidate 刷 UI）。
+ * 差别只在语义：这一个**打开就开始花钱**，所以 UI 那侧要给成本提示，
+ * 而不是像语言/主题那样一点就改。
+ */
+export function useSetWorkLayerEnabled() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (enabled: boolean) =>
+      unwrap(await window.mycontext.preferences.setWorkLayerEnabled({ enabled })),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.bootstrap }),
+  })
+}
+
+/**
  * 改显示名 / 头像。
  *
  * 改头像会把来源标成 `manual` —— 之后渠道授权**不再覆盖**它
