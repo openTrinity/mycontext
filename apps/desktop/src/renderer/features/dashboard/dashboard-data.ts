@@ -131,16 +131,28 @@ export interface IngestCards {
 /**
  * @param channelConnected 渠道现在连上了吗。`null` = 还不知道（首帧、正在查）
  *   —— 那时**不下结论**，否则已连接的账号会闪一下"历史数据"。
+ * @param channelName 当前渠道的显示名（「飞书」/「钉钉」）。
+ *
+ *   ## ★★ 为什么必须传进来
+ *
+ *   下面那三句话原来把渠道名**写死成「钉钉」**。而这一页的每个数字都已经
+ *   按页头 picker 选中的渠道取过了 —— 于是选飞书时界面上是：飞书的数字，
+ *   加一条「钉钉未连接 —— 以下是历史数据」。用户读到的是另一个渠道的状态，
+ *   而没有任何痕迹说这句话讲的不是当前渠道。
+ *
+ *   缺省给「渠道」这个中性词而不是「钉钉」：拿不到名字时说得笼统，
+ *   总比笃定地说错一个渠道名好。
  */
 export function readIngest(
   snapshot: IngestSnapshot | null,
   channelConnected: boolean | null = null,
+  channelName = "渠道",
 ): IngestCards | null {
   if (snapshot === null) return null
   const staleData = channelConnected === false
   const problem =
     snapshot.blockedReason === "session_expired"
-      ? "钉钉登录已过期，去设置里重新授权"
+      ? `${channelName}登录已过期，去设置里重新授权`
       : snapshot.blockedReason === "permission_required"
         ? /**
            * ★★ 这句话**不能**说"去授权" —— 它原来写的是「钉钉侧需要一次授权
@@ -158,7 +170,7 @@ export function readIngest(
            * （客户端缺能力、跨组织未确认、PAT 缺 scope），而说错方向比
            * 说得笼统更糟 —— 用户会按错误的指引反复尝试。
            */
-          (snapshot.lastError ?? "钉钉侧的权限不足，采集已暂停 —— 去设置里看详情")
+          (snapshot.lastError ?? `${channelName}侧的权限不足，采集已暂停 —— 去设置里看详情`)
         : snapshot.lastError !== null
           ? snapshot.lastError
           : /**
@@ -169,7 +181,7 @@ export function readIngest(
              * 去查采集器，而要做的事在设置页。
              */
             staleData
-            ? "钉钉未连接 —— 以下是历史数据，现在不会有新消息进来"
+            ? `${channelName}未连接 —— 以下是历史数据，现在不会有新消息进来`
             : !snapshot.running
               ? "采集未运行"
               : null

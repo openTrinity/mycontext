@@ -177,19 +177,23 @@ export function useDashboardScope(pickedChannelId: string | null): DashboardScop
   const personaSupported =
     channelId === undefined || canRunPersona(channels.data?.find((item) => item.id === channelId))
   /**
-   * ★ 判据是**主渠道**的授权态，而不是"当前选中的渠道连没连"。
+   * ★★ 判据是**当前选中的那个渠道**连没连，不是主渠道。
    *
-   * 那句提示说的是「这些数字还在增长吗」，而增长靠的是采集 ——
-   * 引导走完之后应用不再判授权（`onboarding.isDismissed()` 只看四步走过没有），
-   * 所以登录态过期时仪表盘会一直显示历史数据而不给任何说明。
-   * 见 `readIngest` 的 `staleData`。
+   * 这里原来写死 `PRIMARY_CHANNEL_ID`，理由写的是「采集这条链的语料归属
+   * 按主渠道定」。那个理由对**蒸馏**成立，但用错了地方 —— 这句提示说的是
+   * 「上面那些数字还在增长吗」，而那些数字（会话 / 消息 / 实体 / 事实）
+   * 全都已经按当前渠道取过了（见下面的 `scopeSnapshot`）。
    *
-   * ★ 这里问的是「主渠道是谁」，与上面那个「谁能跑分身」是**两件事**，
-   * 所以仍然用 `PRIMARY_CHANNEL_ID` 而不是能力判据：采集这条链的语料
-   * 归属确实是按主渠道定的（`DistillService` 只读主库）。
+   * 实测的表现：页头 picker 选**飞书**，飞书连得好好的，而下面挂着一条
+   * 「钉钉未连接 —— 以下是历史数据」。用户看着飞书的数字，读到的是
+   * 另一个渠道的连接态 —— 两件事错配，而界面上没有任何痕迹说这句话
+   * 讲的不是当前渠道。
+   *
+   * ★ 仍然只在**查到了**渠道列表时下结论（`undefined` → null）：
+   * 那时不显示"历史数据"，免得已连接的账号首帧闪一下。
    */
-  const primaryState = channels.data?.find((item) => item.id === PRIMARY_CHANNEL_ID)?.status.state
-  const channelConnected = primaryState === undefined ? null : primaryState === "authorized"
+  const currentState = channels.data?.find((item) => item.id === channelId)?.status.state
+  const channelConnected = currentState === undefined ? null : currentState === "authorized"
 
   return {
     channelId,

@@ -12,6 +12,16 @@ import {
 import type { Logger } from "@mycontext/kernel"
 import type { ProcessRunner } from "@mycontext/runtime-env"
 
+/** 什么都不做的 logger（桩用）。见下面 `logger:` 那处的注释。 */
+function noopLogger(): Logger {
+  return {
+    debug: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  } as unknown as Logger
+}
+
 /**
  * 授权时真正要到的权限 —— 直接取源，**不在测试里再抄一份**。
  *
@@ -45,7 +55,13 @@ describe("Feishu CLI safety boundary", () => {
     } as unknown as ProcessRunner
     const cli = new LarkCli({
       processes,
-      logger: {} as Logger,
+      /**
+       * ★ 最小可用 logger，**不能是 `{}`**：`LarkCli.env()` 现在会打一条
+       * 「authRoot 指纹 + 配置存在性」（见那里的注释，为了排查打包态
+       * 那次 `not configured`）。空对象桩会让它抛
+       * `logger.info is not a function` —— 而那个失败与被测行为无关。
+       */
+      logger: noopLogger(),
       authRoot: () => "/tmp/inklings-feishu-test-auth",
       executable: "/tmp/lark-cli",
       platform: "darwin",
@@ -68,7 +84,13 @@ describe("Feishu CLI safety boundary", () => {
     } as unknown as ProcessRunner
     const cli = new LarkCli({
       processes,
-      logger: {} as Logger,
+      /**
+       * ★ 最小可用 logger，**不能是 `{}`**：`LarkCli.env()` 现在会打一条
+       * 「authRoot 指纹 + 配置存在性」（见那里的注释，为了排查打包态
+       * 那次 `not configured`）。空对象桩会让它抛
+       * `logger.info is not a function` —— 而那个失败与被测行为无关。
+       */
+      logger: noopLogger(),
       authRoot: () => "/tmp/inklings-feishu-test-auth-linux",
       executable: "/tmp/lark-cli",
       platform: "linux",
@@ -115,7 +137,7 @@ describe("Feishu auth and ingest parsing", () => {
         return { exitCode: 0, stdout, stderr: "", timedOut: false }
       },
     } as unknown as ProcessRunner
-    const logger = { debug: () => undefined, warn: () => undefined } as unknown as Logger
+    const logger = noopLogger()
     const options = {
       processes,
       logger,

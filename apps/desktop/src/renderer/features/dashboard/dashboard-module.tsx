@@ -122,6 +122,14 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
   const { resolved: mode } = useTheme()
   /** 实体类型名要翻译 —— 与 ego 图的图例共用 `graph` 那一份 key。 */
   const { t: tg } = useDynamicTranslation("graph")
+  /**
+   * 渠道显示名（`channels` 命名空间已有 `<id>.label`）。
+   *
+   * ★ 给 `readIngest` 用：那三句提示原来把渠道名写死成「钉钉」，
+   * 而这一页的数字全按 picker 选中的渠道取 —— 选飞书时会读到
+   * 「钉钉未连接」。见 `readIngest` 的 `channelName` 注释。
+   */
+  const { t: tch } = useDynamicTranslation("channels")
   const { t: tp } = useDynamicTranslation("persona")
   /**
    * 图里点一个人 → 事实面板筛到他。
@@ -235,7 +243,14 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    * `useChannels()`（算 `authorizedChannelIds`），所以判据也归它，
    * 免得同一个查询在两处各读一遍、而两处的结论可能不一致。
    */
-  const ing = readIngest(scope.ingest, scope.channelConnected)
+  const ing = readIngest(
+    scope.ingest,
+    scope.channelConnected,
+    // 取不到就让 readIngest 用「渠道」那个中性缺省，不硬猜一个渠道名
+    scope.channelId === null
+      ? undefined
+      : tch(`${scope.channelId}.label`, { defaultValue: scope.channelId }),
+  )
   const per = readPersona(scope.persona)
   const processing = readProcessing({ feed: scope.feed, distill: scope.distill })
   const klView = describeKl(kl)

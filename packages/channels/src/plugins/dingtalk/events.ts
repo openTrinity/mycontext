@@ -104,9 +104,52 @@ const DEDUP_CAPACITY = 4_096
  */
 const READY_MARKER = "[event] ready"
 
+/**
+ * stderr 里表示「登录态没了」的痕迹 —— 撞到就**停止重连**。
+ *
+ * ## ★★★ 为什么必须有这个判断（一个刷了 19 次的无限循环）
+ *
+ * `spawnOnce` 的 `onExit` **不看退出码也不看 stderr**，任何退出一律当"断线"
+ * 然后退避重连。而「凭据不存在」是**终态**：重连 19 次与 1 次结果完全一样。
+ *
+ * 实测日志（钉钉未登录，飞书刚连上）：
+ *
+ *     warn | process non-zero exit | exitCode 5 | event stop --as user:
+ *            no credentials found, run: dws auth login
+ *     warn | dingtalk event stream disconnected, backing off {reconnects: 1}
+ *     …一路涨到 reconnects: 19，每 60 秒一条，直到应用关掉
+ *
+ * 代价不止是噪音：这堆重复 warn **把真正的错误埋了** —— 同一份日志里
+ * 飞书那一路一条记录都没有，而我第一次读的时候正是被这串刷屏带偏、
+ * 漏看了夹在中间的 `dws auth login`。
+ *
+ * ## 为什么上面那个 `hasPinnedIdentity()` 守卫拦不住
+ *
+ * 它判的是「有没有**绑身份行**」，而身份行与凭据是两件事：这台机器上
+ * `dingtalk@src-…` 那行在（vault 都建了），只是 dws 的 token 没了。
+ * 于是守卫放行 → 子进程起来 → 立刻以 no credentials 退出 → 退避重连。
+ *
+ * ★ 判据放在 stderr 的文本上而不是退出码：实测同一个成因出现过
+ * exitCode 5（`no credentials found`）与 2（`"actions": ["dws auth login"]`）
+ * 两种，而两者的 stderr 都明确写着要 `auth login`。
+ */
+const CREDENTIALS_GONE_MARKERS: readonly string[] = [
+  "no credentials found",
+  "auth login",
+  "not_authenticated",
+  "not_configured",
+]
+
 export class DingTalkEventConsumer implements ChannelEvents {
   private handle: DuplexHandle | null = null
   private state: EventStreamState = "stopped"
+  /**
+   * 这一轮的退出是不是"凭据没了"。
+   *
+   * ★ 每次 `spawnOnce` 开头复位：它描述的是**最近那一条连接**为什么退出，
+   * 不是历史。不复位的话用户重新授权后第一次断线会被误判成终态。
+   */
+  private credentialsGone = false
   private lastEventAt: number | null = null
   private delivered = 0
   private reconnects = 0
@@ -131,6 +174,8 @@ export class DingTalkEventConsumer implements ChannelEvents {
   start(): void {
     if (this.loop !== null) return
     this.stopping = false
+    // 重新授权后重新 start()：上一轮的终态判定不能留下来
+    this.credentialsGone = false
     this.loop = this.runReconnectLoop()
   }
 
@@ -165,6 +210,24 @@ export class DingTalkEventConsumer implements ChannelEvents {
       const exited = this.spawnOnce()
       await exited
       if (this.stopping) break
+
+      /**
+       * ★★★ 凭据没了 → **终态，不重连**。
+       *
+       * 见 `CREDENTIALS_GONE_MARKERS` 上方那段：重连一百次都一样，
+       * 而它刷出来的 warn 会把真正的错误埋掉（实测刷到 19 次）。
+       *
+       * 归 `stopped` 而不是 `failed`：这不是故障，是"还没到能起的时候"
+       * —— 与上面「没绑身份」同一个语气。用户重新授权后挂载链路会
+       * 重新 `start()`（那时 `credentialsGone` 也跟着复位）。
+       */
+      if (this.credentialsGone) {
+        this.state = "stopped"
+        this.options.logger.warn("event stream stopped: credentials gone, reauthorization needed", {
+          reconnects: this.reconnects,
+        })
+        break
+      }
 
       // 断线：进退避。收到过事件的连接归零退避（它是健康的，只是断了）。
       this.reconnects += 1
@@ -222,6 +285,7 @@ export class DingTalkEventConsumer implements ChannelEvents {
       return Promise.resolve()
     }
     this.state = "starting"
+    this.credentialsGone = false
 
     return new Promise<void>((resolve) => {
       let settled = false
@@ -240,6 +304,14 @@ export class DingTalkEventConsumer implements ChannelEvents {
             // ready 只推进到 ready，**不**作健康证据（见文件头）。
             if (line.includes(READY_MARKER) && this.state === "starting") {
               this.state = "ready"
+            }
+            /**
+             * ★ 「凭据没了」是终态 —— 记下来，让重连循环退出。
+             * 判据与 why 见 `CREDENTIALS_GONE_MARKERS`。
+             */
+            const lower = line.toLowerCase()
+            if (CREDENTIALS_GONE_MARKERS.some((marker) => lower.includes(marker))) {
+              this.credentialsGone = true
             }
           },
           onExit: () => settle(),

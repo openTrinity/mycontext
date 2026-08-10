@@ -3240,9 +3240,24 @@ export class IngestService {
         this.droppedOutOfScope += dropped
         this.lastDroppedAt = this.options.clock.now()
         this.options.logger.info("ingest dropped out-of-scope messages", {
+          /**
+           * ★★ 必须带渠道。这条日志说的是「丢了 N 条数据」，而多渠道下
+           * 不带渠道就**没法回答"谁丢的"** —— 实测排查时撞到过：日志里
+           * `dropped: 9, kept: 0, allowed: 0`，而当时钉钉与飞书两路都在跑，
+           * 只能靠时间戳去猜是哪一路，猜错了方向白查一轮。
+           *
+           * 丢数据的日志不带来源，等于知道出血却不知道伤口在哪。
+           */
+          channelId: this.options.plugin.meta.id,
           dropped,
           kept: kept.length,
           allowed: scope.allow.size,
+          /**
+           * ★ 把"为什么丢"也说出来：`allowed: 0` + `restricted` 才是
+           * 「白名单是空的，一条都不许过」，而 `restricted: false` 时
+           * 丢弃只可能来自时间窗。两者的处置完全不同。
+           */
+          restricted: scope.restricted,
         })
       }
       scopedPage = { ...page, messages: kept }

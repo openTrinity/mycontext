@@ -595,11 +595,28 @@ export class DistillSourceService {
          * 而那个比对若不是字面量类型就会静默恒 false，这一整个分类白写。
          */
         const code = error instanceof AppError ? error.code : null
+        /**
+         * ★★ 飞书 CLI 的 `not configured` 同样是**终态**。
+         *
+         * 它的 code 是 `PROCESS_FAILED`（exitCode 3 + `{"type":"config",
+         * "subtype":"not_configured"}`），语义是"这个渠道的配置目录还没
+         * 初始化好" —— 重试不会让它自己好，要走一次授权。
+         *
+         * 实测（打包态）：它在 13 分钟里刷了 13 次
+         * `channel conversation list failed; using local only | not configured`，
+         * 而界面上那句「这次没读到会话」读起来像一次偶发失败 ——
+         * 用户会等，而等不来。
+         *
+         * ★ 判据放在**文本**上而不是 code：`PROCESS_FAILED` 是个大类，
+         * 里面也有真正该重试的（超时、限流）。而 `not configured` 这个串
+         * 来自 CLI 自己的错误信封，稳定且明确。
+         */
+        const notConfigured = /not.configured/i.test(detail)
         sources.push({
           channelId: target.channelId,
           count: local.length,
           state:
-            code === "SESSION_EXPIRED" || code === "CHANNEL_IDENTITY_UNAVAILABLE"
+            code === "SESSION_EXPIRED" || code === "CHANNEL_IDENTITY_UNAVAILABLE" || notConfigured
               ? "expired"
               : "failed",
           reason: detail,

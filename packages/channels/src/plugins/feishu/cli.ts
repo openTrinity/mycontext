@@ -4,6 +4,7 @@
  * CLI 那侧负责 OAuth 与远端 API 的细节；这个包装层负责的是**应用边界**：
  * 隔离的 HOME/配置目录、严格的只读白名单、有界执行、以及宽容的 JSON 信封解析。
  */
+import { createHash } from "node:crypto"
 import { chmodSync, existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
@@ -323,6 +324,13 @@ export interface LarkCliOptions {
 
 export class LarkCli {
   readonly executable: string
+  /**
+   * 上一次 `env()` 解析出的「目录指纹 + 配置存在性」。
+   *
+   * 只为了让下面那条日志**只在变化时**打一条 —— 见它的注释。
+   * `null` = 还没解析过（第一次必打，那正是启动时想知道的）。
+   */
+  private lastEnvSignature: string | null = null
 
   constructor(private readonly options: LarkCliOptions) {
     this.executable = resolveLarkExecutable(options.executable)
@@ -350,6 +358,54 @@ export class LarkCli {
     for (const dir of [authRoot, cliHome, configHome, configDir, logDir]) {
       mkdirSync(dir, { recursive: true, mode: 0o700 })
       chmodSync(dir, 0o700)
+    }
+    const hasConfig = existsSync(join(configDir, "config.json"))
+    const hasMasterKey = existsSync(
+      join(cliHome, "Library", "Application Support", "lark-cli", "master.key.file"),
+    )
+    /**
+     * ★★ 每次解析都留痕：`authRoot 指纹` + 配置/主密钥在不在。
+     *
+     * ## 为什么需要它（一次查不下去的 `not configured`）
+     *
+     * 实测（打包态，一次真实故障）：飞书的会话列表**正常工作了 16 分钟**
+     * （`conversation list merged remote: 4`），然后在一次**重新授权**之后
+     * 变成 `not configured` 并再也没恢复：
+     *
+     *     17:13:19  conversation list merged   remote: 4     ← 还是好的
+     *     17:13:21  channel identity bound                   ← 重新授权
+     *     17:13:56  lark-cli exitCode 3  not_configured      ← 从此一直坏
+     *
+     * 而事后用同一个 authRoot 手动跑 `auth status` / `im +chat-list`
+     * **完全正常**（配置与 master.key 都在）。也就是说坏的不是"文件没了"，
+     * 而是那一小段时间里 CLI 看到的目录与我们以为的不是同一个 ——
+     * 而当时**没有任何日志记下每条命令实际用的是哪个目录**，
+     * 于是"切身份时 authRoot 指到哪"这个关键事实无从回答。
+     *
+     * ## 只记指纹与布尔，不记路径
+     *
+     * 真路径里有用户名（`/Users/<用户名>/…`），那是身份信息（CLAUDE.md §1.1）。
+     * 指纹取 sha256 前 8 位：足够区分"换目录了没有"，且不可逆。
+     *
+     * ## ★ `info` 级，但**只在这三项变化时**打
+     *
+     * 打包态的 `logLevel` 是 `info`（实测：那份日志里只有 info/warn 两种，
+     * debug 一条都没有）—— 用 debug 等于这条日志在真正需要它的环境里不存在，
+     * 而它存在的唯一理由就是排查打包态的故障。
+     *
+     * 而这个方法**每条命令都会调**，无条件 info 会把日志刷满（那正是这轮
+     * 反复踩的坑：重复日志把真正的错误埋掉）。所以只在指纹或存在性发生
+     * 变化时打一条 —— 那恰好就是"切了目录"或"配置突然没了"这两个
+     * 我们要抓的瞬间。
+     */
+    const signature = `${fingerprint(authRoot)}:${hasConfig ? 1 : 0}${hasMasterKey ? 1 : 0}`
+    if (signature !== this.lastEnvSignature) {
+      this.lastEnvSignature = signature
+      this.options.logger.info("lark cli env resolved", {
+        authRootFingerprint: fingerprint(authRoot),
+        hasConfig,
+        hasMasterKey,
+      })
     }
     return {
       ...processEnv(),
@@ -502,3 +558,14 @@ export const LARK_COMMAND_ALLOWLIST = {
   read: READ_COMMANDS,
   interactive: INTERACTIVE_COMMANDS,
 } as const
+
+/**
+ * 目录指纹：sha256 前 8 位。
+ *
+ * ★ **不记真路径** —— 它形如 `/Users/<用户名>/Library/…`，用户名本身就是
+ * 身份信息（CLAUDE.md §1.1）。而排查时要回答的问题只是"这两条命令用的是
+ * 同一个目录吗"，指纹足够，且不可逆。
+ */
+function fingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 8)
+}

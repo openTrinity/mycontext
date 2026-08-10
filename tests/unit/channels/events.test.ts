@@ -190,3 +190,79 @@ describe("DingTalkEventConsumer", () => {
     expect(fake.execCalls).toContainEqual(["event", "stop", "--all"])
   })
 })
+
+/**
+ * 「凭据没了」是终态 —— 不许无限重连。
+ *
+ * ## 锁的是哪个 bug
+ *
+ * `spawnOnce` 的 `onExit` **不看退出码也不看 stderr**，任何退出一律当"断线"
+ * 然后退避重连。而钉钉未登录时子进程会立刻以 `no credentials found` 退出，
+ * 于是重连计数一路涨 —— 实测打包态刷到 `reconnects: 19`，每 60 秒一条 warn，
+ * 直到应用关掉。
+ *
+ * 代价不止是噪音：那堆重复 warn **把真正的错误埋了**（同一份日志里飞书那一路
+ * 一条记录都没有，而我第一次读的时候正是被这串刷屏带偏）。
+ *
+ * ★ 上面那个 `hasPinnedIdentity()` 守卫拦不住它：它判的是"有没有绑身份行"，
+ * 而身份行与凭据是两件事 —— 身份行在（vault 都建了），只是 token 没了。
+ */
+describe("★★★ 凭据没了不许无限重连", () => {
+  it("★★★ stderr 出现 no credentials found → 停止重连", async () => {
+    const { consumer, fake } = makeConsumer(() => undefined)
+    consumer.start()
+    await Promise.resolve()
+
+    // 第一条连接：吐出凭据缺失的 stderr，然后退出
+    fake.specs
+      .at(-1)
+      ?.onStderr?.("● Error: event stop --as user: no credentials found, run: dws auth login")
+    fake.specs.at(-1)?.onExit?.({ code: 5, signal: null })
+    // 让重连循环跑完这一轮
+    for (let i = 0; i < 5; i += 1) await Promise.resolve()
+
+    /**
+     * ★ 判据是**没有起第二条连接**（spawnDuplex 只被调过一次）。
+     * 反证：去掉 `credentialsGone` 那个 break → 会一直起新连接，必红。
+     */
+    expect(fake.specs).toHaveLength(1)
+    expect(consumer.health().state).toBe("stopped")
+    await consumer.stop()
+  })
+
+  /**
+   * ★★ 普通断线（stderr 里没有凭据痕迹）**照旧重连** ——
+   * 不能因为修这个 bug 把正常的断线重连也停掉。
+   */
+  it("★★ 普通断线仍然重连", async () => {
+    const { consumer, fake } = makeConsumer(() => undefined)
+    consumer.start()
+    await Promise.resolve()
+
+    fake.specs.at(-1)?.onExit?.({ code: 1, signal: null })
+    for (let i = 0; i < 8; i += 1) await Promise.resolve()
+
+    expect(fake.specs.length).toBeGreaterThan(1)
+    await consumer.stop()
+  })
+
+  /**
+   * ★★ 重新授权（再 `start()`）后终态判定要**复位** —— 否则用户重新登录
+   * 之后长连接永远起不来，而那比无限重连更糟（静默不工作）。
+   */
+  it("★★ 重新 start 之后能再起连接", async () => {
+    const { consumer, fake } = makeConsumer(() => undefined)
+    consumer.start()
+    await Promise.resolve()
+    fake.specs.at(-1)?.onStderr?.("no credentials found")
+    fake.specs.at(-1)?.onExit?.({ code: 5, signal: null })
+    for (let i = 0; i < 5; i += 1) await Promise.resolve()
+    await consumer.stop()
+    const before = fake.specs.length
+
+    consumer.start()
+    for (let i = 0; i < 5; i += 1) await Promise.resolve()
+    expect(fake.specs.length).toBeGreaterThan(before)
+    await consumer.stop()
+  })
+})

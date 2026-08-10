@@ -395,6 +395,24 @@ export function SourcesStep({
             {conversations.data?.sources !== undefined ? (
               conversations.data.sources
                 .filter((source) => source.state !== "ok")
+                /**
+                 * ★★ 跟着 `channelFilter` 过滤 —— **这一段原来没过滤**。
+                 *
+                 * 这个组件被两处复用：引导第 4 步（列全部已授权渠道）与
+                 * 运行状态页的采集范围面板（`collection-scope-panel`，
+                 * 一次只管**一个**渠道，传的是单元素集合）。
+                 *
+                 * 不过滤的表现（实测截图）：在**飞书**的采集范围面板里挂着一条
+                 * 「钉钉 的登录已过期，重新连接后这里才会有它的会话」——
+                 * 那句话对这个面板毫无意义（它压根不显示钉钉的会话），
+                 * 而用户会以为自己在飞书这里做错了什么。
+                 *
+                 * 列表本身早就按 `channelFilter` 过滤了（见上面 `groups`），
+                 * 是我加这段交代时漏了同一条判据。
+                 */
+                .filter(
+                  (source) => channelFilter === undefined || channelFilter.has(source.channelId),
+                )
                 .map((source) => {
                   const channel = tc(`${source.channelId}.label`, {
                     defaultValue: source.channelId,

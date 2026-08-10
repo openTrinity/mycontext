@@ -227,7 +227,19 @@ describe("采集这一组", () => {
   it("★★ 渠道未连接 → staleData 且提示说明是历史数据", () => {
     const cards = readIngest(ingestSnapshot(), false)
     expect(cards?.staleData).toBe(true)
-    expect(cards?.problem).toBe("钉钉未连接 —— 以下是历史数据，现在不会有新消息进来")
+    /**
+     * ★ 渠道名从**参数**来，不再写死「钉钉」。
+     *
+     * 那三句提示原来把名字写死，而这一页的数字全按 picker 选中的渠道取 ——
+     * 于是选飞书时界面上是飞书的数字 + 一条「钉钉未连接」。
+     * 不传名字时给「渠道」这个中性缺省（说得笼统好过笃定说错一个渠道）。
+     */
+    expect(cards?.problem).toBe("渠道未连接 —— 以下是历史数据，现在不会有新消息进来")
+  })
+
+  it("★★ 传了渠道名 → 提示里用它（不再是写死的「钉钉」）", () => {
+    const cards = readIngest(ingestSnapshot(), false, "飞书")
+    expect(cards?.problem).toBe("飞书未连接 —— 以下是历史数据，现在不会有新消息进来")
     // 数字仍要给：用户问的是"我有多少数据"（与上一条同理）
     expect(cards?.messages).toBe("10,385")
   })
