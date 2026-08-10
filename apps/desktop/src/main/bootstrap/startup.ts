@@ -1132,6 +1132,8 @@ export function bootstrapApp(mainDir: string): AppContext {
     clock: systemClock,
     logger: logger.child("KlServer"),
     processes,
+    // kl 侧 checkpoint 的 key（透传成 POST /ingest 的 source_id）
+    channelId: dingtalk.meta.id,
     klRoot: paths.klRoot,
     /**
      * ★ 构造时给空串占位 —— 真实目录在**挂载时** `rebind()` 换（按 vault）。
@@ -1413,6 +1415,8 @@ export function bootstrapApp(mainDir: string): AppContext {
         clock: systemClock,
         logger: logger.child(`KlServer:${spec.channelId}`),
         processes,
+        // 各渠道各自的 checkpoint —— 共用一个会互相覆盖续传进度
+        channelId: spec.channelId,
         klRoot: paths.klRoot,
         // ★ 构造这一刻路径就是对的（不再占位 + rebind）
         dataDir: feedDirs.klRoot,
@@ -1794,7 +1798,35 @@ export function bootstrapApp(mainDir: string): AppContext {
     )
   }
 
-  const unmountVault = (): Promise<void> =>
+  /**
+   * 卸载当前 vault。
+   *
+   * ## ★★ `keepIdentity` 存在的原因：挂载前那次预卸载**不能**清身份
+   *
+   * `mountVault()` 第一步是幂等地 `await unmountVault()`，而 `releaseVault`
+   * 里有 `activeIdentity.clear()` —— 于是启动恢复那条路会**自己把刚恢复的
+   * 身份清掉**，再去读它：
+   *
+   * ```
+   * resolveOnLogin()  → this.current = 钉钉身份   （日志 "active identity restored"）
+   * mountVault(id)
+   *   └ unmountVault() → releaseVault() → clear()  ← 就这一句
+   *   └ currentIdentity() → null → "identity_unbound"，不 seed 渠道 profile
+   * ```
+   *
+   * 后果不是"少个字段"，而是**整条采集链路静默停摆**：`dwsProfileArgs()` 恒空
+   * → 每条渠道命令都被"还没绑定渠道身份"的守卫拦下。实测（本机 13:30:25）
+   * restore 与 `identity_unbound` 相隔 **121ms**，而两条日志各自都像正常的。
+   *
+   * ★ 为什么切渠道能"修好"：`switchTo()` 在 `await mount()` **之后**有一句
+   * `this.current = target`（见 `ActiveIdentityService.switchTo`），自己把被清掉
+   * 的补回来了。启动恢复这条路没有那一句 —— 所以表现成"重启后不采，切一下
+   * 渠道就好了"。
+   *
+   * ★ 登出/擦除仍然要清（那才是 `clear()` 的本意），所以默认值是"清"，
+   * 只有挂载前的预卸载显式传 `keepIdentity: true`。
+   */
+  const unmountVault = (options: { keepIdentity?: boolean } = {}): Promise<void> =>
     teardownVault({
       onboarding,
       distillSources,
@@ -1820,7 +1852,8 @@ export function bootstrapApp(mainDir: string): AppContext {
       releaseVault: () => {
         mountedVault = null
         vaultPaths = null
-        activeIdentity.clear()
+        // ★ 见上面 `keepIdentity` 那段：挂载前的预卸载不清身份
+        if (options.keepIdentity !== true) activeIdentity.clear()
         vaults.closeAll()
       },
       logger,
@@ -1862,7 +1895,8 @@ export function bootstrapApp(mainDir: string): AppContext {
     vaultId: string,
     seedIdentity?: ChannelIdentityVaultRecord | null,
   ): Promise<void> => {
-    await unmountVault()
+    // ★ 预卸载**不清身份** —— 清了下一行就读不到（见 `unmountVault` 的注释）
+    await unmountVault({ keepIdentity: true })
 
     /**
      * ★★ 把内存态**设回**卸载刚清掉的那个身份。

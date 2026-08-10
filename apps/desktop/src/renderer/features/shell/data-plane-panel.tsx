@@ -108,6 +108,14 @@ export function DataPlanePanel({
           probeIntervalMs: row.probeIntervalMs ?? raw.probeIntervalMs,
           probeThrottled: row.probeThrottled ?? raw.probeThrottled,
           selfConfirmed: row.selfConfirmed ?? raw.selfConfirmed,
+          /**
+           * ★ 存储用量也是渠道级的（各渠道一个物理库）。
+           *
+           * 漏了它的表现：选着飞书，这一页显示「库体积 187.7 MB · 原生留存
+           * 7,666」，而飞书库真值是 640 KB / 4 条 —— 那是主库的数
+           * （192 MB / 7,684）。差 300 倍而界面上毫无痕迹。
+           */
+          storage: row.storage ?? raw.storage,
           running: row.running ?? raw.running,
           lastError: row.lastError ?? raw.lastError,
           blockedReason: row.blockedReason ?? raw.blockedReason,

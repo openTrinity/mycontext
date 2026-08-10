@@ -32,6 +32,7 @@ import {
   type IngestSnapshot,
   type SelfIdentityView,
 } from "@mycontext/ipc-contract"
+import { AUTO_BUILD_MIN_INTERVAL_MS } from "@mycontext/knowledge-feed"
 import { IngestService } from "./ingest.service.js"
 import type { FeedDirs, FeedService } from "./feed.service.js"
 
@@ -99,6 +100,15 @@ interface IngestIntervals {
   minutesMs?: number
   documentsMs?: number
   activeScanMs?: number
+  /**
+   * 建图最小间隔。**与上面几项不同：它不是"多久跑一次"，而是"至少隔多久"**
+   * —— 完整的 why 见契约里 `graphBuildMinIntervalMs` 的注释。
+   *
+   * ★ 它也不由 `IngestService` 消费（那是采集），而是被自动建图的判据
+   * （`auto-build.ts` 的 `decide()`）读走。放在同一组是因为存取链与
+   * 设置面板都是同一套。
+   */
+  graphBuildMinIntervalMs?: number
 }
 
 /**
@@ -120,12 +130,15 @@ function readIngestIntervals(db: SqliteDatabase): IngestIntervals | undefined {
     const minutesMs = num(parsed["minutesMs"])
     const documentsMs = num(parsed["documentsMs"])
     const activeScanMs = num(parsed["activeScanMs"])
+    const graphBuildMinIntervalMs = num(parsed["graphBuildMinIntervalMs"])
     if (probeBaseMs !== undefined) iv.probeBaseMs = probeBaseMs
     if (probeMaxMs !== undefined) iv.probeMaxMs = probeMaxMs
     if (pullMs !== undefined) iv.pullMs = pullMs
     if (minutesMs !== undefined) iv.minutesMs = minutesMs
     if (documentsMs !== undefined) iv.documentsMs = documentsMs
     if (activeScanMs !== undefined) iv.activeScanMs = activeScanMs
+    if (graphBuildMinIntervalMs !== undefined)
+      iv.graphBuildMinIntervalMs = graphBuildMinIntervalMs
     return Object.keys(iv).length === 0 ? undefined : iv
   } catch {
     // 表还不存在（迁移没跑完）/ JSON 坏了 → 用默认，不让它挡住采集启动。
@@ -154,6 +167,11 @@ const INTERVAL_DEFAULTS: Required<IngestIntervals> = {
   minutesMs: 30 * 60_000,
   documentsMs: 60 * 60_000,
   activeScanMs: 30_000,
+  /**
+   * ★ 与 `auto-build.ts` 同源 —— 两处各写一份会让设置页显示的默认值与实际
+   * 生效的不一致，而那种偏差查不出来（面板说 1 小时、实际按另一个值退避）。
+   */
+  graphBuildMinIntervalMs: AUTO_BUILD_MIN_INTERVAL_MS,
 }
 
 /** 生效的采集周期（全字段都有值 —— 缺省与用户配置合并后的结果）。 */
@@ -1074,6 +1092,8 @@ export class DataPlaneService {
           probeIntervalMs: snap.probeIntervalMs,
           probeThrottled: snap.probeThrottled,
           selfConfirmed: snap.selfConfirmed,
+          // ★ 渠道级的存储用量（各渠道一个物理库，见契约里 storage 那段注释）
+          storage: snap.storage,
           lastError: snap.lastError,
           blockedReason: snap.blockedReason,
         })
@@ -1092,6 +1112,8 @@ export class DataPlaneService {
           probeIntervalMs: 0,
           probeThrottled: false,
           selfConfirmed: false,
+          // 查不出来时给全 0，而不是省略 —— 省略会让渲染层逐字段兜底填上主渠道的值
+          storage: { mainBytes: 0, walBytes: 0, rawRecords: 0, rawPruned: 0, vectors: 0 },
           lastError: error instanceof Error ? error.message : String(error),
           blockedReason: null,
         })
@@ -1127,6 +1149,8 @@ export class DataPlaneService {
         probeIntervalMs: 0,
         probeThrottled: false,
         selfConfirmed: false,
+        // 同上：挂载中给 0，别让下游落回另一个渠道的体积
+        storage: { mainBytes: 0, walBytes: 0, rawRecords: 0, rawPruned: 0, vectors: 0 },
         lastError: null,
         blockedReason: null,
       })

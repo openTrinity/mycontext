@@ -24,7 +24,14 @@
  * 只借它"长驻 + 可主动关 + onExit 回调"这三件事。
  */
 import { join } from "node:path"
-import { mkdirSync, existsSync, readdirSync, rmSync, writeFileSync, readFileSync } from "node:fs"
+import {
+  mkdirSync,
+  existsSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs"
 import Database from "better-sqlite3"
 import type { BrowserWindow } from "electron"
 import { type Clock, type Logger } from "@mycontext/kernel"
@@ -36,16 +43,6 @@ import {
 } from "@mycontext/ipc-contract"
 import type { KlGraphOverview } from "@mycontext/ipc-contract"
 import type { DuplexHandle, ProcessRunner } from "@mycontext/runtime-env"
-
-/**
- * `/ingest` 的 `source_id`。上游用它给 chunk 加命名空间前缀、也当 unit 去重的
- * scope（见 `defaultPostIngest` 的注释）。**必填且非空**，缺了直接 422。
- *
- * 用渠道 id 而不是 vaultId：vault 已经由 `KL_DATA_DIR` 隔离，
- * 拿它再当 source_id 是把同一个维度分成两层；而将来同一个 vault 里
- * 可能有多个渠道的语料，那时按渠道分才是对的。
- */
-const KL_INGEST_SOURCE_ID = "dingtalk"
 
 /** kl-server 默认端口（可被 KL_SERVER_PORT 覆盖）。绑 127.0.0.1，不对外。 */
 const DEFAULT_KL_PORT = 8200
@@ -189,6 +186,17 @@ export interface KlServerServiceOptions {
   clock: Clock
   logger: Logger
   processes: ProcessRunner
+  /**
+   * 这个 kl 服务哪个渠道的。
+   *
+   * ## ★★ 必填，因为它是 kl 侧断点续传的 key
+   *
+   * 透传成 `POST /ingest` 的 `source_id`，而 kl 用它算 checkpoint 路径
+   * （`checkpoint_path(source_id)`）。两个渠道共用一个值 → 互相覆盖对方的
+   * 续传进度。给默认值（比如 `"dws"`）会让"忘了传"变成一个静默的
+   * 跨渠道污染，所以这里不给默认。
+   */
+  channelId: string
   /** kl-graph 代码根（含 kl_server.py）。缺失 = kl 未集成，永远 stopped。 */
   klRoot: string
   /**
@@ -1453,10 +1461,17 @@ export class KlServerService {
     const post = this.options.postIngest ?? defaultPostIngest
     try {
       /**
-       * ★ `source_id` 用渠道 id 而不是 vaultId —— 见 `defaultPostIngest` 的注释。
-       * 目前只有一个渠道，所以是常量；接飞书时这里要按导出物的来源分。
+       * ★★ `source_id` 用**这个服务自己的渠道 id**。
+       *
+       * 上游那一版写死成一个常量，注释里写着「目前只有一个渠道，
+       * 所以是常量；接飞书时这里要按导出物的来源分」—— 现在正是那个时候。
+       *
+       * 不按渠道分的后果不是"标签不好看"：kl 拿它算断点续传的 checkpoint 路径
+       * （`checkpoint_path(source_id)`，见 `kl_graph/ingest/runner.py`），
+       * 两个渠道共用一个值就会**互相覆盖对方的续传进度** ——
+       * 表现是"增量建图每次都从头扫"或"某渠道的新导出被当成已处理过"。
        */
-      const status = await post(this.port, exportDir, KL_INGEST_SOURCE_ID)
+      const status = await post(this.port, exportDir, this.options.channelId)
       if (status === 409) {
         this.options.logger.info("ingest already running; following it", {})
         return null
@@ -1770,6 +1785,46 @@ export class KlServerService {
      */
     for (const name of ["extraction_cache", "extraction_cache.db"]) {
       rmSync(join(dir, name), { recursive: true, force: true })
+    }
+    /**
+     * ★★ 断点续传记录必须**跟着库一起删**，否则清库之后建图必然失败。
+     *
+     * `ingest_checkpoint.<sourceId>.json` 记着「哪个 batch 的 Phase A 做完了」，
+     * 而那个 batch 的 workset 存在**刚被删掉的 `knowledge.db` 里**。于是 kl
+     * 跳过 Phase A 直奔后续阶段，然后在那里失败：
+     *
+     * ```
+     * Checkpoint batch '22aba72b-…' has no durable workset;
+     * run Phase A before any chunk-dependent phase
+     * ```
+     *
+     * 实测（本机 2026-08-10 10:20）：只删上面那几项、留着 checkpoint 时，
+     * `/ingest` 回 200 且 `state:"running"`，40 秒后转 `state:"error"`，
+     * `discovered=0 / processed=0` —— **清了库、一条都没建回来**。
+     * 这正是本仓库最贵的那类形态：不可逆地毁了数据，而失败发生在之后。
+     *
+     * ★ 用 `readdirSync` 按前缀匹配而不是拼 `this.options.channelId`：
+     * 同一个 dataDir 下可能躺着历史 sourceId 写的 checkpoint（上游改过
+     * source_id 的取值，比如从 `dws` 改成渠道 id）。留一个不认识的下来
+     * 就是留一颗同样的雷 —— 而这个目录本来就只归这一个渠道。
+     */
+    for (const name of (existsSync(dir)
+      ? readdirSync(dir, { withFileTypes: true })
+      : []
+    )
+      .filter((entry) => entry.isFile() && entry.name.startsWith("ingest_checkpoint."))
+      .map((entry) => entry.name)) {
+      rmSync(join(dir, name), { force: true })
+    }
+    /**
+     * ★ 图存储本体与它的 WAL。
+     *
+     * `knowledge.db` 是关系面，而实体/关系的图结构在 `graph.ladybug`
+     * （见 `kl_graph/storage/ladybug_graph.py`）。只删前者会留下一份指向
+     * 已消失行的图 —— 那是"清空重来"这个语义没做到。
+     */
+    for (const name of ["graph.ladybug", "graph.ladybug.wal", "extraction_cache.db"]) {
+      rmSync(join(dir, name), { force: true })
     }
     /**
      * ★ 文件删了，建图水位也必须清零 —— 否则「待建条数」会少算两个数量级。
@@ -2757,8 +2812,24 @@ function defaultSleep(ms: number): Promise<void> {
  * server —— 而测试里的 fake 只看形参（`(port, dir) => 200`），
  * 字段名换了、少了必填项都一声不响。那正是 422 那个 bug 能上线的原因。
  *
- * ★ 键名与上游 `IngestRequest` 一一对应，且**不能多**（`extra="forbid"`）。
- * 见 `defaultPostIngest` 的注释。
+ * ## ★★ 请求体的形状由上游 kl 定，且它 `extra="forbid"`
+ *
+ * `IngestRequest`（`kl_server.py`）要 `input_dir` + `source_id`，且
+ * `model_config = ConfigDict(extra="forbid")` —— **多一个字段也 422**。
+ *
+ * 改动前发的是 `{ export_dir }`：字段名错、必填的 `source_id` 缺、
+ * 且那个多出来的键本身就会被 forbid 拒掉。三重不匹配，实测日志：
+ * `POST /ingest HTTP/1.1" 422 Unprocessable Entity`
+ * → `graph build failed {"reason":"建图启动失败：HTTP 422"}`，也就是
+ * **每次建图立刻失败**。
+ *
+ * ## ★★ `source_id` 必须按渠道给，且跨轮次稳定
+ *
+ * 它不是一个标签：kl 用它算**断点续传的 checkpoint 路径**
+ * （`checkpoint_path(source_id)`，非字母数字会被替成 `_`）。
+ * 两个渠道共用一个值 → 互相覆盖对方的续传进度，表现是"增量建图每次都从头
+ * 扫"或"某渠道的新导出被当成已处理过"。所以用 channelId：每渠道一个、
+ * 且重启后不变。
  */
 export function buildIngestRequestBody(
   exportDir: string,
@@ -2775,8 +2846,13 @@ async function defaultPostIngest(
   const response = await fetch(`http://127.0.0.1:${port}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // input_dir 显式给：server 侧默认读它自己的 KL_DWS_EXPORT_DIR，
-    // 而我们的导出目录按 vault 定 —— 让它跟着我们走，别各有一份真源。
+    /**
+     * `input_dir` 显式给：server 侧默认读它自己的 `KL_DWS_EXPORT_DIR`，
+     * 而我们的导出目录按 vault + 渠道定 —— 让它跟着我们走，别各有一份真源。
+     *
+     * ★ 只发这两个键。`concurrency` / `improve_mode` 有服务端默认值，
+     * 而 forbid 意味着"发一个它不认识的就整个请求失败"—— 能不发就不发。
+     */
     body: JSON.stringify(buildIngestRequestBody(exportDir, sourceId)),
     // 启动是非阻塞的，10s 足够；真正的等待在 /status 轮询里。
     signal: AbortSignal.timeout(10_000),

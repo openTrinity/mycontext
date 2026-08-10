@@ -61,8 +61,11 @@ export class MultiGraphQueryService {
    *
    * 所以现在：认不出这个渠道就明确说不可用（`facts()` 下面那段同一判据）。
    */
-  // ★ async：上游把 `GraphQueryService.ego()` 改成异步了（关系边要问 kl 的
-  //   HTTP —— SQLite 的 `edges` 表在 ladybug 后端下按设计恒空）。
+  /**
+   * ★ `async` —— 上游把 `GraphQueryService.ego()` 改成了异步：关系边要问 kl 的
+   * HTTP（SQLite 的 `edges` 表在默认后端 ladybug 下按设计恒空）。
+   * 这个聚合器只是转发，所以跟着变成 Promise。
+   */
   async ego(channelId?: string): Promise<KlGraphEgo> {
     if (channelId === undefined || channelId === this.primaryChannelId) {
       return this.primary.ego()

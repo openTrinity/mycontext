@@ -37,7 +37,7 @@ describe("MultiGraphQueryService", () => {
     const dingtalkFacts = vi.fn(() => result("dingtalk", 10))
     const feishuFacts = vi.fn(() => result("feishu", 20))
     const service = new MultiGraphQueryService(
-      { ego: () => ego, facts: dingtalkFacts },
+      { ego: () => Promise.resolve(ego), facts: dingtalkFacts },
       "dingtalk",
       () => [{ channelId: "feishu", facts: feishuFacts }],
     )
@@ -50,13 +50,13 @@ describe("MultiGraphQueryService", () => {
     expect(merged.facts.map((fact) => fact.channelId)).toEqual(["feishu", "dingtalk"])
   })
 
-  it("ego 保持钉钉口径，不把飞书做成数字分身", () => {
+  it("ego 保持钉钉口径，不把飞书做成数字分身", async () => {
     const service = new MultiGraphQueryService(
-      { ego: () => ego, facts: () => result("dingtalk", 10) },
+      { ego: () => Promise.resolve(ego), facts: () => result("dingtalk", 10) },
       "dingtalk",
       () => [{ channelId: "feishu", facts: () => result("feishu", 20) }],
     )
-    expect(service.ego()).toBe(ego)
+    await expect(service.ego()).resolves.toBe(ego)
   })
 
   /**
@@ -78,7 +78,7 @@ describe("MultiGraphQueryService", () => {
     /** 只有主渠道挂着 —— 也就是"飞书刚授权，管线还没挂上"那一刻。 */
     function primaryOnly() {
       const primaryFacts = vi.fn(() => result("dingtalk", 10))
-      const primaryEgo = vi.fn(() => ego)
+      const primaryEgo = vi.fn(() => Promise.resolve(ego))
       const service = new MultiGraphQueryService(
         { ego: primaryEgo, facts: primaryFacts },
         "dingtalk",
@@ -101,10 +101,10 @@ describe("MultiGraphQueryService", () => {
       expect(primaryFacts).not.toHaveBeenCalled()
     })
 
-    it("ego：同一条判据（关系图错渠道比事实错更容易被当真）", () => {
+    it("ego：同一条判据（关系图错渠道比事实错更容易被当真）", async () => {
       const { service, primaryEgo } = primaryOnly()
 
-      const out = service.ego("feishu")
+      const out = await service.ego("feishu")
 
       expect(out.available).toBe(false)
       expect(out.nodes).toEqual([])
@@ -113,7 +113,7 @@ describe("MultiGraphQueryService", () => {
       expect(primaryEgo).not.toHaveBeenCalled()
     })
 
-    it("挂上了就走它自己的（别把上面那条修成「永远不可用」）", () => {
+    it("挂上了就走它自己的（别把上面那条修成「永远不可用」）", async () => {
       const feishuEgo: KlGraphEgo = {
         available: true,
         reason: null,
@@ -124,13 +124,13 @@ describe("MultiGraphQueryService", () => {
       const feishuFacts = vi.fn(() => result("feishu", 20))
       const primaryFacts = vi.fn(() => result("dingtalk", 10))
       const service = new MultiGraphQueryService(
-        { ego: () => ego, facts: primaryFacts },
+        { ego: () => Promise.resolve(ego), facts: primaryFacts },
         "dingtalk",
-        () => [{ channelId: "feishu", facts: feishuFacts, ego: () => feishuEgo }],
+        () => [{ channelId: "feishu", facts: feishuFacts, ego: () => Promise.resolve(feishuEgo) }],
       )
 
       expect(service.facts({ ...INPUT, channelId: "feishu" }).facts[0]?.channelId).toBe("feishu")
-      expect(service.ego("feishu")).toBe(feishuEgo)
+      await expect(service.ego("feishu")).resolves.toBe(feishuEgo)
       expect(primaryFacts).not.toHaveBeenCalled()
     })
 
@@ -140,7 +140,7 @@ describe("MultiGraphQueryService", () => {
      */
     it("不指定渠道时照旧合并（搜索那条路不受影响）", () => {
       const service = new MultiGraphQueryService(
-        { ego: () => ego, facts: () => result("dingtalk", 10) },
+        { ego: () => Promise.resolve(ego), facts: () => result("dingtalk", 10) },
         "dingtalk",
         () => [{ channelId: "feishu", facts: () => result("feishu", 20) }],
       )

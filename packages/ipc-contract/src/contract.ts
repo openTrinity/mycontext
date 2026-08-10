@@ -1842,8 +1842,7 @@ export const ingestSnapshotSchema = z.object({
          * 两个数字互相矛盾而没有任何报错。
          *
          * ★ 判据是"这个数是从哪个库查出来的"：从渠道库查的就该在这里。
-         * vault 级的（`storage` 是整个 vault 的文件体积、`eventStream` 是
-         * 主渠道特有的长连接）**刻意不放**。
+         * `eventStream` 是主渠道特有的长连接，**刻意不放**。
          */
         ftsIndexed: z.number(),
         ftsLag: z.number(),
@@ -1853,6 +1852,31 @@ export const ingestSnapshotSchema = z.object({
         probeIntervalMs: z.number(),
         probeThrottled: z.boolean(),
         selfConfirmed: z.boolean(),
+        /**
+         * 存储用量 —— **也是渠道级的**。
+         *
+         * ## ★★ 这里原来没有它，而注释里写着「`storage` 是整个 vault 的文件体积」
+         *
+         * 那句话在"一个 vault 一个库"的时代是对的。现在每个非主渠道有自己的
+         * 物理库（`sources/<channelId>/core.sqlite`），而 `collectStorageStats`
+         * 拿的正是**那个 IngestService 自己的** `db`/`dbPath` —— 也就是说
+         * 逐渠道的真值一直算出来了，只是没往上传。
+         *
+         * 实测的坏形态：选着飞书，运行状态页显示「库体积 187.7 MB ·
+         * 原生留存 7,666」，而飞书库真值是 **640 KB / 4 条**（那两个数是主库的
+         * 192 MB / 7,684）。数量级差 300 倍，而界面上没有任何痕迹说这是别人的数。
+         *
+         * ★ 判据仍是上面那条："这个数是从哪个库查出来的"。storage 从渠道库查，
+         * 所以它属于这里 —— 那条注释当时把**实现细节**（当时只有一个库）
+         * 当成了**语义**（vault 级）。
+         */
+        storage: z.object({
+          mainBytes: z.number(),
+          walBytes: z.number(),
+          rawRecords: z.number(),
+          rawPruned: z.number(),
+          vectors: z.number(),
+        }),
         lastError: z.string().nullable(),
         /**
          * ★ 与顶层同一个枚举，不是裸 string：它们是**同一个字段**

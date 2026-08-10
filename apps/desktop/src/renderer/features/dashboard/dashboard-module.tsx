@@ -132,6 +132,23 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    */
   const [entityFocus, setEntityFocus] = useState<string | null>(null)
 
+  /**
+   * ★★ 换渠道时清掉被筛实体。
+   *
+   * 实体名只在**一个渠道的图**里有意义。不清的表现（用户截图）：在钉钉点了
+   * 某个人看他的事实，切到飞书之后联动带仍写着「关于 <那个人>」、事实列表
+   * 仍按他筛 —— 而那个名字在飞书的图里根本不存在。于是要么显示"0 条事实"
+   * （像是飞书没数据），要么更糟：飞书恰好也有同名实体，于是显示的是
+   * **另一个人**的事实，而界面上没有任何痕迹说这两个"他"不是一个人。
+   *
+   * ★ 一并清 `focusCount`：它是上一个渠道那次查询的总数，留着会让
+   * 联动带在新渠道上显示一个来自旧渠道的数字。
+   */
+  useEffect(() => {
+    setEntityFocus(null)
+    setFocusCount(null)
+  }, [scope.channelId])
+
 
   /**
    * 「刷新状态」按钮的加载态 + 失效入口。

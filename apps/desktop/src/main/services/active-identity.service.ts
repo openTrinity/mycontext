@@ -226,7 +226,7 @@ export class ActiveIdentityService {
      * ```
      * 23:23:28  active identity restored {channelId: "dingtalk"}   ← 内置那个
      * 23:23:28  vault opened {vaultId: "vaultFAKE-B…"}                ← 内置的库
-     * 23:25:02+ process ... {"executable": ".../dws_res_<自制客户端>_.../dws-darwin-arm64"}
+     * 23:25:02+ process ... {"executable": ".../<自制客户端目录>/dws-darwin-arm64"}
      *                                                              ← 而命令跑的是**自制**客户端
      * ```
      *

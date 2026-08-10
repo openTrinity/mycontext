@@ -73,6 +73,14 @@ function scopeSnapshot(snap: IngestSnapshot | null, channelId: string | undefine
     probeIntervalMs: row.probeIntervalMs ?? snap.probeIntervalMs,
     probeThrottled: row.probeThrottled ?? snap.probeThrottled,
     selfConfirmed: row.selfConfirmed ?? snap.selfConfirmed,
+    /**
+     * ★ 存储用量也是渠道级的（各渠道一个物理库）。
+     *
+     * 漏了它的表现：选着飞书，运行状态页显示「库体积 187.7 MB · 原生留存
+     * 7,666」，而飞书库真值是 640 KB / 4 条 —— 那两个数是主库的。
+     * 数量级差 300 倍，界面上没有任何痕迹说这是别人的数。
+     */
+    storage: row.storage ?? snap.storage,
     running: row.running ?? snap.running,
     lastError: row.lastError ?? snap.lastError,
     blockedReason: row.blockedReason ?? snap.blockedReason,
