@@ -31,7 +31,7 @@
  * 把接线提成纯函数，直接对它断言。
  */
 import { describe, expect, it } from "vitest"
-import { buildAutoBuildSnapshot } from "@main/services/feed.service.js"
+import { buildAutoBuildSnapshot, buildForecastInput } from "@main/services/feed.service.js"
 
 /** 建图水位（`graphSync.buildWatermark()` 的形态）。 */
 const MARK = { seq: 1200, at: 1_700_000_000_000 }
@@ -166,5 +166,69 @@ describe("★★ 设置里的「建图最小间隔」要真的到判据", () => 
     const snapshot = buildAutoBuildSnapshot(hooks, { seq: 0, at: null })
     expect(snapshot.lastBuiltAt).toBeNull()
     expect(snapshot.lastBuiltAt).not.toBe(0)
+  })
+})
+
+describe("★★★ 预测层的接线（界面倒计时的来源）", () => {
+  /**
+   * ★★★ 这一组与上面那组并列：一个喂**判据**（真的建不建），
+   * 这个喂**预测**（界面说还要等多久）。两者必须读同一批值。
+   *
+   * 反证时发现预测这一段也是裸的：把传 `minIntervalMs` 那一行删掉，
+   * 全仓 1068 条测试一条都不红。而漏传的后果是**界面按缺省 1h 倒计时** ——
+   * 用户在设置里改成 6h，那句话还说 1 小时，且没有任何地方报错。
+   *
+   * 这正是那句自相矛盾的话的一半来源（另一半是 `forecastAutoBuild` 缺
+   * `min-interval` 分支）：
+   *
+   * ```
+   * 增量 25,477 / 500 条（还差 0 条） · 或 约 23 小时后按时间触发
+   * ```
+   */
+  const MARK = { seq: 1200, at: 1_700_000_000_000 }
+  const NOW = 1_700_000_600_000
+  const HEAD = 9999
+
+  function hooks(minIntervalMs?: number) {
+    return {
+      enabled: () => true,
+      ready: () => true,
+      graphExists: () => true,
+      trigger: () => Promise.resolve(true),
+      ...(minIntervalMs === undefined ? {} : { minIntervalMs: () => minIntervalMs }),
+    }
+  }
+
+  /** ★★★ 配的冷却要到预测层 —— 不到就按缺省 1h 倒计时。 */
+  it("★★★ 配了 6h → 预测输入里就是 6h", () => {
+    const SIX_HOURS = 6 * 3_600_000
+    expect(buildForecastInput(hooks(SIX_HOURS), MARK, HEAD, NOW).minIntervalMs).toBe(SIX_HOURS)
+  })
+
+  /** ★ 没配 → 省略该字段，交给判据用缺省（与 snapshot 同一口径）。 */
+  it("★ 没配 → 字段不出现", () => {
+    expect("minIntervalMs" in buildForecastInput(hooks(), MARK, HEAD, NOW)).toBe(false)
+  })
+
+  /**
+   * ★★ `ackedSeq` 用的是 changelog 的 **head**，不是导出游标。
+   *
+   * 界面那个数字要回答「还差多少条会触发建图」，而导出是 10 分钟一轮的
+   * 中间步骤 —— 拿导出游标会让数字在导出前后跳一下，看起来像倒退。
+   */
+  it("★★ ackedSeq 取 head（不是水位 seq）", () => {
+    const input = buildForecastInput(hooks(), MARK, HEAD, NOW)
+    expect(input.ackedSeq).toBe(HEAD)
+    expect(input.lastBuiltSeq).toBe(MARK.seq)
+  })
+
+  /** ★ 水位与三个状态一并接上，且都是现读。 */
+  it("★ 水位与状态接上", () => {
+    const input = buildForecastInput(hooks(60_000), MARK, HEAD, NOW)
+    expect(input.lastBuiltAt).toBe(MARK.at)
+    expect(input.now).toBe(NOW)
+    expect(input.enabled).toBe(true)
+    expect(input.ready).toBe(true)
+    expect(input.graphExists).toBe(true)
   })
 })

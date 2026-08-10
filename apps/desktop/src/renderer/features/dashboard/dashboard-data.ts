@@ -345,6 +345,23 @@ export function describeKl(status: KlServerStatus | null): {
  * 所以给一个精确到秒的倒计时是在承诺做不到的事。写"约"之后
  * 「显示 0 分钟但还没开始」就不再是一个 bug 报告。
  */
+/**
+ * 格式化一个**确定的时长**（配置值），不带"约"。
+ *
+ * ★ 与 `formatEta` 分开是刻意的：那个格式化的是**估算**（还要等多久），
+ * 带"约"是诚实的；而这个格式化的是**用户自己配的那个数**，
+ * 说「约 1 小时」会让人以为系统在猜 —— 而它就是 1 小时。
+ *
+ * 实测撞到过：「最小间隔 约 1 小时，可在设置里改」——「约」与「可在设置里改」
+ * 放在一起自相矛盾（可配置的值不该是约数）。
+ */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—"
+  if (ms % 3_600_000 === 0) return `${String(ms / 3_600_000)} 小时`
+  if (ms % 60_000 === 0) return `${String(ms / 60_000)} 分钟`
+  return `${String(Math.round(ms / 60_000))} 分钟`
+}
+
 export function formatEta(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return "—"
   if (ms < 60_000) return "不到 1 分钟"
@@ -372,7 +389,8 @@ export function describeBuildSchedule(
   schedule: KlGraphOverview["buildSchedule"],
 ): { text: string; tone: MetricTone } | null {
   if (schedule === null) return null
-  const { reason, etaMs, pendingMessages, messagesToThreshold, lagThreshold } = schedule
+  const { reason, etaMs, pendingMessages, messagesToThreshold, lagThreshold, minIntervalMs } =
+    schedule
 
   if (!schedule.enabled) {
     /**
@@ -405,6 +423,32 @@ export function describeBuildSchedule(
   if (reason === "no-new-data") {
     // 没有增量时时间条件也不会触发（max-age 要求同时有新数据）—— 不给倒计时。
     return { text: "无增量数据 · 暂不构建", tone: "muted" }
+  }
+  /**
+   * ★★★ `min-interval`：**条数早就够了，只是在冷却**。
+   *
+   * 这一档原来没有，于是它掉进下面那个 `below-threshold` 的分支，
+   * 拼出一句自相矛盾的话（实测界面原文）：
+   *
+   * ```
+   * 自动构建 · 增量 25,477 / 500 条（还差 0 条） · 或 约 23 小时后按时间触发
+   * ```
+   *
+   * 「还差 0 条」读起来像卡住了，而「23 小时」是 24h 兜底的倒计时 ——
+   * 真正要等的是冷却的剩余（那一刻实测还有约 23 **分钟**，差 60 倍）。
+   * 两个数字各自按公式都对，合起来把用户指向两个都错的结论：
+   * 「要等一整天」或「条数还没攒够」。
+   *
+   * ★ 这句话要同时给出三件事：已达标（别再等条数）、还要等多久（冷却剩余）、
+   * 那个冷却是可配置的（否则用户以为是写死的）。
+   */
+  if (reason === "min-interval") {
+    const gap = formatDuration(minIntervalMs)
+    const wait = etaMs === null ? "" : `，${formatEta(etaMs)}后构建`
+    return {
+      text: `增量 ${formatCount(pendingMessages)} 条已达标 · 冷却中${wait}（最小间隔 ${gap}，可在设置里改）`,
+      tone: "muted",
+    }
   }
   // below-threshold：两个条件谁先到都会触发，所以两个都报。
   const byCount = `增量 ${formatCount(pendingMessages)} / ${formatCount(lagThreshold)} 条`

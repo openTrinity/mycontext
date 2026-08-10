@@ -2299,6 +2299,13 @@ export const klGraphOverviewSchema = z.object({
       /** 生效的时间阈值（ms） */
       maxAgeMs: z.number(),
       /**
+       * 生效的**冷却**（两次建图的最小间隔，ms）。
+       *
+       * ★ 回显是为了让界面能说出"最小间隔 1 小时，可在设置里改" ——
+       * 而不是让它自己写一个 1h 的常量（那样用户改成 6h 之后界面还说 1h）。
+       */
+      minIntervalMs: z.number(),
+      /**
        * 距下次触发还有多久（ms）。
        *
        * `null` = **不由时间决定**（被关闭 / 正在建 / 没有新数据）。

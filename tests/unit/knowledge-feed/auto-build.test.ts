@@ -317,6 +317,54 @@ describe("★ forecastAutoBuild：倒计时与真实判据同源", () => {
     expect(f.etaMs).toBe(0)
   })
 
+  /**
+   * ★★★ 冷却那一档的倒计时必须指向**冷却到期**，不是 24h 兜底。
+   *
+   * 这一档原来在 `forecastAutoBuild` 里没有分支，掉进最后那个
+   * `below-threshold` 的 return，于是 `etaMs = lastBuiltAt + 24h - now`。
+   * 界面据此显示（实测原文）：
+   *
+   * ```
+   * 增量 25,477 / 500 条（还差 0 条） · 或 约 23 小时后按时间触发
+   * ```
+   *
+   * 而真正要等的是冷却剩余 —— 那一刻实测距上次建成 37 分钟、冷却 1 小时，
+   * 也就是约 23 **分钟**。差 60 倍，且原因说反了（不是"攒不够"，是"太勤"）。
+   *
+   * ★ 判据是**具体数值**而不是"有倒计时"：后者在退回 maxAge 时同样成立
+   * （反证时验过：只断言非 null 的话那个 bug 抓不到）。
+   */
+  it("★★★ 冷却中 → etaMs 是冷却到期，不是 maxAge 到期", () => {
+    const ONE_HOUR = 3_600_000
+    const f = forecastAutoBuild(
+      base({
+        // 条数远超阈值 → 唯一挡着的是冷却
+        ackedSeq: 1000 + AUTO_BUILD_LAG_THRESHOLD * 10,
+        lastBuiltAt: NOW - 37 * 60_000, // 距上次建成 37 分钟
+        minIntervalMs: ONE_HOUR,
+      }),
+    )
+    expect(f.decision.reason).toBe("min-interval")
+    // 冷却剩余 = 60 - 37 = 23 分钟
+    expect(f.etaMs).toBe(23 * 60_000)
+    // ★ 反面：绝不能是 24h 兜底那个数
+    expect(f.etaMs).not.toBe(AUTO_BUILD_MAX_AGE_MS - 37 * 60_000)
+  })
+
+  /**
+   * ★★ 生效的冷却值要回显 —— 界面要说"最小间隔 6 小时，可在设置里改"。
+   *
+   * 不回显的话界面只能自己写一个常量，而用户改成 6h 之后它还说 1h
+   * （"两处各写一份、必然分叉"）。
+   */
+  it("★★ minIntervalMs 回显生效值（不是缺省值）", () => {
+    const SIX_HOURS = 6 * 3_600_000
+    const f = forecastAutoBuild(
+      base({ ackedSeq: 1000 + AUTO_BUILD_LAG_THRESHOLD * 10, minIntervalMs: SIX_HOURS }),
+    )
+    expect(f.minIntervalMs).toBe(SIX_HOURS)
+  })
+
   it("★ 攒得不够 → 倒计时指向「攒够时间」那一刻", () => {
     const builtAt = NOW - 60_000
     const f = forecastAutoBuild(base({ ackedSeq: 1010, lastBuiltAt: builtAt }))

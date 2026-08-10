@@ -190,6 +190,54 @@ export function buildAutoBuildSnapshot(
   }
 }
 
+/**
+ * 把 `autoBuild` 的 getter + 水位 + head 拼成 `forecastAutoBuild` 的输入。
+ *
+ * ## ★★ 为什么又提一个纯函数（与 `buildAutoBuildSnapshot` 并列）
+ *
+ * 那个喂**判据**（真的建不建），这个喂**预测**（界面上说还要等多久）。
+ * 两者必须读同一批值 —— 分开取就会漂，而漂的表现是"界面说的与实际发生的
+ * 不一致"，且没有任何报错。
+ *
+ * 而这一段原来是 `graphBuildSchedule()` 里的内联对象字面量，**没人能测**
+ * （那个方法要一个真 vault）。反证时验过：把传 `minIntervalMs` 那一行删掉，
+ * 全仓 1068 条测试一条都不红 —— 与「两头都锁了、中间那根线是裸的」同一形状。
+ *
+ * 漏传的后果不是崩，是**界面按缺省 1h 倒计时**：用户在设置里改成 6h 之后
+ * 那句话还说 1 小时，而没有任何地方说过谎 —— 只是没人把值传过去。
+ *
+ * ★ `ackedSeq` 传的是 changelog 的 **head** 而不是导出游标：界面上那个数字
+ * 要回答「还差多少条会触发建图」，而导出是 10 分钟一轮的中间步骤 ——
+ * 拿导出游标会让数字在导出前后跳一下，看起来像倒退。
+ */
+export function buildForecastInput(
+  hooks: AutoBuildHooks,
+  mark: { seq: number; at: number | null },
+  head: number,
+  now: number,
+): {
+  ackedSeq: number
+  lastBuiltSeq: number
+  lastBuiltAt: number | null
+  now: number
+  graphExists: boolean
+  enabled: boolean
+  ready: boolean
+  minIntervalMs?: number
+} {
+  const minIntervalMs = hooks.minIntervalMs?.()
+  return {
+    ackedSeq: head,
+    lastBuiltSeq: mark.seq,
+    lastBuiltAt: mark.at,
+    now,
+    graphExists: hooks.graphExists(),
+    enabled: hooks.enabled(),
+    ready: hooks.ready(),
+    ...(minIntervalMs === undefined ? {} : { minIntervalMs }),
+  }
+}
+
 export class FeedService {
   private server: FeedServer | null = null
   private db: SqliteDatabase | null = null
@@ -558,22 +606,9 @@ export class FeedService {
 
     const mark = sync.buildWatermark()
     const head = sync.head()
-    const forecast = forecastAutoBuild({
-      /**
-       * ★ 用 changelog 的 head 而不是导出游标的 ackedSeq。
-       *
-       * 两者的差别是"数据已经采到哪"与"已经导出到哪"。界面上那个数字
-       * 要回答的是「还差多少条会触发建图」，而导出是 10 分钟一轮的中间步骤
-       * —— 拿 ackedSeq 会让数字在导出前后跳一下，看起来像倒退。
-       */
-      ackedSeq: head,
-      lastBuiltSeq: mark.seq,
-      lastBuiltAt: mark.at,
-      now: this.options.clock.now(),
-      graphExists: auto.graphExists(),
-      enabled: auto.enabled(),
-      ready: auto.ready(),
-    })
+    const forecast = forecastAutoBuild(
+      buildForecastInput(auto, mark, head, this.options.clock.now()),
+    )
 
     return {
       enabled: auto.enabled(),
@@ -583,6 +618,8 @@ export class FeedService {
       messagesToThreshold: forecast.messagesToThreshold,
       lagThreshold: forecast.lagThreshold,
       maxAgeMs: forecast.maxAgeMs,
+      // ★ 回显生效的冷却：界面要说「最小间隔 1 小时，可在设置里改」
+      minIntervalMs: forecast.minIntervalMs,
       etaMs: forecast.etaMs,
       lastBuiltAt: mark.at,
       syncIntervalMs: this.options.graphSyncIntervalMs ?? GRAPH_SYNC_INTERVAL_MS,

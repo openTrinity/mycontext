@@ -822,10 +822,86 @@ describe("★ describeBuildSchedule：每种状态说不同的话", () => {
     messagesToThreshold: 380,
     lagThreshold: 500,
     maxAgeMs: 86_400_000,
+    minIntervalMs: 3_600_000,
     etaMs: 3_600_000,
     lastBuiltAt: 1_785_000_000_000,
     syncIntervalMs: 600_000,
   }
+
+  /**
+   * ★★★ 这一组锁的是一句**自相矛盾**的话。
+   *
+   * 冷却那一档（`min-interval`）原来没有分支，掉进 `below-threshold` 的
+   * 兜底，于是界面真的显示过（实测原文）：
+   *
+   * ```
+   * 自动构建 · 增量 25,477 / 500 条（还差 0 条） · 或 约 23 小时后按时间触发
+   * ```
+   *
+   * · 「还差 0 条」= `max(0, 500 - 25477)` —— 读起来像卡住了；
+   * · 「23 小时」= 24h 兜底的倒计时，而真正要等的是冷却剩余
+   *   （那一刻实测距上次建成 37 分钟、冷却 1 小时 → 还有约 23 **分钟**）。
+   *
+   * 差 60 倍，且把用户指向两个都错的结论：「要等一整天」或「条数没攒够」。
+   */
+  it("★★★ 冷却中 → 说「已达标 · 冷却中」，不许说「还差 N 条」", () => {
+    const d = describeBuildSchedule({
+      ...base,
+      reason: "min-interval",
+      pendingMessages: 25_477,
+      // 条数早就够了 → 这个值是 0，而它正是那句「还差 0 条」的来源
+      messagesToThreshold: 0,
+      etaMs: 23 * 60_000,
+    })
+    expect(d?.text).toContain("已达标")
+    // ★ 反面：不能再出现那两句误导
+    expect(d?.text).not.toContain("还差")
+    expect(d?.text).not.toContain("按时间触发")
+  })
+
+  /**
+   * ★★ 倒计时必须是**冷却剩余**，不是 24h 兜底。
+   *
+   * 判据锁在"分钟"上：24h 那个会被 `formatEta` 格式成「约 23 小时」，
+   * 而冷却剩余是「约 23 分钟」。这一条如果只断言"有倒计时"就抓不住 60 倍差。
+   */
+  it("★★ 倒计时是冷却剩余（分钟级），不是 24h 兜底（小时级）", () => {
+    const d = describeBuildSchedule({
+      ...base,
+      reason: "min-interval",
+      pendingMessages: 25_477,
+      messagesToThreshold: 0,
+      etaMs: 23 * 60_000,
+    })
+    expect(d?.text).toMatch(/23\s*分钟/)
+    expect(d?.text).not.toMatch(/小时后/)
+  })
+
+  /**
+   * ★★ 要说出那个冷却是**可配置**的，且报的是**生效值**。
+   *
+   * 用户把它改成 6h 之后这句话必须跟着变 —— 界面自己写一个 1h 常量的话
+   * 就又是"两处各写一份、必然分叉"（那正是 minIntervalMs 要回显的理由）。
+   */
+  it("★★ 报生效的冷却值并指向设置（改成 6h 就说 6 小时）", () => {
+    const d = describeBuildSchedule({
+      ...base,
+      reason: "min-interval",
+      messagesToThreshold: 0,
+      minIntervalMs: 6 * 3_600_000,
+      etaMs: 60_000,
+    })
+    expect(d?.text).toMatch(/6\s*小时/)
+    expect(d?.text).toContain("设置")
+    /**
+     * ★★ 配置值**不带「约」** —— 它不是估算。
+     *
+     * 实测撞到过「最小间隔 约 1 小时，可在设置里改」：「约」与「可在设置里改」
+     * 放在一起自相矛盾（用户自己配的那个数不该是约数）。
+     * 而倒计时那半句仍然该带"约"（那确实是估算）。
+     */
+    expect(d?.text).not.toMatch(/最小间隔 约/)
+  })
 
   it("没接自动构建 → null（不占位）", () => {
     expect(describeBuildSchedule(null)).toBeNull()

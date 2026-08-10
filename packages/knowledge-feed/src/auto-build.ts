@@ -298,10 +298,13 @@ export function forecastAutoBuild(input: AutoBuildInput): {
   lagThreshold: number
   /** 生效的时间阈值 */
   maxAgeMs: number
+  /** 生效的冷却（两次建图的最小间隔）。回显给界面，免得两处写死不同的数 */
+  minIntervalMs: number
 } {
   const decision = decideAutoBuild(input)
   const lagThreshold = input.lagThreshold ?? AUTO_BUILD_LAG_THRESHOLD
   const maxAgeMs = input.maxAgeMs ?? AUTO_BUILD_MAX_AGE_MS
+  const minIntervalMs = input.minIntervalMs ?? AUTO_BUILD_MIN_INTERVAL_MS
   const newMessages = Math.max(0, input.ackedSeq - input.lastBuiltSeq)
   const messagesToThreshold = Math.max(0, lagThreshold - newMessages)
 
@@ -310,9 +313,10 @@ export function forecastAutoBuild(input: AutoBuildInput): {
    * 返回 null 而不是 0：0 会被界面显示成「即将开始」，而"被关闭"
    * 与"马上开始"是完全不同的两件事。
    */
-  if (decision.build) return { decision, etaMs: 0, messagesToThreshold, lagThreshold, maxAgeMs }
+  if (decision.build)
+    return { decision, etaMs: 0, messagesToThreshold, lagThreshold, maxAgeMs, minIntervalMs }
   if (decision.reason === "disabled" || decision.reason === "build-in-progress") {
-    return { decision, etaMs: null, messagesToThreshold, lagThreshold, maxAgeMs }
+    return { decision, etaMs: null, messagesToThreshold, lagThreshold, maxAgeMs, minIntervalMs }
   }
 
   /**
@@ -324,7 +328,7 @@ export function forecastAutoBuild(input: AutoBuildInput): {
     const failures = input.consecutiveFailures ?? 0
     const at = input.lastFailureAt ?? null
     const eta = at === null ? null : Math.max(0, at + autoBuildBackoffMs(failures) - input.now)
-    return { decision, etaMs: eta, messagesToThreshold, lagThreshold, maxAgeMs }
+    return { decision, etaMs: eta, messagesToThreshold, lagThreshold, maxAgeMs, minIntervalMs }
   }
 
   /**
@@ -333,10 +337,36 @@ export function forecastAutoBuild(input: AutoBuildInput): {
    * 比不给更糟。
    */
   if (decision.reason === "no-new-data") {
-    return { decision, etaMs: null, messagesToThreshold, lagThreshold, maxAgeMs }
+    return { decision, etaMs: null, messagesToThreshold, lagThreshold, maxAgeMs, minIntervalMs }
+  }
+
+  /**
+   * ★★★ `min-interval`：**条数早就够了，只是在冷却**。
+   *
+   * 这一档原来没有，于是它掉进下面那个 `below-threshold` 的 return，
+   * 得到两个"各自按公式都对、合起来完全错"的数字（实测界面原文）：
+   *
+   * ```
+   * 自动构建 · 增量 25,477 / 500 条（还差 0 条） · 或 约 23 小时后按时间触发
+   * ```
+   *
+   * · 「还差 0 条」= `max(0, 500 - 25477)`，读起来像卡住了；
+   * · 「23 小时后」= `lastBuiltAt + 24h - now`，而真正要等的是**冷却的剩余**
+   *   （实测那一刻距上次建成 37 分钟，冷却 1 小时 → 还有约 23 **分钟**）。
+   *
+   * 差了 60 倍，而且指向错的原因：用户会以为要等一整天，
+   * 或者以为条数没攒够而去等更多消息 —— 两个结论都是假的。
+   *
+   * ★ `etaMs` 算的是冷却到期时刻，而不是 maxAge：这一档里冷却是**唯一**
+   * 挡着的东西，冷却一过就会按 `lag-threshold` 立刻触发。
+   */
+  if (decision.reason === "min-interval") {
+    const eta =
+      input.lastBuiltAt === null ? 0 : Math.max(0, input.lastBuiltAt + minIntervalMs - input.now)
+    return { decision, etaMs: eta, messagesToThreshold, lagThreshold, maxAgeMs, minIntervalMs }
   }
 
   // below-threshold：有新数据但没攒够 → 到 maxAge 那一刻会因"攒够时间"触发。
   const eta = input.lastBuiltAt === null ? 0 : Math.max(0, input.lastBuiltAt + maxAgeMs - input.now)
-  return { decision, etaMs: eta, messagesToThreshold, lagThreshold, maxAgeMs }
+  return { decision, etaMs: eta, messagesToThreshold, lagThreshold, maxAgeMs, minIntervalMs }
 }
