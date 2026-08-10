@@ -181,7 +181,7 @@ export default function TrendChart({ days, mode, showChunks, height = 260 }: Tre
                 <TooltipRow color={inboundColor} label="收到" value={row.inbound} />
                 <TooltipRow color={outboundColor} label="发出" value={row.outbound} />
                 {showChunks ? (
-                  <TooltipRow color={chunkColor} label="进图谱" value={row.chunks} />
+                  <TooltipRow color={chunkColor} label="已学习" value={row.chunks} />
                 ) : null}
               </div>
             )

@@ -212,6 +212,7 @@ export class DashboardTrendsService {
         messages: messagesTotal,
         // ★ 图库不可读时后三级给 0，但 `graphAvailable: false` 让 UI 显示 `—`
         units: graph?.units ?? 0,
+        unitsByType: graph?.unitsByType ?? [],
         chunks: graph?.funnel.chunks ?? 0,
         facts: graph?.funnel.facts ?? 0,
         entities: graph?.funnel.entities ?? 0,
@@ -311,7 +312,7 @@ function countOf(db: SqliteDatabase, table: string, where?: string): number {
 function emptyTrends(windowDays: number): DashboardTrends {
   return {
     days: [],
-    funnel: { messages: 0, units: 0, chunks: 0, facts: 0, entities: 0 },
+    funnel: { messages: 0, units: 0, unitsByType: [], chunks: 0, facts: 0, entities: 0 },
     graphLag: { head: 0, build: 0, export: 0 },
     coverage: {
       factsTimestamped: { done: 0, total: 0 },

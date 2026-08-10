@@ -98,6 +98,11 @@ export interface GraphAggregates {
   /** kl 侧登记的处理单元数（漏斗第二级） */
   units: number
   /**
+   * 处理单元**按来源分类**（`type` = kl 的原始 source_type：message/minutes/wiki…，
+   * 友好名字映射在渲染层）。给面板做"处理了 N 条聊天、M 条会议记录"的分类展示。
+   */
+  unitsByType: Array<{ type: string; count: number }>
+  /**
    * 有时间戳的 fact / 全部 fact。
    *
    * ★ 实测本机 **525/975 = 54% 的 fact `timestamp=0`**（CAUSAL 类 70%）。
@@ -942,6 +947,25 @@ export function readGraphAggregates(
       }
     })()
 
+    /**
+     * 单元**按来源分类**（聊天 / 会议记录 / 文档）。面板要说"处理了多少聊天、
+     * 多少会议记录"，而不是一个笼统的"处理单元 32930" —— 后者对非技术用户
+     * 没有意义。缺表时空对象（漏斗那一级会退回只显示总数）。
+     *
+     * ★ `source_type` 是 kl 自己写的原始值（`message`/`minutes`/`wiki`…），
+     * 这里原样带出，友好名字的映射放在渲染层（i18n），不在这里写死中文。
+     */
+    const unitsByType = (() => {
+      try {
+        const rows = db
+          .prepare("SELECT source_type AS type, count(*) AS count FROM units GROUP BY source_type")
+          .all() as Array<{ type: string; count: number }>
+        return rows.map((r) => ({ type: r.type, count: r.count }))
+      } catch {
+        return []
+      }
+    })()
+
     const communities = (() => {
       try {
         return {
@@ -962,6 +986,7 @@ export function readGraphAggregates(
         entities: one("SELECT count(*) AS c FROM entities"),
       },
       units,
+      unitsByType,
       factsTimestamped: {
         /** `timestamp > 0` 而不是 `IS NOT NULL`：上游用 0 表示"没有时间" */
         done: one("SELECT count(*) AS c FROM facts WHERE timestamp > 0"),

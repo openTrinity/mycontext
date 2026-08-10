@@ -18,6 +18,7 @@ import type { DashboardTrends } from "@mycontext/ipc-contract"
 import {
   GRAPH_LAG_OK,
   GRAPH_LAG_WARN,
+  describeUnitsByType,
   readFactTimestampGap,
   readGraphLag,
   readTrendSummary,
@@ -29,7 +30,7 @@ const MS_PER_DAY = 86_400_000
 function trends(patch: Partial<DashboardTrends> = {}): DashboardTrends {
   return {
     days: [],
-    funnel: { messages: 0, units: 0, chunks: 0, facts: 0, entities: 0 },
+    funnel: { messages: 0, units: 0, unitsByType: [], chunks: 0, facts: 0, entities: 0 },
     graphLag: { head: 0, build: 0, export: 0 },
     coverage: {
       factsTimestamped: { done: 0, total: 0 },
@@ -254,5 +255,30 @@ describe("无时间戳的事实必须被说出来", () => {
     expect(text).toContain("54%")
     // 必须说清后果：不计入按时间的统计
     expect(text).toMatch(/不计入|没有时间/)
+  })
+})
+
+describe("处理单元按类型（去技术化 + 分类统计）", () => {
+  it("拼成人话，按数量倒序，用友好名字（不出现 message/wiki 原始码）", () => {
+    const text = describeUnitsByType([
+      { type: "minutes", count: 8 },
+      { type: "message", count: 32_828 },
+      { type: "wiki", count: 94 },
+    ])
+    // 最大的排前面
+    expect(text).toBe("聊天 32,828 · 文档 94 · 会议记录 8")
+    // ★ 反面：不能漏出原始类型码
+    expect(text).not.toContain("message")
+    expect(text).not.toContain("wiki")
+    expect(text).not.toContain("minutes")
+  })
+
+  it("不认识的类型原样显示（保底不漏一类）", () => {
+    expect(describeUnitsByType([{ type: "email", count: 3 }])).toBe("email 3")
+  })
+
+  it("空 / undefined → null（那一级只显示总数，不摆一句空分类）", () => {
+    expect(describeUnitsByType([])).toBeNull()
+    expect(describeUnitsByType(undefined)).toBeNull()
   })
 })

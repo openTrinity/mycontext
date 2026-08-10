@@ -413,13 +413,13 @@ try {
       trendXTicks: document.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick").length,
       trendYTicks: document.querySelectorAll(".recharts-yAxis .recharts-cartesian-axis-tick").length,
       trendVGrid: document.querySelectorAll(".recharts-cartesian-grid-vertical line").length,
-      hasFunnel: text.includes("消化漏斗"),
-      hasCoverage: text.includes("覆盖度"),
+      hasFunnel: text.includes("从这些内容里学到了什么"),
+      hasCoverage: text.includes("拿全了没"),
       /**
        * 漏斗第一级的数值。
        *
-       * ★ 按**结构**取（从「消化漏斗」标题往上找到那张卡，再取卡里第一个
-       * 纯数字单元），不按整页正则 —— 页面上别处也有消息数，
+       * ★ 按**结构**取（从「从这些内容里学到了什么」标题往上找到那张卡，
+       * 再取卡里第一个纯数字单元），不按整页正则 —— 页面上别处也有消息数，
        * 用整页匹配会假绿。
        *
        * ★★ 判据是"这一层里**有**纯数字 span"，而不是"className 含 flex-col"。
@@ -430,7 +430,7 @@ try {
        */
       funnelFirstValue: (() => {
         const header = [...document.querySelectorAll("span")].find(
-          (n) => (n.textContent ?? "").trim() === "消化漏斗",
+          (n) => (n.textContent ?? "").trim() === "从这些内容里学到了什么",
         )
         if (header === undefined) return null
         /**
@@ -661,10 +661,10 @@ try {
   if (dash.trendVGrid !== 0) {
     problems.push(`时序图不该有竖向网格线，实际 ${dash.trendVGrid} 条（规范：只横向 hairline）`)
   }
-  /** 漏斗与覆盖度两张卡在 */
+  /** 「学到了什么」与「拿全了没」两张卡在 */
   for (const [label, present] of [
-    ["消化漏斗", dash.hasFunnel],
-    ["覆盖度", dash.hasCoverage],
+    ["从这些内容里学到了什么", dash.hasFunnel],
+    ["拿全了没", dash.hasCoverage],
   ]) {
     if (present !== true) problems.push(`「${label}」那一块没渲染出来`)
   }

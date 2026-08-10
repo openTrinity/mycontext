@@ -2598,6 +2598,12 @@ export const dashboardTrendsSchema = z.object({
     messages: z.number(),
     /** kl 侧登记的处理单元数 */
     units: z.number(),
+    /**
+     * 处理单元**按来源分类**（`type` = kl 原始 source_type：message/minutes/wiki…，
+     * 友好名字映射在渲染层 i18n）。面板据此说"处理了 N 条聊天、M 条会议记录"，
+     * 而不是一个笼统的总数。空数组 = 旧库没有 units 表 / 还没建图。
+     */
+    unitsByType: z.array(z.object({ type: z.string(), count: z.number() })),
     /** 切出来的块数 */
     chunks: z.number(),
     /** 抽出来的事实数 */

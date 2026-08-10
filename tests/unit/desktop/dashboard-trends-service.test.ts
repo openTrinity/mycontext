@@ -190,6 +190,11 @@ describe("图库读不到时的降级", () => {
       graph: {
         funnel: { chunks: 3409, facts: 975, entities: 602 },
         units: 32_930,
+        unitsByType: [
+          { type: "message", count: 32_828 },
+          { type: "minutes", count: 8 },
+          { type: "wiki", count: 94 },
+        ],
         factsTimestamped: { done: 450, total: 975 },
         communitySummaries: { done: 4, total: 16, stale: 7 },
         chunksByDay: [{ at: dayStart(1), count: 42 }],
@@ -198,6 +203,12 @@ describe("图库读不到时的降级", () => {
 
     expect(result.graphAvailable).toBe(true)
     expect(result.funnel.units).toBe(32_930)
+    // 按类型分类也要透下去（面板用它拼"聊天 N · 会议记录 M · 文档 K"）
+    expect(result.funnel.unitsByType).toEqual([
+      { type: "message", count: 32_828 },
+      { type: "minutes", count: 8 },
+      { type: "wiki", count: 94 },
+    ])
     expect(result.funnel.facts).toBe(975)
     expect(result.coverage.factsTimestamped).toEqual({ done: 450, total: 975 })
     expect(result.coverage.communitySummaries.stale).toBe(7)

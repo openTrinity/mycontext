@@ -74,6 +74,7 @@ import { CoverageBar, Distribution, Section } from "./primitives.js"
 import {
   classifyGraphReason,
   describeKl,
+  describeUnitsByType,
   formatCount,
   readFactTimestampGap,
   readGraphLag,
@@ -442,9 +443,9 @@ export function DashboardModule() {
         {[
           { label: "会话", value: ing?.conversations ?? "—" },
           { label: "图片与文件", value: ing?.media ?? "—" },
-          { label: "实体", value: formatCount(graph?.entities ?? 0) },
-          { label: "事实", value: formatCount(graph?.facts ?? 0) },
-          { label: "关系边", value: formatCount(graph?.edges ?? 0) },
+          { label: "认识的人和事物", value: formatCount(graph?.entities ?? 0) },
+          { label: "记住的事", value: formatCount(graph?.facts ?? 0) },
+          { label: "关系", value: formatCount(graph?.edges ?? 0) },
           { label: "消息", value: ing?.messages ?? "—" },
         ].map((item) => (
           <div key={item.label} className="col-span-6 sm:col-span-4 lg:col-span-2">
@@ -811,6 +812,8 @@ function TrendsSection({ building }: { building: boolean }) {
   const summary = readTrendSummary(data)
   const lag = readGraphLag(data)
   const factGap = readFactTimestampGap(data)
+  // 「读过的内容」按类型拆一句人话（聊天 N · 会议记录 M · 文档 K）
+  const unitsBreakdown = describeUnitsByType(data?.funnel.unitsByType)
 
   /**
    * 图上有没有数据。
@@ -824,7 +827,7 @@ function TrendsSection({ building }: { building: boolean }) {
 
   return (
     <Section
-      title="数据流水与消化"
+      title="最近在忙什么"
       grid={false}
       subtitle={
         summary === null
@@ -890,7 +893,7 @@ function TrendsSection({ building }: { building: boolean }) {
               <LegendDot color={entityColor("Person", mode)} label="收到" />
               <LegendDot color={entityColor("System", mode)} label="发出" />
               {data.graphAvailable ? (
-                <LegendDot color={ENTITY_NEUTRAL[mode]} label="进了图谱" />
+                <LegendDot color={ENTITY_NEUTRAL[mode]} label="已学习" />
               ) : null}
               {summary?.busiest === undefined || summary.busiest === null ? null : (
                 <span className="typography-caption-400 ml-auto text-[var(--text-base-tertiary)]">
@@ -930,10 +933,10 @@ function TrendsSection({ building }: { building: boolean }) {
         )}
       </Panel>
 
-      {/* 漏斗与覆盖度并排：两者都是"全不全"的问题，同一层级 */}
+      {/* 学到了什么 与 拿全了没 并排：都是"全不全"的问题，同一层级 */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <Panel tone="raised" className="flex flex-col gap-3">
-          <PanelHeader title="消化漏斗" hint="喂进去多少 → 落地多少" />
+          <PanelHeader title="从这些内容里学到了什么" hint="读了多少 → 记住了多少" />
           <Funnel
             stages={[
               {
@@ -942,25 +945,26 @@ function TrendsSection({ building }: { building: boolean }) {
                 color: entityColor("Person", mode),
               },
               {
-                label: "处理单元",
+                label: "读过的内容",
                 value: data?.graphAvailable === true ? data.funnel.units : null,
                 color: entityColor("Person", mode),
-                hint: "含文档与听记，所以可能略多于消息数",
+                // ★ 分类摘要放进 hint —— 用友好名字，不出现 message/wiki 这种原始类型码
+                ...(unitsBreakdown === null ? {} : { hint: unitsBreakdown }),
               },
               {
-                label: "文本块",
+                label: "内容片段",
                 value: data?.graphAvailable === true ? data.funnel.chunks : null,
                 color: entityColor("Project", mode),
-                hint: "多条消息合成一块，掉下来是设计如此",
+                hint: "把相邻的消息合成一小段再理解，所以比消息少是正常的",
               },
               {
-                label: "事实",
+                label: "记住的事",
                 value: data?.graphAvailable === true ? data.funnel.facts : null,
                 color: entityColor("Organization", mode),
-                hint: "每块抽出的陈述句 —— 这一步烧 LLM",
+                hint: "从内容里读出来的一条条要点",
               },
               {
-                label: "实体",
+                label: "认识的人和事物",
                 value: data?.graphAvailable === true ? data.funnel.entities : null,
                 color: entityColor("System", mode),
               },
@@ -968,16 +972,16 @@ function TrendsSection({ building }: { building: boolean }) {
           />
           {data?.graphAvailable === false ? (
             <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-              后四级读不到 —— 还没建过图谱（点上面那块的「同步」）
+              还在学习中 —— 点上面那块的「同步」开始
             </p>
           ) : null}
         </Panel>
 
         <Panel tone="raised" className="flex flex-col gap-3">
-          <PanelHeader title="覆盖度" hint="已经拿到的 / 应该有的" />
+          <PanelHeader title="拿全了没" hint="已经拿到的 / 应该有的" />
           <div className="flex flex-col gap-3">
             <CoverageBar
-              label="事实有时间"
+              label="记得发生的时间"
               done={data?.coverage.factsTimestamped.done ?? 0}
               total={data?.coverage.factsTimestamped.total ?? 0}
               color={entityColor("Organization", mode)}
@@ -990,7 +994,7 @@ function TrendsSection({ building }: { building: boolean }) {
               {...(factGap === null ? {} : { hint: factGap })}
             />
             <CoverageBar
-              label="媒体已下载"
+              label="图片已下载"
               done={data?.coverage.mediaDownloaded.done ?? 0}
               total={data?.coverage.mediaDownloaded.total ?? 0}
               color={entityColor("Project", mode)}
@@ -999,26 +1003,15 @@ function TrendsSection({ building }: { building: boolean }) {
                 与「能看 10 张图」是两件事，而现在的界面只显示前者。
               */
               warnBelow={0.5}
-              hint="没下载的那些只有登记，看不到原图"
+              hint="没下载的那些暂时看不到原图"
             />
-            <CoverageBar
-              label="社群有摘要"
-              done={data?.coverage.communitySummaries.done ?? 0}
-              total={data?.coverage.communitySummaries.total ?? 0}
-              color={entityColor("System", mode)}
-              /*
-                ★ 这一条**不设阈值**（null = 从不染色）。
-                社群摘要要跑 `kl improve` 才有，而那是用户显式触发的可选步骤
-                —— 没跑过不是故障。给它阈值就会天天亮黄灯，
-                而一个天天亮灯的仪表盘等于没有仪表盘（同 `lagTone` 的论证）。
-              */
-              warnBelow={null}
-              {...(data !== null && data.coverage.communitySummaries.stale > 0
-                ? {
-                    hint: `另有 ${String(data.coverage.communitySummaries.stale)} 个社群的摘要已过期`,
-                  }
-                : {})}
-            />
+            {/*
+              ★ 「社群摘要」那一条**去掉了**（不再透出社群这个概念）。
+              社群能力已在算法侧默认关闭（config `KL_COMMUNITIES_ENABLED=0`），
+              而它本就是个技术概念、对用户没有意义。契约里那个字段先留着
+              （删它要动 schema + 服务 + 测试，且以后可能重新启用），
+              只是界面不再显示。
+            */}
           </div>
         </Panel>
       </div>

@@ -909,3 +909,37 @@ export function readFactTimestampGap(trends: DashboardTrends | null): string | n
   const pct = ((missing / total) * 100).toFixed(0)
   return `另有 ${formatCount(missing)} 条事实没有时间戳（${pct}%），不计入按时间的统计`
 }
+
+/**
+ * kl 原始 source_type → 用户友好名。
+ *
+ * kl 写的是 `message` / `minutes` / `wiki` 这类内部码，界面不该出现它们。
+ * 不认识的类型原样显示（保底不至于漏一类，而不是显示成空）。
+ */
+const UNIT_TYPE_LABEL: Record<string, string> = {
+  message: "聊天",
+  minutes: "会议记录",
+  wiki: "文档",
+  doc: "文档",
+  document: "文档",
+}
+
+function unitTypeLabel(type: string): string {
+  return UNIT_TYPE_LABEL[type] ?? type
+}
+
+/**
+ * 把「处理单元按类型」拼成一句人话：`聊天 32,828 · 会议记录 8 · 文档 94`。
+ *
+ * ★ 空数组（旧库没 units 表 / 还没建图）→ null，调用方那一级就只显示总数，
+ * 不显示一句空的分类。按数量倒序，最大的那类排前面。
+ */
+export function describeUnitsByType(
+  rows: ReadonlyArray<{ type: string; count: number }> | undefined,
+): string | null {
+  if (rows === undefined || rows.length === 0) return null
+  return [...rows]
+    .sort((a, b) => b.count - a.count)
+    .map((r) => `${unitTypeLabel(r.type)} ${formatCount(r.count)}`)
+    .join(" · ")
+}
