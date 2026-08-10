@@ -168,7 +168,7 @@
     "sourcesPlanned": "排期中",
     "readOnlyChannelHint": "只读接入的渠道不参与数字分身的自动回复。",
     "sourceExpired": "{{channel}} 的登录已过期，重新连接后这里才会有它的会话。",
-    "sourceCannotEnumerate": "{{channel}} 不支持先列会话再勾选 —— 它按时间范围读，读过之后这里会逐步出现。这一步不用为它做选择。",
+    "sourceCannotEnumerate": "这个渠道暂时列不出会话，这一步不用为它做选择 —— 读过一轮之后它的会话会出现在这里。",
     "sourceNotReady": "{{channel}} 还在准备中，稍等一下这里会自己刷新。",
     "sourceFailed": "{{channel}} 这次没读到会话：{{reason}}"
   },

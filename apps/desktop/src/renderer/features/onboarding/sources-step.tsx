@@ -384,7 +384,8 @@ export function SourcesStep({
               界面一句「没读到任何会话」，而用户对着它无事可做）：
 
               · `expired` —— 去重新连接，等下去永远不会有；
-              · `cannot-enumerate` —— 这一步不用为它选，读过之后自然出现；
+              · `cannot-enumerate` —— 这一步不用为它选，读过之后自然出现
+                （现存渠道都有列举能力，这一档是给新接的渠道留的）；
               · `not-ready` —— 稍等，会自己刷新；
               · `failed` —— 带上原因。
 
