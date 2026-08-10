@@ -41,7 +41,7 @@
  */
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { Avatar, Button, Panel, PanelHeader } from "@mycontext/design"
+import { Avatar, Button, IconButton, Panel, PanelHeader, cn } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
   useAdoptableSession,
@@ -411,20 +411,29 @@ export function DashboardModule() {
               两者混淆会让用户以为点一下就能把落后的消息补上来。
 
               `ml-auto` 推到最右：它是这一行的次要动作，不该抢问候语的位置。
+
+              ## ★ 是图标不是文字（用户要求）
+
+              「刷新状态」四个字在这一行（问候语 + 大数字）里是纯噪声 ——
+              一个 ↻ 图标就说清了，可点区域也够（`IconButton` sm=24px）。
+              `title`/`aria-label` 仍带完整说明（"不会去拉新消息"那句关键，
+              别因为收成图标就把它丢了）。刷新中图标转圈（`animate-spin`），
+              把原来 `Button loading` 的转圈交给图标自己。
             */}
-            <Button
+            <IconButton
+              label="刷新状态"
               size="sm"
-              variant="secondary"
+              variant="ghost"
               className="ml-auto"
-              loading={refreshing}
+              disabled={refreshing}
               onClick={() => {
                 setRefreshing(true)
                 void queryClient.invalidateQueries().finally(() => setRefreshing(false))
               }}
               title="重新读取这一屏的状态（不会去拉新消息）"
             >
-              刷新状态
-            </Button>
+              <RefreshGlyph spinning={refreshing} />
+            </IconButton>
           </div>
         )}
 
@@ -1026,5 +1035,38 @@ function LegendDot({ color, label }: { color: string; label: string }) {
       <span className="size-2 shrink-0 rounded-full" style={{ background: color }} />
       <span className="typography-caption-400 text-[var(--text-base-secondary)]">{label}</span>
     </span>
+  )
+}
+
+/**
+ * 刷新图标（循环箭头 ↻）。刷新中转圈。
+ *
+ * ★ `motion-reduce:animate-none` —— 尊重系统的减少动效偏好（与 `IconButton`
+ * 里那条 `motion-reduce` 同一条纪律）。规格与本仓库其余内联图标一致：
+ * `viewBox 0 0 16 16` + `size-4` + `currentColor` + 描边 1.4。
+ */
+function RefreshGlyph({ spinning }: { spinning: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      className={cn("size-4", spinning ? "animate-spin motion-reduce:animate-none" : "")}
+      aria-hidden="true"
+    >
+      {/* 循环箭头：一段近乎整圈的弧 + 一个箭头，读作"重新读一遍" */}
+      <path
+        d="M13 8a5 5 0 1 1-1.46-3.54"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <path
+        d="M13.4 2.6v2.2h-2.2"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   )
 }
