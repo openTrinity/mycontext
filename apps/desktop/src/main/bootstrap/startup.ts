@@ -472,6 +472,24 @@ export function bootstrapApp(mainDir: string): AppContext {
         }
         return result.ok
       },
+      /**
+       * ★ 首次建图「等够初始跨度」闸的三个信号，都从采集快照现读
+       * （见 `decideAutoBuild` 的 `AUTO_BUILD_INITIAL_WINDOW_MS`）。
+       *
+       * · `firstDataAt` = 已采到的最早数据时刻（`backfill.coveredFrom`）；
+       * · `collectionComplete` = backfill 到底且没停滞（历史导入一次就位 → 立刻建）；
+       * · `learningRangeMs` = 用户选的范围跨度（`now - backfill.since`）；
+       *   没配下界（`since` 为 null）= 不限 = 长范围 → undefined（按 14 天要求）。
+       */
+      firstDataAt: (): number | null => dataPlane.snapshot().backfill.coveredFrom,
+      collectionComplete: (): boolean => {
+        const b = dataPlane.snapshot().backfill
+        return b.started && b.remainingMs === 0 && b.stalled === null
+      },
+      learningRangeMs: (): number | undefined => {
+        const since = dataPlane.snapshot().backfill.since
+        return since === null ? undefined : Math.max(0, systemClock.now() - since)
+      },
     },
   })
 

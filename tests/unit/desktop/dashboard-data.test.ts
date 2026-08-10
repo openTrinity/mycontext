@@ -909,6 +909,28 @@ describe("★ describeBuildSchedule：每种状态说不同的话", () => {
     expect(describeBuildSchedule(null)).toBeNull()
   })
 
+  it("★ 首次等够初始跨度 → 说「正在积累前期数据」+ 倒计时，不说成卡住", () => {
+    const d = describeBuildSchedule({
+      ...base,
+      reason: "awaiting-initial-window",
+      etaMs: 4 * 24 * 60 * 60 * 1000, // 还差 4 天
+    })
+    expect(d?.text).toContain("正在积累前期数据")
+    expect(d?.text).toContain("第一张图谱")
+    // 有倒计时
+    expect(d?.text).toMatch(/后/)
+    expect(d?.tone).toBe("muted")
+    // ★ 反面：不该拼成 below-threshold 那句"还差 N 条"
+    expect(d?.text).not.toContain("还差")
+  })
+
+  it("★ 首次等跨度但拿不到最早时刻（etaMs=null）→ 不给假倒计时", () => {
+    const d = describeBuildSchedule({ ...base, reason: "awaiting-initial-window", etaMs: null })
+    expect(d?.text).toContain("正在积累前期数据")
+    // 没有"约 N 后"这种会走到 0 也不建的假倒计时
+    expect(d?.text).not.toMatch(/约.*后生成/)
+  })
+
   it("关闭 → 明确说「已关闭」并提示需手动", () => {
     const d = describeBuildSchedule({ ...base, enabled: false, reason: "disabled" })
     expect(d?.text).toContain("已关闭")

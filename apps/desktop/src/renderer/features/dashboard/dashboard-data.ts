@@ -527,6 +527,20 @@ export function describeBuildSchedule(
     return { text: "无增量数据 · 暂不构建", tone: "muted" }
   }
   /**
+   * ★ 首次建图前在等够初始跨度（14 天 / min(14天, 学习范围)）。
+   *
+   * 这是用户要的那句"小提示"：第一张图要先攒够一段时间跨度再建（否则建出来
+   * 又薄又马上过时、还得全量重烧）。措辞要说清"在攒、不是坏了"，并给倒计时。
+   * `etaMs === null`（拿不到最早时刻）时不给一个走到 0 也不会建的假倒计时。
+   */
+  if (reason === "awaiting-initial-window") {
+    const wait = etaMs === null ? "" : `约 ${formatEta(etaMs)}后`
+    return {
+      text: `正在积累前期数据 · ${wait}生成第一张图谱（数据采齐后会提前）`,
+      tone: "muted",
+    }
+  }
+  /**
    * ★★★ `min-interval`：**条数早就够了，只是在冷却**。
    *
    * 这一档原来没有，于是它掉进下面那个 `below-threshold` 的分支，

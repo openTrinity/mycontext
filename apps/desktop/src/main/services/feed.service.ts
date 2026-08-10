@@ -125,6 +125,20 @@ export interface FeedServiceOptions {
      * （`RuntimeEnv` 的 `dwsChannel` / `dwsBinOverride` 同一个理由）。
      */
     minIntervalMs?: () => number
+    /**
+     * 首次建图「等够初始跨度」闸的三个信号（见 `decideAutoBuild` 的
+     * `AUTO_BUILD_INITIAL_WINDOW_MS`）。都可选、都**现读**（函数）——
+     * 采集在进行时最早时刻/是否采满都在变。
+     *
+     * · `firstDataAt` = 已采到的最早一条数据时刻（ms），null = 还没数据/拿不到；
+     * · `collectionComplete` = 采集是否已到位（backfill 到底）；
+     * · `learningRangeMs` = 用户选的学习范围跨度（ms），undefined = 不限。
+     *
+     * 不给这三个 = 退回"有数据就首建"的老行为。
+     */
+    firstDataAt?: () => number | null
+    collectionComplete?: () => boolean
+    learningRangeMs?: () => number | undefined
   }
 }
 
@@ -177,6 +191,9 @@ export function buildAutoBuildSnapshot(
   enabled: boolean
   ready: boolean
   minIntervalMs?: number
+  firstDataAt?: number | null
+  collectionComplete?: boolean
+  learningRangeMs?: number
 } {
   // 现读：设置里改完下一轮生效（见 options 里的注释）
   const minIntervalMs = hooks.minIntervalMs?.()
@@ -187,7 +204,32 @@ export function buildAutoBuildSnapshot(
     enabled: hooks.enabled(),
     ready: hooks.ready(),
     ...(minIntervalMs === undefined ? {} : { minIntervalMs }),
+    ...initialWindowFields(hooks),
   }
+}
+
+/**
+ * 首次「等够初始跨度」闸的三个字段，现读并**只在给了 getter 时**才带上
+ * （省略 vs `undefined` 的区别见 `minIntervalMs` 那段注释）。
+ *
+ * ★ 提成一处：判据快照与预测输入都要带这三个，两处各写一遍迟早漂。
+ * `firstDataAt` 例外：它**允许** null（"还没数据"是有意义的值），所以
+ * 给了 getter 就带上（哪怕是 null），只有连 getter 都没有才省略。
+ */
+function initialWindowFields(hooks: AutoBuildHooks): {
+  firstDataAt?: number | null
+  collectionComplete?: boolean
+  learningRangeMs?: number
+} {
+  const out: { firstDataAt?: number | null; collectionComplete?: boolean; learningRangeMs?: number } =
+    {}
+  if (hooks.firstDataAt !== undefined) out.firstDataAt = hooks.firstDataAt()
+  if (hooks.collectionComplete !== undefined) out.collectionComplete = hooks.collectionComplete()
+  if (hooks.learningRangeMs !== undefined) {
+    const range = hooks.learningRangeMs()
+    if (range !== undefined) out.learningRangeMs = range
+  }
+  return out
 }
 
 /**
@@ -224,6 +266,9 @@ export function buildForecastInput(
   enabled: boolean
   ready: boolean
   minIntervalMs?: number
+  firstDataAt?: number | null
+  collectionComplete?: boolean
+  learningRangeMs?: number
 } {
   const minIntervalMs = hooks.minIntervalMs?.()
   return {
@@ -235,6 +280,7 @@ export function buildForecastInput(
     enabled: hooks.enabled(),
     ready: hooks.ready(),
     ...(minIntervalMs === undefined ? {} : { minIntervalMs }),
+    ...initialWindowFields(hooks),
   }
 }
 

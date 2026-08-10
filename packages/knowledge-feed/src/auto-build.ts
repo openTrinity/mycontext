@@ -56,6 +56,26 @@
 /** 攒够多少条新消息才值得建一次图。见文件头的成本表。 */
 export const AUTO_BUILD_LAG_THRESHOLD = 500
 
+/**
+ * 首次建图前，**至少**要攒够多长跨度的数据（默认 14 天）。
+ *
+ * ## 为什么首次要等
+ *
+ * 首次建图烧的是**全量** embedding（分钟级、出网、花钱，见文件头成本表）。
+ * 一个刚连上、只采到当天几百条的用户，这一轮建出来的图既薄又马上过时 ——
+ * 下一轮又得全量重烧。等数据攒够一段跨度再建，第一张图就有内容、也更耐用。
+ *
+ * ## 两个前提让它不会"永远等下去"
+ *
+ * · 用户选的学习范围本来就短（≤14 天）时，要求的跨度跟着缩到那个范围
+ *   （`min(14d, 学习范围)`）—— 选 7 天的人不该被 14 天卡住；
+ * · 数据**已经采满**（backfill 到位）时立刻建，不管跨度够不够 ——
+ *   历史导入一次就位，没有"再等几天会更多"这回事。
+ *
+ * 也就是说这道闸只拦一种情形：**范围很长、但刚开始采、还没采满**。
+ */
+export const AUTO_BUILD_INITIAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
+
 /** 攒够多久（有新数据的前提下）也建一次 —— 低频用户不该看一张旧图。 */
 export const AUTO_BUILD_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
@@ -86,6 +106,48 @@ export function autoBuildBackoffMs(failures: number): number {
   const index = Math.min(failures, AUTO_BUILD_BACKOFF_MS.length) - 1
   return AUTO_BUILD_BACKOFF_MS[index] ?? 0
 }
+
+/**
+ * 首次建图要求的最小数据跨度：`min(14d, 学习范围)`。
+ *
+ * 没配学习范围（`learningRangeMs` 缺）= 不限 = 长范围 → 按 14 天。
+ */
+function requiredInitialWindowMs(input: AutoBuildInput): number {
+  const range = input.learningRangeMs
+  if (range === undefined || range >= AUTO_BUILD_INITIAL_WINDOW_MS) {
+    return AUTO_BUILD_INITIAL_WINDOW_MS
+  }
+  return Math.max(0, range)
+}
+
+/**
+ * 首次建图的「初始跨度」闸是否已放行。
+ *
+ * 放行（true）当且仅当下列任一成立：
+ * · 采集已到位（`collectionComplete`）—— 历史导入一次就位，不必等；
+ * · 拿不到最早数据时刻（`firstDataAt` 缺/ null）—— 不拦，退回原行为；
+ * · 已采到的跨度 `now - firstDataAt` ≥ 要求的 `min(14d, 范围)`。
+ *
+ * 也就是只在"范围长 + 刚开始采 + 跨度还不够 + 没采满"时返回 false。
+ */
+function initialWindowReady(input: AutoBuildInput): boolean {
+  if (input.collectionComplete === true) return true
+  const firstAt = input.firstDataAt
+  if (firstAt === undefined || firstAt === null) return true
+  const covered = input.now - firstAt
+  return covered >= requiredInitialWindowMs(input)
+}
+
+/**
+ * 首次「初始跨度」闸还差多久放行（ms）。null = 不由时间决定（拿不到最早时刻）。
+ * 给 `forecastAutoBuild` 用 —— 界面上要能说"再攒 N 天建第一张图"。
+ */
+function initialWindowEtaMs(input: AutoBuildInput): number | null {
+  const firstAt = input.firstDataAt
+  if (firstAt === undefined || firstAt === null) return null
+  return Math.max(0, firstAt + requiredInitialWindowMs(input) - input.now)
+}
+
 
 export interface AutoBuildInput {
   /** 本轮导出确认到的 seq（也就是"数据已经准备到哪"） */
@@ -124,6 +186,22 @@ export interface AutoBuildInput {
    * 这样用户在设置里改完下一轮就生效，不用重启。
    */
   minIntervalMs?: number
+  /**
+   * 首次建图的「等够初始跨度」闸用的两个信号（都只在 `!graphExists` 时才看）。
+   *
+   * · `firstDataAt` = 已采到的**最早**一条数据的时刻（ms）。null/缺 = 还没有
+   *   数据、或拿不到这个信号 → 不拦（退回原来的"有数据就首建"）。
+   * · `collectionComplete` = 采集是否已到位（backfill 到底）。true = 立刻建，
+   *   不等跨度（历史导入一次就位）。
+   * · `learningRangeMs` = 用户在引导里选的学习范围跨度（ms）。要求的最小跨度是
+   *   `min(AUTO_BUILD_INITIAL_WINDOW_MS, learningRangeMs)` —— 选的范围短就跟着短。
+   *   缺 = 按 14 天要求（没配范围 = 不限 = 长范围）。
+   *
+   * 见 `AUTO_BUILD_INITIAL_WINDOW_MS` 的注释与 `awaiting-initial-window`。
+   */
+  firstDataAt?: number | null
+  collectionComplete?: boolean
+  learningRangeMs?: number
 }
 
 export type AutoBuildDecision =
@@ -164,6 +242,16 @@ export type AutoBuildSkipReason =
    * 而用户据此去等更多消息 —— 等来的仍然是不建。
    */
   | "min-interval"
+  /**
+   * 首次建图前在**等够初始跨度** —— 数据刚开始采、还没采满、跨度也没到
+   * `min(14d, 学习范围)`。见 `AUTO_BUILD_INITIAL_WINDOW_MS`。
+   *
+   * ★ 只在首次（图还不存在）出现；图一旦建过就再不会是这个原因。
+   * 与 `no-new-data`/`below-threshold` 必须分开：那两个是"没数据/攒得不够"，
+   * 而这里是"数据在攒、只是还没攒够**时间跨度**"，界面要说的话不同
+   * （前者让用户去连/去等更多消息，这里是"正在攒够 N 天再建第一张图"）。
+   */
+  | "awaiting-initial-window"
   /** 上一次（或连续几次）建图失败了，正在退避 —— 与"攒得不够"是两件事 */
   | "backoff"
 
@@ -210,6 +298,13 @@ export function decideAutoBuild(input: AutoBuildInput): AutoBuildDecision {
   if (!input.graphExists) {
     // 但一条数据都没有时建图没有意义（kl 会报"没数据"）
     if (input.ackedSeq === 0) return { build: false, reason: "no-new-data" }
+    /**
+     * ★ 首次建图前先等够初始跨度（见 `AUTO_BUILD_INITIAL_WINDOW_MS`）。
+     * 只拦"范围长 + 刚开始采 + 还没采满"这一种；采满 / 范围短 / 已够跨度都放行。
+     */
+    if (!initialWindowReady(input)) {
+      return { build: false, reason: "awaiting-initial-window" }
+    }
     return { build: true, reason: "first-build", newMessages }
   }
 
@@ -329,6 +424,22 @@ export function forecastAutoBuild(input: AutoBuildInput): {
     const at = input.lastFailureAt ?? null
     const eta = at === null ? null : Math.max(0, at + autoBuildBackoffMs(failures) - input.now)
     return { decision, etaMs: eta, messagesToThreshold, lagThreshold, maxAgeMs, minIntervalMs }
+  }
+
+  /**
+   * 首次在等够初始跨度：倒计时到"最早数据 + min(14d, 范围)"那一刻。
+   * 界面据此说"再攒 N 天建第一张图"。`initialWindowEtaMs` 拿不到最早时刻
+   * 时返回 null（那时界面不给一个走到 0 也不会建的假倒计时）。
+   */
+  if (decision.reason === "awaiting-initial-window") {
+    return {
+      decision,
+      etaMs: initialWindowEtaMs(input),
+      messagesToThreshold,
+      lagThreshold,
+      maxAgeMs,
+      minIntervalMs,
+    }
   }
 
   /**

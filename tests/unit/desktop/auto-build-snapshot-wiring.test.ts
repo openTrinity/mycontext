@@ -232,3 +232,71 @@ describe("★★★ 预测层的接线（界面倒计时的来源）", () => {
     expect(input.graphExists).toBe(true)
   })
 })
+
+describe("★★ 首次「等够初始跨度」的三个信号要真的到判据", () => {
+  /**
+   * 这一组与「最小间隔」那组同理：设置/采集里的三个信号
+   * （最早数据时刻 / 是否采满 / 学习范围）要走完 getter → 快照 → 判据。
+   * 反证时验过：把 `initialWindowFields` 里任一行删掉，判据就再也看不到它，
+   * 于是首次建图那道 14 天闸静默失效（退回"有数据就建"）。
+   */
+  const MARK = { seq: 1200, at: 1_700_000_000_000 }
+  const DAY = 24 * 60 * 60 * 1000
+
+  function hooks(over: {
+    firstDataAt?: () => number | null
+    collectionComplete?: () => boolean
+    learningRangeMs?: () => number | undefined
+  }) {
+    return {
+      enabled: () => true,
+      ready: () => true,
+      graphExists: () => false,
+      trigger: () => Promise.resolve(true),
+      ...over,
+    }
+  }
+
+  it("★★ 三个信号都接上（现读）", () => {
+    const snap = buildAutoBuildSnapshot(
+      hooks({
+        firstDataAt: () => 111,
+        collectionComplete: () => true,
+        learningRangeMs: () => 7 * DAY,
+      }),
+      MARK,
+    )
+    expect(snap.firstDataAt).toBe(111)
+    expect(snap.collectionComplete).toBe(true)
+    expect(snap.learningRangeMs).toBe(7 * DAY)
+  })
+
+  it("★★ firstDataAt 允许 null（'还没数据'是有意义的值，给了 getter 就带上）", () => {
+    const snap = buildAutoBuildSnapshot(hooks({ firstDataAt: () => null }), MARK)
+    expect("firstDataAt" in snap).toBe(true)
+    expect(snap.firstDataAt).toBeNull()
+  })
+
+  it("★ 没给 getter → 字段省略（不是传 undefined）", () => {
+    const snap = buildAutoBuildSnapshot(hooks({}), MARK)
+    expect("firstDataAt" in snap).toBe(false)
+    expect("collectionComplete" in snap).toBe(false)
+    expect("learningRangeMs" in snap).toBe(false)
+  })
+
+  it("★ learningRangeMs 的 getter 返回 undefined（不限范围）→ 字段省略", () => {
+    const snap = buildAutoBuildSnapshot(hooks({ learningRangeMs: () => undefined }), MARK)
+    expect("learningRangeMs" in snap).toBe(false)
+  })
+
+  it("★★ 预测输入也带这三个（界面倒计时与判据同源）", () => {
+    const input = buildForecastInput(
+      hooks({ firstDataAt: () => 222, collectionComplete: () => false }),
+      MARK,
+      9999,
+      1_700_000_600_000,
+    )
+    expect(input.firstDataAt).toBe(222)
+    expect(input.collectionComplete).toBe(false)
+  })
+})

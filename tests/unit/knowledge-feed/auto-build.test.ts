@@ -125,6 +125,71 @@ describe("★ 首次建图不受攒批阈值约束", () => {
   })
 })
 
+describe("★★ 首次建图前等够初始跨度（14 天 / min(14天, 学习范围)）", () => {
+  const DAY = 24 * 60 * 60 * 1000
+  /** 图还不存在、有数据的首次场景基线。 */
+  const firstBuild = (over: Partial<AutoBuildInput> = {}): AutoBuildInput =>
+    base({ graphExists: false, lastBuiltSeq: 0, lastBuiltAt: null, ackedSeq: 300, ...over })
+
+  it("★★ 长范围 + 刚开始采（跨度 3 天 < 14）+ 没采满 → 等，原因 awaiting-initial-window", () => {
+    const d = decideAutoBuild(
+      firstBuild({ firstDataAt: NOW - 3 * DAY, collectionComplete: false }),
+    )
+    expect(d.build).toBe(false)
+    expect(d.reason).toBe("awaiting-initial-window")
+  })
+
+  it("★★ 跨度够了（14 天）→ 建", () => {
+    const d = decideAutoBuild(
+      firstBuild({ firstDataAt: NOW - 14 * DAY, collectionComplete: false }),
+    )
+    expect(d.build).toBe(true)
+    expect(d.reason).toBe("first-build")
+  })
+
+  it("★★ 数据已采满 → 立刻建，不等跨度（历史导入一次就位）", () => {
+    const d = decideAutoBuild(
+      firstBuild({ firstDataAt: NOW - 1 * DAY, collectionComplete: true }),
+    )
+    expect(d.build).toBe(true)
+    expect(d.reason).toBe("first-build")
+  })
+
+  it("★★ 学习范围本身短（7 天）→ 攒够 7 天就建，不必等满 14", () => {
+    const d = decideAutoBuild(
+      firstBuild({
+        firstDataAt: NOW - 8 * DAY,
+        collectionComplete: false,
+        learningRangeMs: 7 * DAY,
+      }),
+    )
+    expect(d.build).toBe(true)
+    expect(d.reason).toBe("first-build")
+  })
+
+  it("★ 拿不到最早时刻（firstDataAt 缺/null）→ 不拦，退回原来的有数据就建", () => {
+    // 不给 firstDataAt（旧签名 / 测试）
+    expect(decideAutoBuild(firstBuild()).reason).toBe("first-build")
+    // 显式 null 也一样
+    expect(decideAutoBuild(firstBuild({ firstDataAt: null })).reason).toBe("first-build")
+  })
+
+  it("★★ 反证：这道闸只在**首次**（图不存在）生效 —— 图已在就不看它", () => {
+    // 图已存在 + 刚采到 1 天，但已经有图 → 这道闸不该拦（走攒批那条）
+    const d = decideAutoBuild(
+      base({ graphExists: true, firstDataAt: NOW - 1 * DAY, collectionComplete: false }),
+    )
+    expect(d.reason).not.toBe("awaiting-initial-window")
+  })
+
+  it("★ 预测：等跨度时给到「最早 + min(14天,范围)」的倒计时", () => {
+    const f = forecastAutoBuild(firstBuild({ firstDataAt: NOW - 10 * DAY, collectionComplete: false }))
+    expect(f.decision.reason).toBe("awaiting-initial-window")
+    // 还差 4 天（14 - 10）
+    expect(f.etaMs).toBe(4 * DAY)
+  })
+})
+
 describe("★ 攒批：攒够条数才建", () => {
   it("刚好到阈值 → 建", () => {
     const d = decideAutoBuild(
