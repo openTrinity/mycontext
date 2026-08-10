@@ -204,12 +204,61 @@ export class ActiveIdentityService {
    * `mountVault` 的 `seedIdentity` 参数本来就是为这件事设计的
    * （见那里的注释：「为什么必须是参数」），只是登录这条路忘了传。
    */
-  resolveOnLogin(input: { accountId: string; fallbackVaultId: string }): {
+  resolveOnLogin(input: {
+    accountId: string
+    fallbackVaultId: string
+    /**
+     * 当前**带来源作用域**的渠道 id（`dingtalk` / `dingtalk@src-FAKE0001`）。
+     *
+     * ## ★★★ 为什么必须传进来
+     *
+     * 隔离键的第一段是「来源应用」（哪个 dws 二进制，见 `source-key.ts`）——
+     * 因为实测两个来源的 CLI 返回**完全相同**的 corpId/userId，
+     * 不带来源就会被判成同一个身份、共用一个 vault。
+     *
+     * 而那道作用域原来**只在授权那一条路上**生效（`onAuthorized` 里的
+     * `scopedChannelId(...)`）。本方法完全不知道当前用的是哪个二进制，
+     * 于是「记住的那个」失配时就退回"最近用过的"—— 而那可能是**另一个来源**
+     * 的身份。
+     *
+     * 实测后果（本机日志 2026-08-09）：
+     *
+     * ```
+     * 23:23:28  active identity restored {channelId: "dingtalk"}   ← 内置那个
+     * 23:23:28  vault opened {vaultId: "vaultFAKE-B…"}                ← 内置的库
+     * 23:25:02+ process ... {"executable": ".../dws_res_qwenwork_cloud_.../dws-darwin-arm64"}
+     *                                                              ← 而命令跑的是**自制**客户端
+     * ```
+     *
+     * 也就是**拿自制客户端采的数据写进了内置客户端的 vault** ——
+     * 正是 source-key 要结构性排除的那件事，被启动这条路绕开了。
+     * 实测那一轮往错的库里写了 8898 条消息。
+     *
+     * ★ `undefined` = 调用方没给（旧签名 / 测试）→ 退回原来的行为
+     * （不按来源过滤）。保留这一档是为了不让漏传变成"一个身份都找不到"，
+     * 但生产的两个调用点都必须给。
+     */
+    scopedChannelId?: string
+  }): {
     vaultId: string
     identity: ChannelIdentityVaultRecord | null
   } {
+    const scoped = input.scopedChannelId
     const remembered = this.readRemembered()
-    if (remembered !== null && remembered.accountId === input.accountId) {
+    /**
+     * ★★ 记住的那条也要**按来源校验**。
+     *
+     * 不校验的话：上次用自制客户端、这次换回内置，`find()` 仍然命中那条
+     * 自制客户端的身份行 —— 于是内置客户端的数据写进自制的 vault，
+     * 与上面那个 bug 方向相反、性质相同。
+     */
+    const rememberedMatchesSource =
+      remembered === null || scoped === undefined || remembered.channelId === scoped
+    if (
+      remembered !== null &&
+      remembered.accountId === input.accountId &&
+      rememberedMatchesSource
+    ) {
       const found = this.options.identities.find(remembered)
       if (found !== null) {
         this.current = found
@@ -223,7 +272,17 @@ export class ActiveIdentityService {
       this.options.settings.delete(ACTIVE_IDENTITY_KEY)
     }
 
-    const [mostRecent] = this.options.identities.listByAccount(input.accountId)
+    /**
+     * ★★ 退回"最近用过的"时**限定在当前来源**内。
+     *
+     * 不限定的话会挑到另一个来源的身份（见上面 `scopedChannelId` 的实测）。
+     * 当前来源下一个都没有 → 走下面的基础 vault，那是"这个客户端还没授权过"
+     * 的正确表现（引导流程会让用户授权，然后 `onAuthorized` 建它自己的 vault）。
+     */
+    const [mostRecent] =
+      scoped === undefined
+        ? this.options.identities.listByAccount(input.accountId)
+        : this.options.identities.listByAccount(input.accountId, scoped)
     if (mostRecent !== undefined) {
       this.current = mostRecent
       this.remember(mostRecent)

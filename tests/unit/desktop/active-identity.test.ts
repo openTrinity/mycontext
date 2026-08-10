@@ -449,3 +449,166 @@ describe("登出", () => {
     ).toBe("vault-a")
   })
 })
+
+describe("★★★ 启动恢复身份必须认「来源应用」（跨来源写错 vault）", () => {
+  /**
+   * ★★★ 这一组锁的是一次**真实发生的跨来源数据污染**。
+   *
+   * ## 现场（本机日志 2026-08-09）
+   *
+   * ```
+   * 23:23:28  active identity restored {channelId: "dingtalk"}   ← 内置那份的身份
+   * 23:23:28  vault opened {vaultId: "vaultFAKE-B…"}                ← 内置那份的库
+   * 23:25:02+ process {"executable": "…/dws-darwin-arm64"}       ← 跑的却是自制客户端
+   * ```
+   *
+   * 库里同时有两行身份，corpId/userId **完全相同**，只有来源段不同：
+   *
+   * ```
+   * dingtalk@src-FAKE0001 → vault vaultFAKE-A…   （自制客户端，last_used 23:37）
+   * dingtalk              → vault vaultFAKE-B…   （内置，last_used 11:20）
+   * ```
+   *
+   * 而 `app_settings` 里记的是自制那条。启动时 `readRemembered()` 命中它、
+   * 却因为**根本没校验来源**而一路走到"挑最近用过的"——挑中了内置那条。
+   * 于是自制客户端采的数据写进内置客户端的 vault，实测那一轮 8898 条消息。
+   *
+   * ## 为什么四元组没挡住
+   *
+   * 隔离键的第一段本来就是为这件事加的（`source-key.ts`：两个来源的 CLI
+   * 返回逐字段相同的 corpId/userId）。但那道作用域**只在 `onAuthorized`
+   * 那一条路上**生效 —— 启动恢复这条路完全不知道当前用哪个二进制。
+   *
+   * 也就是：门是造好了，而这条走廊压根没装门。
+   */
+  const BUILTIN = "dingtalk"
+  const CUSTOM = "dingtalk@src-FAKE0001"
+
+  /** 两个来源、**同一个** corpId/userId —— 实测就是这个形态。 */
+  function bindBoth() {
+    identities.bind({
+      accountId: ACCOUNT,
+      channelId: BUILTIN,
+      corpId: CORP_A,
+      userId: USER_A,
+      vaultId: "vault-builtin",
+      corpName: "组织甲",
+      userName: "张三",
+      at: "2026-08-09T11:20:03.131Z",
+    })
+    identities.bind({
+      accountId: ACCOUNT,
+      channelId: CUSTOM,
+      corpId: CORP_A,
+      userId: USER_A,
+      vaultId: "vault-custom",
+      corpName: "组织甲",
+      userName: "张三",
+      // ★ 更晚 —— 所以"挑最近用过的"会选它；下面的用例要能区分两种原因
+      at: "2026-08-09T23:37:47.133Z",
+    })
+  }
+
+  /**
+   * ★★★ 用自制客户端启动 → 必须挂**自制**那个 vault。
+   *
+   * 反证：不传 `scopedChannelId`（= 修复前）→ 挑到 `vault-builtin`。
+   */
+  it("★★★ 当前是自制客户端 → 挂自制那个 vault", () => {
+    bindBoth()
+    const service = makeService()
+    const { vaultId, identity } = service.resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+      scopedChannelId: CUSTOM,
+    })
+    expect(vaultId).toBe("vault-custom")
+    expect(identity?.channelId).toBe(CUSTOM)
+  })
+
+  /**
+   * ★★★ 反方向也要对：换回内置客户端 → 挂**内置**那个。
+   *
+   * 这条单独写，因为"挑最近用过的"天然偏向自制那条（它 last_used 更晚）——
+   * 也就是这个方向如果只靠时间排序会**恰好选错**。
+   */
+  it("★★★ 换回内置客户端 → 挂内置那个 vault（不跟着 last_used 跑）", () => {
+    bindBoth()
+    const service = makeService()
+    const { vaultId, identity } = service.resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+      scopedChannelId: BUILTIN,
+    })
+    expect(vaultId).toBe("vault-builtin")
+    expect(identity?.channelId).toBe(BUILTIN)
+  })
+
+  /**
+   * ★★★ **记住的那条也要按来源校验。**
+   *
+   * 场景：上次用自制（settings 里记着它），这次换回内置。
+   * 不校验的话 `find()` 命中那条自制身份 → 内置客户端的数据写进自制的库，
+   * 与那次事故方向相反、性质相同。
+   */
+  it("★★★ 记的是自制、现在用内置 → 不许用那条记录", async () => {
+    bindBoth()
+    // 先切到自制，让它写进 settings
+    const first = makeService()
+    first.resolveOnLogin({ accountId: ACCOUNT, fallbackVaultId: BASE_VAULT })
+    await first.switchTo({
+      accountId: ACCOUNT,
+      channelId: CUSTOM,
+      corpId: CORP_A,
+      userId: USER_A,
+    })
+
+    // 新实例 = 重启，但这次用**内置**
+    const second = makeService()
+    const { vaultId } = second.resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+      scopedChannelId: BUILTIN,
+    })
+    expect(vaultId).toBe("vault-builtin")
+  })
+
+  /**
+   * ★★ 当前来源下**一个身份都没有** → 走基础 vault。
+   *
+   * 那是"这个客户端还没授权过"的正确表现：引导会让用户授权，
+   * 然后 `onAuthorized` 给它建自己的 vault。
+   * ★ 绝不能退回另一个来源的 vault —— 那正是这个 bug。
+   */
+  it("★★ 这个来源还没授权过 → 基础 vault，而不是别的来源的", () => {
+    identities.bind({
+      accountId: ACCOUNT,
+      channelId: BUILTIN,
+      corpId: CORP_A,
+      userId: USER_A,
+      vaultId: "vault-builtin",
+      corpName: "组织甲",
+      userName: "张三",
+      at: NOW.toISOString(),
+    })
+    const service = makeService()
+    const { vaultId, identity } = service.resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+      scopedChannelId: "dingtalk@src-deadbeef",
+    })
+    expect(vaultId).toBe(BASE_VAULT)
+    expect(identity).toBeNull()
+  })
+
+  /** ★ 不传（旧签名 / 测试）→ 退回原行为，不炸。 */
+  it("★ 不传 scopedChannelId → 保持原来的行为", () => {
+    bindBoth()
+    const { vaultId } = makeService().resolveOnLogin({
+      accountId: ACCOUNT,
+      fallbackVaultId: BASE_VAULT,
+    })
+    // 最近用过的那个
+    expect(vaultId).toBe("vault-custom")
+  })
+})

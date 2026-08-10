@@ -14,6 +14,7 @@
  */
 import { isAppError, type Logger } from "@mycontext/kernel"
 import type { AuthStatus } from "@mycontext/channels"
+import { scopedChannelId, sourceKeyOf } from "@mycontext/channels"
 
 /**
  * 这段编排需要的能力，**按行为**声明而不是收整个 service。
@@ -411,4 +412,34 @@ async function refreshAccountProfile(
       detail: error instanceof Error ? error.message : String(error),
     })
   }
+}
+
+/**
+ * 当前**带来源作用域**的渠道 id —— `dingtalk` 或 `dingtalk@src-<hash>`。
+ *
+ * ## ★★★ 为什么提成导出的纯函数（而不是留在 startup 的闭包里）
+ *
+ * 这一段是「哪个 dws 二进制」这个隔离维度的**唯一接线**：授权、启动恢复、
+ * 清库后重挂三条路都要用它。而反证时发现：把 `startup.ts` 里传这个值的
+ * 那一行删掉，全仓 3826 条测试**一条都不红** —— 判据锁得很细
+ * （`resolveOnLogin` 那 5 条），可**没人验证调用方真的传了**。
+ *
+ * 那种断线的后果是这次事故本身：自制客户端采的数据写进内置客户端的 vault
+ * （实测 8898 条），而没有任何报错 —— 两个库都"有数据"，只是数据属于
+ * 另一个来源。与「两头都锁了、中间那根线是裸的」同一个形状。
+ *
+ * @param channelId 渠道自身的 id（`dingtalk`）。
+ * @param binOverride 用户自备可执行文件路径；`null`/`undefined`/空串 = 用内置那份。
+ *
+ * @example
+ * ```ts
+ * scopedChannelIdFor("dingtalk", null)              // → "dingtalk"（内置，无后缀）
+ * scopedChannelIdFor("dingtalk", "/opt/cli/dws")    // → "dingtalk@src-…"
+ * ```
+ */
+export function scopedChannelIdFor(
+  channelId: string,
+  binOverride: string | null | undefined,
+): string {
+  return scopedChannelId(channelId, sourceKeyOf(binOverride ?? undefined))
 }

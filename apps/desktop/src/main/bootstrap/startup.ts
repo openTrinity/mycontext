@@ -31,9 +31,7 @@ import {
   createDingTalkPlugin,
   createFeishuPlugin,
   createRegistry,
-  scopedChannelId,
   seedChannelProfile,
-  sourceKeyOf,
 } from "@mycontext/channels"
 import { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 import { LlmHolder } from "@mycontext/llm"
@@ -41,7 +39,11 @@ import { IPC_EVENTS } from "@mycontext/ipc-contract"
 import type { KlGraphOverview } from "@mycontext/ipc-contract"
 import { bootstrapConfig } from "./config.js"
 import { resolveAppPaths, type AppPaths } from "./paths.js"
-import { applyPostAuthIdentity, routeAuthorizedIdentity } from "./post-auth-identity.js"
+import {
+  applyPostAuthIdentity,
+  routeAuthorizedIdentity,
+  scopedChannelIdFor,
+} from "./post-auth-identity.js"
 import { teardownVault } from "./vault-teardown.js"
 import { DwsSourceService } from "../services/dws-source.service.js"
 import { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
@@ -1421,6 +1423,34 @@ export function bootstrapApp(mainDir: string): AppContext {
   }
 
   /**
+   * 当前**带来源作用域**的渠道 id —— `dingtalk` 或 `dingtalk@src-<hash>`。
+   *
+   * ## ★★★ 为什么恢复身份时也必须带上它
+   *
+   * 隔离键的第一段是「哪个 dws 二进制」（见 `source-key.ts`）：实测两个
+   * 来源的 CLI 返回**完全相同**的 corpId/userId，不带来源会被判成同一个
+   * 身份、共用一个 vault，于是两批语料混进同一份画像。
+   *
+   * 而那道作用域原来**只在 `onAuthorized` 那一条路上**生效。启动恢复
+   * （`resolveOnLogin`）完全不知道当前用的是哪个二进制 —— 于是它会挑到
+   * 另一个来源的身份。实测（本机日志 2026-08-09）：
+   *
+   * ```
+   * 23:23:28  active identity restored {channelId: "dingtalk"}   ← 内置那份的身份
+   * 23:23:28  vault opened {vaultId: "vaultFAKE-B…"}                ← 内置那份的库
+   * 23:25:02+ process {"executable": "…/dws-darwin-arm64"}       ← 跑的却是自制客户端
+   * ```
+   *
+   * 也就是**自制客户端采的数据写进了内置客户端的 vault**，而那一轮往错的库
+   * 里写了 8898 条消息。这正是 source-key 要结构性排除的事，被这条路绕开了。
+   *
+   * ★ 现读 `dwsSource.path()`：用户在设置里换了客户端之后立刻生效，
+   * 与 `runtime.resolve("dws")` 的行为一致（那个 getter 也是现读同一个值）。
+   */
+  const scopedDingtalkChannelId = (): string =>
+    scopedChannelIdFor(dingtalk.meta.id, dwsSource.path())
+
+  /**
    * 身份切换器。它只管"当前是谁"，真正的挂载动作由上面那个 `mountVault`
    * 完成（见 `ActiveIdentityService` 的文件头：为什么两者分开）。
    */
@@ -1475,6 +1505,8 @@ export function bootstrapApp(mainDir: string): AppContext {
       const { vaultId, identity: resolved } = activeIdentity.resolveOnLogin({
         accountId: next.accountId,
         fallbackVaultId: next.vaultId,
+        // ★ 带上来源作用域，否则会挑到另一个 dws 的身份（见那个 getter 的注释）
+        scopedChannelId: scopedDingtalkChannelId(),
       })
       void mountVault(vaultId, resolved).catch((error: unknown) => {
         logger.error("mount vault failed", {
@@ -1567,6 +1599,8 @@ export function bootstrapApp(mainDir: string): AppContext {
       const { vaultId, identity: resolved } = activeIdentity.resolveOnLogin({
         accountId: session.accountId,
         fallbackVaultId,
+        // ★ 同上：清库后重挂也要认来源
+        scopedChannelId: scopedDingtalkChannelId(),
       })
       await mountVault(vaultId, resolved)
     },
@@ -1633,7 +1667,7 @@ export function bootstrapApp(mainDir: string): AppContext {
          * 而且这里要的是"**现在**用的是哪个二进制"：用户在 UI 上改过路径
          * 之后立刻生效，与 `resolve()` 的行为一致。
          */
-        channelId: scopedChannelId(channelId, sourceKeyOf(dwsSource.path() ?? undefined)),
+        channelId: scopedChannelIdFor(channelId, dwsSource.path()),
         status,
       })
       await applyPostAuthIdentity(
