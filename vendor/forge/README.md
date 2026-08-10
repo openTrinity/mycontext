@@ -118,6 +118,88 @@ agent 加载它），对本应用是**三重错误**：
 
 个人直接用 forge 时不受影响：`ownsOutput` 默认 false。
 
+### 时间衰减与测量窗口（本仓库加的，`signals-v6`）
+
+上游把语料当成一个**没有时间维度**的集合：每条消息等权。对「炼一次画像」是对的，
+对本应用不对 —— 这里的语料由采集器持续追加，只增不减。于是半年前的习惯会永久
+与本周等权，而这件事有三个具体后果，且全部是静默的：
+
+- 词汇表里一个已结项目的黑话永远排在前面（它出现过的天数更多）；
+- 换组半年的同事仍停在 band A，而 A 带 `autoAnswer: low-risk allowed`；
+- **最严重**：某个 ask kind 三月起就不管了，但一二月答得很勤，累计答复率仍然高 →
+  `defaultAction` 仍是 `answer` → agent 替本人回一类他早就不负责的事。
+
+所以加了两个**互相独立**的旋钮。分开是因为它们回答不同的问题，混成一个就没法
+分别提问了：
+
+| | 语义 | 配置 |
+| --- | --- | --- |
+| **衰减** | 旧证据**算得少**（半衰 90 天，有下限不到 0） | `signals.json → recency` |
+| **测量窗口** | 旧证据**完全不算**，且在 `limits.md` 里说出来 | `build --window-days` / `measureWindowDays` |
+
+三条硬约束，破一条就会把「衰减」变成新的静默失效源：
+
+1. **锚点是语料的最后一天，不是 `now()`。** 用 `now()` 会让同一份语料明天测出
+   不同结果 —— 而「同语料 + 同 signals ⇒ 同输出」是整个引擎的立足点；且一份停止
+   采集的语料会自己一路衰减到下限，没有任何消息变化。
+2. **`verification` 那两个证据门槛（`minSupport` / `minDistinctDays`）读原始计数。**
+   加权它们会让「有证据但很旧」被报成「证据不足」—— 那是两句不同的话，而分清它们
+   正是 `fidelity.md` 存在的全部理由。所以每个桶都同时存加权数与原始数。
+3. **衰减只能收紧，不能放权。** 风险门与自动发送候选要求**加权与原始两个透镜都过**
+   才放行。否则安静一个季度就能让某个风险类的加权 settle 率越过 40%，
+   翻成 `sometimes_settles` —— 也就是衰减凭空造出一份授权。
+
+「近 N 天」那个率是**并列发布**的（`decisions.md` 多一列 Recently，超过
+`driftPoints` 打 ⚑changed），不是替换掉全窗口那个：一个数说不出「他以前答、
+现在不答了」，而那恰恰是 agent 替人回话之前最该知道的一句。折成一个平均值
+会把趋势藏起来 —— 与 `_finish()` 同时报中位数和均值让偏度可见是同一个道理。
+
+`forge selftest` 里有 21 条针对这些不变量的断言（`_recency_suite`），
+包括「衰减单独不能放松风险门」和「窗口不删任何语料」。
+
+### work 层：应用往 skill 包里加的那一个文件
+
+产物目录里有一个**不是 forge 写的**文件：
+
+```
+<vault>/forge/skills/persona-persona/
+├── SKILL.md              forge 写
+├── references/
+│   ├── style.md          forge 写（测量值）
+│   ├── decisions.md      forge 写（测量值）
+│   ├── …
+│   └── work.md           ★ 应用写（LLM 抽取）
+```
+
+`work.md` 是「他负责什么、怎么做事、定过什么规矩」。这几样**没有结构化信号**
+—— 一个人负责哪个系统这件事不体现在他消息的长度、时间或词频里，只体现在他
+说的话里，所以数不出来。而 forge 的前提是零模型调用，于是这一层走
+`packages/distill` 的 LLM 抽取（facet：`ownership` / `workflow` /
+`artifacts` / `knowhow`），产物落进同一个包 —— 因为对加载 skill 的 agent 来说
+那是**一个**包。
+
+两处必须让 forge 知道「这个文件不是我的」，否则各是一种静默失效：
+
+| 机制 | 不豁免会怎样 |
+| --- | --- |
+| `_prune` | 下一轮 `publish` 把它当成"上一版的残留"**删掉**，而且报成普通清理。应用按自己的节奏又写回去 → 文件存在与否取决于谁最后跑，抽它花的 token 白烧 |
+| `lock` | 锁成 444 → 应用下一轮重写 `PermissionError`。而那条路是定时跑的，表现为「work 层悄悄不更新了」 |
+
+登记方式是配置里的 `externalSkillFiles`（`ForgeService.writeConfig` 写，
+常量 `WORK_LAYER_SKILL_PATH` 是单一真源）。只在 `ownsOutput: true` 时生效 ——
+个人自己跑 forge 时没有宿主应用，豁免会让真正过期的文件永远留着。
+
+★ **能力不是授权。** `work.md` 说的是「他会做什么」，而「agent 能不能替他答」
+只由 `decisions.md` / `rules.json` 决定（答复率、风险类、never_settle）。
+所以它进 `references/` 而**不进** `rules.json`（脚本读的唯一真值），
+文件开头也明写了这一句。混起来不报错：agent 会拿着一份很有底气的能力清单
+去答一个本该草稿的问题，而每一层看起来都在正常工作。
+
+★ **它与 forge 的更新节奏刻意不同。** forge 每 6 小时全量重跑（免费）；
+work 层每轮几万 token，所以走攒批（`packages/distill/src/work-refresh.ts`：
+首次 / 攒够 200 条 / 攒够 3 天且有新数据，失败指数退避）。挂同一个定时器
+就是每天 4 次为同一批老语料付钱 —— 而那正是 LLM 那半当年被关掉的原因。
+
 ### 为什么有 SHA256SUMS
 
 forge 是**会被 spawn 执行**的第三方源码。「有人顺手改了 vendor 里一行 Python」
@@ -147,14 +229,20 @@ forge 是**会被 spawn 执行**的第三方源码。「有人顺手改了 vendo
    | --- | --- | --- |
    | `forge/sources/vault.py` | 整个文件（上游没有）：vault 源 + `recent_messages` / `collection_lag` / `conversationIds` 蒸馏范围 | 蒸馏报 `unknown message source 'vault'` |
    | `forge/sources/__init__.py` | 注册表的 `vault` 一行、`recentReads` 能力、`recent_messages` 协议、`MENTION_LOOKBACK_DAYS` | 同上；@提及只回看 30 天 |
-   | `forge/publish.py` | `_assert_publishable` + `ownsOutput` 门禁；`_prune` 扫空的 skill 根 | **悄悄往 `~/.claude/skills` 写**；残留空目录被当成装好的 skill |
-   | `forge/cli.py` | `CONFIG_TEMPLATE` 的 `ownsOutput` | 门禁读不到开关，等于没开 |
-   | `forge/compose.py` | `rules.json` 里发布 `policy.freshness` | 装好的 skill 读不到滞后阈值 → 退回内置默认值 |
-   | `forge/signals.json` | `thresholds.freshness`；`rulesVersion` = `signals-v5` | 同上；版本串对不上导致派生数字无法追溯 |
+   | `forge/publish.py` | `_assert_publishable` + `ownsOutput` 门禁；`_prune` 扫空的 skill 根；**`external_files` / `_prune` 与 `lock` 对宿主自有文件的豁免** | **悄悄往 `~/.claude/skills` 写**；残留空目录被当成装好的 skill；**应用写的 `references/work.md` 被下一轮 publish 静默删掉**（prune 报成普通清理），且 `lock` 会把它锁成 444 让应用重写 PermissionError |
+   | `forge/cli.py` | `CONFIG_TEMPLATE` 的 `ownsOutput` / `measureWindowDays` / `externalSkillFiles`；`build --window-days` | 门禁读不到开关，等于没开；测量窗口这个旋钮消失；work 层产物失去豁免（见上一行） |
+   | `forge/compose.py` | `rules.json` 里发布 `policy.freshness`；决策表的「Recently」列与 ⚑changed、`recentlyDriftedAskKinds`、`limits.md` 的窗口/衰减说明 | 装好的 skill 读不到滞后阈值 → 退回内置默认值；**衰减后的数字照发但不说自己被衰减过**（读的人会拿它跟旧构建比，把衰减当成行为变化） |
+   | `forge/signals.json` | `thresholds.freshness`；**`recency` 整组**；`rulesVersion` = `signals-v6` | 同上；版本串对不上导致派生数字无法追溯；**时间衰减静默关掉**（半年前的习惯重新与本周等权 —— 见下） |
+   | `forge/analyze.py` | `Recency` / `corpus_anchor_day` / `_weighted_percentile`；`Rules(…, anchor_day)` 与 `window_clause`；`_fold`/`_finish`/`vocabulary`/`reply_bubbles` 的加权 | **洞 2 回归**：一个早就不管的 ask kind 因为累计答复率高，`defaultAction` 仍是 `answer` —— agent 替本人回一类他已经不负责的事 |
+   | `forge/decide.py` | 四套并行计数（加权 / 原始 / 近窗）；漂移降级；风险门与自动发送候选的「两个透镜都要过」 | 同上；且**衰减会变成放权**：安静一个季度就能让某个风险类的加权 settle 率越过 40% 翻成 `sometimes_settles` |
+   | `forge/relations.py` | `_weighted_volumes`：band 按加权互动量算 | 换组半年的同事永久停在 band A，而 A 带 `autoAnswer: low-risk allowed` |
+   | `forge/report.py` | `fidelity.md` 里的衰减与测量窗口说明 | 覆盖度报告不说自己被衰减过 —— 「未测到」与「测到了但很旧」再次混为一谈 |
+   | `forge/build.py` | `build(cfg, window_days)`、`_window_start`、`meta` 里的 `corpusWindow`/`measureWindow`/`recency` | 窗口与衰减都失效；`limits.md` 把语料全跨度当成测量跨度报出去 |
    | `forge/runtime.py` | `HostStore`（读宿主库 + 报滞后） | `context`/`fresh` 退回「必然 degraded」 |
    | `forge/ingest.py` | `MENTION_LOOKBACK_DAYS` + 失败原因由 source 给 | @提及只回看 30 天；诊断指错方向 |
    | `forge/sources/jsonl.py` | `unusableRows` / `unusableReason` | 上游 jsonl 路径的 `complete` 判定失效 |
    | `templates/persona/scripts/persona.py` | `_tail_with_lag` 三档读 + `fresh` 的滞后判据 + `_threshold` | ★ **发送前的滞后闸失效**：库落后时照样发 |
+   | `templates/persona/SKILL.md` | 参考件索引表里的 `references/work.md` 一行 | ★★ **work 层整层白做**：产物照写、每轮照付费抽取，而 ACP 路的 agent 不知道有这个文件 → 没人读（不报错） |
    | `forge/selftest.py` | vault 套件 + 落点 / 滞后 / 蒸馏范围 断言 | 以上全部失去回归保护 |
 
    `tests/unit/forge-vendor.test.ts` 会断言 `vault` 源仍然注册着，

@@ -285,6 +285,37 @@ def _is_boilerplate(body: str) -> bool:
 
 OWNER_HINT_RE = re.compile(r"<!--.*?-->", re.S)
 
+#: Files inside the installed skill that a HOST APPLICATION owns, keyed by the
+#: config flag that declares them. Added by this repository.
+#:
+#: `work.md` is the work layer: what this person is responsible for, how they
+#: work, and the rules they have stated. Those have no structural signal to
+#: measure — you cannot count them out of message lengths or timestamps — so they
+#: come from an LLM pass the forge deliberately does not run (its whole premise is
+#: zero model calls). The app writes it here because the skill is ONE bundle to
+#: whoever loads it, while its provenance is genuinely different.
+#:
+#: ★ Declared as data rather than hardcoded into `_prune` so the exemption is
+#: visible at the config boundary: a reader of `persona-config.json` can see that
+#: the forge does not own this file, which is the fact that matters when a
+#: rebuilt skill turns out not to be byte-identical to a fresh one.
+_EXTERNAL_FILES = ("references/work.md",)
+
+
+def external_files(cfg: dict) -> frozenset[str]:
+    """Skill files the embedding application owns, never generated or pruned here.
+
+    Empty unless `ownsOutput` is set — a person running the forge for themselves
+    has no host application writing into their skill, and an exemption that
+    applied by default would let a genuinely stale file survive forever.
+    """
+    if not cfg.get("ownsOutput"):
+        return frozenset()
+    declared = cfg.get("externalSkillFiles")
+    if isinstance(declared, list) and declared:
+        return frozenset(str(item) for item in declared if item)
+    return frozenset(_EXTERNAL_FILES)
+
 
 def publish(cfg: dict, features: dict, dry_run: bool = False,
             prune: bool = True) -> dict:
@@ -293,6 +324,9 @@ def publish(cfg: dict, features: dict, dry_run: bool = False,
     preserved: list[str] = []
     restored: list[str] = []
     pruned: list[str] = []
+    # Files the embedding application owns in this same directory — kept, never
+    # generated. See `_prune`'s docstring on why the exemption is necessary.
+    external = external_files(cfg)
 
     backup = _load_owner_backup(cfg)
     roots = skill_roots(cfg)
@@ -338,7 +372,7 @@ def publish(cfg: dict, features: dict, dry_run: bool = False,
                     C.secure_write(dest, content)
                 written.append(f"{target.name}/{rel}")
             if prune and target.exists():
-                pruned += _prune(target, expected, dry_run)
+                pruned += _prune(target, expected, dry_run, external)
 
     if not dry_run:
         _save_owner_backup(cfg, collected)
@@ -354,6 +388,10 @@ def publish(cfg: dict, features: dict, dry_run: bool = False,
             "ownerBlocksPreserved": sorted(set(preserved)),
             "ownerBlocksRestored": sorted(set(restored)),
             "removedStaleFiles": pruned,
+            # Reported so "the forge did not touch this" is observable rather than
+            # assumed. A caller comparing `files` against what is on disk would
+            # otherwise conclude the extra file is stale forge output.
+            "externalFilesKept": sorted(external),
             "readOnly": locked,
             "autonomyScope": cfg.get("autonomy", {}).get("scope", "draft_only")}
 
@@ -369,23 +407,39 @@ def set_readonly(cfg: dict, lock: bool) -> dict:
 
     Not a security boundary: whoever owns the files can chmod them back. It stops
     accidental and agent-initiated edits, which is the actual failure mode.
+
+    ## ★ Host-owned files are left writable
+
+    `external_files(cfg)` is skipped. The lock exists to stop a LOADING AGENT from
+    tuning the skill at runtime; the embedding application is not that agent — it
+    is the other publisher of this bundle. Locking its file to 444 would make the
+    app's own rewrite fail with `PermissionError` on the next work-layer refresh,
+    and since that path runs on a timer the failure would surface as "the work
+    layer silently stopped updating" rather than as a permissions problem.
     """
+    external = external_files(cfg)
     changed = []
+    skipped = []
     for persona_dir in skill_roots(cfg):
         for target in (persona_dir,):
             if not target.exists():
                 continue
             for path in target.rglob("*"):
                 if path.is_file() and "__pycache__" not in path.parts:
+                    if path.relative_to(target).as_posix() in external:
+                        skipped.append(str(path))
+                        continue
                     os.chmod(path, 0o444 if lock else 0o600)
                     changed.append(str(path))
     return {"locked": lock, "files": len(changed),
+            "hostOwnedFilesLeftWritable": len(skipped),
             "note": ("installed skills are read-only; `forge publish` still "
                      "rebuilds them and re-applies the lock"
                      if lock else "installed skills are writable again")}
 
 
-def _prune(target: Path, expected: set[str], dry_run: bool) -> list[str]:
+def _prune(target: Path, expected: set[str], dry_run: bool,
+           external: frozenset[str] = frozenset()) -> list[str]:
     """Remove files a previous version installed that this one no longer emits,
     so a rebuilt skill has no leftovers contradicting the current one.
 
@@ -393,6 +447,24 @@ def _prune(target: Path, expected: set[str], dry_run: bool) -> list[str]:
     `agents/` behind as an empty shell — harmless to an agent reading the skill,
     but it broke the guarantee that matters: a freshly published skill must be
     byte-identical to a rebuilt one, and a stray directory is a visible diff.
+
+    ## ★ `external` — files a HOST APPLICATION owns in this same directory
+
+    Added by this repository. The embedding app publishes its own reference into
+    the installed skill (`references/work.md`, distilled by a separate LLM pass
+    the forge deliberately does not do — see the repo's README on the work layer).
+    That file lives in the forge's output directory because the skill is one
+    bundle to whoever loads it, but the forge does not generate it.
+
+    Without this exemption the interaction is silent and destructive: the app
+    writes `work.md`, the next `forge refresh` prunes it as "a leftover from an
+    older version", and the app's own tokens-costing output disappears with no
+    error anywhere. The app would then rewrite it on its own schedule, so the file
+    would flicker in and out of existence depending on which ran last.
+
+    Exempting is strictly better than the alternatives: making the forge generate
+    it would require the LLM layer the forge exists to avoid, and turning prune off
+    would let genuinely stale forge output accumulate.
     """
     removed = []
     for path in list(target.rglob("*")):
@@ -403,13 +475,18 @@ def _prune(target: Path, expected: set[str], dry_run: bool) -> list[str]:
         if not path.is_file():
             continue
         rel = path.relative_to(target).as_posix()
+        if rel in external:
+            continue          # owned by the host application, not by this forge
         if rel not in expected:
             removed.append(f"{target.name}/{rel}")
             if not dry_run:
                 path.unlink(missing_ok=True)
 
     # Sweep now-empty directories, deepest first so nested shells collapse.
+    # External files count toward "this directory is still in use", or the sweep
+    # would remove the directory holding a file it just decided to keep.
     expected_dirs = {str(Path(rel).parent) for rel in expected}
+    expected_dirs |= {str(Path(rel).parent) for rel in external}
     for path in sorted(target.rglob("*"), key=lambda p: -len(p.parts)):
         if not path.is_dir() or "__pycache__" in path.parts:
             continue

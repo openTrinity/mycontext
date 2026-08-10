@@ -14,7 +14,35 @@ from . import analyze, common as C, decide, locale as locale_mod
 from . import relations, sources as sources_mod, store
 
 
-def build(cfg: dict) -> dict:
+def _window_start(conn, window_days: int | None) -> str:
+    """Lower bound for the measurement window, `"YYYY-MM-DD"`, or `""` for all.
+
+    Counted back from the corpus's LATEST day, not from `now()` — the same anchor
+    `Recency` uses, and for the same reason: a wall-clock bound would make the
+    same corpus build differently tomorrow, and a corpus that stopped being
+    collected would silently narrow to an empty window.
+    """
+    if not window_days or window_days <= 0:
+        return ""
+    anchor = analyze.corpus_anchor_day(conn)
+    if not anchor:
+        return ""
+    try:
+        latest = dt.date.fromisoformat(anchor)
+    except ValueError:
+        return ""
+    return (latest - dt.timedelta(days=window_days)).isoformat()
+
+
+def build(cfg: dict, window_days: int | None = None) -> dict:
+    """Corpus → measured features.
+
+    `window_days` limits what is MEASURED, never what is stored: the corpus keeps
+    every message and widening the window again is one flag away. It defaults to
+    `cfg["measureWindowDays"]` so a host application can set the policy once in
+    the config instead of on every invocation. See `Rules.window_clause` for why
+    this is not the same knob as `pull --since`.
+    """
     db_path = C.expand(cfg["database"]["path"])
     if not db_path.exists():
         raise SystemExit("no corpus yet — run `forge pull` first")
@@ -40,7 +68,15 @@ def build(cfg: dict) -> dict:
         # bug-report boilerplate, which must never enter a distributed pack.
         overrides = locale_mod.extra_placeholders(data_root, pack.id)
         C.register_placeholders(furniture + tuple(overrides))
-        rules = analyze.Rules(analyze.load_signals(data_root), pack)
+        # ★ The decay anchor comes from the corpus, never from the clock — see
+        # `analyze.Recency`. Passing it here (rather than letting `Rules` look it
+        # up) keeps `analyze` free of the "which connection" question and makes
+        # the determinism property visible at the one place a build is assembled.
+        anchor = analyze.corpus_anchor_day(conn)
+        rules = analyze.Rules(analyze.load_signals(data_root), pack, anchor)
+        if window_days is None:
+            window_days = cfg.get("measureWindowDays")
+        rules.window_start = _window_start(conn, window_days)
 
         aliases = set((store.get_meta(conn, "selfAliases") or "").split(",")) - {""}
         self_ids = set((store.get_meta(conn, "selfOpenIds") or "").split(",")) - {""}
@@ -79,6 +115,14 @@ def build(cfg: dict) -> dict:
 
         stats = store.stats(conn)
         window = f"{(stats['earliest'] or '')[:10]} → {(stats['latest'] or '')[:10]}"
+        # ★ When a measurement window is set, the published window must be the
+        # MEASURED one, not the corpus's full span. `window` is what `limits.md`
+        # renders as "what this persona was built from", and reporting six months
+        # when only the last 30 days were measured is precisely the confident
+        # overstatement `limits.md` exists to prevent.
+        measured_window = window
+        if rules.window_start:
+            measured_window = f"{rules.window_start} → {(stats['latest'] or '')[:10]}"
         # The human label belongs to the adapter, not to the config: reading it
         # from `cfg` silently yielded "" and the published limits.md said only
         # "work chat only" instead of naming the platform.
@@ -89,7 +133,14 @@ def build(cfg: dict) -> dict:
             "meta": {
                 "slug": cfg["profileSlug"],
                 "displayName": cfg.get("displayName"),
-                "window": window,
+                "window": measured_window,
+                "corpusWindow": window,
+                "measureWindow": {
+                    "days": window_days or 0,
+                    "start": rules.window_start,
+                    "applied": bool(rules.window_start),
+                },
+                "recency": rules.recency.describe(),
                 "builtAt": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "rulesVersion": rules.version,
                 "signalsVersion": rules.signals_version,

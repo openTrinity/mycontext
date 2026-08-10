@@ -47,6 +47,18 @@ BOT_ID = "BOT-1"
 TWIN_ID = "PEER-A-TWIN"
 
 
+def _version_at_least(version: str, minimum: int) -> bool:
+    """Is `"signals-vN"` at or above `minimum`?
+
+    Compared numerically rather than by string prefix so the assertion survives
+    the next bump: pinning `startswith("signals-v6")` would fail on v7 and teach
+    whoever bumps it that the fix is to edit the test, which is how a real
+    regression (an upstream re-sync reverting signals.json) gets waved through.
+    """
+    match = re.search(r"signals-v(\d+)", version or "")
+    return bool(match) and int(match.group(1)) >= minimum
+
+
 class Fixture:
     """One language's worth of fictional corpus, plus what to assert about it.
 
@@ -914,6 +926,55 @@ def _corpus_suite(fx: Fixture, ck) -> None:
         ck("untouched block not recorded as an edit",
            "references/limits.md" not in backed, str(sorted(backed))[:120])
 
+        # ★★ A file the HOST APPLICATION owns must survive a republish.
+        #
+        # This repository's app writes `references/work.md` (the work layer: what
+        # this person owns, how they work, the rules they have stated — none of
+        # which has a structural signal the forge could measure). It lands in the
+        # forge's output directory because the skill is one bundle to whoever
+        # loads it.
+        #
+        # Without the exemption `_prune` deletes it as "a leftover from an older
+        # version" on the very next refresh, and the deletion is invisible: prune
+        # reports it as ordinary cleanup, the app rewrites it on its own timer, and
+        # the file flickers depending on which ran last. The tokens spent producing
+        # it are simply lost.
+        work_md = persona_dir / "references" / "work.md"
+        work_md.write_text("# work layer\nowned by the host app\n", encoding="utf-8")
+        owns_cfg = {**cfg, "ownsOutput": True}
+        pub_ext = publish_mod.publish(owns_cfg, features)
+        ck("★★ a host-owned skill file survives republish",
+           work_md.exists(), str(pub_ext.get("removedStaleFiles"))[:160])
+        ck("the host-owned file is reported, not silently kept",
+           "references/work.md" in (pub_ext.get("externalFilesKept") or []),
+           str(pub_ext.get("externalFilesKept")))
+        # Guarded on existence: when the exemption regresses, the file is gone and
+        # the assertion above already reported it. Reading it unguarded would raise
+        # FileNotFoundError and abort the whole suite, hiding every later check
+        # behind a traceback instead of one failed line.
+        ck("the forge does not rewrite what it does not own",
+           work_md.exists()
+           and work_md.read_text(encoding="utf-8") == "# work layer\nowned by the host app\n")
+        # ★ And `lock` must leave it writable: the lock exists to stop a LOADING
+        # AGENT from tuning the skill, not to stop the other publisher of the
+        # bundle. Locking it to 444 makes the app's next work-layer refresh fail
+        # with PermissionError on a timer — surfacing as "the work layer quietly
+        # stopped updating" rather than as a permissions problem.
+        locked_ext = publish_mod.set_readonly(owns_cfg, True)
+        ck("★ lock leaves host-owned files writable",
+           work_md.exists() and bool(work_md.stat().st_mode & 0o200),
+           f"exists={work_md.exists()} "
+           f"skipped={locked_ext.get('hostOwnedFilesLeftWritable')}")
+        publish_mod.set_readonly(owns_cfg, False)
+        # ★ Without `ownsOutput` there is no host application, so nothing is
+        # exempt — otherwise a genuinely stale file would survive forever in a
+        # personal install.
+        ck("no exemption when the forge is not app-driven",
+           publish_mod.external_files(cfg) == frozenset(),
+           str(publish_mod.external_files(cfg)))
+        publish_mod.publish(cfg, features)
+        ck("★ a personal install still prunes that file", not work_md.exists())
+
         s = scan_mod.scan("skill", persona_dir)
         ck("published skill passes share scan", s["safe"],
            json.dumps(s["findings"][:5], ensure_ascii=False))
@@ -1182,6 +1243,220 @@ def _corpus_epoch_is_seconds(cfg: dict) -> bool:
     """
     peak = _corpus_epoch_max(cfg) or 0
     return 1e9 < peak < 1e11
+
+
+def _recency_suite(ck) -> None:
+    """Time decay and the measurement window.
+
+    Synthetic corpora rather than a locale fixture, because every case here is
+    about the SHAPE of the time distribution — an ask kind answered all spring and
+    dropped in June, a phrase that fell out of use — and a natural fixture cannot
+    be relied on to contain those. All checks are locale-independent: they use
+    NULL_PACK, so what they prove is the arithmetic, not a lexicon.
+    """
+    sig = analyze.load_signals(None)
+
+    # --- Recency.weight: the curve and its guarantees ---------------------
+    rec = analyze.Recency({"halfLifeDays": 90, "floorWeight": 0.05,
+                           "recentWindowDays": 60, "driftPoints": 20},
+                          "2026-08-01")
+    ck("the anchor day itself carries full weight",
+       rec.weight("2026-08-01") == 1.0, str(rec.weight("2026-08-01")))
+    ck("one half-life back carries half the weight",
+       abs(rec.weight("2026-05-03") - 0.5) < 0.01, str(rec.weight("2026-05-03")))
+    # The floor is what keeps "old" from becoming indistinguishable from "absent".
+    ck("very old evidence decays to the floor, never to zero",
+       rec.weight("2020-01-01") == 0.05, str(rec.weight("2020-01-01")))
+    # A clock-skewed client can emit a timestamp past the anchor; it must not be
+    # able to outvote real traffic by being "more recent than the newest".
+    ck("a day after the anchor is clamped, not amplified",
+       rec.weight("2027-01-01") == 1.0, str(rec.weight("2027-01-01")))
+    # An unreadable date is a formatting problem, not evidence about the owner.
+    ck("an unparseable day keeps full weight rather than being discounted",
+       rec.weight("not-a-date") == 1.0, str(rec.weight("not-a-date")))
+    ck("the recent window is a hard edge at its configured width",
+       rec.is_recent("2026-07-15") and not rec.is_recent("2026-01-15"))
+    # ★ The documented escape hatch back to pre-v6 numbers.
+    off = analyze.Recency({"halfLifeDays": 0}, "2026-08-01")
+    ck("halfLifeDays 0 disables decay entirely",
+       not off.enabled and off.weight("2020-01-01") == 1.0)
+    # ★ Determinism: no anchor means no decay, rather than decay from now().
+    # Anchoring on the clock would make the same corpus measure differently
+    # tomorrow, which is the property the whole engine rests on.
+    no_anchor = analyze.Recency({"halfLifeDays": 90}, "")
+    ck("an empty corpus disables decay instead of anchoring on the clock",
+       not no_anchor.enabled and no_anchor.weight("2020-01-01") == 1.0)
+
+    # --- the decision layer: stale traffic must stop reading as current ---
+    #
+    # One corpus, two ask kinds, deliberately opposite in time:
+    #   · `old_kind`  — answered 20/20, but every one of them ~10 months back
+    #   · `live_kind` — answered 20/20, all within the last few days
+    # Undecayed they are indistinguishable. That is the bug: an agent would answer
+    # `old_kind` unattended on the strength of behavior the owner has abandoned.
+    _dec = sqlite3.connect(":memory:")
+    _dec.row_factory = sqlite3.Row
+    _dec.executescript(store.SCHEMA)
+    _dec.execute("INSERT INTO conversations(conversation_id,title,single_chat,"
+                 "peer_name,peer_open_id) VALUES('c1','peer',1,'peer','PID')")
+    for i in range(20):
+        for kind, day in (("old_kind", f"2025-10-{i % 28 + 1:02d}"),
+                          ("live_kind", f"2026-07-{i % 28 + 1:02d}")):
+            _dec.execute(
+                "INSERT INTO asks(ask_key,conversation_id,single_chat,asker_name,"
+                "asker_id,tone_band,ask_kind,addressed_self,risk_tags,ask_text,"
+                "answered,reply_text,latency_seconds,occurred_at) "
+                "VALUES(?,?,1,'peer','PID','B',?,1,'',?,1,?,60,?)",
+                (f"{kind}{i}", "c1", kind, "a question", "an answer",
+                 f"{day} 10:00:00"))
+    _dec.commit()
+    _dec_rules = analyze.Rules(sig, locale_mod.NULL_PACK, "2026-08-01")
+    _dec_mined = decide.mine(_dec, _dec_rules)
+    _old = _dec_mined["replyPropensity"]["old_kind"]
+    _live = _dec_mined["replyPropensity"]["live_kind"]
+    ck("both kinds still report the same RAW answer count",
+       _old["asks"] == _live["asks"] == 20, f"{_old['asks']} vs {_live['asks']}")
+    ck("stale traffic weighs markedly less than live traffic",
+       _old["weightedTotal"] < _live["weightedTotal"] / 2,
+       f"{_old['weightedTotal']} vs {_live['weightedTotal']}")
+    # ★ The invariant that keeps decay from lying about coverage: the evidence bar
+    # reads RAW counts, so old-but-real evidence stays "sufficient". Reporting it
+    # as insufficient would say "there is no evidence" when the truth is "the
+    # evidence is old" — two different sentences, and conflating them is exactly
+    # what fidelity.md exists to prevent.
+    ck("old evidence still clears the support bar (the bar reads raw counts)",
+       _old["evidenceSufficient"] is True, str(_old))
+    ck("the recent lens is published alongside the full-window rate",
+       "recentAnswerRatePct" in _live and _live["recentAsks"] > 0, str(_live))
+    ck("a kind with no recent traffic reports no recent lens rather than 0%",
+       "recentAnswerRatePct" not in _old, str(_old))
+
+    # --- drift demotes, never promotes -----------------------------------
+    #
+    # `drift_kind` was answered all spring and has been ignored since. The full
+    # window still reads ~50%, so without the drift check it would keep an
+    # `answer`-class default while the owner has visibly stopped.
+    _dr = sqlite3.connect(":memory:")
+    _dr.row_factory = sqlite3.Row
+    _dr.executescript(store.SCHEMA)
+    _dr.execute("INSERT INTO conversations(conversation_id,title,single_chat,"
+                "peer_name,peer_open_id) VALUES('c1','peer',1,'peer','PID')")
+    # `drift_kind` was answered up to just before the recent window opened, and has
+    # been ignored ever since. Two placement constraints, both load-bearing:
+    #
+    #   · the answered half must sit OUTSIDE `recentWindowDays` (which opens
+    #     2026-06-02 for a 2026-08-01 anchor) or the two lenses see the same thing;
+    #   · it must sit just outside rather than months back, because decay already
+    #     pulls the full-window rate down toward the recent one — measured at
+    #     2026-01 the gap shrinks to 19.9 points and the drift check correctly does
+    #     not fire. That is not a bug in either mechanism: decay and drift overlap
+    #     by design, and drift only reports the residual disagreement decay has not
+    #     already priced in.
+    for i in range(20):
+        # answered, just before the recent window opens
+        _dr.execute(
+            "INSERT INTO asks(ask_key,conversation_id,single_chat,asker_name,"
+            "asker_id,tone_band,ask_kind,addressed_self,risk_tags,ask_text,"
+            "answered,reply_text,latency_seconds,occurred_at) "
+            "VALUES(?,?,1,'peer','PID','B','drift_kind',1,'','q',1,'a',60,?)",
+            (f"dold{i}", "c1", f"2026-05-{i % 28 + 1:02d} 10:00:00"))
+        # ignored, inside the recent window
+        _dr.execute(
+            "INSERT INTO asks(ask_key,conversation_id,single_chat,asker_name,"
+            "asker_id,tone_band,ask_kind,addressed_self,risk_tags,ask_text,"
+            "answered,reply_text,latency_seconds,occurred_at) "
+            "VALUES(?,?,1,'peer','PID','B','drift_kind',1,'','q',0,'',-1,?)",
+            (f"dnew{i}", "c1", f"2026-07-{i % 28 + 1:02d} 10:00:00"))
+    _dr.commit()
+    _dr_mined = decide.mine(_dr, analyze.Rules(sig, locale_mod.NULL_PACK,
+                                               "2026-08-01"))
+    _drift = _dr_mined["replyPropensity"]["drift_kind"]
+    ck("a kind the owner recently stopped answering is flagged as drifted",
+       _drift["recentlyDrifted"] is True, str(_drift))
+    ck("drift never leaves a kind on an answer-class default",
+       _drift["defaultAction"] not in ("answer", "settle_ok"),
+       _drift["defaultAction"])
+
+    # --- decay may not manufacture permission -----------------------------
+    #
+    # The asymmetry that matters most. `money` was routed away 40 times over the
+    # winter and settled 6 times last week. Weighted, the settle share crosses the
+    # 40% bar; raw, it is ~13%. If the weighted lens alone decided, a quiet quarter
+    # would have handed an agent permission to settle money questions.
+    _risk = sqlite3.connect(":memory:")
+    _risk.row_factory = sqlite3.Row
+    _risk.executescript(store.SCHEMA)
+    _risk.execute("INSERT INTO conversations(conversation_id,title,single_chat,"
+                  "peer_name,peer_open_id) VALUES('c1','peer',1,'peer','PID')")
+    # Handoffs need a pack to be recognized as handoffs, so the shape is written
+    # directly: what is under test is the two-lens comparison, not the lexicon.
+    for i in range(40):
+        _risk.execute(
+            "INSERT INTO asks(ask_key,conversation_id,single_chat,asker_name,"
+            "asker_id,tone_band,ask_kind,addressed_self,risk_tags,ask_text,"
+            "answered,reply_text,latency_seconds,occurred_at) "
+            "VALUES(?,?,1,'peer','PID','B','other_ask',1,'money','q',1,'ask X',60,?)",
+            (f"rold{i}", "c1", f"2025-12-{i % 28 + 1:02d} 10:00:00"))
+    for i in range(6):
+        _risk.execute(
+            "INSERT INTO asks(ask_key,conversation_id,single_chat,asker_name,"
+            "asker_id,tone_band,ask_kind,addressed_self,risk_tags,ask_text,"
+            "answered,reply_text,latency_seconds,occurred_at) "
+            "VALUES(?,?,1,'peer','PID','B','other_ask',1,'money','q',1,'yes ok',60,?)",
+            (f"rnew{i}", "c1", f"2026-07-2{i % 8:01d} 10:00:00"))
+    _risk.commit()
+    # A real pack is needed for `settle` to be detectable at all; without one the
+    # gate is held by the no-lexicon branch instead, which is asserted below.
+    _risk_pack = None
+    for _pack_id in ("zh-CN", "en"):
+        try:
+            _pack = locale_mod.load(_pack_id, None, _risk)[0]
+        except SystemExit:
+            continue
+        if _pack.has("replyShapes"):
+            _risk_pack = _pack
+            break
+    if _risk_pack is not None:
+        _risk_mined = decide.mine(_risk, analyze.Rules(sig, _risk_pack, "2026-08-01"))
+        _money = _risk_mined["riskBehavior"].get("money", {})
+        ck("decay alone cannot relax a risk gate",
+           _money.get("policy") == "never_settle", str(_money))
+    else:
+        ck("decay alone cannot relax a risk gate (no pack: gate held by default)",
+           decide._risk_policy(
+               {"money": {"total": 10.0, "n": 10, "settle": 9.0, "n_settle": 9}},
+               sig["verification"],
+               analyze.Rules(sig, locale_mod.NULL_PACK, "2026-08-01"),
+           )["money"]["policy"] == "never_settle")
+
+    # --- the measurement window is non-destructive and honest -------------
+    _win = sqlite3.connect(":memory:")
+    _win.row_factory = sqlite3.Row
+    _win.executescript(store.SCHEMA)
+    _win.execute("INSERT INTO conversations(conversation_id,title,single_chat,"
+                 "peer_name,peer_open_id) VALUES('c1','peer',1,'peer','PID')")
+    for i, day in enumerate(("2026-01-05", "2026-07-20")):
+        _win.execute(
+            "INSERT INTO messages(message_id,conversation_id,sender_id,sender_name,"
+            "occurred_at,epoch,msg_type,text,clean_text,is_self,is_agent_sent,"
+            "is_pasted,scene) VALUES(?,?,'SELF','me',?,?,'text',?,?,1,0,0,'unknown')",
+            (f"w{i}", "c1", f"{day} 10:00:00", 1000.0 + i,
+             "a real sentence here", "a real sentence here"))
+    _win.commit()
+    _win_rules = analyze.Rules(sig, locale_mod.NULL_PACK, "2026-07-20")
+    ck("with no window every message is measured",
+       analyze.style(_win, _win_rules)["overall"]["messages"] == 2)
+    _win_rules.window_start = "2026-06-01"
+    ck("a window excludes older messages from the measurement",
+       analyze.style(_win, _win_rules)["overall"]["messages"] == 1)
+    # ★ Non-destructive: the window narrows what is READ, never what is stored.
+    # If it deleted rows, widening it again would silently measure less, and the
+    # discarded history cannot be re-collected.
+    ck("a window deletes nothing from the corpus",
+       _win.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 2)
+    _win_rules.window_start = ""
+    ck("removing the window restores the full measurement",
+       analyze.style(_win, _win_rules)["overall"]["messages"] == 2)
 
 
 def _global_suite(ck) -> None:
@@ -2592,9 +2867,21 @@ def _global_suite(ck) -> None:
            v_rules["policy"]["freshness"]["unknownLagIsStale"] is True)
         # Changing a threshold has to invalidate derived numbers, or a rebuilt
         # skill would quietly disagree with the version stamped on it.
+        #
+        # Two assertions, because they catch different regressions:
+        #   · the published version must equal signals.json's own — a mismatch
+        #     means a derived number is stamped with a version that did not
+        #     produce it, which makes every published figure untraceable;
+        #   · and it must be at least v6, the version that introduced this repo's
+        #     threshold groups. An upstream re-sync that silently reverted
+        #     signals.json would restore a lower version, and `rsync --delete`
+        #     makes that a one-line, invisible loss (see vendor/forge/README.md).
+        signals_version = analyze.load_signals()["rulesVersion"]
+        ck("the published rules version is the one signals.json defines",
+           v_rules["rulesVersion"].startswith(signals_version),
+           f"{v_rules['rulesVersion']} vs {signals_version}")
         ck("the signals version reflects the new threshold group",
-           v_rules["rulesVersion"].startswith("signals-v5"),
-           v_rules["rulesVersion"])
+           _version_at_least(signals_version, 6), signals_version)
 
         v_scan = scan_mod.scan("skill", v_persona)
         ck("vault-sourced skill passes the share scan", v_scan["safe"],
@@ -2767,6 +3054,7 @@ def run(locale: str | None = None) -> dict:
         results.append({"check": label, "ok": bool(ok), "detail": str(detail)[:200]})
 
     _global_suite(ck)
+    _recency_suite(ck)
 
     wanted = [locale] if locale else list(FIXTURES)
     for locale_id in wanted:

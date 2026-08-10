@@ -1,5 +1,5 @@
 {
-  "rulesVersion": "signals-v5",
+  "rulesVersion": "signals-v6",
   "_comment": "LANGUAGE-INDEPENDENT rules only. Every lexical pattern lives in a locale pack under forge/locales/ — nothing in this file may contain a word in any human language. The model never free-judges at build time; it only reads what these rules measured.",
   "_versioning": "Changing anything here changes rulesVersion and therefore every derived number. The effective version published in a skill is `rulesVersion+<localePack>@<packVersion>`, so a pack change invalidates derived numbers exactly like a change here does.",
   "style": {
@@ -66,6 +66,18 @@
     "minDistinctDays": 4,
     "minScenes": 2,
     "minShareForClaim": 0.15
+  },
+  "recency": {
+    "_comment": "Time decay. An IM corpus only grows, so without this a habit from the first month keeps equal say with this week's forever: the vocabulary list keeps a former project's jargon at the top, a tone band keeps someone who changed teams at 'closest collaborator', and — worst — an ask kind the owner stopped handling months ago keeps a high enough answer rate that its defaultAction stays 'answer', which is an agent replying on their behalf about something they no longer own.",
+    "_anchorNote": "The half-life is counted back from the LATEST DAY IN THE CORPUS, never from wall-clock now(). Anchoring on now() would make the same corpus measure differently tomorrow, which breaks the determinism the whole engine rests on (same corpus + same signals ⇒ identical output) and would silently decay every number of a corpus that stopped being collected.",
+    "halfLifeDays": 90,
+    "_halfLifeNote": "A day this far before the anchor counts half as much as the anchor day. 90 days ≈ one quarter, which is roughly the cadence at which teams, projects and ownership actually change. Set to 0 to disable decay entirely and recover pre-v6 behavior.",
+    "floorWeight": 0.05,
+    "_floorNote": "No message ever decays to zero. A weight of exactly 0 would let old evidence vanish from the WEIGHTED counts while still being present in the corpus, so a long-quiet ask kind would read as 'never seen' rather than 'seen, long ago' — the same conflation between absent and unmeasured that fidelity.md exists to prevent.",
+    "recentWindowDays": 60,
+    "_recentWindowNote": "The second, unweighted lens: a plain rate over just these last days, published ALONGSIDE the full-window rate rather than replacing it. Two numbers because folding a trend into one average hides the trend — the same reason _finish() reports median and mean together instead of picking one.",
+    "driftPoints": 20,
+    "_driftNote": "How many percentage points the recent rate must differ from the full-window rate before the drift is called out in the published skill. Below this the gap is sampling noise on a small recent window, and narrating it would manufacture a behavior change out of a slow week."
   },
   "thresholds": {
     "_comment": "Every behavioral cutoff the decision layer applies, in one place. These are policy, not measurement: each turns a measured share into a published rule. They are conservative by construction — being wrong about a commitment costs more than a missed reply — and they are versioned, so tightening one is reproducible rather than a local edit.",

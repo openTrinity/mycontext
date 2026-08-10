@@ -239,6 +239,7 @@ number:
 | `references/scenes.md` | Situational shifts, with real turns |
 | `references/limits.md` | What this persona cannot know |
 | `references/fidelity.md` | Which layers had evidence, and which did not |
+| `references/work.md` | What they work on and how they do it — read this when the message is about their actual work, not just its tone. **Optional**: absent when the host application has not extracted it. Never permission: what you may answer is `decisions.md` only. |
 
 ## Other commands
 

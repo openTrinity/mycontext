@@ -58,6 +58,25 @@ CONFIG_TEMPLATE = {
                        "runs the forge for themselves — installing into their own "
                        "agents is the whole point.",
     "analysisStart": "",
+    "externalSkillFiles": [],
+    "_externalSkillFilesHelp": "Files inside the installed skill that the calling "
+                               "application writes and owns, relative to the skill "
+                               "root (e.g. \"references/work.md\"). `publish` never "
+                               "generates them and never prunes them, and `lock` "
+                               "leaves them writable. Only honored when ownsOutput "
+                               "is true. Empty = use the built-in default list. "
+                               "Without this a host-written file is deleted by the "
+                               "next refresh as a stale leftover — silently, since "
+                               "prune reports it as ordinary cleanup.",
+    "measureWindowDays": 0,
+    "_measureWindowDaysHelp": "Measure only the last N days of the corpus, counted "
+                              "back from its newest message (never from now, which "
+                              "would make the same corpus build differently every "
+                              "day). 0 = measure everything. This is NOT "
+                              "`pull --since`: that one decides what is collected, "
+                              "this one only what a build looks at, so narrowing it "
+                              "deletes nothing and widening it again is one flag. "
+                              "Overridden per run by `build --window-days`.",
     "timezone": "",
     "_timezoneHelp": "IANA name, informational only. Timestamps are stored in this "
                      "machine's local wall-clock time; leave empty to accept that.",
@@ -405,11 +424,17 @@ def cmd_build(a) -> int:
     cfg = load_cfg(a.config)
     if a.locale:
         cfg.setdefault("locale", {})["id"] = a.locale
-    features = build_mod.build(cfg)
+    features = build_mod.build(cfg, getattr(a, "window_days", None))
     m = features["meta"]
     loc = m.get("locale") or {}
     return emit({
         "built": True, "window": m["window"], "rulesVersion": m["rulesVersion"],
+        # Both reported: `window` is what was MEASURED, `corpusWindow` what is
+        # STORED. A caller that saw only one could not tell a narrow build from a
+        # thin corpus, and those call for opposite fixes.
+        "corpusWindow": m.get("corpusWindow"),
+        "measureWindow": m.get("measureWindow"),
+        "recency": m.get("recency"),
         "locale": {"id": loc.get("id"), "isNull": loc.get("isNull"),
                    "missing": loc.get("missing"),
                    "reason": (loc.get("verdict") or {}).get("reason")},
@@ -915,6 +940,13 @@ def main(argv: list[str] | None = None) -> int:
     p = add("build", help="corpus → measured features")
     p.add_argument("--locale", help="override the configured locale pack for this "
                                     "build (pack id, 'auto', or 'none')")
+    p.add_argument("--window-days", type=int,
+                   help="measure only the last N days of the corpus (counted back "
+                        "from its newest message, not from now). Non-destructive: "
+                        "nothing is deleted and a later build without this flag "
+                        "measures everything again. Use it to re-distill a recent "
+                        "window without discarding history that cannot be "
+                        "re-collected. Defaults to config's measureWindowDays.")
     add("publish", help="install the persona skill")
     add("refresh", help="pull → build → publish")
 

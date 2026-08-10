@@ -273,6 +273,32 @@ def render_fidelity(features: dict, cfg: dict | None = None) -> str:
         f"- **{c['corpus']['turnsPaired']:,}** context→reply pairs.",
         f"- Evidence threshold: a layer needs **{c['evidenceThreshold']}** examples "
         "before its measurement is treated as a pattern rather than noise.",
+    ]
+    # ★ Time weighting belongs in the coverage report, not only in features.json.
+    # A reader comparing this build's numbers to an older one has no way to tell a
+    # real behavior change from a decay artifact unless the weighting is stated,
+    # and "the evidence bar is unweighted" is the sentence that keeps "old" from
+    # being misread as "absent" — which is this file's whole purpose.
+    recency = ((features.get("meta") or {}).get("recency")
+               or (features.get("style") or {}).get("recency") or {})
+    if recency.get("enabled"):
+        lines += [
+            f"- **Recency weighting is on** (half-life "
+            f"{int(recency['halfLifeDays'])} days, anchored on "
+            f"{recency['anchorDay']}, floor {recency['floorWeight']}). Published "
+            "rates are weighted toward recent traffic; the counts above and the "
+            "evidence threshold are **not** — so a layer marked measured has that "
+            "many real examples, whatever their age.",
+        ]
+    measure = (features.get("meta") or {}).get("measureWindow") or {}
+    if measure.get("applied"):
+        lines += [
+            f"- **Measurement was limited to the last {measure['days']} days** "
+            f"(from {measure['start']}). Older messages remain in the corpus but "
+            "were not examined — every 'not measured' below may simply be outside "
+            "this window.",
+        ]
+    lines += [
         "",
         "## Language coverage",
         "",

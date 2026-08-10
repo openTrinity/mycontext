@@ -397,24 +397,62 @@ def render_decisions(name: str, policy: dict, mined: dict) -> str:
             "a kind sitting well below the baseline is one they deliberately let go.",
             "",
         ]
+    recency = mined.get("recency") or {}
+    if recency.get("enabled"):
+        lines += [
+            f"**Recent behavior counts for more.** Every rate below is weighted so "
+            f"that traffic from {int(recency['halfLifeDays'])} days before "
+            f"{recency['anchorDay']} counts half as much as traffic from that day "
+            "itself, and older traffic less again. What they used to do is still in "
+            "the corpus — it just no longer outvotes what they do now. The **Seen** "
+            "column is the raw count, so a row with plenty of history and a low "
+            "weight is one they have moved on from.",
+            "",
+        ]
     lines += [
         "## Step 1 — is this even theirs to answer?",
         "",
-        "| What is being asked | Seen | They answered | vs baseline | Their default move |",
-        "|---|---|---|---|---|",
+        "| What is being asked | Seen | They answered | Recently | vs baseline | Their default move |",
+        "|---|---|---|---|---|---|",
     ]
     for kind, d in prop.items():
         label = ASK_KIND_LABEL.get(kind, kind)
         action = ACTION_LABEL.get(d["defaultAction"], d["defaultAction"])
         star = "" if d["evidenceSufficient"] else " ⚠︎thin"
+        if d.get("recentlyDrifted"):
+            star += " ⚑changed"
         delta = d.get("vsBaselinePct")
         delta_s = f"{delta:+.0f} pts" if delta is not None else "—"
-        lines.append(f"| {label}{star} | {d['total']} | {d['answerRatePct']}% | "
+        # The recent lens as its own column rather than folded into the rate: one
+        # number cannot say "they used to answer these and no longer do", and that
+        # is the sentence an agent needs before replying on someone's behalf.
+        recent = d.get("recentAnswerRatePct")
+        recent_s = (f"{recent}% of {d.get('recentAsks', 0)}"
+                    if recent is not None else "none since")
+        lines.append(f"| {label}{star} | {d.get('asks', d['total'])} | "
+                     f"{d['answerRatePct']}% | {recent_s} | "
                      f"{delta_s} | {action} |")
 
     lines += [
         "",
         "⚠︎thin = too few examples to trust; draft and let the owner decide.",
+    ]
+    drifted = policy.get("recentlyDrifted") or []
+    if drifted:
+        lines += [
+            "",
+            "⚑changed = **their recent behavior disagrees with their history on "
+            "this.** Treat these as draft-only regardless of the rate, and say so "
+            "when handing the draft over — the owner is the only one who knows "
+            "whether the change is deliberate:",
+            "",
+        ]
+        for item in drifted:
+            label = ASK_KIND_LABEL.get(item["askKind"], item["askKind"])
+            lines.append(
+                f"- **{label}** — {item['fullWindowPct']}% across the full history, "
+                f"{item['recentPct']}% recently ({item['driftPoints']:+.0f} pts)")
+    lines += [
         "",
         "## Step 2 — the hard stop",
         "",
@@ -430,8 +468,12 @@ def render_decisions(name: str, policy: dict, mined: dict) -> str:
         settled = d["shapePct"].get("settle", 0)
         rule = ("**never settle** — draft only" if d["policy"] == "never_settle"
                 else "they sometimes settle these; still draft, and mirror their wording")
-        seen = d["total"] if d["total"] else "—"
-        settled_s = f"{settled}%" if d["total"] else "—"
+        # ★ The RAW count in the Seen column, not the weighted mass: "seen 27.57
+        # times" is not a thing that happened, and this column is the reader's
+        # sanity check on everything else in the row.
+        raw = d.get("asks", 0)
+        seen = raw if raw else "—"
+        settled_s = f"{settled}%" if raw else "—"
         lines.append(f"| {label} | {seen} | {settled_s} | {rule} | "
                      f"{d.get('reason', '')} |")
 
@@ -759,6 +801,24 @@ def render_limits(name: str, meta: dict, style: dict, mined: dict) -> str:
                 f"- Locale pack `{locale.get('id')}` v{locale.get('version')}"
                 + (f", which cannot measure: {', '.join(locale['missing'])}."
                    if locale.get("missing") else "."))
+    # ★ A narrowed measurement window has to be stated here, not just recorded in
+    # features.json. The corpus holds more than was measured, so anyone reading
+    # "built from <window>" would otherwise conclude the earlier history was
+    # examined and found uninformative — when it was never looked at.
+    measure = meta.get("measureWindow") or {}
+    if measure.get("applied"):
+        lines.append(
+            f"- **Only the last {measure['days']} days were measured**, though the "
+            f"corpus holds {meta.get('corpusWindow', 'more')}. Anything older is "
+            "stored but was not examined for this build — absent from these "
+            "numbers is not the same as absent from their history.")
+    recency = meta.get("recency") or {}
+    if recency.get("enabled"):
+        lines.append(
+            f"- Older evidence was **weighted down**, not dropped: traffic "
+            f"{int(recency['halfLifeDays'])} days before {recency['anchorDay']} "
+            "counts half as much as traffic from that day. Raw counts are reported "
+            "alongside every weighted rate so the two can be told apart.")
     lines += [
         "",
         "## What is missing",
@@ -879,6 +939,16 @@ def render_rules(features: dict, pack, rules, cfg: dict,
                 policy.get("undetectableRiskClasses") or []),
             "thinAskKinds": sorted(
                 k for k, d in prop.items() if not d.get("evidenceSufficient")),
+            # ★ Ask kinds whose recent behavior contradicts their history. Published
+            # as data for the same reason `thinAskKinds` is: `check` runs inside the
+            # installed skill and cannot import the forge, so "they used to answer
+            # these and no longer do" has to travel with the policy. `byAskKind`
+            # already resolves these to a draft action — this list is what lets a
+            # consumer SAY WHY when handing the draft over, instead of reporting
+            # "insufficient evidence" for a kind with plenty of it.
+            "recentlyDriftedAskKinds": sorted(
+                k for k, d in prop.items() if d.get("recentlyDrifted")),
+            "recency": policy.get("recency") or {},
             # Style slices too thin to imitate. Published for the same reason as
             # `thinAskKinds`: `check` runs inside the installed skill and cannot
             # import the forge, so "this situation has almost no evidence" has to

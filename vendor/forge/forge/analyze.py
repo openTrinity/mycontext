@@ -14,6 +14,7 @@ Nothing here writes prose. compose.py turns these numbers into skill text.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import sqlite3
@@ -42,6 +43,145 @@ def _rx(pattern: str) -> re.Pattern:
     return re.compile(pattern, re.I)
 
 
+def _day_index(day: str) -> int | None:
+    """"YYYY-MM-DD" → days since the epoch. None when unparseable.
+
+    An ordinal rather than a date object because every caller only ever
+    subtracts two of them, and this runs once per message on a six-figure
+    corpus.
+    """
+    text = (day or "")[:10]
+    if len(text) != 10:
+        return None
+    try:
+        return dt.date(int(text[:4]), int(text[5:7]), int(text[8:10])).toordinal()
+    except ValueError:
+        return None
+
+
+class Recency:
+    """Time decay: how much a day's evidence still counts.
+
+    ## Why this exists
+
+    An IM corpus only grows, and every count in this module was a plain count —
+    so a habit from the corpus's first month kept equal say with this week's,
+    forever. Three concrete consequences, all silent:
+
+    - the vocabulary list keeps a finished project's jargon at the top;
+    - a tone band keeps someone who changed teams at "closest collaborator";
+    - worst, an ask kind the owner stopped handling months ago keeps an answer
+      rate high enough that its `defaultAction` stays `answer` — which is an
+      agent replying on their behalf about something they no longer own.
+
+    ## ★ The anchor is the corpus, never the clock
+
+    `weight()` measures distance from the LATEST DAY IN THE CORPUS. Using
+    `now()` instead would break the determinism the whole engine rests on
+    (`analyze` module docstring: same corpus + same signals ⇒ identical output):
+    the same corpus would measure differently tomorrow, and a corpus that
+    stopped being collected would decay toward the floor without a single
+    message changing.
+
+    ## What decay must NOT touch
+
+    Only *aggregate* counts are weighted. The `verification` gate
+    (`minSupport` / `minDistinctDays`) keeps reading raw counts — see
+    `evidence_strength`. Weighting those would let old evidence disappear from
+    the bar it has to clear, reporting "there is no evidence for this" when the
+    truth is "the evidence is real but old". Those are different sentences, and
+    telling them apart is the entire job of `fidelity.md`.
+    """
+
+    def __init__(self, cfg: dict | None, anchor_day: str = ""):
+        cfg = cfg or {}
+        self.half_life = float(cfg.get("halfLifeDays", 0) or 0)
+        self.floor = float(cfg.get("floorWeight", 0.0) or 0.0)
+        self.recent_window = int(cfg.get("recentWindowDays", 0) or 0)
+        self.drift_points = float(cfg.get("driftPoints", 0) or 0)
+        self.anchor_day = (anchor_day or "")[:10]
+        self._anchor = _day_index(self.anchor_day)
+        #: Decay is off when there is no half-life configured, or no anchor to
+        #: measure from (an empty corpus). Off means `weight()` returns 1.0
+        #: everywhere, which reproduces pre-v6 numbers exactly — that is the
+        #: documented escape hatch for `halfLifeDays: 0`.
+        self.enabled = self.half_life > 0 and self._anchor is not None
+        #: Memoized per day string: a build folds every message, and there are
+        #: at most a few hundred distinct days behind a six-figure corpus.
+        self._cache: dict[str, float] = {}
+
+    def weight(self, day: str) -> float:
+        """How much a message from `day` counts. 1.0 at the anchor, never 0.
+
+        A day *after* the anchor cannot happen (the anchor is the maximum) but
+        is clamped to 1.0 rather than amplified, so a stray future timestamp
+        from a misconfigured client cannot outvote real traffic.
+
+        An unparseable or missing day gets the full weight. That is the
+        conservative direction here: dropping it toward the floor would quietly
+        discount real messages for a formatting reason, and the rest of the
+        engine already treats a missing timestamp as its own reported problem
+        rather than as evidence about the owner.
+        """
+        if not self.enabled:
+            return 1.0
+        cached = self._cache.get(day)
+        if cached is not None:
+            return cached
+        index = _day_index(day)
+        if index is None:
+            weight = 1.0
+        else:
+            age = self._anchor - index
+            if age <= 0:
+                weight = 1.0
+            else:
+                weight = max(self.floor, 0.5 ** (age / self.half_life))
+        self._cache[day] = weight
+        return weight
+
+    def is_recent(self, day: str) -> bool:
+        """Is this day inside the unweighted recent window?
+
+        Separate from `weight()` and deliberately a hard edge: the recent lens
+        exists to be a plain, easily-explained rate over a named window ("the
+        last 60 days"), so that a reader can check it. A second decayed number
+        would be two views of the same smoothing rather than an independent one.
+        """
+        if self.recent_window <= 0 or self._anchor is None:
+            return False
+        index = _day_index(day)
+        if index is None:
+            return False
+        return (self._anchor - index) <= self.recent_window
+
+    def describe(self) -> dict:
+        """What was applied, for `fidelity.md` and the features payload.
+
+        Published rather than kept internal because a decayed count is not
+        comparable to an undecayed one, and a reader with no way to tell which
+        they are holding would compare across builds and see a change that never
+        happened.
+        """
+        return {
+            "enabled": self.enabled,
+            "halfLifeDays": self.half_life if self.enabled else 0,
+            "floorWeight": self.floor if self.enabled else 1.0,
+            "anchorDay": self.anchor_day,
+            "recentWindowDays": self.recent_window,
+            "driftPoints": self.drift_points,
+        }
+
+
+def corpus_anchor_day(conn: sqlite3.Connection) -> str:
+    """The latest day present in the corpus — the anchor every weight is measured
+    from. Empty string on an empty corpus, which disables decay."""
+    row = conn.execute(
+        "SELECT MAX(occurred_at) AS latest FROM messages WHERE occurred_at != ''"
+    ).fetchone()
+    return ((row["latest"] if row else "") or "")[:10]
+
+
 class Rules:
     """Compiled rules — thresholds from signals.json, lexicon from a locale pack.
 
@@ -51,7 +191,8 @@ class Rules:
     a pack for still gets a fully-measured structural persona.
     """
 
-    def __init__(self, sig: dict, pack: LocalePack | None = None):
+    def __init__(self, sig: dict, pack: LocalePack | None = None,
+                 anchor_day: str = ""):
         self.raw = sig
         self.pack = pack or NULL_PACK
         # A locale change must invalidate derived numbers exactly like a signals
@@ -74,6 +215,14 @@ class Rules:
                             if b in self.tone]
         self.group_only_cap = self.tone.get("groupOnlyCap", "C")
         self.verification = sig["verification"]
+        # Time decay. `anchor_day` comes from the corpus (see `corpus_anchor_day`),
+        # never from the clock — a caller that omits it gets decay DISABLED rather
+        # than a wrong anchor, and `Recency.describe()` is published into
+        # `features` and `fidelity.md` so "off" is visible instead of assumed.
+        self.recency = Recency(sig.get("recency"), anchor_day)
+        #: Measurement window lower bound, `"YYYY-MM-DD"`, or `""` for "all of it".
+        #: Set by `build` from `--window-days`; see `window_clause`.
+        self.window_start = ""
 
         # -- lexical, all from the pack; empty under NULL_PACK ---------------
         self.style = self.pack.style
@@ -85,6 +234,35 @@ class Rules:
         self.chitchat = self.pack.chitchat
         self.bot_name = self.pack.bot_name
         self.sensitive_title = self.pack.sensitive_title
+
+    def window_clause(self, column: str) -> tuple[str, list]:
+        """`(sql_fragment, params)` restricting `column` to the measurement window.
+
+        Returns `("", [])` when no window is set, so every query is byte-identical
+        to the unwindowed one — the same shape as `VaultSource._scope`, and for the
+        same reason: filtering in Python would make a narrow window pay the full
+        cost of a wide read.
+
+        ## Why a window at all, when `pull` already has `--since`
+
+        `pull`'s window governs what enters the CORPUS; this one governs what the
+        BUILD measures, and the two are not interchangeable. Once a corpus holds
+        six months (because the user picked a wide range once, or because
+        `resolveSince` re-scanned earlier history), every later build measures all
+        six months no matter what the user asks for — so "re-distill just the last
+        30 days" was impossible without deleting the corpus, which throws away data
+        that cannot be re-collected.
+
+        Windowing the measurement instead is non-destructive: the corpus keeps
+        everything, and the window is one flag away from being widened again.
+
+        ★ Independent from `Recency`. Decay makes old evidence count *less*; a
+        window makes it count *not at all*, and says so in `limits.md`. Conflating
+        them would leave no way to ask either question on its own.
+        """
+        if not self.window_start:
+            return "", []
+        return f" AND {column} >= ?", [self.window_start]
 
     #: Marker keys folded into the per-1k style profile. Only those the active
     #: pack actually defines are counted, so a pack may omit one without the
@@ -205,10 +383,27 @@ def _conversation_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "FROM conversations ORDER BY conversation_id").fetchall()
 
 
-def _messages_of(conn: sqlite3.Connection, conv_id: str) -> list[sqlite3.Row]:
+def _messages_of(conn: sqlite3.Connection, conv_id: str,
+                 rules: Rules | None = None) -> list[sqlite3.Row]:
+    """One conversation's messages, oldest first, inside the measurement window.
+
+    `rules` is optional so a caller that has no window (and every existing test)
+    keeps the unwindowed behavior. When a window IS set the cut happens here, in
+    the one function every pairing pass goes through — so turns, asks and reply
+    cadence are windowed by construction rather than by three separate filters
+    that could disagree.
+
+    A consequence worth naming: the context lines a turn is paired against are
+    windowed too, so a reply on the window's first day may lose the incoming line
+    it answered and simply not become a turn. That is the honest outcome — the
+    alternative is measuring against context the window says is out of scope —
+    and it is why the window is expressed in days rather than as an exact instant.
+    """
+    clause, params = rules.window_clause("occurred_at") if rules else ("", [])
     return conn.execute(
-        "SELECT * FROM messages WHERE conversation_id=? ORDER BY epoch, message_id",
-        (conv_id,)).fetchall()
+        f"SELECT * FROM messages WHERE conversation_id=?{clause} "
+        "ORDER BY epoch, message_id",
+        (conv_id, *params)).fetchall()
 
 
 def build_turns_and_asks(conn: sqlite3.Connection, rules: Rules,
@@ -230,7 +425,7 @@ def build_turns_and_asks(conn: sqlite3.Connection, rules: Rules,
         # A note-to-self chat has no counterparty; its "replies" answer nobody.
         if single and title in self_aliases:
             continue
-        msgs = _messages_of(conn, conv_id)
+        msgs = _messages_of(conn, conv_id, rules)
         if not msgs:
             continue
         peer_default = title if single else ""
@@ -422,29 +617,49 @@ _JOINING_PUNCT = ",，、;；"
 
 
 def _block() -> dict:
-    return {"n": 0, "cp": 0, "q": 0, "joined": 0, "counts": defaultdict(int),
-            "buckets": defaultdict(int), "openers": defaultdict(int),
+    #: Two parallel tallies, and the distinction is load-bearing.
+    #:
+    #: · `n` / `days` are RAW counts — they answer "is there enough evidence to
+    #:   call this a habit at all", which `evidence_strength` decides, and old
+    #:   evidence must not vanish from that bar (see `Recency`).
+    #: · `w` and every weighted accumulator answer "what does this person do
+    #:   NOW", so a message from a year ago should not shape them as much as
+    #:   this week's.
+    #:
+    #: Mixing the two is the failure this split exists to prevent: weighting the
+    #: evidence bar reports "no evidence" for behavior that is real but old,
+    #: while leaving the shares unweighted publishes a former habit as current.
+    return {"n": 0, "w": 0.0, "cp": 0.0, "q": 0.0, "joined": 0.0,
+            "counts": defaultdict(float),
+            "buckets": defaultdict(float), "openers": defaultdict(float),
             "latencies": [], "lengths": [], "days": set()}
 
 
 def _fold(b: dict, text: str, rules: Rules, latency: float = -1,
           day: str = "") -> None:
+    weight = rules.recency.weight(day)
     b["n"] += 1
+    b["w"] += weight
     cp = C.cp_len(text)
-    b["cp"] += cp
+    b["cp"] += cp * weight
     # Distinct days, per block, so `verification.minDistinctDays` can be applied
     # to a style or scene block exactly as it already is to a mined ask kind.
     # Without it a single busy afternoon in a rare situation — 50 messages, one
     # day — is indistinguishable from a habit, and gets narrated as one.
+    #
+    # ★ Deliberately NOT weighted, like `n`: this is the evidence bar, not a share.
     if day:
         b["days"].add(day)
-    b["lengths"].append(cp)
-    b["buckets"][rules.bucket_of(cp)] += 1
+    # Lengths and latencies carry their weight so the percentiles below can be
+    # weighted ones. Keeping the raw value alongside is what makes that possible
+    # without a second pass over the corpus.
+    b["lengths"].append((cp, weight))
+    b["buckets"][rules.bucket_of(cp)] += weight
     question = rules.style.get("question")
     if question and question.search(text):
-        b["q"] += 1
+        b["q"] += weight
     if any(ch in text for ch in _JOINING_PUNCT):
-        b["joined"] += 1
+        b["joined"] += weight
     # Only markers the active pack defines are counted. Iterating a fixed list
     # regardless would report 0/1k for a marker nobody can detect, which reads
     # in the published skill as "they never do this" rather than "unmeasured".
@@ -454,46 +669,77 @@ def _fold(b: dict, text: str, rules: Rules, latency: float = -1,
             continue
         hits = len(rx.findall(text))
         if hits:
-            b["counts"][key] += hits
+            b["counts"][key] += hits * weight
     if rules.openers:
-        b["openers"][rules.opener_of(text)] += 1
+        b["openers"][rules.opener_of(text)] += weight
     if latency >= 0:
-        b["latencies"].append(latency)
+        b["latencies"].append((latency, weight))
+
+
+def _weighted_percentile(pairs: list[tuple[float, float]], q: float) -> float:
+    """The q-th percentile of `(value, weight)` pairs.
+
+    A weighted percentile rather than a weighted mean because every number this
+    feeds is one an imitator has to reproduce — median length, p90 latency — and
+    a mean of a right-skewed chat distribution is not reproducible behavior (see
+    `_finish`). Walking the cumulative weight keeps the "half the mass is below
+    this" meaning intact while letting recent messages carry more of that mass.
+
+    Falls back to the unweighted position when the total weight is zero, which
+    can only happen if every weight floored to 0 — impossible with the shipped
+    `floorWeight`, but the fallback keeps a hand-edited `signals.json` from
+    producing a division by zero instead of a number.
+    """
+    if not pairs:
+        return 0.0
+    ordered = sorted(pairs)
+    total = sum(w for _, w in ordered)
+    if total <= 0:
+        return ordered[min(len(ordered) - 1, int(len(ordered) * q))][0]
+    target = total * q
+    seen = 0.0
+    for value, weight in ordered:
+        seen += weight
+        if seen >= target:
+            return value
+    return ordered[-1][0]
 
 
 def _finish(b: dict) -> dict:
-    n = b["n"] or 1
-    cp = b["cp"] or 1
-    lat = sorted(b["latencies"])
-    lengths = sorted(b["lengths"])
+    # Weighted denominators for every share; raw `n` stays reported separately as
+    # the evidence count. `w or 1` guards the empty block, exactly as `n or 1` did.
+    w = b["w"] or 1.0
+    cp = b["cp"] or 1.0
+    lengths = b["lengths"]
     # Chat length is heavily right-skewed in every corpus we can reason about: a
     # handful of pasted plans and long write-ups drag the mean well above
     # anything the person routinely types. The median is the number to imitate;
     # the mean is reported alongside it only so the skew stays visible, and
     # compose.py warns when the gap is wide enough to mislead.
-    median_cp = lengths[len(lengths) // 2] if lengths else 0
+    median_cp = int(_weighted_percentile(lengths, 0.5))
     out = {
         "messages": b["n"],
         "distinctDays": len(b["days"]),
         "medianCodepoints": median_cp,
-        "avgCodepoints": round(b["cp"] / n, 1),
-        "p90Codepoints": lengths[int(len(lengths) * 0.9)] if lengths else 0,
-        "lengthMixPct": {k: C.pct(v, b["n"]) for k, v in sorted(b["buckets"].items())},
-        "questionPct": C.pct(b["q"], b["n"]),
-        "joinedClausePct": C.pct(b["joined"], b["n"]),
+        "avgCodepoints": round(b["cp"] / w, 1),
+        "p90Codepoints": int(_weighted_percentile(lengths, 0.9)),
+        "lengthMixPct": {k: C.pct(v, b["w"]) for k, v in sorted(b["buckets"].items())},
+        "questionPct": C.pct(b["q"], b["w"]),
+        "joinedClausePct": C.pct(b["joined"], b["w"]),
         "per1k": {k: round(v / cp * 1000, 2) for k, v in sorted(b["counts"].items())},
-        "openerMixPct": {k: C.pct(v, b["n"])
+        "openerMixPct": {k: C.pct(v, b["w"])
                          for k, v in sorted(b["openers"].items(), key=lambda x: -x[1])},
     }
-    if lat:
+    if b["latencies"]:
         out["replyLatencySeconds"] = {
-            "median": round(lat[len(lat) // 2], 1),
-            "p90": round(lat[int(len(lat) * 0.9)], 1),
+            "median": round(_weighted_percentile(b["latencies"], 0.5), 1),
+            "p90": round(_weighted_percentile(b["latencies"], 0.9), 1),
         }
     hi = b["counts"].get("certaintyHigh", 0)
     lo = b["counts"].get("certaintyLow", 0)
-    out["hedgeToAssertRatio"] = round(lo / hi, 2) if hi else (float(lo) if lo else 0.0)
+    out["hedgeToAssertRatio"] = round(lo / hi, 2) if hi else (round(lo, 2) if lo else 0.0)
     return out
+
 
 
 def reply_bubbles(conn: sqlite3.Connection, rules: Rules,
@@ -518,12 +764,20 @@ def reply_bubbles(conn: sqlite3.Connection, rules: Rules,
 
     `is_agent_sent` rows are excluded like everywhere else: counting the agent's
     own output would let a wrong cadence reinforce itself on the next rebuild.
+
+    Runs carry their day's recency weight, so a cadence the owner has since
+    changed fades out of the published median instead of averaging with the
+    current one forever. `samples` stays the raw run count — that is the evidence
+    figure, and `_bubble_stats` reports both.
     """
     gap = float(rules.threshold("burst", "bubbleGapSeconds", 180) or 180)
     tone_by_person = tone_by_person or {}
 
-    runs: list[int] = []
-    by_band: dict[str, list[int]] = {}
+    #: `(run_length, weight)` pairs. The weight is the run's LAST day: a run is
+    #: one reply, and when it straddles midnight the moment it finished is the
+    #: moment it happened.
+    runs: list[tuple[int, float]] = []
+    by_band: dict[str, list[tuple[int, float]]] = {}
 
     for conv in _conversation_rows(conn):
         single = bool(conv["single_chat"])
@@ -535,56 +789,66 @@ def reply_bubbles(conn: sqlite3.Connection, rules: Rules,
             band = tone_by_person.get(conv["peer_open_id"] or "", "")
 
         run = 0
+        run_day = ""
         prev_epoch = 0.0
-        for m in _messages_of(conn, conv["conversation_id"]):
+
+        def flush(length: int, day: str) -> None:
+            if not length:
+                return
+            weight = rules.recency.weight(day)
+            runs.append((length, weight))
+            if band:
+                by_band.setdefault(band, []).append((length, weight))
+
+        for m in _messages_of(conn, conv["conversation_id"], rules):
             usable = (m["is_self"] and not m["is_agent_sent"]
                       and m["msg_type"] == "text" and m["clean_text"]
                       and not m["is_pasted"]
                       and not C.is_placeholder(m["clean_text"]))
             if not usable:
-                if run:
-                    runs.append(run)
-                    if band:
-                        by_band.setdefault(band, []).append(run)
+                flush(run, run_day)
                 run = 0
+                run_day = ""
                 prev_epoch = 0.0
                 continue
             epoch = m["epoch"] or 0.0
             if run and prev_epoch and epoch and (epoch - prev_epoch) > gap:
                 # Same speaker, but long enough later to be a new reply rather
                 # than another bubble of the same one.
-                runs.append(run)
-                if band:
-                    by_band.setdefault(band, []).append(run)
+                flush(run, run_day)
                 run = 0
+                run_day = ""
             run += 1
+            run_day = (m["occurred_at"] or "")[:10] or run_day
             prev_epoch = epoch or prev_epoch
-        if run:
-            runs.append(run)
-            if band:
-                by_band.setdefault(band, []).append(run)
+        flush(run, run_day)
 
     return {"overall": _bubble_stats(runs),
             "byToneBand": {b: _bubble_stats(v) for b, v in sorted(by_band.items())},
             "gapSeconds": int(gap)}
 
 
-def _bubble_stats(runs: list[int]) -> dict:
+def _bubble_stats(runs: list[tuple[int, float]]) -> dict:
     if not runs:
         return {"samples": 0, "medianBubbles": 0, "meanBubbles": 0.0,
                 "multiBubblePct": 0.0, "maxBubbles": 0}
-    ordered = sorted(runs)
+    total_w = sum(w for _, w in runs) or 1.0
     return {
+        # Raw count: the evidence figure, unaffected by decay.
         "samples": len(runs),
-        "medianBubbles": ordered[len(ordered) // 2],
-        "meanBubbles": round(sum(runs) / len(runs), 2),
+        "medianBubbles": int(_weighted_percentile(
+            [(float(r), w) for r, w in runs], 0.5)),
+        "meanBubbles": round(sum(r * w for r, w in runs) / total_w, 2),
         # The share that matters for drafting: how often one reply is more than a
         # single message. Reported alongside the median because the median alone
         # hides it — a median of 1 is compatible both with "almost always one
         # message" and with "one message just over half the time", which call for
         # opposite drafting behavior.
-        "multiBubblePct": C.pct(sum(1 for r in runs if r > 1), len(runs)),
-        "maxBubbles": ordered[-1],
+        "multiBubblePct": C.pct(sum(w for r, w in runs if r > 1), total_w),
+        # The extreme is raw on purpose: "the most bubbles they have ever sent in
+        # one reply" is a fact about the corpus, and decaying it would report a
+        # smaller maximum than actually occurred.
+        "maxBubbles": max(r for r, _ in runs),
     }
 
 
@@ -633,9 +897,10 @@ def style(conn: sqlite3.Connection, rules: Rules,
     by_scene: dict[str, dict] = {}
     days: set[str] = set()
 
+    window, params = rules.window_clause("occurred_at")
     for r in conn.execute("SELECT clean_text, scene, occurred_at FROM messages "
                           "WHERE is_self=1 AND is_agent_sent=0 AND msg_type='text' "
-                          "AND is_pasted=0"):
+                          "AND is_pasted=0" + window, params):
         text = r["clean_text"]
         if not text or C.cp_len(text) < rules.min_reply or C.is_placeholder(text):
             continue
@@ -675,6 +940,10 @@ def style(conn: sqlite3.Connection, rules: Rules,
     result = {
         "rulesVersion": rules.version,
         "activeDays": len(days),
+        # What decay was applied. Published because a decayed number is not
+        # comparable to an undecayed one: a reader who cannot tell which they hold
+        # would compare across builds and see a behavior change that never happened.
+        "recency": rules.recency.describe(),
         "overall": {**_finish(overall), "bubbles": bubbles["overall"]},
         "byToneBand": finished_tone,
         "byScene": finished_scene,
@@ -737,6 +1006,20 @@ def vocabulary(conn: sqlite3.Connection, rules: Rules, top: int = 30) -> dict:
 
     ASCII technical terms are collected in both cases and filtered to plausible
     words, because base64 media ids and hex blobs are payloads, not jargon.
+
+    ## ★ Ranked by decayed day MASS, not by raw day count
+
+    Distinct days stop one busy thread from manufacturing a catchphrase, but they
+    do nothing about age: a finished project's jargon appeared on more days than
+    this quarter's does, so it outranks it forever and the published catchphrase
+    list slowly becomes an archive. Ranking sums each day's `Recency.weight()`
+    instead of counting days, so a term has to still be in use to stay near the
+    top.
+
+    `days` is reported unchanged next to the mass. That is the raw evidence
+    ("this really did appear on 40 days") and it is what makes the ranking
+    auditable; `lastSeen` is published alongside so a reader can tell a current
+    phrase from a fading one rather than having to trust the order.
     """
     stop = rules.pack.stopwords
     segmented = rules.pack.word_boundaries
@@ -745,9 +1028,10 @@ def vocabulary(conn: sqlite3.Connection, rules: Rules, top: int = 30) -> dict:
     term_count: dict[str, int] = defaultdict(int)
     ascii_days: dict[str, set[str]] = defaultdict(set)
 
+    window, params = rules.window_clause("occurred_at")
     for r in conn.execute("SELECT clean_text, occurred_at FROM messages "
                           "WHERE is_self=1 AND is_agent_sent=0 AND msg_type='text' "
-                          "AND is_pasted=0"):
+                          "AND is_pasted=0" + window, params):
         text, day = r["clean_text"], (r["occurred_at"] or "")[:10]
         if C.is_placeholder(text):
             continue
@@ -784,11 +1068,19 @@ def vocabulary(conn: sqlite3.Connection, rules: Rules, top: int = 30) -> dict:
                 continue
             ascii_days[t].add(day)
 
-    phrases = _collapse_overlaps(term_days, term_count, top, segmented=segmented)
-    jargon = [{"term": w, "days": len(d), "count": len(d)}
-              for w, d in sorted(ascii_days.items(), key=lambda x: -len(x[1]))[:top]]
+    # Decayed weight of a term's day set. Memoized per day inside `Recency`, so
+    # this stays one dictionary lookup per day even across ~200k candidate grams.
+    def mass(days: set[str]) -> float:
+        return sum(rules.recency.weight(d) for d in days)
+
+    phrases = _collapse_overlaps(term_days, term_count, top, segmented=segmented,
+                                 mass=mass)
+    jargon = [{"term": w, "days": len(d), "recentWeight": round(mass(d), 2),
+               "lastSeen": max(d) if d else "", "count": len(d)}
+              for w, d in sorted(ascii_days.items(), key=lambda x: -mass(x[1]))[:top]]
     return {"phrases": phrases, "jargon": jargon,
             "strategy": "words+bigrams" if segmented else "sliding-ngram",
+            "ranking": "decayed-day-mass" if rules.recency.enabled else "distinct-days",
             "stopwordsApplied": len(stop)}
 
 
@@ -864,7 +1156,8 @@ def _prefer_longest(days_map: dict[str, set[str]],
 
 
 def _collapse_overlaps(days_map: dict[str, set[str]], counts: dict[str, int],
-                       top: int, segmented: bool = False) -> list[dict]:
+                       top: int, segmented: bool = False,
+                       mass=None) -> list[dict]:
     """Keep one representative per overlapping term family.
 
     **Sliding n-grams** over-generate badly, in two distinct ways. Every prefix of
@@ -881,15 +1174,25 @@ def _collapse_overlaps(days_map: dict[str, set[str]], counts: dict[str, int],
     exclusively inside an already-kept bigram. Applying the character-overlap
     test to segmented text would be actively wrong: it would collapse "deploy"
     and "deployed" into one entry, and any two short words sharing letters.
+
+    `mass` (a `set[str] -> float` over day sets) supplies the recency-decayed
+    weight used for BOTH the ranking and the "is it more widespread than what we
+    already kept" test. Both, not just the ranking: mixing a decayed order with a
+    raw-count redundancy test would let a stale term evict the current one that
+    outranked it. Defaults to the plain day count, which reproduces pre-v6
+    behavior exactly.
     """
+    if mass is None:
+        def mass(days: set[str]) -> float:
+            return float(len(days))
     if not segmented:
         days_map = _prefer_longest(days_map)
-    ranked = sorted(days_map.items(), key=lambda x: (-len(x[1]), -len(x[0])))
+    ranked = sorted(days_map.items(), key=lambda x: (-mass(x[1]), -len(x[0])))
     kept: list[tuple[str, set[str]]] = []
     for term, days in ranked:
         redundant = False
         for other, odays in kept:
-            if len(days) > len(odays) * 1.15:
+            if mass(days) > mass(odays) * 1.15:
                 continue           # genuinely more widespread; keep it
             if segmented:
                 # Only drop a single word that is subsumed by a kept phrase.
@@ -906,12 +1209,20 @@ def _collapse_overlaps(days_map: dict[str, set[str]], counts: dict[str, int],
             kept.append((term, days))
         if len(kept) >= top:
             break
-    return [{"term": t, "days": len(d), "count": counts.get(t, len(d))}
+    return [{"term": t, "days": len(d), "recentWeight": round(mass(d), 2),
+             "lastSeen": max(d) if d else "", "count": counts.get(t, len(d))}
             for t, d in kept]
 
 
 def ask_kind_summary(conn: sqlite3.Connection) -> dict:
-    """Reply-rate and shape per incoming ask kind — decision evidence."""
+    """Reply-rate and shape per incoming ask kind — decision evidence.
+
+    ★ Deliberately RAW (undecayed), unlike `decide.mine`'s propensity table.
+    This is the "what is actually in the corpus" view, and it is what makes the
+    decayed numbers auditable: with only weighted figures published there would be
+    no way to check the weighting, and a reader comparing two builds could not
+    tell a behavior change from a decay artifact.
+    """
     out: dict[str, dict] = {}
     for r in conn.execute("""
             SELECT ask_kind,
