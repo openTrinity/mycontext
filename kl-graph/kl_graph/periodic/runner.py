@@ -17,17 +17,23 @@ from __future__ import annotations
 
 import time
 
-from kl_graph.config import cfg, DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS
+from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, cfg
 from kl_graph.ingest.checkpoint import IngestCheckpoint, run_if_needed
 from kl_graph.periodic.community_detection import (
-    detect_entity_communities_multi,
-    detect_fact_communities_multi,
+    _build_community_graph,
+    detect_communities_hierarchical,
     project_community_membership_edges,
-    store_multi_resolution_communities,
+    store_communities,
 )
 from kl_graph.periodic.entity_disambiguation import run_entity_disambiguation
 from kl_graph.periodic.entity_similarity import build_entity_similarity_edges
 from kl_graph.periodic.fact_similarity import build_fact_similarity_edges
+
+# Summarization hook (implemented by Task 2; import guarded for forward compat)
+try:
+    from kl_graph.periodic.community_summarizer import run_community_summarization
+except ImportError:
+    run_community_summarization = None  # type: ignore[assignment]
 from kl_graph.storage.base import KnowledgeStore, create_store
 from kl_graph.storage.qdrant_store import QdrantStore
 
@@ -47,14 +53,12 @@ def run_periodic_improvement(
     # Entity similarity params
     entity_emb_threshold: float = 0.65,
     entity_hybrid_threshold: float = 0.45,
-    # Community params
-    entity_resolution: float = 2.0,
-    fact_resolution: float = 1.5,
-    fact_min_cluster_size: int = 5,
     # Entity disambiguation
     run_disambiguation: bool = True,
     skip_llm_judge: bool = False,
     llm_max_budget: int = 500,
+    # Community summarization
+    run_summarization: bool = True,
 ):
     """Run the full periodic improvement phase.
 
@@ -67,6 +71,15 @@ def run_periodic_improvement(
             matching parameters) and skips if so.
     """
     t0 = time.time()
+    # Per-step wall-clock tracking: _lap() prints the elapsed time since the
+    # previous lap, so each improve step's cost is visible in build logs.
+    _lap_t = [t0]
+
+    def _lap() -> None:
+        now = time.time()
+        print(f"  Step time: {now - _lap_t[0]:.1f}s")
+        _lap_t[0] = now
+
     print("=" * 60)
     print("PERIODIC IMPROVEMENT PHASE")
     print("=" * 60)
@@ -111,6 +124,7 @@ def run_periodic_improvement(
                 store,
                 threshold=fact_sim_threshold,
             )
+        _lap()
 
         # Step 2: Entity ENTITY_SIMILAR edges
         print("\n[2/6] Building entity ENTITY_SIMILAR edges...")
@@ -138,6 +152,7 @@ def run_periodic_improvement(
                 embedding_threshold=entity_emb_threshold,
                 hybrid_threshold=entity_hybrid_threshold,
             )
+        _lap()
 
         # Step 3: Entity disambiguation (pinyin + hybrid + LLM judge → ENTITY_SIMILAR edges)
         n_disambig_edges = 0
@@ -169,54 +184,54 @@ def run_periodic_improvement(
                 )
         else:
             print("\n[3/6] Skipping entity disambiguation (disabled)")
+        _lap()
 
-        # Step 4-6: Community detection (entity Leiden + fact HDBSCAN + fact Leiden)
-        # These form one logical unit: they delete-and-rebuild all community
+        # Step 4: hierarchical community detection
+        # This forms one logical unit: it deletes-and-rebuilds all community
         # assignments, so either all are done or all must re-run.
-        community_params = {
-            "entity_resolution": entity_resolution,
-            "fact_resolution": fact_resolution,
-            "fact_min_cluster_size": fact_min_cluster_size,
-        }
+        community_params = {}
         if checkpoint and checkpoint.is_done(
             "improve.communities", params=community_params
         ):
-            print("\n[4-6/6] Community detection — skipping (already done)")
-            entity_communities_multi = {}
-            fact_topic_clusters = {}
-            fact_communities_multi = {}
+            print("\n[4/6] Community detection — skipping (already done)")
+            assignments = {}
         else:
-            # Step 4: Multi-resolution entity community detection
-            print("\n[4/6] Detecting entity communities (multi-resolution Leiden)...")
-            entity_communities_multi = detect_entity_communities_multi(store)
+            # Step 4: hierarchical community detection
+            print("\n[4/6] Building community graph for hierarchical Leiden...")
+            edges, label_map = _build_community_graph(store)
+            _lap()
 
-            # Step 5: Fact community detection (HDBSCAN)
-            print("\n[5/6] Detecting fact topic clusters (HDBSCAN)...")
-            # fact_topic_clusters = detect_fact_communities_hdbscan(
-            #     qdrant,
-            #     store,
-            #     min_cluster_size=fact_min_cluster_size,
-            # )
-            fact_topic_clusters = None
-
-            # Step 6: Multi-resolution fact community detection (Leiden)
-            print("\n[6/6] Detecting fact communities (multi-resolution Leiden)...")
-            fact_communities_multi = detect_fact_communities_multi(store)
+            print("\n[5/6] Running hierarchical Leiden...")
+            detection_result = detect_communities_hierarchical(edges, label_map)
+            _lap()
 
             # Store all community assignments
-            print("\n[Store] Saving community assignments...")
-            store_multi_resolution_communities(
-                store,
-                entity_communities_multi,
-                fact_communities_multi,
-                fact_topic_clusters,
-            )
+            print("\n[6/6] Storing community assignments...")
+            store_communities(store, detection_result)
+            _lap()
 
             # Project the (now authoritative) assignment columns into reified
             # Community nodes + COMM_MEMBER edges. Delete-and-rebuild, so it must run
             # after the columns are final.
             print("\n[Project] Materializing Community nodes + COMM_MEMBER edges...")
-            project_community_membership_edges(store)
+            project_community_membership_edges(store, detection_result)
+            _lap()
+
+            # Extract assignments for reporting
+            assignments = detection_result.get("assignments", {})
+
+            # Run community summarization if enabled
+            if run_summarization and run_community_summarization is not None:
+                print("\n[Summarize] Running community summarization...")
+                n_summaries = run_community_summarization(
+                    store,
+                    levels=None,
+                    min_members=10,
+                )
+                print(f"  Generated {n_summaries} community summaries")
+                _lap()
+            elif run_summarization:
+                print("\n[Summarize] Skipping (community_summarizer not available)")
 
             if checkpoint:
                 checkpoint.mark_done(
@@ -231,20 +246,11 @@ def run_periodic_improvement(
         print(f"  Fact FACT_SIMILAR edges: {n_fact_edges}")
         print(f"  Entity ENTITY_SIMILAR edges: {n_entity_edges}")
         print(f"  Disambiguation edges: {n_disambig_edges}")
-        if entity_communities_multi:
-            print("  Entity communities (multi-res):")
-            for level, mapping in entity_communities_multi.items():
+        if assignments:
+            print("  Hierarchical communities:")
+            for level, mapping in assignments.items():
                 n_comms = len(set(mapping.values())) if mapping else 0
-                print(f"    {level}: {n_comms} communities, {len(mapping)} entities")
-        if fact_topic_clusters:
-            print(
-                f"  Fact topic clusters (HDBSCAN): {len(set(fact_topic_clusters.values()))}"
-            )
-        if fact_communities_multi:
-            print("  Fact communities (multi-res):")
-            for level, mapping in fact_communities_multi.items():
-                n_comms = len(set(mapping.values())) if mapping else 0
-                print(f"    {level}: {n_comms} communities, {len(mapping)} facts")
+                print(f"    Level {level}: {n_comms} communities, {len(mapping)} nodes")
         print("=" * 60)
 
     finally:

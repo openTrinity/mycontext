@@ -18,7 +18,6 @@ from kl_graph.ingest.checkpoint import IngestCheckpoint
 from kl_graph.ingest.strategies import get_community_strategy, get_similarity_strategy
 from kl_graph.periodic.community_detection import (
     RESOLUTIONS,
-    project_community_membership_edges,
 )
 from kl_graph.storage.base import KnowledgeStore
 from kl_graph.storage.qdrant_store import QdrantStore
@@ -137,7 +136,7 @@ def _current_community_ids(
                 for level, cluster_id in zip(levels, row):
                     if cluster_id is not None:
                         touched.add(
-                            community_id_from(node_type, level, int(cluster_id))
+                            community_id_from(level, int(cluster_id))
                         )
     return touched
 
@@ -247,7 +246,6 @@ def run_incremental_improvement(
             list(targets.fact_ids),
             entity_resolutions=RESOLUTIONS,
             fact_resolutions=RESOLUTIONS,
-            structural_cache=structural_cache,
         )
         changed = set(community_changes)
         changed_keys = set(getattr(community_changes, "community_keys", set()))
@@ -277,24 +275,17 @@ def run_incremental_improvement(
                 except (TypeError, ValueError):
                     continue
 
-    # Step 2b: Projection — rebuild COMM_MEMBER edges scoped to the changed
-    # communities, then invalidate stale summaries.
+    # Step 2b: Summary invalidation. Incremental community *assignment* and the
+    # scoped COMM_MEMBER projection are deferred to the next full improve
+    # (hierarchical Leiden rebuilds the whole projection); the incremental
+    # strategy is a guarded no-op, so ``changed`` stays empty here. We still
+    # invalidate the summaries of the communities the touched nodes already
+    # belong to, so a stale report is not served for a community whose members
+    # changed.
     projection_done = checkpoint is not None and checkpoint.is_done(
         "improve.incremental_projection", params=params
     )
     if not projection_done:
-        # Exact assignment keys keep projection reads and writes scoped;
-        # an empty change set intentionally performs no projection work.
-        if changed_keys:
-            project_community_membership_edges(
-                store,
-                community_ids=changed,
-                community_keys=changed_keys,
-            )
-        elif changed:
-            # Compatibility path for strategies that return UUIDs but not
-            # reversible assignment keys. An empty change set is a no-op.
-            project_community_membership_edges(store, community_ids=changed)
         changed.update(_current_community_ids(store, targets))
         stale_count = _invalidate_summaries(
             store,

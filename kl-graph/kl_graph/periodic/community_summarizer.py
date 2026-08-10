@@ -1,65 +1,85 @@
-"""LLM-based community summarization.
+"""LLM-based community summarization over mixed (entity + fact) communities.
 
-Generates short summaries for each community at each resolution level,
+Generates GraphRAG-style reports for each community at each resolution level,
 enabling agents to navigate the hierarchy without reading all members.
 
-Each summary includes:
-  - 1-2 sentence description of the community's theme/scope
-  - 3-5 keyword tags for quick matching
+Each report includes:
+  - title: short specific community name
+  - summary: executive summary of structure and theme
+  - rating (0-10) + rating_explanation: impact/importance severity
+  - findings: 5-10 key insights with {summary, explanation}
+  - tags: 3-5 keywords for quick matching
 
 Model: qwen3.7-plus via litellm (Anthropic mode)
-Batching: 10 communities per call to minimize API overhead
+Concurrency: semaphore-bounded async calls (one per community)
+Token budget: 8000 input / 2000 output (GraphRAG parity)
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 
-from kl_graph.config import cfg, DATA_DIR
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
-from kl_graph.periodic.community_detection import RESOLUTIONS
+from kl_graph.config import DATA_DIR, cfg
+from kl_graph.ingest.chunker import num_tokens_from_string
+from kl_graph.models.types import community_id_from
 from kl_graph.storage.sqlite_store import SQLiteStore
+from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 
+# Token budgets [A human 2026-08-09: raised 8000 → 8192]
+MAX_INPUT_LENGTH = 8192
+MAX_REPORT_LENGTH = 2000
+
+# Tokenization is not additive across a concatenation boundary: the skeleton
+# is measured with members_text="", then the packed members are appended, and
+# the join can tokenize into marginally more tokens than the two parts sum to.
+# Reserve a few tokens so the final hard assertion never trips by 1-2 tokens.
+TOKENIZATION_MARGIN = 8
+
 
 @dataclass
-class CommunitySummary:
-    """Summary for one community at one level."""
-    level: str           # L0, L1, L2, L3
+class CommunityReport:
+    """Report for one community at one level."""
+
+    level: int  # 0, 1, 2, 3, ...
     community_id: int
-    node_type: str       # "entity" or "fact"
     member_count: int
-    summary: str         # 1-2 sentence description
-    tags: list[str]      # 3-5 keyword tags
+    entity_count: int
+    fact_count: int
+    title: str
+    summary: str
+    rating: float
+    rating_explanation: str
+    findings: list[dict]  # [{summary, explanation}, ...]
+    tags: list[str]
     top_members: list[str]  # top-N member names/texts used for generation
 
 
-SYSTEM_PROMPT = """You are a knowledge graph analyst. Given a list of community members (entities or facts from a workplace chat knowledge graph), write a brief summary describing the community's theme.
+def enumerate_community_level_columns(sqlite: SQLiteStore) -> list[int]:
+    """Find all community_Li columns present in entities/facts tables.
 
-RULES:
-- Write 1-2 sentences in Chinese describing what this group is about
-- Extract 3-5 short keyword tags (can be Chinese or English, lowercase)
-- Be specific: "InkFlow团队的部署基础设施和CLI工具开发" is better than "技术开发"
-- If members are entities (people/systems/projects), describe the team/project/domain they represent
-- If members are facts, describe the topic/theme they discuss
-- Tags should be specific enough to distinguish this community from others
-
-Output JSON: {"summary": "...", "tags": ["tag1", "tag2", ...]}"""
-
-
-BATCH_PROMPT_TEMPLATE = """Summarize each of the following {count} communities.
-
-{communities_text}
-
-Output JSON array with exactly {count} elements:
-[{{"id": 0, "summary": "...", "tags": ["...", ...]}}, ...]
-
-Each summary should be 1-2 sentences in Chinese. Each tags list should have 3-5 items."""
+    Returns sorted list of level integers (e.g., [0, 1, 2, 3]).
+    """
+    cols: set[int] = set()
+    for table in ("entities", "facts"):
+        rows = sqlite.sql_conn.execute(
+            f"PRAGMA table_info({table})"
+        ).fetchall()
+        for row in rows:
+            col_name = row[1]
+            if col_name.startswith("community_L"):
+                try:
+                    level = int(col_name[len("community_L") :])
+                    cols.add(level)
+                except ValueError:
+                    pass
+    return sorted(cols)
 
 
 def _precompute_entity_degrees(sqlite: SQLiteStore) -> dict[str, int]:
@@ -82,81 +102,286 @@ def _precompute_fact_degrees(sqlite: SQLiteStore) -> dict[str, int]:
     return dict(degrees)
 
 
-def _get_all_entity_communities(
+def _get_mixed_communities(
     sqlite: SQLiteStore,
-    level: str,
-) -> dict[int, list[tuple[str, str]]]:
-    """Get all entities grouped by community at a given level.
+    level: int,
+    entity_degrees: dict[str, int],
+    fact_degrees: dict[str, int],
+) -> dict[int, dict]:
+    """Get all entities + facts grouped by community at a given level.
 
-    Returns: {community_id: [(entity_id, name), ...]}
+    Returns: {
+        community_id: {
+            "entities": [(entity_id, name, description, degree), ...],
+            "facts": [(fact_id, text, confidence, degree), ...],
+        }
+    }
     """
-    col = f"community_{level}"
+    col = f"community_L{level}"
+    result: dict[int, dict] = defaultdict(lambda: {"entities": [], "facts": []})
+
+    # Entities
     rows = sqlite.sql_conn.execute(f"""
-        SELECT id, name, {col} FROM entities WHERE {col} IS NOT NULL
+        SELECT id, name, description, {col} FROM entities WHERE {col} IS NOT NULL
     """).fetchall()
-    result = defaultdict(list)
-    for eid, name, cid in rows:
-        result[cid].append((eid, name))
+    for eid, name, desc, cid in rows:
+        degree = entity_degrees.get(eid, 0)
+        result[cid]["entities"].append((eid, name, desc or "", degree))
+
+    # Facts
+    rows = sqlite.sql_conn.execute(f"""
+        SELECT id, text, confidence, {col} FROM facts WHERE {col} IS NOT NULL
+    """).fetchall()
+    for fid, text, conf, cid in rows:
+        degree = fact_degrees.get(fid, 0)
+        result[cid]["facts"].append((fid, text, conf or 0.0, degree))
+
     return result
 
 
-def _get_all_fact_communities(
-    sqlite: SQLiteStore,
-    level: str,
-) -> dict[int, list[tuple[str, str]]]:
-    """Get all facts grouped by community at a given level.
+SYSTEM_PROMPT = """你是一位知识图谱分析师。给定一个社区的所有成员（实体和事实），生成一份结构化的社区报告。
 
-    Returns: {community_id: [(fact_id, text), ...]}
+规则：
+- 使用中文撰写
+- title: 简短具体的社区名称（包含代表性实体名称）
+- summary: 社区结构和主题的执行摘要（2-3句）
+- rating: 0-10的浮点数，表示影响/重要性程度
+- rating_explanation: 一句话解释评分理由
+- findings: 5-10个关键发现，每个包含summary和explanation
+- tags: 3-5个关键词（可中英文混合，小写）
+- 对于标记为"待验证"的事实，在报告中应有所保留而非断言
+
+输出JSON格式：
+{
+  "title": "...",
+  "summary": "...",
+  "rating": 7.5,
+  "rating_explanation": "...",
+  "findings": [
+    {"summary": "...", "explanation": "..."},
+    ...
+  ],
+  "tags": ["tag1", "tag2", ...]
+}"""
+
+
+COMMUNITY_PROMPT_TEMPLATE = """分析以下社区的成员，生成结构化报告。
+
+社区层级: L{level}
+社区ID: {community_id}
+成员数: {member_count} (实体: {entity_count}, 事实: {fact_count})
+
+成员列表（按重要性排序）:
+{members_text}
+
+请生成符合要求的JSON报告。"""
+
+
+def _render_member_context(
+    entities: list[tuple[str, str, str, int]],
+    facts: list[tuple[str, str, float, int]],
+) -> str:
+    """Render full ranked member context for prompt assembly.
+
+    Entities ranked by MENTIONS degree, facts by ABOUT degree (confidence tie-break).
+    Returns concatenated text for token packing.
     """
-    col = f"community_{level}"
-    rows = sqlite.sql_conn.execute(f"""
-        SELECT id, text, {col} FROM facts WHERE {col} IS NOT NULL
-    """).fetchall()
-    result = defaultdict(list)
-    for fid, text, cid in rows:
-        result[cid].append((fid, text))
-    return result
+    parts: list[str] = []
+
+    # Sort entities by degree (desc)
+    sorted_entities = sorted(entities, key=lambda x: x[3], reverse=True)
+    for eid, name, desc, degree in sorted_entities:
+        parts.append(f"[实体] {name} | {desc} | 提及度: {degree}")
+
+    # Sort facts by degree (desc), then confidence (desc)
+    sorted_facts = sorted(facts, key=lambda x: (x[3], x[2]), reverse=True)
+    for fid, text, conf, degree in sorted_facts:
+        conf_marker = "待验证" if conf < 0.7 else "已验证"
+        parts.append(f"[事实] {text} | {conf_marker} | 关联度: {degree}")
+
+    return "\n".join(parts)
 
 
-def _get_community_ids(
-    sqlite: SQLiteStore,
-    level: str,
-    node_type: str,
-) -> list[tuple[int, int]]:
-    """Get all (community_id, member_count) pairs for a given level+type."""
-    col = f"community_{level}"
-    table = "entities" if node_type == "entity" else "facts"
-    rows = sqlite.sql_conn.execute(f"""
-        SELECT {col}, COUNT(*) as cnt
-        FROM {table}
-        WHERE {col} IS NOT NULL
-        GROUP BY {col}
-        ORDER BY cnt DESC
-    """).fetchall()
-    return [(r[0], r[1]) for r in rows]
+def _token_pack(text: str, max_tokens: int) -> str:
+    """Pack text to fit within max_tokens by dropping whole lines from the end.
+
+    Never slices mid-line (AGENTS.md: no [:xx] on stored/embedded/indexed paths).
+    Lines are dropped lowest-ranked (end of list) first.
+    """
+    if num_tokens_from_string(text) <= max_tokens:
+        return text
+
+    lines = text.split("\n")
+    # Drop lines from the end until we fit
+    while lines and num_tokens_from_string("\n".join(lines)) > max_tokens:
+        lines.pop()
+
+    return "\n".join(lines)
 
 
-async def _summarize_batch(
+def _build_ranked_context(
+    entities: list[tuple[str, str, str, int]],
+    facts: list[tuple[str, str, float, int]],
+    max_tokens: int,
+) -> tuple[str, list[str]]:
+    """Build token-packed member context using combined degree ranking.
+
+    Merges entities and facts into ONE deterministic priority order ranked
+    by degree (descending). Confidence only tie-breaks among facts.
+    Drops whole lowest-ranked items from the combined tail to fit max_tokens.
+
+    Args:
+        entities: [(entity_id, name, description, degree), ...]
+        facts: [(fact_id, text, confidence, degree), ...]
+        max_tokens: Token budget for the packed output.
+
+    Returns:
+        (packed_text, selected_entries) where selected_entries are
+        whole member strings suitable for storage in top_members (no slicing).
+    """
+    # Build combined ranked list: (sort_key, rendered_line, storage_entry)
+    # sort_key = (-degree, type_order, -confidence_if_fact, id)
+    # type_order: 0 = entity, 1 = fact (entities first at same degree)
+    ranked: list[tuple[tuple, str, str]] = []
+
+    for eid, name, desc, degree in entities:
+        rendered = f"[实体] {name} | {desc} | 提及度: {degree}"
+        ranked.append(((-degree, 0, 0.0, eid), rendered, name))
+
+    for fid, text, conf, degree in facts:
+        conf_marker = "待验证" if conf < 0.7 else "已验证"
+        rendered = f"[事实] {text} | {conf_marker} | 关联度: {degree}"
+        ranked.append(((-degree, 1, -conf, fid), rendered, text))
+
+    # Sort: most-important first
+    ranked.sort(key=lambda x: x[0])
+
+    # Pack lines and entries together by appending — no [:xx] on stored path
+    # Each item that fits the budget is appended; items that don't fit are skipped.
+    # This ensures selected_entries is built incrementally (not sliced from a larger list).
+    kept_lines: list[str] = []
+    kept_entries: list[str] = []
+
+    for _sort_key, rendered, entry in ranked:
+        # Check if adding this line would exceed the budget
+        candidate_lines = kept_lines + [rendered]
+        candidate_text = "\n".join(candidate_lines)
+        if num_tokens_from_string(candidate_text) > max_tokens:
+            break
+        kept_lines.append(rendered)
+        kept_entries.append(entry)
+
+    return "\n".join(kept_lines), kept_entries
+
+
+def _validate_report_response(parsed: dict) -> None:
+    """Validate parsed report response strictly. Raises ValueError on any issue.
+
+    Requirements:
+    - title: non-empty string
+    - summary: non-empty string
+    - rating: finite non-bool number in [0, 10]
+    - rating_explanation: non-empty string
+    - findings: 5-10 items, each with string summary and explanation
+    - tags: 3-5 non-empty strings
+    """
+    required = {"title", "summary", "rating", "rating_explanation", "findings", "tags"}
+    if not isinstance(parsed, dict):
+        raise ValueError("Response must be a JSON object")
+    missing = required - set(parsed.keys())
+    if missing:
+        raise ValueError(f"Missing required fields: {missing}")
+
+    # title: non-empty string
+    if not isinstance(parsed["title"], str) or not parsed["title"].strip():
+        raise ValueError("title must be a non-empty string")
+
+    # summary: non-empty string
+    if not isinstance(parsed["summary"], str) or not parsed["summary"].strip():
+        raise ValueError("summary must be a non-empty string")
+
+    # rating: finite non-bool number in [0, 10]
+    rating = parsed["rating"]
+    if isinstance(rating, bool) or not isinstance(rating, (int, float)):
+        raise ValueError("rating must be a number (not bool)")
+    if math.isnan(rating) or math.isinf(rating):
+        raise ValueError("rating must be finite")
+    if not (0 <= rating <= 10):
+        raise ValueError(f"rating must be in [0, 10], got {rating}")
+
+    # rating_explanation: non-empty string
+    if not isinstance(parsed["rating_explanation"], str) or not parsed["rating_explanation"].strip():
+        raise ValueError("rating_explanation must be a non-empty string")
+
+    # findings: 5-10 items, each with string summary and explanation
+    findings = parsed["findings"]
+    if not isinstance(findings, list):
+        raise ValueError("findings must be a list")
+    if not (5 <= len(findings) <= 10):
+        raise ValueError(f"findings must have 5-10 items, got {len(findings)}")
+    for i, f in enumerate(findings):
+        if not isinstance(f, dict):
+            raise ValueError(f"finding[{i}] must be a dict")
+        if "summary" not in f or "explanation" not in f:
+            raise ValueError(f"finding[{i}] must have summary and explanation")
+        if not isinstance(f["summary"], str) or not f["summary"].strip():
+            raise ValueError(f"finding[{i}].summary must be a non-empty string")
+        if not isinstance(f["explanation"], str) or not f["explanation"].strip():
+            raise ValueError(f"finding[{i}].explanation must be a non-empty string")
+
+    # tags: 3-5 non-empty strings
+    tags = parsed["tags"]
+    if not isinstance(tags, list):
+        raise ValueError("tags must be a list")
+    if not (3 <= len(tags) <= 5):
+        raise ValueError(f"tags must have 3-5 items, got {len(tags)}")
+    for i, t in enumerate(tags):
+        if not isinstance(t, str) or not t.strip():
+            raise ValueError(f"tag[{i}] must be a non-empty string")
+
+
+async def _summarize_community(
     api_key: str | None,
-    communities: list[dict],
+    level: int,
+    community_id: int,
+    entities: list[tuple[str, str, str, int]],
+    facts: list[tuple[str, str, float, int]],
     semaphore: asyncio.Semaphore,
     stats: dict | None = None,
-    max_retries: int = 3,
-) -> list[dict]:
-    """Summarize a batch of communities in one LLM call."""
-    # Format communities for prompt
-    parts = []
-    for i, comm in enumerate(communities):
-        members_str = ", ".join(comm["top_members"][:10])
-        parts.append(
-            f"Community {i} ({comm['node_type']}, {comm['member_count']} members, "
-            f"level {comm['level']}):\n  Members: {members_str}"
-        )
-    communities_text = "\n\n".join(parts)
+    max_retries: int = 2,
+) -> tuple[dict, list[str]] | None:
+    """Summarize one community with one LLM call.
 
-    prompt = BATCH_PROMPT_TEMPLATE.format(
-        count=len(communities),
-        communities_text=communities_text,
+    Returns (parsed_report, selected_entries) or None if malformed after retries.
+    """
+    # Compute fixed overhead (system prompt + template without members)
+    overhead_template = COMMUNITY_PROMPT_TEMPLATE.format(
+        level=level,
+        community_id=community_id,
+        member_count=len(entities) + len(facts),
+        entity_count=len(entities),
+        fact_count=len(facts),
+        members_text="",
+    )
+    fixed_overhead = num_tokens_from_string(SYSTEM_PROMPT) + num_tokens_from_string(overhead_template)
+    member_budget = MAX_INPUT_LENGTH - fixed_overhead - TOKENIZATION_MARGIN
+
+    # Build ranked context using combined degree ranking within member budget
+    packed_context, selected_entries = _build_ranked_context(entities, facts, member_budget)
+
+    prompt = COMMUNITY_PROMPT_TEMPLATE.format(
+        level=level,
+        community_id=community_id,
+        member_count=len(entities) + len(facts),
+        entity_count=len(entities),
+        fact_count=len(facts),
+        members_text=packed_context,
+    )
+
+    # Assert final messages fit MAX_INPUT_LENGTH
+    total_tokens = num_tokens_from_string(SYSTEM_PROMPT) + num_tokens_from_string(prompt)
+    assert total_tokens <= MAX_INPUT_LENGTH, (
+        f"Message exceeds MAX_INPUT_LENGTH: {total_tokens} > {MAX_INPUT_LENGTH}"
     )
 
     for attempt in range(max_retries):
@@ -174,7 +399,7 @@ async def _summarize_batch(
                     api_base=cfg.services.llm_flash.base_url or "",
                     api_key=api_key,
                     temperature=0.3,
-                    max_tokens=2000,
+                    max_tokens=MAX_REPORT_LENGTH,
                     response_format={"type": "json_object"},
                     timeout=float(cfg.services.llm_flash.timeout),
                 )
@@ -205,102 +430,86 @@ async def _summarize_batch(
             if text.startswith("```"):
                 text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-            # Handle both array and object responses
             parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                # Sometimes wraps in {"communities": [...]} or similar
-                for key in ("communities", "results", "summaries"):
-                    if key in parsed and isinstance(parsed[key], list):
-                        parsed = parsed[key]
-                        break
-                else:
-                    # Single community response for batch of 1
-                    parsed = [parsed]
-
-            results = []
-            for i, comm in enumerate(communities):
-                if i < len(parsed):
-                    item = parsed[i]
-                    summary = item.get("summary", "")
-                    tags = item.get("tags", [])
-                    if isinstance(tags, str):
-                        tags = [t.strip() for t in tags.split(",")]
-                    results.append({"summary": summary, "tags": tags[:5]})
-                else:
-                    results.append({"summary": "", "tags": []})
-
-            return results
+            _validate_report_response(parsed)
+            return parsed, selected_entries
 
         except Exception as e:  # noqa: BLE001
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
-                print(f"  Warning: batch summarization failed after {max_retries} attempts: {e}")
-                return [{"summary": "", "tags": []} for _ in communities]
+                print(
+                    f"  Warning: community L{level}:{community_id} failed after "
+                    f"{max_retries} attempts: {e}"
+                )
+                return None
 
 
-async def generate_community_summaries(
+async def generate_community_reports(
     sqlite: SQLiteStore,
-    concurrency: int = 20,
-    batch_size: int = 10,
-    min_members: int = 3,
-) -> list[CommunitySummary]:
-    """Generate LLM summaries for all communities at all levels.
+    levels: list[int] | None = None,
+    min_members: int = 10,
+    max_concurrent: int = 8,
+) -> tuple[list[CommunityReport], dict]:
+    """Generate LLM reports for all communities at specified levels.
 
     Args:
         sqlite: SQLite store with community assignments
-        concurrency: Max concurrent LLM calls
-        batch_size: Communities per LLM call
-        min_members: Minimum community size to summarize
+        levels: Which levels to summarize (None = all present)
+        min_members: Minimum mixed member count to summarize
+        max_concurrent: Max concurrent LLM calls
 
     Returns:
-        List of CommunitySummary objects
+        (reports, llm_stats) tuple
     """
     api_key = provider_api_key(cfg.services.llm_flash.provider)
-    semaphore = asyncio.Semaphore(concurrency)
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    # Enumerate present level columns
+    if levels is None:
+        levels = enumerate_community_level_columns(sqlite)
+
+    if not levels:
+        print("  No community_L* columns found; skipping summarization.")
+        return [], {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_cost_usd": 0.0}
 
     # Pre-compute degrees (one pass each)
     print("  Pre-computing degrees...")
     entity_degrees = _precompute_entity_degrees(sqlite)
     fact_degrees = _precompute_fact_degrees(sqlite)
 
+    # Native authority [A human 2026-08-09]: the projection materializes one
+    # Community row per genuine Leiden cluster. Column-derived groups whose id
+    # has no Community row are repeated-final-fill copies (identical member
+    # sets to their origin cluster) and must not be summarized.
+    native_ids = {
+        r[0] for r in sqlite.sql_conn.execute("SELECT id FROM communities").fetchall()
+    }
+
     # Collect all communities to summarize
-    all_communities = []
+    all_communities: list[dict] = []
 
-    for level in RESOLUTIONS:
-        # Entities
-        entity_comms = _get_all_entity_communities(sqlite, level)
-        for cid, members in entity_comms.items():
-            if len(members) < min_members:
+    for level in levels:
+        communities = _get_mixed_communities(sqlite, level, entity_degrees, fact_degrees)
+        for cid, members in communities.items():
+            if community_id_from(f"L{level}", cid) not in native_ids:
                 continue
-            # Sort by pre-computed degree, take top 10
-            sorted_members = sorted(members, key=lambda x: entity_degrees.get(x[0], 0), reverse=True)
-            top_names = [name for _, name in sorted_members[:10]]
+            n_entities = len(members["entities"])
+            n_facts = len(members["facts"])
+            total = n_entities + n_facts
+            if total < min_members:
+                continue
             all_communities.append({
                 "level": level,
                 "community_id": cid,
-                "node_type": "entity",
-                "member_count": len(members),
-                "top_members": top_names,
-            })
-
-        # Facts
-        fact_comms = _get_all_fact_communities(sqlite, level)
-        for cid, members in fact_comms.items():
-            if len(members) < min_members:
-                continue
-            sorted_members = sorted(members, key=lambda x: fact_degrees.get(x[0], 0), reverse=True)
-            top_texts = [text[:100] for _, text in sorted_members[:10]]
-            all_communities.append({
-                "level": level,
-                "community_id": cid,
-                "node_type": "fact",
-                "member_count": len(members),
-                "top_members": top_texts,
+                "entities": members["entities"],
+                "facts": members["facts"],
+                "entity_count": n_entities,
+                "fact_count": n_facts,
+                "member_count": total,
             })
 
     print(f"  Communities to summarize: {len(all_communities)}")
-    print(f"  Batches: {(len(all_communities) + batch_size - 1) // batch_size}")
 
     # LLM usage tracking
     llm_stats = {
@@ -311,143 +520,177 @@ async def generate_community_summaries(
         "estimated_cost_usd": 0.0,
     }
 
-    # Process in batches
-    summaries = []
-
+    # Process with semaphore-bounded concurrency
+    reports: list[CommunityReport] = []
     t0 = time.time()
-    # Process batches with progress tracking using semaphore-bounded gather
-    batch_count = (len(all_communities) + batch_size - 1) // batch_size
-    done_count = 0
 
-    async def _process_batch(batch_idx):
-        nonlocal done_count
-        start = batch_idx * batch_size
-        batch = all_communities[start:start + batch_size]
-        result = await _summarize_batch(api_key, batch, semaphore, stats=llm_stats)
-        done_count += 1
-        if done_count % 20 == 0 or done_count == batch_count:
-            print(f"  Progress: {done_count}/{batch_count} batches "
-                  f"({time.time() - t0:.0f}s)", flush=True)
-        return batch_idx, result
+    async def _process_community(comm: dict) -> CommunityReport | None:
+        # One bad community (packing assertion, unexpected LLM shape, ...) must
+        # skip, never kill the whole run — mirrors the retry/skip policy for
+        # malformed responses.
+        try:
+            summarize_result = await _summarize_community(
+                api_key,
+                comm["level"],
+                comm["community_id"],
+                comm["entities"],
+                comm["facts"],
+                semaphore,
+                stats=llm_stats,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"  Warning: community L{comm['level']}:{comm['community_id']} "
+                f"skipped: {e}"
+            )
+            return None
+        if summarize_result is None:
+            return None
+        result, selected_entries = summarize_result
 
-    tasks = [_process_batch(i) for i in range(batch_count)]
-    batch_results_list = await asyncio.gather(*tasks)
+        return CommunityReport(
+            level=comm["level"],
+            community_id=comm["community_id"],
+            member_count=comm["member_count"],
+            entity_count=comm["entity_count"],
+            fact_count=comm["fact_count"],
+            title=result["title"],
+            summary=result["summary"],
+            rating=result["rating"],
+            rating_explanation=result["rating_explanation"],
+            findings=result["findings"],
+            tags=result["tags"],
+            top_members=selected_entries,
+        )
 
-    # Reassemble in order
-    batch_results_list = sorted(batch_results_list, key=lambda x: x[0])
-    for batch_idx, batch_results in batch_results_list:
-        start = batch_idx * batch_size
-        for j, result in enumerate(batch_results):
-            comm = all_communities[start + j]
-            summaries.append(CommunitySummary(
-                level=comm["level"],
-                community_id=comm["community_id"],
-                node_type=comm["node_type"],
-                member_count=comm["member_count"],
-                summary=result["summary"],
-                tags=result["tags"],
-                top_members=comm["top_members"],
-            ))
+    tasks = [_process_community(comm) for comm in all_communities]
+    results = await asyncio.gather(*tasks)
+
+    # Filter out None (failed) results
+    reports = [r for r in results if r is not None]
 
     elapsed = time.time() - t0
-    n_with_summary = sum(1 for s in summaries if s.summary)
-    print(f"  Generated {n_with_summary}/{len(summaries)} summaries in {elapsed:.1f}s")
+    print(f"  Generated {len(reports)}/{len(all_communities)} reports in {elapsed:.1f}s")
     print(f"  LLM calls: {llm_stats['llm_calls']}")
     print("  ── LLM Token Usage ──")
     print(f"  Prompt tokens:     {llm_stats['prompt_tokens']:,}")
     print(f"  Completion tokens: {llm_stats['completion_tokens']:,}")
-    print(f"  Total tokens:       {llm_stats['total_tokens']:,}")
+    print(f"  Total tokens:      {llm_stats['total_tokens']:,}")
     if llm_stats["llm_calls"] > 0:
         avg_pt = llm_stats["prompt_tokens"] / llm_stats["llm_calls"]
         avg_ct = llm_stats["completion_tokens"] / llm_stats["llm_calls"]
         print(f"  Avg tokens/call:   {avg_pt:.0f} in + {avg_ct:.0f} out")
     print(f"  Estimated cost:    ${llm_stats['estimated_cost_usd']:.4f}")
 
-    return summaries, llm_stats
+    return reports, llm_stats
 
 
-def store_community_summaries(sqlite: SQLiteStore, summaries: list[CommunitySummary]):
-    """Store community summaries in SQLite.
+def store_community_reports(sqlite: SQLiteStore, reports: list[CommunityReport]) -> int:
+    """Store community reports in SQLite.
 
-    Creates/replaces the community_summaries table.
+    Creates/replaces the community_summaries table with new schema.
+    Returns count of rows stored.
     """
+    sqlite.sql_conn.execute("DROP TABLE IF EXISTS community_summaries")
     sqlite.sql_conn.execute("""
-        CREATE TABLE IF NOT EXISTS community_summaries (
-            level TEXT NOT NULL,
+        CREATE TABLE community_summaries (
+            level INTEGER NOT NULL,
             community_id INTEGER NOT NULL,
-            node_type TEXT NOT NULL,
             member_count INTEGER NOT NULL,
+            entity_count INTEGER NOT NULL,
+            fact_count INTEGER NOT NULL,
+            title TEXT NOT NULL,
             summary TEXT NOT NULL,
+            rating REAL NOT NULL,
+            rating_explanation TEXT NOT NULL,
+            findings TEXT NOT NULL,
             tags TEXT NOT NULL,
             top_members TEXT NOT NULL,
-            PRIMARY KEY (level, community_id, node_type)
+            PRIMARY KEY (level, community_id)
         )
     """)
-    sqlite.sql_conn.execute("DELETE FROM community_summaries")
     sqlite.sql_conn.commit()
 
     rows = []
-    for s in summaries:
-        if s.summary:  # Only store non-empty summaries
-            rows.append((
-                s.level,
-                s.community_id,
-                s.node_type,
-                s.member_count,
-                s.summary,
-                json.dumps(s.tags, ensure_ascii=False),
-                json.dumps(s.top_members[:10], ensure_ascii=False),
-            ))
+    for r in reports:
+        rows.append((
+            r.level,
+            r.community_id,
+            r.member_count,
+            r.entity_count,
+            r.fact_count,
+            r.title,
+            r.summary,
+            r.rating,
+            r.rating_explanation,
+            json.dumps(r.findings, ensure_ascii=False),
+            json.dumps(r.tags, ensure_ascii=False),
+            json.dumps(r.top_members, ensure_ascii=False),
+        ))
 
     sqlite.sql_conn.executemany(
         """INSERT OR REPLACE INTO community_summaries
-           (level, community_id, node_type, member_count, summary, tags, top_members)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (level, community_id, member_count, entity_count, fact_count,
+            title, summary, rating, rating_explanation, findings, tags, top_members)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     sqlite.sql_conn.commit()
-    print(f"  Stored {len(rows)} community summaries")
+    print(f"  Stored {len(rows)} community reports")
 
     # Print stats per level
-    for level in RESOLUTIONS:
-        n_entity = sum(1 for s in summaries if s.level == level and s.node_type == "entity" and s.summary)
-        n_fact = sum(1 for s in summaries if s.level == level and s.node_type == "fact" and s.summary)
-        print(f"    {level}: {n_entity} entity, {n_fact} fact summaries")
+    levels_seen = sorted(set(r.level for r in reports))
+    for level in levels_seen:
+        n_reports = sum(1 for r in reports if r.level == level)
+        print(f"    L{level}: {n_reports} reports")
+
+    return len(rows)
 
 
-async def run_community_summarization(
-    sqlite_path=SQLITE_PATH,
-    concurrency: int = 10,
-    batch_size: int = 10,
-    min_members: int = 3,
-):
-    """Main entry point for community summarization."""
+def run_community_summarization(
+    sqlite: SQLiteStore,
+    *,
+    levels: list[int] | None = None,
+    min_members: int = 10,
+    max_concurrent: int = 8,
+) -> int:
+    """Main entry point for community summarization (sync wrapper).
+
+    Matches the pinned call contract from runner.py:
+    run_community_summarization(store, levels=None, min_members=10) -> int
+
+    Args:
+        sqlite: SQLite store with community assignments
+        levels: Which levels to summarize (None = all present)
+        min_members: Minimum mixed member count to summarize
+        max_concurrent: Max concurrent LLM calls
+
+    Returns:
+        Count of reports stored
+    """
     t0 = time.time()
     print("\n" + "=" * 60)
     print("COMMUNITY SUMMARIZATION")
     print("=" * 60)
 
-    sqlite = SQLiteStore(sqlite_path)
-    try:
-        summaries, llm_stats = await generate_community_summaries(
+    reports, llm_stats = asyncio.run(
+        generate_community_reports(
             sqlite,
-            concurrency=concurrency,
-            batch_size=batch_size,
+            levels=levels,
             min_members=min_members,
+            max_concurrent=max_concurrent,
         )
-        store_community_summaries(sqlite, summaries)
+    )
+    n_stored = store_community_reports(sqlite, reports)
 
-        elapsed = time.time() - t0
-        print("\n  ┌─ Community Summarization Cost Summary ──────┐")
-        print(f"  │  LLM calls:          {llm_stats['llm_calls']:,}")
-        print(f"  │  Prompt tokens:      {llm_stats['prompt_tokens']:,}")
-        print(f"  │  Completion tokens:  {llm_stats['completion_tokens']:,}")
-        print(f"  │  Total tokens:        {llm_stats['total_tokens']:,}")
-        print(f"  │  Estimated cost:     ${llm_stats['estimated_cost_usd']:.4f}")
-        print(f"  │  Time:               {elapsed:.1f}s ({elapsed/60:.1f} min)")
-        print("  └────────────────────────────────────────────┘")
-    finally:
-        sqlite.close()
+    elapsed = time.time() - t0
+    print("\n  ┌─ Community Summarization Cost Summary ──────┐")
+    print(f"  │  LLM calls:          {llm_stats['llm_calls']:,}")
+    print(f"  │  Prompt tokens:      {llm_stats['prompt_tokens']:,}")
+    print(f"  │  Completion tokens:  {llm_stats['completion_tokens']:,}")
+    print(f"  │  Total tokens:       {llm_stats['total_tokens']:,}")
+    print(f"  │  Estimated cost:     ${llm_stats['estimated_cost_usd']:.4f}")
+    print(f"  │  Time:               {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+    print("  └────────────────────────────────────────────┘")
 
-
-
+    return n_stored
