@@ -152,6 +152,15 @@ export const IPC_CHANNELS = {
    */
   preferencesSetQuitConfirm: "mycontext:preferences/set-quit-confirm",
   /**
+   * 开/关「工作层抽取」（LLM 抽职责/流程/经验，写进 skill 包的 `work.md`）。
+   *
+   * ★ 单独一个通道，理由同 `preferencesSetQuitConfirm`：偏好之间没有共同的
+   * 入参形状。而这一个还有一层特殊性 —— 它是唯一一个**打开就开始花钱**的
+   * 偏好（每轮几万 token 的模型调用），所以它必须是显式动作，不能被
+   * 某个"保存全部设置"顺手带上。
+   */
+  preferencesSetWorkLayer: "mycontext:preferences/set-work-layer",
+  /**
    * 渲染层回话：用户在确认框里选了什么。
    *
    * ★ 用 invoke（而不是再来一个单向事件）：主进程那侧是
@@ -402,6 +411,16 @@ export const setLanguageInputSchema = z.object({ language: languagePreferenceSch
  * "下次不再提醒"的勾选合流到同一个持久化位。
  */
 export const setQuitConfirmInputSchema = z.object({ suppressed: z.boolean() })
+
+/**
+ * 开/关工作层抽取。
+ *
+ * ★ 字段是 `enabled`（正向），与 `setQuitConfirmInputSchema` 的 `suppressed`
+ * （反向）刻意不同。那边反向是因为"读值失败要默认会问"；这边正向是因为
+ * **读值失败必须默认不花钱** —— boolean 的默认 false 恰好对应"关"，
+ * 语义对齐，不需要在 UI 上再翻一层。
+ */
+export const setWorkLayerInputSchema = z.object({ enabled: z.boolean() })
 
 /**
  * 用户在退出确认框里的选择。
@@ -1413,6 +1432,13 @@ export const bootstrapStateSchema = z.object({
    * 免得先渲染成默认再跳成用户选择。
    */
   quitConfirmSuppressed: z.boolean(),
+  /**
+   * 工作层抽取是否开着。`false` = 关（默认）。
+   *
+   * 随启动态下发，理由同上面两个：设置页首帧就要读它，否则会先渲染成"关"
+   * 再跳成"开" —— 而对一个**花钱**的开关，那一下闪烁会让人以为自己没开成。
+   */
+  workLayerEnabled: z.boolean(),
 })
 
 export type BootstrapState = z.infer<typeof bootstrapStateSchema>

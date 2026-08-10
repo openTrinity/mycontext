@@ -342,6 +342,23 @@ export class MessageRepository {
    * `is_bot_channel` 同理（那还是 conversations 上的列，且可能被手改过）。
    *
    * 按时间**正序**返回：作息统计与"上一条是谁说的"都依赖对话顺序。
+   *
+   * ## ★★ 但**取样**取的是窗口内**最近**的 N 条，不是最早的 N 条
+   *
+   * 这两句话不矛盾：SQL 里按 `sent_at DESC` 取够 `limit` 条，再在内存里
+   * 翻回正序。返回给调用方的仍是正序。
+   *
+   * 为什么必须这样：原来是 `ORDER BY sent_at ASC LIMIT ?`，也就是一个窗口
+   * 只喂**最早的** N 条。实测本机库 30 天窗 + limit 400 时：
+   *
+   * ```
+   * 7 月有 14097 条可蒸语料 → 只看到最早的 400 条（2.8%）
+   * ```
+   *
+   * 而且每一轮重跑喂进去的都是**同一批**最早的消息 —— 于是「跑很久 +
+   * 很贵 + 结论永远不变」三件事同时成立，而没有任何一处报错。
+   * 取最近的那一批则至少与当前的工作状态相关（同 forge 的时间衰减那条：
+   * 半年前的习惯不该与本周等权）。
    */
   distillableInWindow(spec: {
     start: number
@@ -364,17 +381,25 @@ export class MessageRepository {
         : ` AND conversation_id IN (SELECT id FROM conversations WHERE external_id IN (${ids
             .map(() => "?")
             .join(",")}))`
-    return this.db
-      .prepare<(number | string)[], MessageDbRow>(
-        `SELECT * FROM messages
+    return (
+      this.db
+        .prepare<(number | string)[], MessageDbRow>(
+          `SELECT * FROM messages
           WHERE sent_at >= ? AND sent_at < ?
             AND content_text IS NOT NULL AND trim(content_text) <> ''
             AND origin <> 'agent'${scopeClause}
-          ORDER BY sent_at ASC
+          ORDER BY sent_at DESC
           LIMIT ?`,
-      )
-      .all(spec.start, spec.end, ...ids, spec.limit)
-      .map(toMessage)
+        )
+        .all(spec.start, spec.end, ...ids, spec.limit)
+        .map(toMessage)
+        /**
+         * ★ 翻回正序。SQL 取的是最近 N 条（见方法注释），但调用方要的是对话顺序
+         * —— `routineCandidates` 的作息统计与 `workflow` 的「先 A 再 B」都依赖它。
+         * 少这一步不会报错，只会让抽出来的流程步骤是倒着的。
+         */
+        .reverse()
+    )
   }
 
   /**

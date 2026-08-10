@@ -81,6 +81,10 @@ const LINE_STRUCTURE = /^(?:[\s>#*+\-=_~`|]|\d+[.)](?=\s))+/
 /**
  * 把 facet 值里的 markdown 结构中性化。
  *
+ * ★ 导出给 `work.ts` 复用（而不是各写一份）：这个函数是**安全边界**，
+ * 而它的正确形状是踩过一轮才收敛的（见下面那段「为什么从逐个字符黑名单
+ * 改成结构性隔离」）。第二份实现必然会漏掉其中几条，而漏了不报错。
+ *
  * ## ★ 为什么必须处理（facet 值是不可信输入）
  *
  * facet 是**从群聊语料蒸馏**出来的，也就是说它的内容最终来源是别人发的消息。
@@ -120,7 +124,7 @@ const LINE_STRUCTURE = /^(?:[\s>#*+\-=_~`|]|\d+[.)](?=\s))+/
  *
  * 信息保留（人读起来一样），结构失效。
  */
-function neutralizeMarkdown(text: string): string {
+export function neutralizeMarkdown(text: string): string {
   const collapsed = text
     // ① 所有空白（含换行）折成一个空格。
     //
@@ -182,7 +186,7 @@ export type RenderReplyMode = "auto" | "draft" | "silent" | "smart" | "yolo"
  *
  * 数字分身有两条生成路径，工具能力**完全不同**：
  *
- * · `recall_only` —— `LlmClient` 直连（`generateDraft` 的降级路径）：
+ * · `recall_only` —— `LlmClient` 直连（`PersonaComposer.compose` 的降级路径）：
  *   只有一个 `RECALL_TOOL`（本会话 FTS 检索）。没有 shell、查不了图谱。
  * · `agent` —— opencode ACP（`PersonaAcp`）：有 `skill` 与 `bash`
  *   （精确放行 `kl *`，见 `KL_SKILL_PERMISSION`），也就是**能查知识图谱**。

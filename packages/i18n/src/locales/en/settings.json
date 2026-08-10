@@ -325,6 +325,13 @@
         "noKey": "Enter an API key first"
       },
       "modelNotListed": "This model isn't in the gateway's list — pick one above, or extraction/graph tasks will fail with model_not_found"
+    },
+    "workLayer": {
+      "title": "Work-layer extraction",
+      "description": "Uses the model to extract your scope of ownership, workflow, output preferences and hard-won conclusions from chat and documents, and writes them into the digital twin's skill package. Off by default.",
+      "toggle": "Enable work-layer extraction",
+      "cost": "★ Turning this on costs money: each distill round sends one request per dimension (four), tens of thousands of tokens each. Distilling runs in the background (every 6 hours), so the cost is ongoing.",
+      "note": "Turning it off keeps whatever was already produced — it just stops updating. To remove it, use \"clear this channel's data\"."
     }
   },
   "ingestIntervals": {

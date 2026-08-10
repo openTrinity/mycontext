@@ -32,12 +32,15 @@ import {
   type MessageRow,
   type SqliteDatabase,
 } from "@mycontext/store"
-import { filterDistillable, type DistillRejectReason } from "./guards.js"
+import { filterDistillable, type DistillRejectReason, type FacetCandidate } from "./guards.js"
 import { LLM_FACETS, mapFacetWithLlm, type LlmFacet } from "./map/llm-map.js"
+import { readWorkCorpus, type WorkCorpusItem } from "./map/work-corpus.js"
 import { routineCandidates } from "./map/stats.js"
+import { assertDeidentified, assertSelfAttributed } from "./guards.js"
 import { mergeFacet, type FacetRow } from "./reduce/merger.js"
+import { candidateKey, findSimilar } from "./reduce/dedupe.js"
 
-/** 统计型 facet 的任务名。它不调 LLM，与 LLM_FACETS 并列成为第 6 个任务。 */
+/** 统计型 facet 的任务名。它不调 LLM，与 LLM_FACETS 并列成为最后一个任务。 */
 export const STAT_FACET = "routines"
 
 /** 全部会被切成任务的 facet。 */
@@ -46,7 +49,51 @@ export const ALL_FACETS: readonly string[] = [...LLM_FACETS, STAT_FACET]
 /** 一个窗口最多取多少条消息。超了就靠切更小的窗口，而不是截断。 */
 const MAX_MESSAGES_PER_TASK = 400
 
+/**
+ * 一个窗口最多取多少篇文档/纪要。
+ *
+ * 比消息的上限小两个量级，因为单篇是消息的一个量级长（截到 1200 字）：
+ * 400 篇 × 1200 字会把上下文撑爆，而它们只是**背景**（见
+ * `llm-map.SYSTEM_PROMPT` 第 6 条），不是主要证据来源。
+ * 取最近的若干篇（SQL 按时间倒序）—— 那也是与画像最相关的。
+ */
+const MAX_WORK_ITEMS_PER_TASK = 12
+
+/**
+ * 哪些 facet 要读文档。
+ *
+ * 只有这两个：`role`（他负责什么）与 `knowhow`（他定过什么规矩）——
+ * 技术方案与 wiki 的第一段往往直接写着系统边界，那是聊天里挖不到的。
+ *
+ * `workflow` / `artifacts` **刻意不读**：那两个要的是「他自己怎么做」，
+ * 而文档不带作者（见 `work-corpus.ts` 文件头），拿别人的文档去推断
+ * 「他写方案的结构习惯」正是这一层最容易犯的那个错。
+ * `routines` 是统计型的，与 LLM 无关。
+ *
+ * ## ★★ 这里的名字必须是**现行** facet 名
+ *
+ * 曾经写的是 `ownership` —— 那是 `role` 的旧名。改名时漏了这一处，
+ * 后果全静默：985 篇文档（236 篇有正文）里**一篇都没进** `role` 这一层，
+ * 而日志、产物、进度页都看不出少了什么，只是结论比应有的薄。
+ * `tests/unit/distill/work-corpus.test.ts` 现在断言这个数组是
+ * `LLM_FACETS` 的子集，正是为了让下一次改名漏掉时**测试红**而不是静默。
+ */
+const WORK_CORPUS_FACETS: readonly string[] = ["role", "knowhow"]
+
 export interface DistillRunnerOptions {
+  /**
+   * 结论正文里不许出现的字面量（真实姓名、公司名、内部系统名、商标）。
+   *
+   * ★ 由宿主给：这个包不知道谁是同事、公司叫什么。写死一张名单等于
+   * 换个用户就失效，而失效的表现是静默的（守卫恒放行）。
+   *
+   * ★ 调用方**必须自己过滤太短的词**：两个字的中文名会撞上普通词
+   * （见 `scripts/check-no-local-data.mjs` 的 `CJK_NAME_MIN_LENGTH` 那段）。
+   * 这一层不猜长度。
+   *
+   * 不给 = 不检查（守卫直接放行）。那时唯一的防线是 prompt。
+   */
+  forbiddenTerms?: readonly string[]
   db: SqliteDatabase
   clock: Clock
   logger: Logger
@@ -67,6 +114,19 @@ export interface PlanInput {
   /** 会话白名单；空表示不限 */
   conversationIds?: readonly string[]
   /** 窗口长度（天）。切窗是为了可续跑与可观测，不是为了省钱 */
+  /**
+   * 切窗宽度（天）。缺省 7。
+   *
+   * ## ★ 这个数直接决定一轮的**成本**
+   *
+   * 任务数 = 窗口数 × facet 数。实测 3 个月语料 + 7 天窗 = 135 个任务，
+   * 一轮约 80 万 token / 100 分钟。放宽到 30 天则是约 25 个任务。
+   *
+   * 窄窗的收益是**时间分辨率**（能看出"他六月开始不管这类事了"），
+   * 而 work 层抽的是长期结论（职责、规矩）—— 那些东西不需要按周切。
+   * 所以这一层适合宽窗；需要时间分辨率的是 forge 的衰减与近窗对比，
+   * 而那一层免费。
+   */
   windowDays?: number
 }
 
@@ -76,11 +136,36 @@ export interface TaskRunResult {
   state: "done" | "failed" | "skipped"
   /** 过守卫后的语料条数 */
   accepted: number
+  /**
+   * 这个任务读了几篇文档/纪要（0 = 这个 facet 不读文档，或窗口内没有）。
+   *
+   * 单独一个计数而不是合进 `accepted`：两类语料的可信度不同
+   * （文档不带作者，见 `work-corpus.ts`），而"这轮的结论有多少是文档撑起来的"
+   * 是排查画像质量时的第一个问题。
+   */
+  workItems?: number
   rejected: Record<DistillRejectReason, number>
   /** 写库的结论数（insert + update） */
   written: number
   /** 被合并逻辑跳过的（用户手改优先 / 无变化） */
   skippedByMerge: number
+  /**
+   * 因为**没脱敏**被丢掉的条数（正文里有真实姓名/商标/内部系统名）。
+   *
+   * 与 `skippedByMerge` 分开计：那个是"已有更可信的版本"（正常），
+   * 这个是"模型没听 prompt 第 8 条"（需要有人去调 prompt）。
+   * 混成一个数会让后者永远看不见。
+   */
+  droppedNotDeidentified: number
+  /**
+   * 因为**归因不对**被丢掉的条数（证据不是本人说的，或引用了这一批里没有的 id）。
+   *
+   * 与 `droppedNotDeidentified` 分开计，理由同那一条：两者要采取的行动不同
+   * —— 脱敏漏了是去调 prompt 第 8 条，归因错了是这一层的判据问题
+   * （实测 tasks 有 61 条、role 有 16 条证据是别人说的话）。
+   * 混成一个数会让其中一个永远看不见。
+   */
+  droppedNotSelfAttributed: number
   costTokens: number
   error?: string
 }
@@ -151,7 +236,9 @@ export class DistillRunner {
 
   /** 取一批任务并逐个跑。返回每个任务的结果（进度页与日志都要）。 */
   async runBatch(limit = 4, conversationIds?: readonly string[]): Promise<TaskRunResult[]> {
-    const batch = this.tasks.claimBatch(limit)
+    // ★ 传 now 让超时的 `running` 被回收 —— 见 `claimBatch` 的注释：
+    // 僵尸 running 会让队列永远排不空，于是 work 层的收尾永不执行。
+    const batch = this.tasks.claimBatch(limit, 3, this.options.clock.now())
     const out: TaskRunResult[] = []
     for (const task of batch) {
       out.push(await this.runTask(task, conversationIds))
@@ -181,6 +268,8 @@ export class DistillRunner {
       },
       written: 0,
       skippedByMerge: 0,
+      droppedNotDeidentified: 0,
+      droppedNotSelfAttributed: 0,
       costTokens: 0,
     }
 
@@ -208,7 +297,23 @@ export class DistillRunner {
       result.accepted = accepted.length
       result.rejected = rejected
 
-      if (accepted.length === 0) {
+      /**
+       * 文档与纪要摘要 —— 只给需要它们的 facet 读（见 `WORK_CORPUS_FACETS`）。
+       *
+       * 在空窗口判定**之前**取：一个窗口可能一条消息都没有而有几篇文档
+       * （比如那周他只在写方案），此时按"没语料"跳过会白扔掉真实语料。
+       */
+      const workItems: WorkCorpusItem[] = WORK_CORPUS_FACETS.includes(task.facet)
+        ? readWorkCorpus(this.options.db, {
+            channelId: "dingtalk",
+            start: task.windowStart,
+            end: task.windowEnd,
+            limit: MAX_WORK_ITEMS_PER_TASK,
+          })
+        : []
+      result.workItems = workItems.length
+
+      if (accepted.length === 0 && workItems.length === 0) {
         /**
          * 空窗口标 **skipped** 而不是 done。
          *
@@ -220,12 +325,28 @@ export class DistillRunner {
         return { ...result, state: "skipped" }
       }
 
-      const candidates =
+      /**
+       * ★ 统计型与抽取型的**成本来源不同**，所以在这里就分开拿。
+       *
+       * 统计型是纯本地计算，costTokens 如实为 0 —— 那是正确答案而不是
+       * "没测到"（同 `fidelity.md` 的约定）。抽取型的用量由 `mapFacetWithLlm`
+       * 把每批 `completion.usage` 累加后返回；**不能**事后读
+       * `llm.usage()`，那是 client 的生命周期累计，见 `MapLlmResult.costTokens`
+       * 的注释（实测它把 routines 记成了 1070 万 token）。
+       */
+      const mapped =
         task.facet === STAT_FACET
-          ? routineCandidates(accepted, {
-              offsetMinutes: this.options.offsetMinutes ?? 8 * 60,
-            })
-          : await this.mapWithLlm(task.facet, accepted, conversationById)
+          ? {
+              candidates: routineCandidates(accepted, {
+                offsetMinutes: this.options.offsetMinutes ?? 8 * 60,
+              }),
+              costTokens: 0,
+            }
+          : await this.mapWithLlm(task.facet, accepted, conversationById, workItems)
+      const candidates = mapped.candidates
+      // 成本先记下来：下面任何一条 continue / 提前 return 都不该让它丢失，
+      // 因为钱**已经花掉了**（结论被守卫丢掉不会退款）。
+      result.costTokens = mapped.costTokens
 
       // 统计型可能因样本不足产出 0 条 —— 那是**正确行为**，不是失败
       if (candidates.length === 0) {
@@ -233,13 +354,111 @@ export class DistillRunner {
         return { ...result, state: "skipped", accepted: accepted.length }
       }
 
+      /**
+       * ★★ 归因表：证据 id → 那条消息是不是本人说的。
+       *
+       * 只收**这一批真的喂给了模型**的语料（`accepted` + `workItems`），
+       * 不是整库 —— 因为它同时承担「这个 id 是不是编的」这个判断：
+       * 拿整库去查会让模型引用一条它根本没看到的消息也算合法，
+       * 而那与编一个 id 只差一层运气。
+       *
+       * 文档与纪要记 `null`（作者未知，见 `work-corpus.ts` 文件头）——
+       * 于是它们不能单独支撑任何结论（`assertSelfAttributed` 要求至少一条
+       * 本人证据），但也不会被当成"编造的 id"整条作废。那正是文档
+       * 「只能作为环境背景」这个定位的落地。
+       */
+      const authorship = new Map<string, boolean | null>()
+      for (const message of accepted) authorship.set(message.id, message.isSelf)
+      for (const item of workItems) {
+        authorship.set(item.id, item.authorship === "self" ? true : null)
+      }
+
+      /**
+       * ★★ 去重的**已有行快照**：每个 facet 只查一次，循环内复用。
+       *
+       * 在循环外查是必要的，但要注意它是**快照** —— 同一批里两条互相近义的
+       * 候选都会与"写之前"的状态比。所以下面写完一条要把它**补进快照**，
+       * 否则同一批内的重复合不掉（实测同一个窗口里模型确实会给出两条近义结论）。
+       */
+      const dedupeScope =
+        task.facet === STAT_FACET
+          ? []
+          : this.facets.listByFacet(task.facet, "global", "").map((row) => ({
+              facet: row.facet,
+              key: row.key,
+              value: safeParse(row.valueJson),
+            }))
+
       for (const candidate of candidates) {
-        const existing = this.facets.find(
-          candidate.facet,
-          candidate.scope,
-          candidate.scopeRef,
-          candidate.key,
-        )
+        /**
+         * ★★ 脱敏：命中就**丢掉这一条**（并计数），不让整个任务失败。
+         *
+         * 整任务失败会连坐同一批里合格的结论 —— 而那些是花了钱抽出来的。
+         * 计数进 `droppedNotDeidentified`，日志里报个数**不报内容**
+         * （内容就是真实姓名，进日志等于换个地方泄漏）。
+         *
+         * 这是第二道防线；第一道是 prompt 第 8 条（见 `llm-map.SYSTEM_PROMPT`）。
+         * 两道都要 —— 模型会漏，而这一层的产物进 skill 包，而 skill 包会被
+         * 导出、分享、进 git。
+         */
+        const deid = assertDeidentified(candidate, {
+          forbidden: this.options.forbiddenTerms ?? [],
+        })
+        if (!deid.ok) {
+          result.droppedNotDeidentified += 1
+          continue
+        }
+
+        /**
+         * ★★ 归因：证据必须真实存在，且由本人的话支撑。
+         *
+         * 与脱敏同一档处理（丢这一条、计数、不让整任务失败）——
+         * 一条归因错的结论不该连坐同一批里合格的那些。
+         *
+         * ★ 统计型 facet 跳过：它的候选由 `routineCandidates` 从 `accepted`
+         * 直接算出，证据就是那批消息本身，没有"模型编来源"这个失效模式。
+         * 而它的证据里**本来就**含 `is_self=0` 的消息（作息统计要看整体节奏），
+         * 拿这道守卫去卡它会把唯一一个免费的 facet 全部拒掉。
+         */
+        if (task.facet !== STAT_FACET) {
+          const attributed = assertSelfAttributed(candidate, authorship)
+          if (!attributed.ok) {
+            result.droppedNotSelfAttributed += 1
+            continue
+          }
+        }
+
+        /**
+         * ★★ 定位到哪一行：先找近义的已有行，找不到才用算出来的稳定 key。
+         *
+         * 这两步替换掉了原来的「用模型给的 key 去 find」。那条路的问题见
+         * `reduce/dedupe.ts` 文件头：模型每个窗口编一个新 key，于是
+         * `UNIQUE(facet,scope,scope_ref,key)` 从不命中，`mergeFacet` 的三态
+         * **从未跑过**（实测 260/273 条停在 revision=1），
+         * 「有 20 句话都这么说」这个信号永久丢失。
+         *
+         * `candidate.key`（模型给的）**不再参与定位**。它仍在
+         * `FacetCandidate` 上，因为 `parseFacetItems` 还在读模型的 `key`
+         * 字段做形状校验 —— 但那只是"模型有没有按格式回话"的证据，
+         * 不是数据库定位用的东西。
+         *
+         * ## ★★ 但统计型 facet 用它**自己的** key
+         *
+         * `routines` 的 key 是**代码里的常量**（`stats.ts` 的 `active_hours` /
+         * `active_weekdays` / `reply_latency_ms`）—— 那本来就稳定，而且
+         * `mergeFacet` 的数值累积分支（`isNumericFacet`）正是**按这些名字**
+         * 找到上一轮那一行的。
+         *
+         * 拿词法 key 覆盖它们会同时坏掉两件事，且都不报错：
+         * · 每轮算出的 key 随直方图的值变化 → 数值再也累积不起来，
+         *   每轮都是一行新记录；
+         * · 审阅页与下游按 `active_hours` 这个名字取值，取不到就是空。
+         */
+        const key =
+          task.facet === STAT_FACET
+            ? candidate.key
+            : (findSimilar(candidate, dedupeScope) ?? candidateKey(candidate))
+        const existing = this.facets.find(candidate.facet, candidate.scope, candidate.scopeRef, key)
         const merged = mergeFacet(existing as FacetRow | null, candidate)
         if (merged.action === "skip") {
           result.skippedByMerge += 1
@@ -252,7 +471,7 @@ export class DistillRunner {
             facet: candidate.facet,
             scope: candidate.scope,
             scopeRef: candidate.scopeRef,
-            key: candidate.key,
+            key,
             value: merged.value,
             confidence: merged.confidence,
             evidence: merged.evidence,
@@ -265,14 +484,46 @@ export class DistillRunner {
           },
           now,
         )
+        // ★ 补进快照 —— 见上面的注释：否则同一批内的近义候选合不掉。
+        if (existing === null) {
+          dedupeScope.push({ facet: candidate.facet, key, value: merged.value })
+        }
         result.written += 1
       }
 
-      const tokens = this.options.llm?.usage().totalTokens ?? 0
-      result.costTokens = tokens
+      const tokens = result.costTokens
       this.tasks.markDone(task.id, now, {
         inputMessageCount: accepted.length,
         costTokens: tokens,
+      })
+      /**
+       * ★ 一个任务的**去留账**。没有这一行，两道守卫的效果就是不可见的：
+       * "抽出 20 条、写进 3 条"与"抽出 3 条、写进 3 条"在产物上一模一样，
+       * 而前者说明 prompt 需要调（模型在大量产出不合格的结论）。
+       *
+       * 只报**个数**不报内容 —— 被拦下的正文里可能正是真实姓名。
+       */
+      this.options.logger.info("distill task done", {
+        facet: task.facet,
+        accepted: accepted.length,
+        workItems: workItems.length,
+        candidates: candidates.length,
+        written: result.written,
+        skippedByMerge: result.skippedByMerge,
+        droppedNotDeidentified: result.droppedNotDeidentified,
+        droppedNotSelfAttributed: result.droppedNotSelfAttributed,
+        /**
+         * ★★ 字段名**不能**叫 `costTokens` —— `redact.ts` 的 `SENSITIVE_KEY`
+         * 正则含 `token`，于是它会被整条替换成 `"[unset]"`。
+         *
+         * 实测踩到：这一行日志在真机上打出 `costTokens: '[unset]'`，
+         * 而我刚刚才修好"成本计量"那个 bug（读 client 累计值 → 读本次增量）。
+         * 也就是修对了数字，却在最后一步把它遮掉了 —— 成本仍然不可见。
+         *
+         * 用 `spentTokens` 之外的写法都躲不开那个正则（`tokens` 本身就命中），
+         * 所以改成 `usage`：语义一样，且不含敏感词。
+         */
+        usage: tokens,
       })
       return result
     } catch (error) {
@@ -287,11 +538,20 @@ export class DistillRunner {
     }
   }
 
+  /**
+   * 跑抽取型 map。
+   *
+   * ★ 返回 `{candidates, costTokens}` 而不是只返回 candidates：钱是在这里花的，
+   * 而"花了多少"必须跟着结论一起往上走。原来这个函数只返回 candidates，
+   * 于是调用方只能事后去问 client "你一共花了多少" —— 那个数是生命周期累计，
+   * 不是本任务增量（见 `MapLlmResult.costTokens`）。
+   */
   private async mapWithLlm(
     facet: string,
     accepted: readonly MessageRow[],
     conversationById: ReadonlyMap<string, ConversationRow>,
-  ) {
+    workItems: readonly WorkCorpusItem[],
+  ): Promise<{ candidates: FacetCandidate[]; costTokens: number }> {
     const client = this.options.llm
     if (client === null) {
       /**
@@ -313,9 +573,9 @@ export class DistillRunner {
       accepted,
       conversationById,
       { scope: "global", scopeRef: "" },
-      { client, selfNames: this.options.selfNames },
+      { client, selfNames: this.options.selfNames, workItems },
     )
-    return mapped.candidates
+    return { candidates: mapped.candidates, costTokens: mapped.costTokens }
   }
 
   /**
@@ -336,5 +596,19 @@ export class DistillRunner {
 
   progress() {
     return this.tasks.progress()
+  }
+}
+
+/**
+ * `value_json` → 值。坏了就返回原串而不是抛。
+ *
+ * 这里只用于去重的相似度比对：一行的 JSON 坏掉不该让整轮蒸馏失败，
+ * 而拿原串去比相似度**仍然是有意义的**（那个串里就有原文的字）。
+ */
+function safeParse(json: string): unknown {
+  try {
+    return JSON.parse(json)
+  } catch {
+    return json
   }
 }

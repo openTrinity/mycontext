@@ -13,6 +13,7 @@
   "dependencies": {
     "@mycontext/kernel": "workspace:*",
     "@mycontext/llm": "workspace:*",
+    "@mycontext/retrieval": "workspace:*",
     "@mycontext/store": "workspace:*"
   }
 }

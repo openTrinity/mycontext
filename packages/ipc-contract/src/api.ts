@@ -389,6 +389,13 @@ export interface MyContextApi {
      * 反悔路径：用户在设置里手动打开开关。
      */
     setQuitConfirmSuppressed(input: { suppressed: boolean }): Promise<Result<true>>
+    /**
+     * 开/关工作层抽取（LLM 抽职责/流程/经验 → skill 包里的 `work.md`）。
+     *
+     * ★ 打开这个开关会开始**花钱**：每轮蒸馏对四个维度各发一次请求，
+     * 每次上万 token。所以它默认关，且只能由用户显式打开。
+     */
+    setWorkLayerEnabled(input: { enabled: boolean }): Promise<Result<true>>
   }
   profile: {
     /**

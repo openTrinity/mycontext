@@ -17,7 +17,7 @@
  */
 import { describe, expect, it, vi } from "vitest"
 import { ManualClock, createLogger } from "@mycontext/kernel"
-import { DistillRunner, ALL_FACETS } from "@mycontext/distill"
+import { DistillRunner, ALL_FACETS, facetKey } from "@mycontext/distill"
 import {
   ConversationRepository,
   DistillTaskRepository,
@@ -141,7 +141,7 @@ describe("★ 切窗幂等", () => {
     vault.close()
   })
 
-  it("每个窗口切出全部 facet（6 个：5 个 LLM + 1 个统计）", () => {
+  it("每个窗口切出全部 facet（断言用 ALL_FACETS，不写死个数）", () => {
     const vault = seed({ others: 1, selves: 1 })
     const runner = makeRunner(vault, null)
     // 一个 7 天窗口
@@ -219,15 +219,38 @@ describe("★ 结论真的落库，且证据能验回原文", () => {
   it("LLM 抽出的结论进 profile_facets，证据是真 message_id", async () => {
     const vault = seed({ others: 10, selves: 10 })
     const response = JSON.stringify({
-      items: [{ key: "formality", value: "偏随意", confidence: 0.8, evidence: [1, 2] }],
+      items: [
+        {
+          key: "triage_steps",
+          value: "接到需求先列边界条件问产品",
+          confidence: 0.8,
+          /**
+           * ★ 证据必须落在**本人**的消息上（`#2` = `s0`，见 seed 的交错顺序）。
+           *
+           * 用 `[1, 2]` 会被 `assertSelfAttributed` 拒掉 —— `#1` 是 `o0`（他人），
+           * 而 `workflow` 问的是「**他**怎么做」，所以要求全部证据是本人的。
+           * 那道守卫存在的理由见 `guards.ts`：实测有 61 条结论把别人的话
+           * 当成了本人的做法。
+           */
+          evidence: [2],
+        },
+      ],
     })
     const runner = makeRunner(vault, fakeLlm(response))
     runner.plan({ since: NOW, until: NOW + 86_400_000, windowDays: 7 })
     await runner.runBatch(10)
 
     const facets = new ProfileFacetRepository(vault.db)
-    const row = facets.find("tone", "global", "", "formality")
-    expect(row).not.toBeNull()
+    /**
+     * ★★ 按 facet 取，**不按模型给的 key** 取。
+     *
+     * key 现在由本地词法从正文算出（`reduce/dedupe.facetKey`），模型给的
+     * `triage_steps` 不再参与定位 —— 那正是「同一件事每轮一个新 key、
+     * 于是 `mergeFacet` 从未触发」那个 bug 的修法。
+     */
+    const rows = facets.listByFacet("workflow", "global", "")
+    expect(rows).toHaveLength(1)
+    const row = rows[0]
     const evidence = JSON.parse(row?.evidenceJson ?? "[]") as string[]
     expect(evidence.length).toBeGreaterThan(0)
     // ★ 证据必须是库里真实存在的 message_id
@@ -260,14 +283,14 @@ describe("★ 没配 LLM 时抽取型任务抛错，而不是静默产出 0 条"
     runner.plan({ since: NOW, until: NOW + 86_400_000, windowDays: 7 })
     const results = await runner.runBatch(10)
 
-    const tone = results.find((item) => item.facet === "tone")
+    const workflow = results.find((item) => item.facet === "workflow")
     /**
      * ★ 必须是 failed。
      * skipped 会与"这段没语料"混在一起，而后者不需要用户做任何事 ——
      * 于是"少配了一个 key"这件事永远不会被发现。
      */
-    expect(tone?.state).toBe("failed")
-    expect(tone?.error).toContain("LLM")
+    expect(workflow?.state).toBe("failed")
+    expect(workflow?.error).toContain("LLM")
     vault.close()
   })
 })
@@ -342,28 +365,57 @@ describe("合并走 mergeFacet（不是覆盖）", () => {
       vault,
       fakeLlm(
         JSON.stringify({
-          items: [{ key: "formality", value: "偏随意", confidence: 0.8, evidence: [1] }],
+          items: [
+            {
+              key: "triage_steps",
+              value: "接到需求先列边界条件问产品",
+              confidence: 0.8,
+              // ★ `#2` = `s0`（本人）—— 见上一个用例里那段说明
+              evidence: [2],
+            },
+          ],
         }),
       ),
     )
     first.plan({ since: NOW, until: NOW + 86_400_000, windowDays: 7 })
     await first.runBatch(10)
-    const before = facets.find("tone", "global", "", "formality")
+    const before = facets.listByFacet("workflow", "global", "")[0]
+    expect(before).toBeDefined()
 
-    // 第二轮：清任务重跑，值变了
+    /**
+     * 第二轮：清任务重跑，值变了。
+     *
+     * ★ 用**同一句话加一点**而不是完全换一句（原来是「偏正式」）。
+     *
+     * 这个用例要锁的性质是「同一个维度第二次跑走 update 而不是插新行」，
+     * 而定位现在靠**词法相似度**（`reduce/dedupe.findSimilar`）。
+     * 完全换词的两句话在新实现下是**两件不同的事**，各占一行 ——
+     * 那是刻意的取舍（见 `dedupe.ts`：宁可漏合，误合会让两条真结论
+     * 双双降置信而消失）。所以这里给一句改写，它才是这个用例想描述的场景。
+     */
     new DistillTaskRepository(vault.db).clear()
     const second = makeRunner(
       vault,
       fakeLlm(
         JSON.stringify({
-          items: [{ key: "formality", value: "偏正式", confidence: 0.9, evidence: [2] }],
+          items: [
+            {
+              key: "triage_steps",
+              value: "接到需求先列边界条件问产品，再评估范围",
+              confidence: 0.9,
+              evidence: [4],
+            },
+          ],
         }),
       ),
     )
     second.plan({ since: NOW, until: NOW + 86_400_000, windowDays: 7 })
     await second.runBatch(10)
 
-    const after = facets.find("tone", "global", "", "formality")
+    const rows = facets.listByFacet("workflow", "global", "")
+    // ★ 仍然只有一行 —— 这就是「合并真的发生了」
+    expect(rows).toHaveLength(1)
+    const after = rows[0]
     expect(after?.id).toBe(before?.id)
     expect(after?.revision).toBe(2)
     /**
@@ -378,13 +430,20 @@ describe("合并走 mergeFacet（不是覆盖）", () => {
   it("用户手改的结论不会被 LLM 覆盖", async () => {
     const vault = seed({ others: 10, selves: 10 })
     const facets = new ProfileFacetRepository(vault.db)
+    const value = "接到需求先列边界条件问产品"
     facets.write(
       {
         id: "user-1",
-        facet: "tone",
+        facet: "workflow",
         scope: "global",
         scopeRef: "",
-        key: "formality",
+        /**
+         * ★ key 用**算出来的**那个（与 runner 同一个函数），不写字面量。
+         *
+         * runner 现在按词法 key 定位，所以用户那一行必须落在同一个 key 上，
+         * 否则这个用例测的是"两行互不相干"而不是"用户手改优先"。
+         */
+        key: facetKey(value),
         value: "用户写的",
         confidence: 1,
         evidence: ["o0"],
@@ -397,7 +456,8 @@ describe("合并走 mergeFacet（不是覆盖）", () => {
       vault,
       fakeLlm(
         JSON.stringify({
-          items: [{ key: "formality", value: "模型写的", confidence: 0.9, evidence: [1] }],
+          // 同一句话（于是命中用户那一行），但模型想把值改掉
+          items: [{ key: "triage_steps", value, confidence: 0.9, evidence: [2] }],
         }),
       ),
     )
@@ -408,10 +468,10 @@ describe("合并走 mergeFacet（不是覆盖）", () => {
      * ★ 没有这条的话，用户在审阅页改完一句话，下一轮蒸馏就把它改回去了 ——
      * 而用户不会再改第二次，他会关掉这个功能。
      */
-    expect(JSON.parse(facets.find("tone", "global", "", "formality")?.valueJson ?? '""')).toBe(
-      "用户写的",
-    )
-    expect(results.find((item) => item.facet === "tone")?.skippedByMerge).toBe(1)
+    expect(
+      JSON.parse(facets.find("workflow", "global", "", facetKey(value))?.valueJson ?? '""'),
+    ).toBe("用户写的")
+    expect(results.find((item) => item.facet === "workflow")?.skippedByMerge).toBe(1)
     vault.close()
   })
 })
@@ -441,6 +501,146 @@ describe("时区显式传（统计不能读运行环境）", () => {
     const value = JSON.parse(row?.valueJson ?? "{}") as { offsetMinutes?: number }
     // 偏移进了结论本身 —— 否则读结论的人无法知道"14 点"是哪个时区的 14 点
     expect(value.offsetMinutes).toBe(480)
+    vault.close()
+  })
+})
+
+/**
+ * ★★ facet 集合变更之后，库里按**旧**名字建的任务必须被丢掉。
+ *
+ * ## 这一组锁的是一个实测踩到的静默失效
+ *
+ * facet 集合是代码里的常量。本机库里曾有 48 条 pending 任务，facet 名是
+ * 换集合**之前**的那套（`identity` / `tone` / `persona` / `expertise` /
+ * `relations`）。它们不会自己消失，而留着的后果全都不报错：
+ *
+ * · 进度条把它们算进 `total`，永远显示"还有 40 个没跑"；
+ * · runner 认领到一条之后不知道怎么处理那个 facet；
+ * · 而最要命的是**"排空"永远不成立** → `work.md` 永远不产出，日志里一个错都没有。
+ */
+describe("★★ 陈旧 facet 的任务要被丢掉", () => {
+  /** 直接插一条任意 facet 的任务 —— 绕过 runner，那正是"旧版本写的行"的形态。 */
+  function insertTask(
+    vault: ReturnType<typeof seed>,
+    facet: string,
+    state: "pending" | "done" | "running" | "failed" | "skipped",
+  ): void {
+    vault.db
+      .prepare(
+        `INSERT INTO distill_tasks(id,facet,scope,scope_ref,window_start,window_end,
+           state,attempts,created_at,updated_at)
+         VALUES(?,?,'global','',?,?,?,0,?,?)`,
+      )
+      .run(`t-${facet}-${state}`, facet, NOW, NOW + 1000, state, NOW, NOW)
+  }
+
+  it("★★ 未完成的旧 facet 任务被删，当前 facet 的不动", () => {
+    const vault = seed({ others: 1, selves: 1 })
+    for (const facet of ["identity", "tone", "persona", "expertise", "relations"]) {
+      insertTask(vault, facet, "pending")
+    }
+    insertTask(vault, ALL_FACETS[0] ?? "ownership", "pending")
+
+    const tasks = new DistillTaskRepository(vault.db)
+    expect(tasks.dropUnknownFacets(ALL_FACETS)).toBe(5)
+    // 当前 facet 的那条还在 —— 删多了会把正常任务一起清掉
+    expect(tasks.progress().total).toBe(1)
+    vault.close()
+  })
+
+  /**
+   * ★ `done` / `skipped` 是**历史记录**，删掉它们会让"这段语料抽过了"凭空消失，
+   * 于是下一轮重抽一遍同一段 —— 那是要花钱的。
+   */
+  it("★ 已完成的旧 facet 任务保留（那是历史，删了会导致重抽付费）", () => {
+    const vault = seed({ others: 1, selves: 1 })
+    insertTask(vault, "identity", "done")
+    insertTask(vault, "tone", "skipped")
+    insertTask(vault, "persona", "pending")
+
+    const tasks = new DistillTaskRepository(vault.db)
+    expect(tasks.dropUnknownFacets(ALL_FACETS), "只该删那条 pending").toBe(1)
+    expect(tasks.progress().total).toBe(2)
+    vault.close()
+  })
+
+  it("没有陈旧任务时什么都不做（幂等，可以每次挂载都跑）", () => {
+    const vault = seed({ others: 1, selves: 1 })
+    const runner = makeRunner(vault, null)
+    runner.plan({ since: NOW, until: NOW + 3 * 86_400_000, windowDays: 7 })
+    const tasks = new DistillTaskRepository(vault.db)
+    const before = tasks.progress().total
+    expect(tasks.dropUnknownFacets(ALL_FACETS)).toBe(0)
+    expect(tasks.progress().total).toBe(before)
+    vault.close()
+  })
+
+  /**
+   * ★★ 空清单不该清库。
+   *
+   * 那只可能是调用方传错了（比如 import 出了问题拿到空数组）。按它执行
+   * 会把**全部**任务删掉 —— 一次由 bug 触发的静默数据删除。
+   */
+  it("★★ 传空清单时不删任何东西（防止 import 出错导致清库）", () => {
+    const vault = seed({ others: 1, selves: 1 })
+    insertTask(vault, "identity", "pending")
+    const tasks = new DistillTaskRepository(vault.db)
+    expect(tasks.dropUnknownFacets([])).toBe(0)
+    expect(tasks.progress().total).toBe(1)
+    vault.close()
+  })
+})
+
+/**
+ * ★★ 成本必须是**本任务增量**，不是 client 的生命周期累计。
+ *
+ * ## 这一组锁的是一次「成本失去度量」的静默失效
+ *
+ * 原来 runner 记的是 `llm.usage().totalTokens` —— 而那是 `LlmClient` 的累计量
+ * （只加不减、从不清零）。实测本机库里的形状：
+ *
+ * ```
+ * routines（纯统计，零模型调用）12 个任务共记 1070 万 token
+ * 同一 facet 的任务逐个递增：230891 → 319303 → 458700 → 602428 …
+ * sum(cost_tokens) = 4847 万，纯属虚构
+ * ```
+ *
+ * 后果不是报错，而是"这一轮比上一轮省了多少"这个问题**无法回答** ——
+ * 而这一层存在的前提就是它贵得需要被盯着（见 `work-refresh.ts` 的攒批判据）。
+ */
+describe("★★ cost_tokens 是本任务增量", () => {
+  it("★★ 纯统计的 routines 记 0（它一次模型都没调）", async () => {
+    const vault = seed({ others: 30, selves: 30 })
+    // 给一个能用的 llm，确保"记 0"不是因为没有 client
+    const runner = makeRunner(vault, fakeLlm('{"items":[]}'))
+    runner.plan({ since: NOW, until: NOW + 86_400_000, windowDays: 7 })
+    const results = await runner.runBatch(10)
+    const routines = results.find((item) => item.facet === "routines")
+    expect(routines?.costTokens).toBe(0)
+    // 落库的那一行也必须是 0（进度页读的是库，不是这个返回值）
+    const row = vault.db
+      .prepare(
+        "SELECT cost_tokens AS c FROM distill_tasks WHERE facet = 'routines' AND state = 'done'",
+      )
+      .get() as { c: number | null } | undefined
+    expect(row?.c ?? 0).toBe(0)
+    vault.close()
+  })
+
+  it("★★ 多个抽取任务各记自己的量，而不是逐个递增的累计值", async () => {
+    const vault = seed({ others: 10, selves: 10 })
+    /**
+     * `fakeLlm` 每次回 `total_tokens: 15`，一个 facet 一批 → 每个抽取任务
+     * 应当恰好记 15。若读的是 client 累计，它们会是 15 / 30 / 45 / 60 …
+     */
+    const runner = makeRunner(vault, fakeLlm('{"items":[]}'))
+    runner.plan({ since: NOW, until: NOW + 86_400_000, windowDays: 7 })
+    const results = await runner.runBatch(10)
+    const llmCosts = results
+      .filter((item) => item.facet !== "routines")
+      .map((item) => item.costTokens)
+    expect(llmCosts.length).toBeGreaterThan(1)
+    for (const cost of llmCosts) expect(cost).toBe(15)
     vault.close()
   })
 })

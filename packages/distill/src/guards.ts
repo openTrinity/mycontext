@@ -130,6 +130,171 @@ export function assertHasEvidence(candidate: FacetCandidate): void {
 }
 
 /**
+ * 一条结论的证据**是不是本人说的话** —— 落库前的第三道防线。
+ *
+ * ## ★★ 为什么必须有这一道（prompt 已经写了，但压不住）
+ *
+ * `SYSTEM_PROMPT` 第 1 条已经是「只描述**标注为「我」的那个人**」，而实测
+ * 本机库（33924 条消息、273 条结论）按 `evidence_json` 回查每条证据的 `is_self`：
+ *
+ * | facet | is_self=1 | is_self=0 | 三张表里都查不到 |
+ * | --- | --- | --- | --- |
+ * | tasks | 154 | **61** | 0 |
+ * | role | 151 | **16** | **12** |
+ * | knowhow | 71 | 4 | 0 |
+ *
+ * 也就是模型把**别人的话**当成了本人的。后果在 `role` 一节里直接可见 ——
+ * 同时出现两个互相矛盾的人：
+ *
+ * ```
+ * 0.7  "前端开发，负责 Web 前端页面渲染、路由配置与 UI 呈现"
+ * 0.8  "不负责前端开发实现——给出交互设计方案后由前端同学实现"
+ * ```
+ *
+ * 而且**他/她混用**（「想合分支时她要求等」）—— 那是把群里另一个人的职责
+ * 写进了本人画像。这与 `assertDistillable` 拒绝 `is_self === null` 是同一个
+ * 判断的延伸：那一道保证「进 prompt 的消息本人身份已判定」，
+ * **不保证一条结论的证据是本人说的**。中间这个缺口就是上面那 61 条。
+ *
+ * `filterDistillable` 也不能替代它：抽取需要看到别人的话（否则没有上下文，
+ * 「别人找他做什么」根本无从谈起），所以语料里必须有 `is_self=0`。
+ * 能拦的位置只有**结论落库前**。
+ *
+ * ## ★ 判据按 facet 分档，因为那五个 facet 问的问题不同
+ *
+ * · `role` / `workflow` / `artifacts` / `knowhow` —— 问的是「**他**怎么做」，
+ *   所以要求**全部**证据都是本人的。一条别人说的话不足以证明他的做法；
+ * · `tasks` —— 问的是「**别人**找他做什么」，触发句本来就是别人说的
+ *   （「MR 链接 + 一句话」那句话是同事发的）。所以允许别人的证据，
+ *   但要求**至少有一条本人的**：否则「别人在群里聊到某事」会被写成
+ *   「他负责某事」，而那正是 61 条越界里最常见的形状。
+ *
+ * ## ★ 顺带拦住「引用了这一批里没有的东西」
+ *
+ * 实测另有 17 个证据 id 在 messages / documents / minutes 三张表里都查不到
+ * （形如 `0mp0iypjcc…`）。**那些不是模型编的** —— 整个 `0mp0*` 时段在库里
+ * 是 0 行，也就是它们是写入之后被 `purge-scope` 删掉的（用户收窄了采集范围）。
+ * 所以那 17 条是「证据已随语料被清掉」，是一个正常状态。
+ *
+ * 但这道守卫仍然要拦「引用了这一批里没有的 id」，理由与
+ * `resolveEvidence` 只校验序号范围是互补的：那一道保证序号落在批次内，
+ * 这一道保证**映射回的 id 真的在喂给模型的那批语料里**。两道都在的时候，
+ * 「模型编一个来源」这件事才没有缝可钻 —— 而这一层的证据机制存在的
+ * 全部意义就是那个来源能被回验（同 `assertHasEvidence` 那条）。
+ */
+export type SelfAttributionVerdict =
+  | { ok: true }
+  | { ok: false; reason: "unknown_evidence" | "no_self_evidence" | "foreign_evidence" }
+
+/**
+ * 只需要 `is_self` —— 传整个 `MessageRow` 会让这个函数依赖 store 的类型，
+ * 而它是纯判据。`undefined` = 这个 id 在语料里查不到（编造的）。
+ */
+export type EvidenceAuthorship = ReadonlyMap<string, boolean | null>
+
+/**
+ * 要求**全部**证据都是本人的那几个 facet。
+ *
+ * 不含 `tasks` —— 见上面的分档说明。`routines` 是统计型的，
+ * 它的证据是本人消息的集合（`stats.ts` 自己保证），不走这里。
+ */
+const SELF_ONLY_FACETS: ReadonlySet<string> = new Set(["role", "workflow", "artifacts", "knowhow"])
+
+export function assertSelfAttributed(
+  candidate: FacetCandidate,
+  authorship: EvidenceAuthorship,
+): SelfAttributionVerdict {
+  /**
+   * 空判据时放行（与 `assertDeidentified` 同一个约定）：调用方没给语料
+   * 就没法判断，而在这里硬拒会让所有单测都要构造一张表。
+   * 生产路径由 runner 保证一定给（它手里就是那批 `accepted`）。
+   */
+  if (authorship.size === 0) return { ok: true }
+
+  let selfCount = 0
+  let foreignCount = 0
+  for (const id of candidate.evidence) {
+    if (!authorship.has(id)) {
+      // ★ 引用了这一批语料里没有的 id：整条作废。见函数注释最后一节。
+      return { ok: false, reason: "unknown_evidence" }
+    }
+    const isSelf = authorship.get(id)
+    if (isSelf === true) selfCount += 1
+    else foreignCount += 1
+  }
+
+  if (selfCount === 0) return { ok: false, reason: "no_self_evidence" }
+  if (foreignCount > 0 && SELF_ONLY_FACETS.has(candidate.facet)) {
+    return { ok: false, reason: "foreign_evidence" }
+  }
+  return { ok: true }
+}
+
+/**
+ * 结论正文里**不许出现**的东西 —— 落库前的第二道防线。
+ *
+ * ## ★★ 为什么 prompt 不够
+ *
+ * `SYSTEM_PROMPT` 第 8 条已经要求脱敏（人名换角色、内部系统名换中性描述）。
+ * 但实测第一版跑出的 59 条结论里**有 5 条**带着不该出现的内容：一位同事的
+ * 真实花名（原话引用「我明天让某某看下」）、内部监控系统名、两个第三方产品名、
+ * 以及渠道 CLI 的具体命令。
+ *
+ * 模型会漏。而这一层的产物（`work.md`）进 agent 的 skill 包，而 skill 包
+ * **会被导出、分享、进 git** —— 真实人名与内部系统名一旦进去就不可撤回
+ * （fork / 镜像 / CI 日志都留存）。所以要两道：prompt 让绝大多数一次做对，
+ * 守卫兜住剩下的。与 `check:no-local-data` 那道门禁是同一个思路
+ * （那条也不信"记得脱敏"，而是拿真值去比对）。
+ *
+ * ## ★ 判据必须由**调用方**给，不能写死在这里
+ *
+ * 这个包不知道谁是同事、公司叫什么。写死一张名单等于换个用户就失效，
+ * 而失效的表现是静默的（守卫恒放行）。所以真实姓名由宿主从
+ * `channel_self_identity` / `people` 传进来，商标名单由宿主给。
+ */
+export interface DeidentifyRules {
+  /**
+   * 不许出现的字面量（真实姓名、公司名、内部系统名、第三方商标）。
+   *
+   * ★ 太短的会误伤（两个字的中文名撞上普通词，见
+   * `scripts/check-no-local-data.mjs` 的 `CJK_NAME_MIN_LENGTH` 那段长注释）。
+   * 所以调用方**必须**自己过滤长度 —— 这一层不猜。
+   */
+  forbidden: readonly string[]
+}
+
+/** 一条结论的脱敏检查结果。`hits` 非空 = 该丢掉它。 */
+export interface DeidentifyVerdict {
+  ok: boolean
+  /** 命中的字面量。**不进日志**（那是真实姓名），只用于本地判断与计数。 */
+  hits: readonly string[]
+}
+
+/**
+ * 结论正文里有没有不该出现的东西。
+ *
+ * ★ 返回判定而不是抛错：一条命中的结论应当被**丢掉并计数**，而不是让整个
+ * 任务失败。整任务失败会连坐同一批里合格的结论，而那些是花了钱抽出来的。
+ *
+ * ★ 检查 `value` 的**序列化形式**：`tasks` 的 value 是对象
+ * （`{task, from, trigger, askKind}`），人名可能藏在任何一个字段里。
+ * 只查 `value.task` 会漏掉 `from`，而 `from` 恰好是最可能出现人名的字段。
+ */
+export function assertDeidentified(
+  candidate: FacetCandidate,
+  rules: DeidentifyRules,
+): DeidentifyVerdict {
+  if (rules.forbidden.length === 0) return { ok: true, hits: [] }
+  const haystack = (
+    typeof candidate.value === "string" ? candidate.value : JSON.stringify(candidate.value ?? "")
+  ).toLowerCase()
+  const hits = rules.forbidden.filter(
+    (term) => term !== "" && haystack.includes(term.toLowerCase()),
+  )
+  return { ok: hits.length === 0, hits }
+}
+
+/**
  * 规范化 scopeRef：global 一律空串。
  *
  * 单独一个函数是为了让「不允许 null」这条有个可搜索的落点 ——

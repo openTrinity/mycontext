@@ -6,8 +6,10 @@
  */
 import { describe, expect, it } from "vitest"
 import {
+  assertDeidentified,
   assertDistillable,
   assertHasEvidence,
+  assertSelfAttributed,
   filterDistillable,
   normalizeScopeRef,
   type FacetCandidate,
@@ -197,5 +199,165 @@ describe("scopeRef 规范化（防唯一键失效）", () => {
     expect(normalizeScopeRef("conversation", "conv-1")).toBe("conv-1")
     expect(() => normalizeScopeRef("conversation", null)).toThrow()
     expect(() => normalizeScopeRef("contact", "")).toThrow()
+  })
+})
+
+/**
+ * ★★ 脱敏：结论正文里不许出现真实姓名/商标/内部系统名。
+ *
+ * ## 为什么需要**第二道**防线
+ *
+ * `SYSTEM_PROMPT` 第 8 条已经要求脱敏。而实测第一版跑出的 59 条结论里
+ * **有 5 条**带着不该出现的内容：一位同事的真实花名（原话引用
+ * 「我明天让某某看下」）、内部监控系统名、两个第三方产品名、渠道 CLI 命令。
+ *
+ * 模型会漏。而这一层的产物（`work.md`）进 agent 的 skill 包，而 skill 包
+ * **会被导出、分享、进 git** —— 一旦进去就不可撤回（fork/镜像/CI 日志都留存）。
+ * 所以两道：prompt 让绝大多数一次做对，守卫兜住剩下的。
+ */
+describe("★★ assertDeidentified", () => {
+  const candidate = (value: unknown): FacetCandidate => ({
+    facet: "workflow",
+    scope: "global",
+    scopeRef: "",
+    key: "k",
+    value,
+    confidence: 0.8,
+    evidence: ["m1"],
+    source: "llm",
+  })
+
+  it("★★ 正文里有真实姓名 → 拦下", () => {
+    const verdict = assertDeidentified(candidate("明天让小王看下这个 bug"), {
+      forbidden: ["小王"],
+    })
+    expect(verdict.ok).toBe(false)
+    expect(verdict.hits).toContain("小王")
+  })
+
+  it("脱敏过的同一条结论 → 放行（换名字，留行为）", () => {
+    /**
+     * ★ 这条与上一条是一对：要守的性质是"换掉名字就该过"，而不是
+     * "含人名的结论整条丢掉"。行为本身（指定负责人次日跟进）有价值。
+     */
+    const verdict = assertDeidentified(candidate("明天让对应负责人看下这个 bug"), {
+      forbidden: ["小王"],
+    })
+    expect(verdict.ok).toBe(true)
+  })
+
+  /**
+   * ★★ `tasks` 的 value 是**对象**，人名最可能藏在 `from` 里
+   * （「谁提出的」）。只查 `task` 字段会漏掉它 —— 而那恰好是最危险的字段。
+   */
+  it("★★ 对象型 value 的每个字段都查（不只查 task）", () => {
+    const verdict = assertDeidentified(
+      candidate({ task: "review 代码", from: "小王", askKind: "help_request" }),
+      { forbidden: ["小王"] },
+    )
+    expect(verdict.ok, "from 字段里的人名被漏掉了").toBe(false)
+  })
+
+  it("大小写不敏感（商标名常见混写）", () => {
+    expect(assertDeidentified(candidate("用 FooBar 打包"), { forbidden: ["foobar"] }).ok).toBe(
+      false,
+    )
+  })
+
+  it("空名单 → 放行（不给名单 = 不检查，那时唯一防线是 prompt）", () => {
+    expect(assertDeidentified(candidate("任何内容"), { forbidden: [] }).ok).toBe(true)
+  })
+
+  /**
+   * ★ 命中的字面量返回给调用方，但**不该进日志** —— 那就是真实姓名，
+   * 进日志等于换个地方泄漏。调用方只报个数（见 runner 的 `droppedNotDeidentified`）。
+   */
+  it("★ 返回命中项供调用方计数（但调用方只报个数，不报内容）", () => {
+    const verdict = assertDeidentified(candidate("小王和小李都说了"), {
+      forbidden: ["小王", "小李", "小张"],
+    })
+    expect(verdict.hits).toHaveLength(2)
+  })
+})
+
+/**
+ * ★★ 归因守卫：结论必须由**本人的话**支撑。
+ *
+ * ## 这一组锁的是实测到的一次画像污染
+ *
+ * 按 `evidence_json` 回查每条证据的 `is_self`（本机库 33924 条消息 / 273 条结论）：
+ *
+ * ```
+ * tasks: 本人 154 / 他人 61      role: 本人 151 / 他人 16
+ * ```
+ *
+ * 后果在产物里直接可见 —— `role` 一节同时出现两个互相矛盾的人
+ * （「前端开发，负责页面渲染」与「不负责前端开发实现」），且他/她混用。
+ * 那是把群里另一个人的职责写进了本人画像。
+ *
+ * `SYSTEM_PROMPT` 第 1 条已经写了「只描述标注为「我」的那个人」而压不住，
+ * 所以这件事必须落在**落库前**的判据上。
+ */
+describe("★★ assertSelfAttributed（归因）", () => {
+  const selfOnly = { m_self: true, m_other: false, d1: null } as const
+  const authorship = new Map<string, boolean | null>(Object.entries(selfOnly))
+
+  function withEvidence(facet: string, evidence: string[]): FacetCandidate {
+    return {
+      facet,
+      scope: "global",
+      scopeRef: "",
+      key: "k",
+      value: "某条结论",
+      confidence: 0.8,
+      evidence,
+      source: "llm",
+    }
+  }
+
+  it("★★ role/workflow/artifacts/knowhow：混入他人证据 → 拒", () => {
+    /**
+     * 那四个问的是「**他**怎么做」，一条别人说的话不足以证明他的做法。
+     */
+    for (const facet of ["role", "workflow", "artifacts", "knowhow"]) {
+      const verdict = assertSelfAttributed(withEvidence(facet, ["m_self", "m_other"]), authorship)
+      expect(verdict.ok, `${facet} 放过了他人证据`).toBe(false)
+      expect(verdict.ok === false && verdict.reason).toBe("foreign_evidence")
+    }
+  })
+
+  it("★ tasks：允许他人证据（触发句本来就是别人说的），但要有本人的回应", () => {
+    expect(assertSelfAttributed(withEvidence("tasks", ["m_self", "m_other"]), authorship).ok).toBe(
+      true,
+    )
+  })
+
+  it("★★ 一条本人证据都没有 → 拒（不分 facet）", () => {
+    const verdict = assertSelfAttributed(withEvidence("tasks", ["m_other"]), authorship)
+    expect(verdict.ok).toBe(false)
+    expect(verdict.ok === false && verdict.reason).toBe("no_self_evidence")
+  })
+
+  it("★★ 引用了这一批语料里没有的 id → 拒", () => {
+    /**
+     * 与 `resolveEvidence` 只校验序号范围是互补的：那一道保证序号落在批次内，
+     * 这一道保证映射回的 id 真的在喂给模型的那批语料里。
+     */
+    const verdict = assertSelfAttributed(withEvidence("tasks", ["m_self", "0mp0编的"]), authorship)
+    expect(verdict.ok).toBe(false)
+    expect(verdict.ok === false && verdict.reason).toBe("unknown_evidence")
+  })
+
+  it("★ 文档（作者未知）不能单独支撑结论，但也不算「编造的 id」", () => {
+    /**
+     * 文档没有可用的作者字段（见 `work-corpus.ts`），所以它只能作为环境背景。
+     * 单靠它 → `no_self_evidence`（而不是 `unknown_evidence`）。
+     */
+    const verdict = assertSelfAttributed(withEvidence("role", ["d1"]), authorship)
+    expect(verdict.ok === false && verdict.reason).toBe("no_self_evidence")
+  })
+
+  it("空归因表 → 放行（调用方没给语料就无从判断；生产路径一定会给）", () => {
+    expect(assertSelfAttributed(withEvidence("role", ["whatever"]), new Map()).ok).toBe(true)
   })
 })

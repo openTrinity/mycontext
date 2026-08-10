@@ -118,6 +118,27 @@ export class ProfileFacetRepository {
       .map(toRow)
   }
 
+  /**
+   * 列出**某一个 facet** 在某 scope 下的全部行。
+   *
+   * ★ 给去重用（`reduce/dedupe.findSimilar`）：一条新结论要先看"这其实是
+   * 已经有的那条吗"，而那个比对只在同一个 facet 内进行 —— 跨 facet 比会把
+   * `workflow` 的「先 A 再 B」与 `knowhow` 的「必须 A」合成一条，
+   * 而那两个的分工是 `llm-map.LLM_FACETS` 特意划开的。
+   *
+   * 与 `listByScope` 分开而不是让调用方自己过滤：那个函数返回整个 scope
+   * （实测本机 276 行），每条候选都全量拉一遍再过滤是 O(候选 × 全表)。
+   */
+  listByFacet(facet: string, scope: string, scopeRef = ""): ProfileFacetRow[] {
+    return this.db
+      .prepare<[string, string, string], RawRow>(
+        `SELECT * FROM profile_facets WHERE facet = ? AND scope = ? AND scope_ref = ?
+          ORDER BY key`,
+      )
+      .all(facet, scope, scopeRef)
+      .map(toRow)
+  }
+
   list(): ProfileFacetRow[] {
     return this.db
       .prepare<[], RawRow>("SELECT * FROM profile_facets ORDER BY facet, scope, scope_ref, key")

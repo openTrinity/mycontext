@@ -6,5 +6,10 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../kernel" }, { "path": "../llm" }, { "path": "../store" }]
+  "references": [
+    { "path": "../kernel" },
+    { "path": "../llm" },
+    { "path": "../retrieval" },
+    { "path": "../store" }
+  ]
 }

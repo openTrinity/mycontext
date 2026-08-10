@@ -19,12 +19,16 @@
 import { describe, expect, it } from "vitest"
 import {
   computeRoutines,
+  FACET_TIMEOUT_MS,
+  mapFacetWithLlm,
   parseFacetItems,
   percentile,
   renderMessageBlock,
   resolveEvidence,
   routineCandidates,
 } from "@mycontext/distill"
+import { LlmClient } from "@mycontext/llm"
+import { createLogger } from "@mycontext/kernel"
 import type { ConversationRow, MessageRow } from "@mycontext/store"
 import { isAppError } from "@mycontext/kernel"
 
@@ -71,6 +75,11 @@ const conversation: ConversationRow = {
 const conversationById = new Map([["conv-1", conversation]])
 const globalScope = { scope: "global" as const, scopeRef: "" }
 
+/** 三条消息 —— 配 `batchSize: 1` 就是三批，用来观测并发。 */
+function threeMessages(): MessageRow[] {
+  return [message({ id: "m1" }), message({ id: "m2" }), message({ id: "m3" })]
+}
+
 describe("★ 证据必须能验回原文", () => {
   const messages = [message({ id: "m1" }), message({ id: "m2" }), message({ id: "m3" })]
 
@@ -111,7 +120,7 @@ describe("★ 证据必须能验回原文", () => {
         { key: "empty", value: "没给证据", confidence: 0.9, evidence: [] },
       ],
     })
-    const result = parseFacetItems(text, "tone", messages, globalScope)
+    const result = parseFacetItems(text, "workflow", messages, globalScope)
     expect(result.candidates.map((item) => item.key)).toEqual(["good"])
     // 两条都归到"无有效证据"：编造的与没给的都属于这一类
     expect(result.droppedNoEvidence).toBe(2)
@@ -127,7 +136,7 @@ describe("★ 证据必须能验回原文", () => {
         "整个不是对象",
       ],
     })
-    const result = parseFacetItems(text, "tone", messages, globalScope)
+    const result = parseFacetItems(text, "workflow", messages, globalScope)
     expect(result.candidates).toHaveLength(0)
     expect(result.droppedBadShape).toBe(4)
     expect(result.droppedNoEvidence).toBe(0)
@@ -138,9 +147,9 @@ describe("解析失败要抛，不是静默返回空", () => {
   const messages = [message({ id: "m1" })]
 
   it("坏 JSON 抛 PARSE_FAILED", () => {
-    expect(() => parseFacetItems("not json", "tone", messages, globalScope)).toThrow()
+    expect(() => parseFacetItems("not json", "workflow", messages, globalScope)).toThrow()
     try {
-      parseFacetItems("{", "tone", messages, globalScope)
+      parseFacetItems("{", "workflow", messages, globalScope)
     } catch (error) {
       expect(isAppError(error) && error.code).toBe("PARSE_FAILED")
     }
@@ -151,11 +160,11 @@ describe("解析失败要抛，不是静默返回空", () => {
      * 静默返回 0 条会与"模型认为没什么可抽的"混在一起 ——
      * 前者是我们的 bug，后者是正常结果，必须能区分。
      */
-    expect(() => parseFacetItems('{"facets":[]}', "tone", messages, globalScope)).toThrow()
+    expect(() => parseFacetItems('{"facets":[]}', "workflow", messages, globalScope)).toThrow()
   })
 
   it("items 为空数组是**合法**的（模型认为没什么可抽）", () => {
-    const result = parseFacetItems('{"items":[]}', "tone", messages, globalScope)
+    const result = parseFacetItems('{"items":[]}', "workflow", messages, globalScope)
     expect(result.candidates).toHaveLength(0)
   })
 })
@@ -172,7 +181,7 @@ describe("置信度归一", () => {
         { key: "d", value: "x", evidence: [1] },
       ],
     })
-    const result = parseFacetItems(text, "tone", messages, globalScope)
+    const result = parseFacetItems(text, "workflow", messages, globalScope)
     expect(result.candidates.map((item) => item.confidence)).toEqual([1, 0, 0.5, 0.5])
   })
 })
@@ -324,5 +333,184 @@ describe("分位数用最近邻（样本少时线性插值会造出没出现过�
 
   it("空数组返回 null 而不是 0（0 是一个有意义的时延值）", () => {
     expect(percentile([], 0.5)).toBeNull()
+  })
+})
+
+/**
+ * ★★ 各批**并发**发，且结果顺序与串行版一致。
+ *
+ * ## 为什么改成并发（实测数字）
+ *
+ * `MAX_MESSAGES_PER_TASK` 400 ÷ `DEFAULT_BATCH_SIZE` 120 = 一个任务通常 4 批。
+ * 原来是 `for` 里 `await`，单任务耗时 = 4 × 单次耗时；真机实测单任务 230s
+ * （建图抢网关时）/ 61s（空闲时），其中绝大部分是**等网关**。
+ *
+ * 而 `LlmClient` 内部本来就有并发闸（`Semaphore(concurrency ?? 3)`）——
+ * 串行发等于让那个闸永远只用到 1/3。
+ *
+ * ## 这一组锁两条性质
+ *
+ * · **真的并发**（不是伪并发）—— 用"请求还没返回时已经收到第二个请求"来证；
+ * · **顺序不变** —— 候选顺序影响 `findSimilar` 命中哪一行，而"同一份语料
+ *   两次跑得到同一份画像"是这个引擎的立足点。
+ */
+describe("★★ 分批并发（且顺序稳定）", () => {
+  /** 造一个能观测并发的 client：记录同时在飞的请求数峰值。 */
+  function concurrencyProbeLlm(replyFor: (index: number) => string) {
+    let inFlight = 0
+    let peak = 0
+    let seen = 0
+    const client = new LlmClient({
+      baseUrl: "https://fake.invalid",
+      apiKey: "k",
+      model: "m",
+      sleep: () => Promise.resolve(),
+      logger: createLogger("T", { level: "error" }),
+      fetchImpl: async () => {
+        const mine = seen++
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        // 让请求真的重叠：先让出事件循环，再返回
+        await new Promise((resolve) => setTimeout(resolve, 15))
+        inFlight -= 1
+        return {
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              choices: [{ message: { content: replyFor(mine) } }],
+              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            }),
+          text: () => Promise.resolve(""),
+        } as unknown as Response
+      },
+    })
+    return { client, peak: () => peak }
+  }
+
+  it("★★ 多批时请求真的重叠（峰值 > 1）", async () => {
+    const probe = concurrencyProbeLlm(() => '{"items":[]}')
+    // 3 批：batchSize 1、3 条消息
+    await mapFacetWithLlm("role", threeMessages(), conversationById, globalScope, {
+      client: probe.client,
+      selfNames: ["我"],
+      batchSize: 1,
+    })
+    expect(probe.peak(), "各批仍是串行的 —— 并发闸被浪费了").toBeGreaterThan(1)
+  })
+
+  it("★★ 候选顺序按批次索引，与串行版一致", async () => {
+    /**
+     * 每批回一条带自己序号的结论。并发之后**完成顺序**是不确定的
+     * （谁先返回看网关），但 `Promise.all` 保证结果数组按索引有序 ——
+     * 所以折叠出来的候选必须仍是 batch0 → batch1 → batch2。
+     */
+    const probe = concurrencyProbeLlm((index) =>
+      JSON.stringify({
+        items: [
+          {
+            key: `k${String(index)}`,
+            value: `第 ${String(index)} 批`,
+            confidence: 0.8,
+            evidence: [1],
+          },
+        ],
+      }),
+    )
+    const result = await mapFacetWithLlm("role", threeMessages(), conversationById, globalScope, {
+      client: probe.client,
+      selfNames: ["我"],
+      batchSize: 1,
+    })
+    expect(result.calls).toBe(3)
+    expect(result.candidates.map((c) => c.value)).toEqual(["第 0 批", "第 1 批", "第 2 批"])
+  })
+
+  it("★★ 一批失败 → 整个任务失败（不许部分成功后记成 done）", async () => {
+    /**
+     * 与串行版行为一致。用 `allSettled` 部分成功会更糟：一个任务的结论
+     * **少了一批**却被记成成功，而少掉的那部分永远不会再抽 —— 静默数据缺失。
+     */
+    const client = new LlmClient({
+      baseUrl: "https://fake.invalid",
+      apiKey: "k",
+      model: "m",
+      maxRetries: 0,
+      sleep: () => Promise.resolve(),
+      logger: createLogger("T", { level: "error" }),
+      fetchImpl: (() => {
+        let n = 0
+        return () =>
+          n++ === 1
+            ? Promise.resolve({
+                ok: false,
+                status: 400,
+                text: () => Promise.resolve("bad"),
+              } as unknown as Response)
+            : Promise.resolve({
+                ok: true,
+                status: 200,
+                json: () =>
+                  Promise.resolve({
+                    choices: [{ message: { content: '{"items":[]}' } }],
+                    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+                  }),
+                text: () => Promise.resolve(""),
+              } as unknown as Response)
+      })(),
+    })
+    await expect(
+      mapFacetWithLlm("role", threeMessages(), conversationById, globalScope, {
+        client,
+        selfNames: ["我"],
+        batchSize: 1,
+      }),
+    ).rejects.toThrow()
+  })
+})
+
+/**
+ * ★★ 抽取必须用**自己的长超时**，不能吃 `LlmClient` 的默认 90s。
+ *
+ * ## 为什么值得一条回归锁
+ *
+ * 真机实测：单次抽取调用约 125s，而 client 默认超时 90s（那个值是按
+ * "数字分身替人回消息、有人在等"定的）。于是这一层的**正常耗时本身就越线**，
+ * 语料长的窗口必然失败 —— 而失败长得像"这个窗口没什么可抽的"：
+ *
+ * ```
+ * 已成功窗口  400 条  6768 字符（均 17 字符/条）  ✓
+ * 05-12 窗口  400 条 14680 字符（均 37 字符/条）  ✗ role/tasks 双双超时
+ * ```
+ *
+ * 这条锁的是「传了 timeoutMs 且远大于默认」这个事实。把它删掉/改小，
+ * 症状是部分窗口静默缺 facet，而产物里看不出来 —— 那正是本仓库
+ * CLAUDE.md §4 说的那类静默降级，不该靠人再实测一遍才发现。
+ */
+describe("★★ 抽取用长超时（不吃 client 默认的 90s）", () => {
+  it("每次调用都显式带 FACET_TIMEOUT_MS，且 ≥ 默认 90s 的两倍", async () => {
+    const seen: (number | undefined)[] = []
+    const client = {
+      complete: (input: { timeoutMs?: number }) => {
+        seen.push(input.timeoutMs)
+        return Promise.resolve({
+          text: '{"items":[]}',
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        })
+      },
+    } as unknown as LlmClient
+
+    await mapFacetWithLlm("role", threeMessages(), conversationById, globalScope, {
+      client,
+      selfNames: ["我"],
+      batchSize: 1,
+    })
+
+    expect(seen.length, "一批都没发出去").toBeGreaterThan(0)
+    for (const value of seen) {
+      expect(value, "某一批没带 timeoutMs —— 它会吃 client 默认的 90s").toBe(FACET_TIMEOUT_MS)
+    }
+    // 默认 90s 是给"有人在等"的那条路的；抽取是后台批处理，必须宽得多
+    expect(FACET_TIMEOUT_MS).toBeGreaterThanOrEqual(180_000)
   })
 })

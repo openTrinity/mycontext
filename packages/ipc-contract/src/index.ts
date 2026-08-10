@@ -17,6 +17,7 @@ export {
   languagePreferenceSchema,
   setLanguageInputSchema,
   setQuitConfirmInputSchema,
+  setWorkLayerInputSchema,
   quitDecisionInputSchema,
   updateProfileInputSchema,
   onboardingStepSchema,

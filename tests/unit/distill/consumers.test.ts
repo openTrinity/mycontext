@@ -28,7 +28,7 @@ import {
   PersonaConfigRepository,
   type ChangelogRow,
 } from "@mycontext/store"
-import { createDistillHandler, DISTILL_CONSUMER_ID } from "@mycontext/distill"
+import { createDistillHandler, DISTILL_CONSUMER_ID, ALL_FACETS } from "@mycontext/distill"
 import {
   PersonaSupervisor,
   createPersonaInboxHandler,
@@ -111,16 +111,21 @@ describe("★ distill 消费者：只入队，不跑蒸馏", () => {
     expect(result.processed).toBe(20)
 
     /**
-     * ★ 6 个任务（5 个 LLM facet + 1 个统计），不是 20×6。
+     * ★ 一组任务（每个 facet 一个），不是 20 × facet 数。
      *
-     * 逐条入队会产生 120 次 enqueue（都被幂等挡掉，但白跑 120 次查询）。
+     * 逐条入队会产生 20×N 次 enqueue（都被幂等挡掉，但白跑那么多次查询）。
      * 更重要的是：窗口如果不对齐，每条消息会算出略微不同的起点，
      * 于是同一段时间被切成无数**重叠**的窗口 —— 那会让蒸馏重复花钱。
+     *
+     * ★ 从 `ALL_FACETS` 取数而不是写死：facet 集合改过一次（LLM 那半从
+     * 「抽整个画像」换成「只抽 forge 测不了的工作维度」），写死的常量
+     * 会让这条测试在一次合理的改动后变红，而修法看起来就是"改掉期望值"
+     * —— 那会顺手盖住真正的回归（窗口没对齐导致任务数暴涨）。
      */
     const tasks = new DistillTaskRepository(vault.db)
     const progress = tasks.progress()
-    expect(progress.total).toBe(6)
-    expect(progress.pending).toBe(6)
+    expect(progress.total).toBe(ALL_FACETS.length)
+    expect(progress.pending).toBe(ALL_FACETS.length)
     vault.close()
   })
 
@@ -142,7 +147,8 @@ describe("★ distill 消费者：只入队，不跑蒸馏", () => {
       })(),
     })
     handler(batchOf(vault))
-    expect(new DistillTaskRepository(vault.db).progress().total).toBe(12)
+    // 两个窗口 × 每窗一组
+    expect(new DistillTaskRepository(vault.db).progress().total).toBe(ALL_FACETS.length * 2)
     vault.close()
   })
 
@@ -164,7 +170,7 @@ describe("★ distill 消费者：只入队，不跑蒸馏", () => {
      * 幂等是抢占安全的前提：租约过期后新持有者会从 `acked_seq` **重放**。
      * 不幂等的话每次抢占都把那段时间重蒸一遍。
      */
-    expect(new DistillTaskRepository(vault.db).progress().total).toBe(6)
+    expect(new DistillTaskRepository(vault.db).progress().total).toBe(ALL_FACETS.length)
     vault.close()
   })
 
