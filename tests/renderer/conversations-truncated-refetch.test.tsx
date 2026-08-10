@@ -23,7 +23,7 @@ import { useChannelConversations } from "@renderer/lib/queries"
 
 afterEach(cleanup)
 
-function setup(responses: { items: unknown[]; truncated: boolean }[]) {
+function setup(responses: { items: unknown[]; truncated: boolean; sources?: unknown[] }[]) {
   let call = 0
   const conversations = vi.fn(() => {
     const body = responses[Math.min(call, responses.length - 1)]
@@ -85,5 +85,92 @@ describe("★★ 截断的会话列表要能自己恢复", () => {
     const resolved = typeof stale === "function" ? stale(query!) : stale
     expect(typeof resolved).toBe("number")
     expect(resolved as number).toBeLessThan(60_000)
+  })
+
+  /**
+   * ★★★ **登录过期不许重试** —— 这条锁的是一个停不下来的轮询。
+   *
+   * 原判据是 `truncated === true` → 每 8 秒无限重取，注释里写着
+   * "两者都会在几秒内自己好转"。实测不成立：
+   *
+   *     16:20:54 warn | conversation list: primary db not attached yet
+   *     16:21:02 warn | …每 8 秒一条，刷到日志末尾（2 分半没停）
+   *
+   * 而 `expired` 更糟 —— 那一轮里钉钉每次调用都回 `dws auth login` 提示，
+   * 重试 20 次与 1 次结果完全一样，只是把真正的错误刷出了屏幕。
+   */
+  it("★★★ expired（登录过期）→ 不重试（靠等永远好不了）", async () => {
+    const { client, wrapper } = setup([
+      {
+        items: [],
+        truncated: true,
+        sources: [{ channelId: "dingtalk", count: 0, state: "expired", reason: "登录已过期" }],
+      },
+    ])
+    const { result } = renderHook(() => useChannelConversations(true), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+
+    const query = client.getQueryCache().find({ queryKey: ["channel", "conversations"] })
+    const interval = query?.options.refetchInterval
+    expect(typeof interval === "function" ? interval(query!) : interval).toBe(false)
+  })
+
+  /** ★★ `cannot-enumerate` 是渠道的固有属性，重试无意义。 */
+  it("★★ cannot-enumerate → 不重试", async () => {
+    const { client, wrapper } = setup([
+      {
+        items: [],
+        truncated: true,
+        sources: [{ channelId: "feishu", count: 0, state: "cannot-enumerate", reason: null }],
+      },
+    ])
+    const { result } = renderHook(() => useChannelConversations(true), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+
+    const query = client.getQueryCache().find({ queryKey: ["channel", "conversations"] })
+    const interval = query?.options.refetchInterval
+    expect(typeof interval === "function" ? interval(query!) : interval).toBe(false)
+  })
+
+  /** ★★★ `not-ready`（库还在挂）**才**重试 —— 它是唯一会自己好转的。 */
+  it("★★★ not-ready → 重试", async () => {
+    const { client, wrapper } = setup([
+      {
+        items: [],
+        truncated: true,
+        sources: [{ channelId: "dingtalk", count: 0, state: "not-ready", reason: "挂载中" }],
+      },
+    ])
+    const { result } = renderHook(() => useChannelConversations(true), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+
+    const query = client.getQueryCache().find({ queryKey: ["channel", "conversations"] })
+    const interval = query?.options.refetchInterval
+    expect(typeof (typeof interval === "function" ? interval(query!) : interval)).toBe("number")
+  })
+
+  /**
+   * ★★★ 有**次数上限** —— `not-ready` 理论上会好转，但挂载那一步自己挂掉时
+   * （实测发生过）无限轮询会一直转，而它刷出来的 warn 会掩盖真正的错误。
+   */
+  it("★★★ not-ready 重试到上限后停下", async () => {
+    const { client, wrapper } = setup([
+      {
+        items: [],
+        truncated: true,
+        sources: [{ channelId: "dingtalk", count: 0, state: "not-ready", reason: "挂载中" }],
+      },
+    ])
+    const { result } = renderHook(() => useChannelConversations(true), { wrapper })
+    await waitFor(() => expect(result.current.data).toBeDefined())
+
+    const query = client.getQueryCache().find({ queryKey: ["channel", "conversations"] })!
+    const interval = query.options.refetchInterval as (q: typeof query) => number | false
+    // 伪造"已经取到过 8 次"→ 必须停
+    const exhausted = {
+      ...query,
+      state: { ...query.state, dataUpdateCount: 8 },
+    } as unknown as typeof query
+    expect(interval(exhausted)).toBe(false)
   })
 })

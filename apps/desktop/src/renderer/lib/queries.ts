@@ -8,6 +8,7 @@ import { resolveLanguage } from "@mycontext/i18n"
 import type {
   AuthMode,
   AuthProgress,
+  ChannelConversationListView,
   SaveRuntimeConfigInput,
   ProbeRuntimeConfigInput,
   Credentials,
@@ -1013,29 +1014,64 @@ export function useUploadImage() {
 /**
  * 可选会话列表。
  *
- * ## ★★ 结果**截断**时不当终态缓存，短周期重取
+ * ## ★★★ 只在「等一下真的会好」时重取，且**有次数上限**
  *
- * `truncated` 是主进程给的"这不是全集"的信号，它有两个可恢复的成因：
- * 主渠道的库还没挂完（授权刚成功的那个窗口），或渠道 CLI 这一次调用失败。
- * 两者都会在几秒内自己好转 —— 而 `staleTime: 5 * 60_000` 会把那一刻的
- * 残缺结果按住 5 分钟，用户看到的是一个空列表（或缺一个渠道），
- * 且**不会自己恢复**。
+ * 这里原来的判据是 `truncated === true` → 每 8 秒无限重取，注释写着
+ * "两者都会在几秒内自己好转"。**那个假设实测不成立**，代价是一个
+ * 停不下来的轮询：
  *
- * 所以：完整结果照旧缓存 5 分钟（这个列表要跑渠道 CLI，不便频繁问）；
- * 截断结果只缓存 5 秒，并开一个 8 秒的轮询直到它变完整。
+ *     16:20:54 warn | conversation list: primary db not attached yet
+ *     16:21:02 warn | conversation list: primary db not attached yet
+ *     …每 8 秒一条，刷到日志末尾（2 分半没停）
  *
- * ★ 判据用主进程给的 `truncated` 而不是"items 为空"：真的没有会话
- * （新账号、全是保密群）也会是空，那时不该无限轮询。
+ * 而 `truncated` 有四种成因，只有一种会自己好转：
+ *
+ * · `not-ready`（库还在挂）—— 会好，值得等；
+ * · `expired`（登录过期）—— **靠等永远好不了**，要用户去重新授权。
+ *   实测那一轮里钉钉每次调用都是 `dws auth login` 提示，重试 20 次
+ *   与重试 1 次的结果完全一样，只是把真正的错误刷出了屏幕；
+ * · `cannot-enumerate` —— 那是这个渠道的固有属性，重试无意义；
+ * · `failed` —— 可能是一次性故障，值得重试**几次**但不能无限。
+ *
+ * ## 上限而不是"一直等"
+ *
+ * `not-ready` 理论上会好转，但"理论上"不够 —— 挂载那一步自己挂掉时
+ * （实测发生过：`switching channel identity` 之后主库再也没挂上）
+ * 无限轮询会一直转，而且**它刷出来的 warn 会掩盖真正的错误**。
+ * 所以给 8 次上限（约 1 分钟）：正常挂载远快于此，而超过它就是真出问题了
+ * —— 那时停下来，让界面上那句 `not-ready` 文案留在原地，
+ * 比一个永远在转的圈诚实。
  */
 export function useChannelConversations(enabled: boolean) {
   return useQuery({
     queryKey: QUERY_KEYS.channelConversations,
     queryFn: async () => unwrap(await window.mycontext.channels.conversations()),
     enabled,
-    staleTime: (query) => (query.state.data?.truncated === true ? 5_000 : 5 * 60_000),
-    // 截断 → 每 8 秒再问一次；完整 → 停（false）
-    refetchInterval: (query) => (query.state.data?.truncated === true ? 8_000 : false),
+    staleTime: (query) => (shouldRetryConversations(query.state.data) ? 5_000 : 5 * 60_000),
+    refetchInterval: (query) => {
+      if (!shouldRetryConversations(query.state.data)) return false
+      // ★ 上限：`dataUpdateCount` 是这个 query 成功取到数据的次数
+      return query.state.dataUpdateCount >= CONVERSATION_RETRY_LIMIT ? false : 8_000
+    },
   })
+}
+
+/** 会话列表最多自动重取几次（约 1 分钟）。见 `useChannelConversations` 的注释。 */
+const CONVERSATION_RETRY_LIMIT = 8
+
+/**
+ * 这份结果值得再问一次吗。
+ *
+ * ★ 判据是**逐渠道的 state**，不是那个笼统的 `truncated` ——
+ * 只有"库还在挂"会自己好转，而登录过期靠等永远好不了（见上面的注释）。
+ *
+ * `sources` 缺席（旧主进程）时退回 `truncated`：少一点精度好过完全不重试，
+ * 但那条路同样受上面那个次数上限约束。
+ */
+function shouldRetryConversations(data: ChannelConversationListView | undefined): boolean {
+  if (data === undefined) return false
+  if (data.sources === undefined) return data.truncated
+  return data.sources.some((source) => source.state === "not-ready" || source.state === "failed")
 }
 
 // ---------------------------------------------------------------
