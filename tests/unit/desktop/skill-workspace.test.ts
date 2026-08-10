@@ -6,7 +6,7 @@
  * skill 的链路有**四段**，断任何一段的表现都一样：「图谱查不了」，
  * 而且**都不报错**：
  *
- * ① `kl-graph/.claude/skills/kl/` —— 算法团队那份代码里有没有（`sync:kl-graph`）；
+ * ① `kl-graph/skills/kl/` —— 算法团队那份代码里有没有（`sync:kl-graph`）；
  * ② `apps/desktop/resources/skills/kl/` —— 同步到打包资源了没有（`sync:kl-skill`，
  *    已有 `check:kl-skill-sync` 守着）；
  * ③ **`SearchService` 起 opencode 时把资源目录塞进 `skills.paths`** ——
@@ -186,10 +186,22 @@ describe("★ skill 资源目录本身要是齐的（前两段链路）", () => 
     // 这几个是 agent 真正会用到的入口
     expect(text).toContain("kl ask")
     expect(text).toContain("kl search")
+    /**
+     * ★ 锁住**上游新能力真的到达了产物**（`74dea06` 新增的 GraphRAG 全局搜索）。
+     *
+     * 这一条不是多余的重复：`check:kl-skill-sync` 只保证"产物 == 净化后的源"，
+     * 而当门禁盯着 gitignore 掉的旧副本时，"源"本身就是停更的 499 行 ——
+     * 于是产物与那个旧源一致、门禁绿，agent 却压根不知道 `global-search` 存在。
+     * 盯一个**具体的新命令**能独立地发现"整条链停在旧版本"，
+     * 与只比指纹是两码事（见 check-kl-skill-sync.mjs 顶部关于搬家的注释）。
+     */
+    expect(text).toContain("global-search")
   })
 
   it("kl-graph/ 里有 skill 源（sync:kl-skill 的输入）", () => {
-    const source = join(REPO_ROOT, "kl-graph/.claude/skills/kl/SKILL.md")
+    // ★ 源在 `kl-graph/skills/kl`，不是 `.claude/skills/kl`（后者被 gitignore、
+    // 停在上游搬家前 772303e）。盯错目录会把停更的旧 skill 打进 .app。
+    const source = join(REPO_ROOT, "kl-graph/skills/kl/SKILL.md")
     expect(existsSync(source), `缺 kl-graph 里的 skill 源：${dirname(source)}`).toBe(true)
   })
 })

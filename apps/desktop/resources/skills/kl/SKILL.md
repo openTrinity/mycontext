@@ -1,6 +1,6 @@
 ---
 name: kl
-description: Query the DingTalk spatio-temporal knowledge graph (tens of thousands of messages/chunks, plus entities, facts, and multi-resolution communities). Use when answering questions about workplace conversations, team structures, project decisions, people, or system relationships from the DingTalk export. Triggered by questions about who said what, project timelines, team composition, technical decisions, or any question that can be grounded in workplace chat history.
+description: Query the DingTalk spatio-temporal knowledge graph (tens of thousands of messages/chunks, plus entities, facts, and multi-resolution communities). Use when answering questions about workplace conversations, team structures, project decisions, people, or system relationships from the DingTalk export. Triggered by questions about who said what, project timelines, team composition, technical decisions, conceptual/aggregate questions about a person ("what are my recent tasks", "what does X mainly work on" — use `kl global-search`), or any question that can be grounded in workplace chat history.
 ---
 
 # Knowledge Graph Query (kl)
@@ -17,7 +17,7 @@ runtime, then invoke `kl` relative to it.**
 
 Discover the repo root (call it `KL_REPO`):
 
-- This skill file lives at `<repo>/.claude/skills/kl/SKILL.md`, so the repo root
+- This skill file lives at `<repo>/skills/kl/SKILL.md`, so the repo root
   is **three directories up from this file** — if you know this file's path, use
   its `../../..`.
 - Otherwise walk up from the current directory until you find the marker files
@@ -103,6 +103,7 @@ the server or querying:
 ```bash
 export PYTHONUTF8=1
 export KL_DATA_DIR="$KL_REPO/data"
+export KL_DWS_EXPORT_DIR="$KL_REPO/dataset/<your-export-dir>"
 export KL_EMBED_BASE_URL=<your-embed-endpoint>/v1
 export KL_EMBED_MODEL=Qwen3-Embedding-0.6B
 export KL_EMBED_API_KEY=<your-key>
@@ -143,6 +144,7 @@ export KL_REPO
 
 # Environment variables (adjust paths/values for your setup)
 export KL_DATA_DIR="$KL_REPO/data"
+export KL_DWS_EXPORT_DIR="$KL_REPO/dataset/<your-export-dir>"
 export KL_EMBED_BASE_URL=<your-embed-endpoint>/v1
 export KL_EMBED_MODEL=Qwen3-Embedding-0.6B
 export KL_EMBED_API_KEY=<your-key>
@@ -174,21 +176,105 @@ synthesis is slow — the server may still complete the request; check
 export KL_CLI_TIMEOUT=180  # 3 minutes
 ```
 
+## End to End (build → ingest → query)
+
+First-time setup from a raw DWS export to answering questions. Steps 1–4 are
+the one-time **build**; after that you only use step 5 (query), and re-run the
+ingest when new data arrives.
+
+```bash
+# 1. BUILD: install deps + point at your endpoints and data (env-only, no
+#    secrets are baked into the repo). Put the config in a local .env file
+#    (gitignored) and source it before starting the server:
+pip install -r requirements.txt
+set -a; source .env; set +a          # load KL_* + ANTHROPIC_AUTH_TOKEN
+```
+
+The repo ships a `.env` at the project root (gitignored — never commit it)
+with working endpoints. Nothing auto-loads it, so you must `source` it as above.
+It sets:
+
+```bash
+# data + export
+export KL_DATA_DIR=./data                      # where knowledge.db + qdrant land
+export KL_DWS_EXPORT_DIR=/path/to/dws_export   # the exported source folders
+
+# embedding: PAI-EAS Qwen3-Embedding-0.6B (1024-dim). URL MUST end in /v1;
+# KL_EMBEDDING_DIM MUST match the model (1024) — it is baked into the Qdrant
+# collections, so changing models later requires wiping + re-embedding.
+export KL_EMBED_BASE_URL=<your-embed-endpoint>/v1
+export KL_EMBED_MODEL=Qwen3-Embedding-0.6B
+export KL_EMBED_API_KEY=<embedding-api-key>   # real value lives only in .env
+export KL_EMBEDDING_DIM=1024
+export KL_EMBED_SEND_DIMENSIONS=0
+
+# extraction/synthesis LLM: qwen3.6-flash (Anthropic-compatible base;
+# do NOT append /v1 — litellm adds /v1/messages itself).
+export KL_LLM_BASE_URL=https://example.com/apps/anthropic
+export KL_LLM_MODEL=qwen3.6-flash
+export ANTHROPIC_AUTH_TOKEN=<api-key>   # real value lives only in .env
+```
+
+```bash
+# 2. SERVE: start the retrieval server first (ingest runs inside it).
+./kl start
+kl status                                      # wait for "status": "ready"
+
+# 3. INGEST: drive the whole build through the running server. This runs
+#    Phase A (chunk+embed every source) → Phase B (LLM extract + build+embed
+#    the graph) → the improve step (ENTITY_SIMILAR/FACT_SIMILAR edges +
+#    communities L0–L3), then hot-swaps the new graph in. Non-blocking.
+kl ingest -d "$KL_DWS_EXPORT_DIR"              # omit -d to use $KL_DWS_EXPORT_DIR
+kl status                                      # poll: "Ingest: running NN% (phase)"
+
+# 4. COMMUNITY SUMMARIES (optional but recommended): kl ingest builds the
+#    community structure but NOT their summaries/vectors. These two steps add
+#    1–2 sentence summaries and make `search -c communities` work.
+python -m kl_graph.periodic.community_summarizer   # 1–2 sentence summary/community
+python scripts/embed_communities.py                # embed summaries (search -c communities)
+
+# 5. QUERY: ask questions (see Retrieval Patterns below).
+kl ask "who decided to use e2b for sandbox" -k 5
+kl context <fact_id>                               # ground the answer in source
+```
+
+Notes:
+
+- `kl ingest` **upserts** into the current DB (deterministic UUID5 ids mean
+  re-ingesting never duplicates entities/facts); it has no wipe flag, so for a
+  truly clean rebuild `rm -rf "$KL_DATA_DIR"` before step 2. `--no-improve`
+  skips the community/PageRank step; `-c N` raises extraction concurrency.
+- For a **cold/scripted build without a running server**, the offline
+  equivalents are `python -m scripts.ingest --fresh-db` (Phase A + B, `--fresh-db`
+  wipes `knowledge.db` — which now holds the extraction cache, so the cache is
+  cleared too) followed by
+  `python -m scripts.improve --skip-llm-judge`. `kl ingest` is the preferred
+  path when the server is up.
+- Community columns (`community_L0..L3`) come from the improve step; without it
+  `community`/`members` are empty and `entity` shows no community labels.
+
 ## Commands
 
 ```bash
 # Lifecycle
-kl status              # Server status + DB stats
+kl status              # Server status + DB stats (+ ingest progress)
 kl start               # Start kl-server (retrieval)
 kl start embedding [--model P] [--dp N] [--tp N] [--port 8100] [--gpu-util 0.4]
 kl stop                # Stop both servers
 kl stop embedding      # Stop only the embedding server
+kl ingest [-c N] [-d PATH] [--no-improve]  # in-server background ingest (Phase A + B)
 
 # All commands require kl-server running (kl start)
-kl entity "<name>"     # Entity lookup (substring match); shows id + SIMILAR_TO
-                       #   edges (with names) + top facts about it (id + text)
+kl entity "<name>"     # Entity lookup by name (substring); shows id +
+                       #   communities + top edges + facts about it (id + text)
+                       #   + ENTITY_SIMILAR neighbors ("similar", with names)
+kl entity --id <id>    # Same, but look up by entity id (exact or prefix).
+                       #   Add --no-similar to skip the ENTITY_SIMILAR block.
 kl facts <entity_id>   # Facts ABOUT an entity (id + text), confidence-sorted
-kl expand <entity_id>  # SIMILAR_TO neighbors (alias resolution)
+kl facts --fact-id <id>  # A single fact by its id (exact/prefix); minimal —
+                       #   use `kl context` for full source provenance
+kl expand <entity_id>  # [DEPRECATED] ENTITY_SIMILAR neighbors — same as the
+                       #   "similar" block of `kl entity --id <id>`
 kl community [-l L0|L1|L2|L3] [-t entity|fact] [--id N]
 kl members <id> [-l L1] [-t entity]
 kl context <fact_id>   # Source message + context + entities
@@ -196,7 +282,56 @@ kl timeline "<entity>" [--from YYYY-MM-DD] [--to YYYY-MM-DD]
 kl stats               # Detailed statistics
 kl search "<query>" [-c chunks|messages|facts|entities|communities] [-k 10]  # vector ANN, one collection
 kl ask "<question>" [-k 10] [--phase2] [--seed-k 6] [--radius 1] [--max-nodes 40]  # hybrid retrieval + graph walk (+ optional synthesis)
+kl global-search "<question>" [--user "<name>"] [--json]  # GraphRAG map-reduce over a person's community summaries
 kl hop -n <node_id> -c '<cursor_json>'   # expand one node one hop deeper (no LLM/embed)
+```
+
+**Ingest is two phases** (`kl ingest` for in-server background ingest, or
+`python -m scripts.ingest` for a cold/scripted build):
+**Phase A** loads + chunks + embeds *every* source folder (chat + wiki/mail/
+work/…) into SQLite `chunks` + Qdrant — no LLM, dense/BM25 recall works after
+this. **Phase B** runs LLM entity/fact extraction over all chunks, then builds
+and embeds the graph (the only LLM-billed phase; results are cached per chunk).
+Watch progress with `kl status` (`Ingest: running NN% (phase)`).
+
+> **Run the full ingest (Phase A + Phase B) — `kl ingest` does both.** But you
+> don't have to *wait* for Phase B: the service is usable as soon as **Phase A**
+> completes (search/ask work off dense + BM25 recall), so start querying while
+> Phase B is still running. **Phase B then improves performance/accuracy** by
+> adding the entity/fact graph on top — check `kl status` to see when it lands.
+
+Offline build (needs `KL_DWS_EXPORT_DIR`, `KL_DATA_DIR`, `ANTHROPIC_AUTH_TOKEN`,
+`KL_EMBED_API_KEY` in the env):
+
+```bash
+python -m scripts.ingest --fresh-db                # Phase A + Phase B (fresh)
+python -m scripts.improve --skip-llm-judge         # ENTITY_SIMILAR/FACT_SIMILAR + communities L0–L3
+python -m kl_graph.periodic.community_summarizer   # 1–2 sentence summary/community
+python scripts/embed_communities.py                # embed summaries (search -c communities)
+```
+
+- With no flag, `scripts.ingest` runs the full pipeline with **smart resume**:
+  if Phase A is fully done (every chunk persisted *and* embedded) it skips to
+  Phase B, else it re-runs Phase A. `--phase-a` = chunk+embed only (no LLM).
+- `--fresh-db` wipes `knowledge.db` + the Qdrant dir. The extraction cache now
+  lives in the `extraction_cache` table **inside** `knowledge.db`, so `--fresh-db`
+  clears it too. To rebuild the graph **without** re-billing the LLM (reusing the
+  cache), run `python -m scripts.ingest --build-only` **without** `--fresh-db`.
+  To wipe everything, `rm -rf "$KL_DATA_DIR"` first.
+- Ids are deterministic UUID5s of normalized content, so re-ingesting never
+  duplicates entities/facts.
+- Community columns (`community_L0..L3`) are created **only** by
+  `scripts.improve` (or `kl ingest` unless `--no-improve`); without them
+  `community`/`members` are empty and `entity` shows no community labels.
+
+To ingest a new export into the **running server** (non-blocking — it keeps
+serving and hot-swaps the new graph in when done):
+
+```bash
+kl ingest -d /path/to/dws_export     # start Phase A → B in the background
+kl status                            # poll: "Ingest: running NN% (phase_a|phase_b)"
+# -c N raises LLM extraction concurrency (default 8); --no-improve skips
+# community detection/PageRank; omit -d to use $KL_DWS_EXPORT_DIR.
 ```
 
 `search` returns raw nearest-neighbor hits from a single collection (default
@@ -258,13 +393,17 @@ enough for querying.
 How to use `kl` well, in priority order:
 
 1. **Check the server first.** Every query command needs `kl start` running;
-   run `kl status` and confirm `"status": "ready"` before querying.
+   run `kl status` and confirm `"status": "ready"` before querying. If a build
+   is in progress, remember the service is usable after Phase A.
 2. **Plan before you query.** Think about what the user is really asking and
    which commands answer it; don't fire commands blindly (see the Query
    strategy callout under Retrieval Patterns).
 3. **Start with `kl ask`, avoid `kl search`.** `kl ask` is the primary entry
    point (hybrid retrieval + graph walk); reserve `kl search` for narrow
-   single-collection lookups `kl ask` can't serve.
+   single-collection lookups `kl ask` can't serve. For **conceptual,
+   person-scoped "what has X been about / what are my recent tasks" questions**
+   that need aggregation rather than a single hit, use `kl global-search`
+   (see Retrieval Pattern 8).
 4. **Trace before you trust.** Ground every claim in source: take a `fact_id`
    from `ask`/`entity`/`facts`/`timeline` and run `kl context <fact_id>` to see
    the original message before reporting it.
@@ -306,12 +445,14 @@ How to use `kl` well, in priority order:
 | timeline (high-degree, no filter) | auto-filtered to 90 days |
 | search (single-collection ANN) | remote embed + Qdrant ANN |
 | ask (hybrid; may synthesize) | dense+sparse+RRF + hop-1 graph walk; +LLM when it escalates to Phase 2 |
+| global-search (map-reduce over communities) | 1 map + 1 reduce LLM call (~30s on the `ok` path); 0 ms / 0 LLM on no-data |
 | hop (expand one node) | no embed/LLM — pure in-memory adjacency (fastest) |
 | CLI total (Python startup + httpx) | +1.5s overhead |
 
 `ask` is slower when it escalates to Phase-2 synthesis (an extra LLM call).
 Embeddings are served by the configured remote endpoint (`KL_EMBED_*` env
-vars).
+vars); the embedding dimension is fixed at build time, so changing models
+requires a full re-embed.
 
 ## Retrieval Patterns
 
@@ -353,7 +494,7 @@ kl context <best_fact_id>                          # ground the answer in source
 ### 2. Entity Deep-Dive (about a person/project/system)
 
 ```bash
-kl entity "周强"                    # id + SIMILAR_TO edges + top facts (with fact_ids)
+kl entity "周强"                    # id + "similar" (ENTITY_SIMILAR) + top facts (with fact_ids)
 kl facts <entity_id>                 # all facts ABOUT it (fact_id + text)
 kl context <fact_id>                 # ground a fact in its source message
 kl community -l L2 --id <community_id>
@@ -363,10 +504,12 @@ kl timeline "周强" --from 2026-06-01
 
 **Id-driven trace-back (no name round-trip):** every id `kl` prints is
 traceable. `kl entity` returns an `entity_id` plus the facts about it; feed the
-`entity_id` to `kl facts` for the full list, then any `fact_id` to `kl context`
-for the exact source message. SIMILAR_TO edges also show the neighbor's name +
-full `entity_id`, so you can `kl expand`/`kl facts` on those too. Prefer ids
-over names when chaining — names aren't unique (e.g. two `周强` entities).
+`entity_id` back with `kl entity --id <id>` (or `kl facts <entity_id>` for the
+full list), then any `fact_id` to `kl context` for the exact source message
+(or `kl facts --fact-id <id>` for just the fact text). The `similar` block also
+shows each ENTITY_SIMILAR neighbor's name + full `entity_id`, so you can
+`kl entity --id`/`kl facts` on those too. Prefer ids over names when chaining
+— names aren't unique (e.g. two `周强` entities).
 
 (To find a person/system when unsure of the exact surface form, use
 `kl search "<term>" -c entities` for a semantic entity lookup.)
@@ -391,7 +534,7 @@ kl members 8 -l L2 -t entity    # Who's in it?
 
 ```bash
 kl entity "张伟"
-kl expand <entity_id>            # See SIMILAR_TO links
+kl entity --id <entity_id>       # the "similar" block lists ENTITY_SIMILAR links
 ```
 
 ### 5. Timeline
@@ -418,8 +561,8 @@ entities/facts the query extracted. There is **no separate `graph` command**;
 the walk is built into `ask`.
 
 ```bash
-kl ask "e2b 沙箱和谁相关" --seed-k 6 --max-nodes 40   # items + seeds + hop-1 subgraph (JSON)
-kl ask "e2b 沙箱和谁相关" --pretty                    # human view + expandable ids
+kl ask "e2b 部署平台和谁相关" --seed-k 6 --max-nodes 40   # items + seeds + hop-1 subgraph (JSON)
+kl ask "e2b 部署平台和谁相关" --pretty                    # human view + expandable ids
 ```
 
 The response includes `nodes`, `edges`, an `expandable` list of node ids, and a
@@ -438,6 +581,51 @@ Notes:
   vector hits) in the same response shape — check the `mode` field.
 - `hop` does no embedding/LLM (pure in-memory walk) — cheap to chain.
 - Ground any interesting fact node with `kl context <fact_id>` as usual.
+
+### 8. Global Search (conceptual / aggregate questions about a person)
+
+Use `kl global-search` when the question is **conceptual and person-scoped** —
+it must be *aggregated* over everything a person has been involved in, not
+answered by any single chunk/fact. Canonical example: *"我最近的任务是什么"*
+(what are my recent tasks?), *"这个人主要负责什么"* (what does this person mainly
+work on?). Where `ask` does flat recall + a depth-1 graph walk, `global-search`
+resolves the person to a Person entity, collects **that person's community
+summaries across L0–L3**, and runs a GraphRAG-style **map-reduce** over them
+(strict-JSON key points scored 0–100 → drop score-0 → importance-sort →
+token-budgeted reduce → grounded markdown with `[Data: Communities (...)]`
+citations).
+
+```bash
+kl global-search "我最近的任务是什么" --user "孙亮"   # explicit person
+kl global-search "这个人主要负责什么"                    # identity via DWS get-self
+kl global-search "我最近的任务是什么" --json            # full wire shape for chaining
+```
+
+Identity resolution precedence: **`--user <name>`** → **DWS `get-self`** (the
+CLI shells out to `dws contact user get-self` for the logged-in user) →
+otherwise the server's `KL_CURRENT_USER`. The response carries `reason`,
+`communities` (the selected `{level, community_id, member_count}`), `citations`,
+and `diagnostics` (map/reduce call counts, latency).
+
+When there is **no grounding** — the name doesn't resolve
+(`reason=identity_unresolved`), or the person has no community memberships
+(`reason=no_communities`) — it returns a **canned bilingual no-data answer in
+~0 ms with ZERO LLM calls** plus a remediation hint (e.g. run
+`python -m scripts.improve`). It never falls back to a corpus-wide search or
+errors out.
+
+Requires the community layer to be built **and summarized**: `kl ingest` /
+`scripts.improve` create the `community_L0..L3` columns, and
+`python -m kl_graph.periodic.community_summarizer` generates the summaries this
+command reads. Without summaries every query returns `no_communities`.
+
+> **Caveat — summaries are name-based, not task-based (today).** Community
+> summaries are built from member *names/aliases*, so a person whose graph
+> neighborhood is dominated by identity/HR material may get a thin, honest
+> "can't pin down concrete tasks" answer even on the `ok` path. That is a data
+> limitation, not a retrieval bug — prefer `ask`/`facts`/`timeline` for
+> specific, dateable task lookups, and use `global-search` for the high-level
+> "what has this person been about" shape.
 
 ## Community Hierarchy
 
@@ -492,7 +680,7 @@ L3 (component-level) -> "Specific facts + evidence"
 
 ## Key Notes
 
-- Entity names are Chinese and English: "周强", "InkFlow", "Claude Code"
+- Entity names are Chinese and English: "周强", "InkFlow", "VS Code"
 - Fact IDs support prefix match: `kl context 49d8370a`
 - High-degree entities (>200 edges) get auto-filtered to last 90 days on timeline (use --from/--to to override)
 - Check `kl status` first — if server not running, use `kl start`

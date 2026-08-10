@@ -44,7 +44,20 @@ import { join, relative, resolve } from "node:path"
 import { findResidual, sanitize } from "./lib/kl-skill-sanitize.mjs"
 
 const root = resolve(import.meta.dirname, "..")
-const source = join(root, "kl-graph/.claude/skills/kl")
+/**
+ * ★ 源是 `kl-graph/skills/kl`，**不是** `kl-graph/.claude/skills/kl`。
+ *
+ * 上游把 SKILL.md 从 `.claude/skills/kl` 搬到了 `skills/kl`（`74dea06`：
+ * id 寻址 /entity+/facts、废弃 /expand、新增 `kl global-search`）。
+ * 而 `.claude/` 在本仓库的 `.gitignore` 里 —— 那份旧的 499 行副本
+ * **未被 git 跟踪**、停在搬家前的 `772303e`，`sync:kl-graph` 再也不会更新它。
+ *
+ * 门禁原来盯着那个 gitignore 掉的旧副本，于是它拿"停更的旧源"与"停更的旧产物"
+ * 对比、恒绿；而 agent 真正装的是那份 499 行旧 skill，压根不知道
+ * `global-search` 存在 —— 「接上新功能」在文档这一层是断的。
+ * 这正是「门禁跳过比门禁失败更糟」：绿 ≠ 同步，只是盯错了目录。
+ */
+const source = join(root, "kl-graph/skills/kl")
 const target = join(root, "apps/desktop/resources/skills/kl")
 
 if (!existsSync(source)) {

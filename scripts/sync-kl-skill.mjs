@@ -26,7 +26,12 @@ import { dirname, join, relative, resolve } from "node:path"
 import { findResidual, sanitize } from "./lib/kl-skill-sanitize.mjs"
 
 const root = resolve(import.meta.dirname, "..")
-const source = join(root, "kl-graph/.claude/skills/kl")
+/**
+ * ★ 源是 `kl-graph/skills/kl`（上游 `74dea06` 从 `.claude/skills/kl` 搬到这里）。
+ * `.claude/` 被本仓库 `.gitignore` 掉，那份旧副本停在搬家前、不再更新 ——
+ * 盯它会把停更的旧 skill 打进 .app（详见 check-kl-skill-sync.mjs 的注释）。
+ */
+const source = join(root, "kl-graph/skills/kl")
 const target = join(root, "apps/desktop/resources/skills/kl")
 
 if (!existsSync(source)) {

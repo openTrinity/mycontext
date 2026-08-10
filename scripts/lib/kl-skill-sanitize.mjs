@@ -8,7 +8,7 @@
  *
  * ## 为什么需要这一步
  *
- * `kl-graph/.claude/skills/kl/SKILL.md` 是**算法团队的文件**，我们不改它
+ * `kl-graph/skills/kl/SKILL.md` 是**算法团队的文件**，我们不改它
  * （改了会在 `pnpm sync:kl-graph` 合并上游时变成冲突，且他们看不到）。
  * 而这份 skill 会通过 `extraResources` **打进 .app 分发给用户**
  * （`apps/desktop/resources/skills/` → `Resources/skills/`），
@@ -42,7 +42,7 @@
  *
  * 全仓库历史改写把**我们自己**的代码与 commit message 都洗过了，
  * 但 `kl-graph/` 刻意一个字节都没动（那是算法团队的真实历史）。
- * 于是那 3 个真名仍然在 `kl-graph/.claude/skills/kl/SKILL.md` 里 ——
+ * 于是那 3 个真名仍然在 `kl-graph/skills/kl/SKILL.md` 里 ——
  * 而这份 skill 会被 `sync:kl-skill` 拷进 `apps/desktop/resources/skills/`
  * 并**打进 .app 发给用户**。也就是说：源脏、产物必须干净，落差就靠这张表。
  *
