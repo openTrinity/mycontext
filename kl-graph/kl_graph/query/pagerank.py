@@ -91,7 +91,13 @@ def compute_entity_pagerank(
 
     n = len(graph)
     if n == 0:
-        logger.warning("PageRank: no fact-projection edges found; scores empty.")
+        if not fact_conf:
+            logger.info("PageRank: knowledge graph has no facts yet; scores empty.")
+        else:
+            logger.warning(
+                "PageRank: facts exist but no fact-projection edges were found; "
+                "scores empty."
+            )
         return {}
 
     # 4. Weighted power iteration.

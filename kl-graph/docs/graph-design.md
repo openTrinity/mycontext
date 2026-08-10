@@ -279,7 +279,7 @@ does not imply deletion.
 
 > **Community feature gate.** Community detection, summarization, projection,
 > and community-based query behavior are controlled together by
-> `pipelines.communities.enabled` (`KL_COMMUNITIES_ENABLED`). The default is
+> `pipelines.experimental.communities.enabled` (`KL_COMMUNITIES_ENABLED`). The default is
 > disabled until a cost-efficient incremental hierarchy is validated. When
 > disabled, improvement still builds similarity relationships and may run
 > disambiguation, but it neither rebuilds nor deletes existing community data;

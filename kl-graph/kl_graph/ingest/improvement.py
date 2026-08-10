@@ -199,7 +199,7 @@ def run_incremental_improvement(
     """Update similarities and communities for nodes affected by one batch."""
 
     similarity_name = str(cfg.pipelines.ingestion.incremental.similarity_strategy)
-    communities_enabled = bool(cfg.pipelines.communities.enabled)
+    communities_enabled = bool(cfg.pipelines.experimental.communities.enabled)
     community_name = (
         str(cfg.pipelines.ingestion.incremental.community_strategy)
         if communities_enabled
@@ -345,7 +345,7 @@ def run_improvement(
     # Only the experimental full community path requires hierarchical Leiden.
     # Check before similarity writes so an explicitly enabled but incomplete
     # installation cannot leave a half-improved run.
-    if applied == "full" and bool(cfg.pipelines.communities.enabled):
+    if applied == "full" and bool(cfg.pipelines.experimental.communities.enabled):
         try:
             import graspologic_native  # noqa: F401
         except ImportError as exc:

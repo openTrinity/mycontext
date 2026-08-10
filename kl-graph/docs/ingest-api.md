@@ -67,7 +67,7 @@ Content-Type: application/json
 graph-wide fact/entity similarity, runs entity disambiguation, and refreshes the
 server's in-memory adjacency index. It does not create chunks, entities, or
 facts from source data. Hierarchical detection and its LLM summaries run only
-when `pipelines.communities.enabled: true` (or
+when `pipelines.experimental.communities.enabled: true` (or
 `KL_COMMUNITIES_ENABLED=1`); communities are disabled by default.
 
 `POST /improve` and `POST /ingest` use the same single-writer queue, so a full

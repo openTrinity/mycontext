@@ -6,7 +6,7 @@ body; capability discovery uses `GET`. The server also publishes generated
 OpenAPI documentation at `/docs` and the raw schema at `/openapi.json`.
 
 Community features are disabled by default through
-`pipelines.communities.enabled` (`KL_COMMUNITIES_ENABLED=0`). While disabled,
+`pipelines.experimental.communities.enabled` (`KL_COMMUNITIES_ENABLED=0`). While disabled,
 community vectors are not opened, `COMM_MEMBER` edges are excluded from the
 serving adjacency index, `/global_search` returns
 `reason: communities_disabled`, and direct community endpoints return 404.

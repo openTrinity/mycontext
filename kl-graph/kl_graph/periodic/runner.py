@@ -67,7 +67,7 @@ def run_periodic_improvement(
     """
     t0 = time.time()
     if communities_enabled is None:
-        communities_enabled = bool(cfg.pipelines.communities.enabled)
+        communities_enabled = bool(cfg.pipelines.experimental.communities.enabled)
     # Per-step wall-clock tracking: _lap() prints the elapsed time since the
     # previous lap, so each improve step's cost is visible in build logs.
     _lap_t = [t0]

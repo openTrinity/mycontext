@@ -403,10 +403,13 @@ def status():
         )
         click.echo(f"  Graph backend: {data.get('graph_backend', 'unknown')}")
         click.echo(f"  Adjacency index: {data['adjacency_entities']} entities")
-        sq = data["sqlite"]
+        # ``sqlite`` is a compatibility fallback for servers predating the
+        # backend-neutral /status label.
+        knowledge = data.get("knowledge", data.get("sqlite", {}))
         click.echo(
-            f"  SQLite: {sq['messages']:,} msgs, {sq['entities']:,} entities, "
-            f"{sq['facts']:,} facts, {sq['edges']:,} edges"
+            f"  Knowledge: {knowledge['messages']:,} msgs, "
+            f"{knowledge['entities']:,} entities, "
+            f"{knowledge['facts']:,} facts, {knowledge['edges']:,} edges"
         )
         vectors = data.get("vectors", data.get("qdrant", {}))
         for coll, count in vectors.items():
@@ -680,12 +683,12 @@ def stop_embedding():
 def stats():
     """Show detailed graph statistics."""
     data = _server_request("GET", "/status")
-    sq = data["sqlite"]
+    knowledge = data.get("knowledge", data.get("sqlite", {}))
     click.echo("=== GRAPH STATISTICS ===\n")
-    click.echo(f"Messages:  {sq['messages']:,}")
-    click.echo(f"Entities:  {sq['entities']:,}")
-    click.echo(f"Facts:     {sq['facts']:,}")
-    click.echo(f"Edges:     {sq['edges']:,}")
+    click.echo(f"Messages:  {knowledge['messages']:,}")
+    click.echo(f"Entities:  {knowledge['entities']:,}")
+    click.echo(f"Facts:     {knowledge['facts']:,}")
+    click.echo(f"Edges:     {knowledge['edges']:,}")
     click.echo(f"Adjacency: {data['adjacency_entities']} entities indexed")
     click.echo("\nVectors:")
     for coll, count in data.get("vectors", data.get("qdrant", {})).items():

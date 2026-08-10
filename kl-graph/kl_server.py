@@ -63,7 +63,7 @@ SQLITE_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 QUERY_MAX_CONCURRENCY = int(cfg.pipelines.query.max_concurrency)
 CURRENT_USER = str(cfg.pipelines.query.global_search.current_user or "")
-COMMUNITIES_ENABLED = bool(cfg.pipelines.communities.enabled)
+COMMUNITIES_ENABLED = bool(cfg.pipelines.experimental.communities.enabled)
 
 from kl_graph.query import graph_walk as gw
 from kl_graph.query.adjacency import AdjacencyEntry, AdjacencyIndex
@@ -952,12 +952,13 @@ class PathRequest(BaseModel):
 
 @app.get("/status")
 async def get_status():
-    """Server health + DB stats."""
+    """Server health + backend-neutral knowledge/vector statistics."""
     if not state.ready:
         raise HTTPException(503, "Server not ready")
 
     stats = {}
-    # SQLite counts
+    # Content-node counts come from the shared knowledge database; edge counts
+    # come from the configured graph authority (LadybugDB, SQLite, etc.).
     stats["messages"] = state.sqlite_conn.execute(
         "SELECT COUNT(*) FROM chunks WHERE source_type = 'message'"
     ).fetchone()[0]
@@ -1008,7 +1009,7 @@ async def get_status():
         "graph_backend": cfg.storage.graph.backend,
         "vector_backend": cfg.storage.vector.backend,
         "adjacency_entities": len(state.adjacency) if state.adjacency else 0,
-        "sqlite": stats,
+        "knowledge": stats,
         "vectors": vector_stats,
         "ingest": ingest_status or {"state": "idle", "percent": 0.0},
     }

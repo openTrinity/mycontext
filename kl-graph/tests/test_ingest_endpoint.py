@@ -69,6 +69,13 @@ def test_status_reads_latest_persisted_ingest_run(tmp_path, monkeypatch) -> None
     assert response["ingest"]["run_id"] == "r1"
     assert response["ingest"]["source_id"] == "slack"
     assert response["ingest"]["percent"] == 1
+    assert response["knowledge"] == {
+        "messages": 0,
+        "entities": 0,
+        "facts": 0,
+        "edges": 0,
+    }
+    assert "sqlite" not in response
     assert response["vectors"] == {"chunks": 0, "entities": 0, "facts": 0}
     assert "qdrant" not in response
 

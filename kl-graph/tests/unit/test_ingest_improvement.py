@@ -76,7 +76,7 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
             return_value=communities,
         ),
         patch(
-            "kl_graph.ingest.improvement.cfg.pipelines.communities.enabled",
+            "kl_graph.ingest.improvement.cfg.pipelines.experimental.communities.enabled",
             True,
         ),
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
@@ -163,7 +163,7 @@ def test_incremental_invalidates_current_community_summaries(tmp_path) -> None:
             return_value=1,
         ) as inval,
         patch(
-            "kl_graph.ingest.improvement.cfg.pipelines.communities.enabled",
+            "kl_graph.ingest.improvement.cfg.pipelines.experimental.communities.enabled",
             True,
         ),
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),

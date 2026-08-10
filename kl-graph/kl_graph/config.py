@@ -237,8 +237,14 @@ class CommunitiesPipelineConfig(_ConfigModel):
     enabled: bool = False
 
 
-class PipelinesConfig(_ConfigModel):
+class ExperimentalPipelinesConfig(_ConfigModel):
+    """Feature-gated pipeline components that are not enabled by default."""
+
     communities: CommunitiesPipelineConfig = CommunitiesPipelineConfig()
+
+
+class PipelinesConfig(_ConfigModel):
+    experimental: ExperimentalPipelinesConfig = ExperimentalPipelinesConfig()
     ingestion: IngestionPipelineConfig
     query: QueryPipelineConfig
 
