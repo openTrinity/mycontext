@@ -1,10 +1,12 @@
 """Global search: GraphRAG-style map-reduce over community summaries.
 
 Answers *conceptual* questions (e.g. "我最近的任务是什么") that no single
-vector hit can recall: select the current user's entity-community summaries,
-map them in token-budgeted batches into importance-scored key points (strict
-JSON), then reduce the survivors into one grounded markdown answer with
-``[Data: Communities (...)]`` citations.
+vector hit can recall: rate-then-descend selection over the community
+hierarchy (level-0 roots first, LLM rates each report's relevance to the
+query, children of kept communities queued via parent links), then map-reduce
+the selected reports in token-budgeted batches into importance-scored key
+points (strict JSON), and reduce the survivors into one grounded markdown
+answer with ``[Data: Communities (...)]`` citations.
 
 Standalone by design (see docs/todo/global-search.md, unit U1): no FastAPI,
 no Qdrant, and no ``kl_graph.query.engine`` imports. Dependencies are
@@ -29,28 +31,33 @@ import asyncio
 import json
 import logging
 import math
-import random
 import re
 import sqlite3
 import time
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from itertools import groupby
 from typing import Any
 
 from kl_graph.config import cfg
+from kl_graph.models.types import community_id_from
 
 logger = logging.getLogger(__name__)
 
 # Derived constants from OmegaConf config
-GLOBAL_SEARCH_LEVELS = cfg.pipelines.query.global_search.levels
 GLOBAL_SEARCH_MAP_BUDGET = int(cfg.pipelines.query.global_search.map_budget)
 GLOBAL_SEARCH_MAP_CONCURRENCY = int(cfg.pipelines.query.global_search.map_concurrency)
 GLOBAL_SEARCH_MAP_MAX_TOKENS = int(cfg.pipelines.query.global_search.map_max_tokens)
-GLOBAL_SEARCH_MAX_COMMUNITIES = int(cfg.pipelines.query.global_search.max_communities)
 GLOBAL_SEARCH_REDUCE_BUDGET = int(cfg.pipelines.query.global_search.reduce_budget)
 GLOBAL_SEARCH_REDUCE_MAX_TOKENS = int(cfg.pipelines.query.global_search.reduce_max_tokens)
 GLOBAL_SEARCH_SHUFFLE_SEED = int(cfg.pipelines.query.global_search.shuffle_seed)
+
+# GraphRAG-style global search constants (new for hierarchical communities)
+RATE_THRESHOLD = 1  # Keep communities with rating >= threshold (0-10 scale)
+RATE_NUM_REPEATS = 1  # Future: majority vote over multiple ratings
+RATE_CONCURRENCY = 8  # Max concurrent rating calls
+MAX_RATINGS_PER_QUERY = 200  # Hard cap on total rating calls per query
+MAX_DATA_TOKENS = 8000  # Token budget per map batch (GraphRAG default)
 
 # Canned grounded refusal (GraphRAG's NO_DATA_ANSWER), returned WITHOUT any
 # LLM call when there is no community evidence to aggregate.
@@ -95,6 +102,13 @@ REDUCE_SYSTEM_PROMPT = """You are an analyst answering a user's question using t
 5. If the reports do not contain enough information to answer, say what is missing instead of guessing.
 Answer in at most {max_length} words."""
 
+# Rate system prompt: GraphRAG-style relevance rating for community reports.
+# LLM rates 0-10 how relevant a community report is to the user's question.
+# Chinese to match the pipeline's convention (semantics identical to GraphRAG's RATE_QUERY).
+RATE_SYSTEM_PROMPT = """你是知识图谱搜索系统的相关性评分员。给定用户问题和社区报告，请评估该报告与回答问题的相关程度。
+评分标准：0（完全不相关）到 10（直接回答问题）。
+只回复一个 0 到 10 之间的整数。"""
+
 
 def estimate_tokens(text: str) -> int:
     """Conservative char-based token estimate ([!RED R3]).
@@ -120,28 +134,17 @@ def effective_budget(tokens: int) -> int:
     return max(1, math.floor(tokens * BUDGET_SAFETY_FACTOR))
 
 
-def parse_levels(spec: str) -> list[str]:
-    """Parse a comma-separated levels spec, preserving order, deduped.
+def community_ref(level: int, community_id: int) -> str:
+    """Canonical citation id for a community, e.g. ``"L1-12"``.
 
     Args:
-        spec: e.g. ``"L0,L1,L2,L3"``.
+        level: Integer level (0, 1, 2, ...).
+        community_id: Cluster id at that level.
 
     Returns:
-        Ordered unique level names (``["L0", "L1", "L2", "L3"]``).
+        Formatted reference string.
     """
-    levels: list[str] = []
-    seen: set[str] = set()
-    for part in spec.split(","):
-        level = part.strip()
-        if level and level not in seen:
-            seen.add(level)
-            levels.append(level)
-    return levels
-
-
-def community_ref(level: str, community_id: int) -> str:
-    """Canonical citation id for a community, e.g. ``"L1-12"``."""
-    return f"{level}-{community_id}"
+    return f"L{level}-{community_id}"
 
 
 def clamp_citations(community_ids: Sequence[str]) -> list[str]:
@@ -171,7 +174,7 @@ def canonical_citation(community_ids: Sequence[str]) -> str:
     return "[Data: Communities ({})]".format(", ".join(clamp_citations(community_ids)))
 
 
-def normalize_point_citation(description: str, community_ids: Sequence[str]) -> str:
+def normalize_point_citations(description: str, community_ids: Sequence[str]) -> str:
     """Rewrite a point's citation from its VALIDATED ids, clamped.
 
     Any model-authored ``[Data: Communities (...)]`` bracket in the
@@ -198,6 +201,9 @@ def normalize_point_citation(description: str, community_ids: Sequence[str]) -> 
 def _new_diagnostics() -> dict[str, Any]:
     """Fresh diagnostics dict with the documented key set."""
     return {
+        "rating_calls": 0,
+        "ratings_kept": 0,
+        "rating_budget_hit": False,
         "summaries_selected": 0,
         "map_calls": 0,
         "map_batches_ok": 0,
@@ -208,6 +214,25 @@ def _new_diagnostics() -> dict[str, Any]:
         "reduce_called": False,
         "llm_errors": [],
     }
+
+
+def parse_rate_response(raw: str) -> int | None:
+    """Parse an integer rating (0-10) from the LLM response.
+
+    Args:
+        raw: Raw LLM response text.
+
+    Returns:
+        Integer rating 0-10, or None if parsing fails.
+    """
+    text = raw.strip()
+    # Try to extract an integer from the response
+    match = re.search(r"\b(\d+)\b", text)
+    if match:
+        rating = int(match.group(1))
+        if 0 <= rating <= 10:
+            return rating
+    return None
 
 
 @dataclass
@@ -235,14 +260,17 @@ class GlobalSearchResult:
 
 
 class GlobalSearch:
-    """GraphRAG-style global search over the user's community summaries.
+    """GraphRAG-style global search over community summaries.
 
     Example:
         search = GlobalSearch(conn, acomplete=my_litellm_wrapper)
-        result = await search.search("我最近的任务是什么", user_entity_id)
+        result = await search.search("我最近的任务是什么", user_entity_id="")
 
-    The map step runs its batches concurrently under a bounded semaphore; the
-    reduce step is a single LLM call by design (that call IS the aggregation).
+    Rate-then-descend selection starts from level-0 roots, LLM-rates each
+    report's relevance to the query, keeps ratings ≥ threshold, descends into
+    children of kept communities via parent links, and continues through all
+    existing hierarchy levels. Selected reports are packed into token-budgeted
+    batches for the map step, then reduced into a single grounded answer.
     """
 
     def __init__(
@@ -263,7 +291,7 @@ class GlobalSearch:
         """Wire dependencies; every knob defaults to ``kl_graph.config``.
 
         Args:
-            conn: SQLite connection holding ``entities`` and
+            conn: SQLite connection holding ``communities`` and
                 ``community_summaries``. Mutually exclusive with
                 ``conn_provider``.
             conn_provider: Zero-arg callable returning such a connection
@@ -271,18 +299,18 @@ class GlobalSearch:
             acomplete: Async completion callable
                 ``acomplete(system: str, user: str) -> str``; the server wraps
                 ``litellm.acompletion`` here. Required.
-            levels: Community levels to consider (default
-                ``GLOBAL_SEARCH_LEVELS``).
-            max_communities: Max summaries selected per query.
-            map_budget: Prompt-input budget (estimated tokens) per map batch;
-                also caps total selected material.
+            levels: Ignored (kept for signature stability). Levels are now
+                enumerated dynamically from community_summaries.
+            max_communities: Ignored (kept for signature stability). Replaced
+                by token-budgeted batching.
+            map_budget: Prompt-input budget (estimated tokens) per map batch.
             reduce_budget: Prompt-input budget (estimated tokens) for the
                 reduce call.
             map_max_tokens: Advertised map output limit.
             reduce_max_tokens: Advertised reduce output limit.
             map_concurrency: Max concurrent map calls.
-            shuffle_seed: Fixed seed for reproducible selection inside
-                equal-member-count groups.
+            shuffle_seed: Ignored (kept for signature stability). Selection
+                is now query-driven by relevance rating.
 
         Raises:
             ValueError: If neither or both connection sources are given, or
@@ -295,10 +323,7 @@ class GlobalSearch:
         self._conn = conn
         self._conn_provider = conn_provider
         self._acomplete = acomplete
-        self.levels = list(levels) if levels is not None else parse_levels(GLOBAL_SEARCH_LEVELS)
-        self.max_communities = (
-            max_communities if max_communities is not None else GLOBAL_SEARCH_MAX_COMMUNITIES
-        )
+        # levels, max_communities, shuffle_seed are accepted but ignored
         self.map_budget = map_budget if map_budget is not None else GLOBAL_SEARCH_MAP_BUDGET
         self.reduce_budget = reduce_budget if reduce_budget is not None else GLOBAL_SEARCH_REDUCE_BUDGET
         self.map_max_tokens = (
@@ -310,7 +335,6 @@ class GlobalSearch:
         self.map_concurrency = (
             map_concurrency if map_concurrency is not None else GLOBAL_SEARCH_MAP_CONCURRENCY
         )
-        self.shuffle_seed = shuffle_seed if shuffle_seed is not None else GLOBAL_SEARCH_SHUFFLE_SEED
 
     # ── connection handling ────────────────────────────────────────────────
 
@@ -321,116 +345,229 @@ class GlobalSearch:
         assert self._conn_provider is not None
         return self._conn_provider()
 
-    # ── selection ──────────────────────────────────────────────────────────
+    # ── rate-then-descend selection ────────────────────────────────────────
 
-    def select_communities(self, user_entity_id: str) -> list[dict[str, Any]]:
-        """Select the user's entity-community summaries, deterministically.
-
-        Reads the authoritative ``community_L*`` columns of the entity, joins
-        ``community_summaries`` (``node_type='entity'``), excludes empty
-        summaries, dedups ``(level, community_id)``, sorts by ``member_count``
-        DESC with a fixed-seed shuffle only inside equal-member-count groups,
-        then caps by ``max_communities`` and the (safety-margined) map prompt
-        budget — dropping whole lowest-priority rows, never slicing summary
-        text. The cap is HARD: a single row larger than the whole budget is
-        dropped, not admitted as an exception (the system-prompt + question
-        overhead is reserved later, at batch packing, where the query is
-        known).
-
-        Args:
-            user_entity_id: Canonical entity id of the current user.
+    def _enumerate_levels(self) -> list[int]:
+        """Find all levels present in community_summaries, sorted ascending.
 
         Returns:
-            Selected summary dicts with ``level``, ``community_id``,
-            ``member_count``, ``summary`` (full text), ``tags`` keys, in
-            priority order. Empty when there is no evidence.
+            Sorted list of integer levels (e.g., [0, 1, 2, 3]), or empty
+            list if table missing or empty.
         """
         conn = self._sqlite()
-
-        # Community columns are added lazily by scripts.improve; tolerate a
-        # database that never ran it (same detection pattern as kl_server).
-        cols = {c[1] for c in conn.execute("PRAGMA table_info(entities)").fetchall()}
-        levels = [lv for lv in self.levels if f"community_{lv}" in cols]
-        if not levels:
-            return []
-
-        # The summaries table may also be absent on a never-improved DB.
         has_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'community_summaries'"
         ).fetchone()
         if not has_table:
             return []
+        rows = conn.execute(
+            "SELECT DISTINCT level FROM community_summaries ORDER BY level"
+        ).fetchall()
+        return [r[0] for r in rows]
 
-        row = conn.execute(
-            "SELECT {} FROM entities WHERE id = ?".format(
-                ", ".join(f"community_{lv}" for lv in levels)
-            ),
-            (user_entity_id,),
+    def _read_all_summaries(self, levels: list[int]) -> dict[tuple[int, int], dict[str, Any]]:
+        """Read all summaries into a lookup dict keyed by (level, community_id).
+
+        Args:
+            levels: List of integer levels to read.
+
+        Returns:
+            Dict mapping (level_int, community_id_int) → summary dict with
+            keys: level, community_id, member_count, title, summary, tags.
+        """
+        conn = self._sqlite()
+        all_summaries: dict[tuple[int, int], dict[str, Any]] = {}
+        for level in levels:
+            rows = conn.execute(
+                "SELECT level, community_id, member_count, title, summary, tags "
+                "FROM community_summaries WHERE level = ?",
+                (level,),
+            ).fetchall()
+            for r in rows:
+                summary_text = r[4] if r[4] is not None else ""
+                if not summary_text.strip():
+                    continue  # Skip empty summaries
+                tags_str = r[5] if r[5] is not None else "[]"
+                try:
+                    tags_list = json.loads(tags_str) if isinstance(tags_str, str) else tags_str
+                except (json.JSONDecodeError, TypeError):
+                    tags_list = []
+                all_summaries[(r[0], r[1])] = {
+                    "level": r[0],
+                    "community_id": r[1],
+                    "member_count": int(r[2] or 0),
+                    "title": r[3] if r[3] is not None else "",
+                    "summary": summary_text,
+                    "tags": tags_list,
+                }
+        return all_summaries
+
+    def _build_parent_links(
+        self, all_summaries: dict[tuple[int, int], dict[str, Any]]
+    ) -> tuple[dict[str, tuple[int, int]], dict[str, list[str]]]:
+        """Build parent-child link mappings from the communities table.
+
+        Args:
+            all_summaries: Dict of (level, community_id) → summary dict.
+
+        Returns:
+            Tuple of:
+            - uuid_to_key: dict mapping community UUID → (level_int, community_id_int)
+            - parent_to_children: dict mapping parent UUID → list of child UUIDs
+        """
+        conn = self._sqlite()
+        has_communities = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'communities'"
         ).fetchone()
-        if row is None:
+        if not has_communities:
+            # No communities table — can't descend, treat all as roots
+            uuid_to_key: dict[str, tuple[int, int]] = {}
+            for (level, cid) in all_summaries:
+                uuid = community_id_from(f"L{level}", cid)
+                uuid_to_key[uuid] = (level, cid)
+            return uuid_to_key, {}
+
+        # Build UUID → key mapping for all summaries
+        uuid_to_key = {}
+        for (level, cid) in all_summaries:
+            uuid = community_id_from(f"L{level}", cid)
+            uuid_to_key[uuid] = (level, cid)
+
+        # Read parent links from communities table
+        parent_to_children: dict[str, list[str]] = defaultdict(list)
+        try:
+            rows = conn.execute(
+                "SELECT id, parent_id FROM communities WHERE parent_id IS NOT NULL"
+            ).fetchall()
+            for child_uuid, parent_uuid in rows:
+                if parent_uuid and child_uuid in uuid_to_key:
+                    parent_to_children[parent_uuid].append(child_uuid)
+        except sqlite3.OperationalError:
+            # parent_id column might not exist in old DBs — gracefully degrade
+            logger.debug("communities table missing parent_id column, no descent possible")
+
+        return uuid_to_key, dict(parent_to_children)
+
+    async def _rate_community(
+        self,
+        summary: dict[str, Any],
+        query: str,
+        diagnostics: dict[str, Any],
+        sem: asyncio.Semaphore,
+    ) -> int:
+        """Rate one community report's relevance to the query (0-10).
+
+        Args:
+            summary: Summary dict with title, summary keys.
+            query: User's question.
+            diagnostics: Mutable diagnostics dict to update.
+            sem: Concurrency semaphore.
+
+        Returns:
+            Integer rating 0-10, or 0 on parse/LLM failure.
+        """
+        async with sem:
+            title = summary.get("title", "")
+            text = summary.get("summary", "")
+            user_msg = f"问题：{query}\n\n社区报告：\n标题：{title}\n{text}"
+            diagnostics["rating_calls"] += 1
+            try:
+                resp = await self._acomplete(RATE_SYSTEM_PROMPT, user_msg)
+            except Exception as exc:  # noqa: BLE001
+                diagnostics["llm_errors"].append(f"rating: {exc}")
+                logger.warning("global search rating failed: %s", exc)
+                return 0
+        rating = parse_rate_response(resp)
+        if rating is None:
+            logger.debug("global search rating parse failed: %r", resp)
+            return 0
+        return rating
+
+    async def _select_communities(
+        self, query: str, diagnostics: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Rate-then-descend selection over the community hierarchy.
+
+        Starts from level-0 roots (or all summaries if no parent links available),
+        LLM-rates each report's relevance, keeps ratings ≥ threshold, descends
+        into children of kept communities via parent links, and continues through
+        all existing hierarchy levels until budget exhausted.
+
+        Args:
+            query: User's question.
+            diagnostics: Mutable diagnostics dict to update.
+
+        Returns:
+            List of selected summary dicts in selection order (roots first,
+            then children of kept communities, etc.).
+        """
+        levels = self._enumerate_levels()
+        if not levels:
             return []
 
-        # Unique (level, community_id) membership pairs, in level order.
-        pairs: list[tuple[str, int]] = []
-        seen: set[tuple[str, int]] = set()
-        for level, cid in zip(levels, tuple(row)):
-            if cid is None:
-                continue
-            try:
-                cid_int = int(cid)
-            except (TypeError, ValueError):
-                continue
-            if (level, cid_int) not in seen:
-                seen.add((level, cid_int))
-                pairs.append((level, cid_int))
+        all_summaries = self._read_all_summaries(levels)
+        if not all_summaries:
+            return []
 
-        summaries: list[dict[str, Any]] = []
-        for level, cid in pairs:
-            r = conn.execute(
-                "SELECT level, community_id, member_count, summary, tags "
-                "FROM community_summaries "
-                "WHERE node_type = 'entity' AND level = ? AND community_id = ?",
-                (level, cid),
-            ).fetchone()
-            if r is None:
-                continue
-            summary_text = r[3] if r[3] is not None else ""
-            if not summary_text.strip():  # exclude empty summaries
-                continue
-            summaries.append(
-                {
-                    "level": level,
-                    "community_id": cid,
-                    "member_count": int(r[2] or 0),
-                    "summary": summary_text,  # FULL text — never sliced
-                    "tags": r[4] if r[4] is not None else "[]",
-                }
+        uuid_to_key, parent_to_children = self._build_parent_links(all_summaries)
+
+        # Determine roots: level-0 communities, or all if no parent links
+        if levels and levels[0] == 0:
+            roots = [key for key in all_summaries if key[0] == 0]
+        else:
+            # No level 0 — use all summaries as candidates (flat selection)
+            roots = list(all_summaries.keys())
+
+        selected: list[dict[str, Any]] = []
+        rating_sem = asyncio.Semaphore(RATE_CONCURRENCY)
+        rating_count = 0
+
+        # Queue-based descent: start with roots, rate them, queue children of kept
+        queue = roots
+        while queue and rating_count < MAX_RATINGS_PER_QUERY:
+            # Rate all in current queue (bounded by semaphore and budget)
+            batch_size = min(len(queue), MAX_RATINGS_PER_QUERY - rating_count)
+            batch = queue[:batch_size]
+            queue = queue[batch_size:]
+
+            # Concurrent rating
+            rating_tasks = [
+                self._rate_community(all_summaries[key], query, diagnostics, rating_sem)
+                for key in batch
+            ]
+            ratings = await asyncio.gather(*rating_tasks)
+            rating_count += len(batch)
+
+            # Keep those >= threshold, add to selected, queue their children
+            kept_uuids: list[str] = []
+            for key, rating in zip(batch, ratings):
+                if rating >= RATE_THRESHOLD:
+                    diagnostics["ratings_kept"] += 1
+                    selected.append(all_summaries[key])
+                    # Find this community's UUID and queue its children
+                    for uuid, mapped_key in uuid_to_key.items():
+                        if mapped_key == key:
+                            kept_uuids.append(uuid)
+                            break
+
+            # Add children of kept communities to next queue
+            for parent_uuid in kept_uuids:
+                children = parent_to_children.get(parent_uuid, [])
+                for child_uuid in children:
+                    child_key = uuid_to_key.get(child_uuid)
+                    if child_key and child_key in all_summaries:
+                        queue.append(child_key)
+
+        if rating_count >= MAX_RATINGS_PER_QUERY and queue:
+            diagnostics["rating_budget_hit"] = True
+            logger.info(
+                "global search: rating budget hit (%d/%d), %d candidates unprocessed",
+                rating_count,
+                MAX_RATINGS_PER_QUERY,
+                len(queue),
             )
 
-        # member_count DESC; seeded shuffle only inside equal-count groups so
-        # repeated queries select identically (success-metric determinism).
-        summaries.sort(key=lambda s: -int(s["member_count"]))
-        rng = random.Random(self.shuffle_seed)
-        ordered: list[dict[str, Any]] = []
-        for _, group in groupby(summaries, key=lambda s: int(s["member_count"])):
-            members = list(group)
-            rng.shuffle(members)
-            ordered.extend(members)
-        ordered = ordered[: self.max_communities]
-
-        # Total prompt-char budget: keep highest-priority whole rows only —
-        # HARD cap, so a first row larger than the whole budget is dropped
-        # rather than admitted as an exception ([!RED R3]).
-        budget = effective_budget(self.map_budget)
-        kept: list[dict[str, Any]] = []
-        used = 0
-        for s in ordered:
-            cost = estimate_tokens(self._render_row(s) + "\n\n")
-            if used + cost > budget:
-                break
-            kept.append(s)
-            used += cost
-        return kept
+        return selected
 
     # ── budget accounting ([!RED R3]) ─────────────────────────────────────
 
@@ -445,7 +582,7 @@ class GlobalSearch:
             MAP_SYSTEM_PROMPT.format(max_length=self.map_max_tokens)
             + f"Question: {query}\n\n"
         )
-        return max(0, effective_budget(self.map_budget) - overhead)
+        return max(0, effective_budget(MAX_DATA_TOKENS) - overhead)
 
     def _reduce_material_budget(self, query: str) -> int:
         """Reduce tokens left for evidence after reserving fixed overhead."""
@@ -460,10 +597,13 @@ class GlobalSearch:
     @staticmethod
     def _render_row(summary: dict[str, Any]) -> str:
         """Render one selected summary as a map-prompt row (full text)."""
-        ref = community_ref(str(summary["level"]), int(summary["community_id"]))
+        ref = community_ref(int(summary["level"]), int(summary["community_id"]))
+        tags_str = summary.get("tags", [])
+        if isinstance(tags_str, list):
+            tags_str = json.dumps(tags_str, ensure_ascii=False)
         return (
-            f"[{ref}] level={summary['level']} | community_id={summary['community_id']} "
-            f"| members={summary['member_count']} | tags={summary['tags']}\n"
+            f"[{ref}] level=L{summary['level']} | community_id={summary['community_id']} "
+            f"| members={summary['member_count']} | tags={tags_str}\n"
             f"{summary['summary']}"
         )
 
@@ -472,7 +612,7 @@ class GlobalSearch:
     ) -> list[list[dict[str, Any]]]:
         """Pack selected summaries into map batches under the HARD budget.
 
-        The budget is the (safety-margined) map budget minus the reserved
+        The budget is the (safety-margined) MAX_DATA_TOKENS minus the reserved
         system-prompt + question overhead ([!RED R3]); only WHOLE rows that
         fit the remainder are admitted. A row larger than the entire material
         budget is dropped whole — never sent alone over budget, never sliced.
@@ -592,7 +732,7 @@ class GlobalSearch:
             block = (
                 f"----Analyst {i}----\n"
                 f"Importance Score: {p['score']}\n"
-                f"{normalize_point_citation(p['description'], p['community_ids'])}"
+                f"{normalize_point_citations(p['description'], p['community_ids'])}"
             )
             cost = estimate_tokens(block + "\n\n")
             if used + cost > budget:
@@ -603,17 +743,19 @@ class GlobalSearch:
 
     # ── orchestration ──────────────────────────────────────────────────────
 
-    async def search(self, query: str, user_entity_id: str) -> GlobalSearchResult:
-        """Run select -> map -> reduce for one conceptual question.
+    async def search(
+        self, query: str, user_entity_id: str = ""
+    ) -> GlobalSearchResult:
+        """Run rate-then-descend → map → reduce for one conceptual question.
 
         Args:
             query: The user's question (any language; answered in kind).
-            user_entity_id: Canonical entity id of the current user (identity
-                resolution happens upstream, in the server).
+            user_entity_id: Ignored (kept for signature stability). Identity
+                resolution is deleted; selection is now query-driven.
 
         Returns:
             GlobalSearchResult; ``NO_DATA_ANSWER`` with zero LLM calls when
-            nothing is selected, and with zero reduce calls when no map point
+            no summaries exist, and with zero reduce calls when no map point
             survives the score-0 filter OR no evidence block fits the
             overhead-adjusted reduce budget ([!RED R3] hard cap).
         """
@@ -623,7 +765,8 @@ class GlobalSearch:
         def _latency_ms() -> float:
             return (time.perf_counter() - started) * 1000.0
 
-        selected = self.select_communities(user_entity_id)
+        # Rate-then-descend selection
+        selected = await self._select_communities(query, diagnostics)
         diagnostics["summaries_selected"] = len(selected)
         if not selected:
             return GlobalSearchResult(
