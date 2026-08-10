@@ -168,28 +168,29 @@ class Community:
     projected Community starts empty and gets enriched later.
 
     Example:
-        >>> cid = community_id_from("entity", "L1", 7)
-        >>> c = Community(id=cid, level="L1", node_type="entity", member_count=12)
+        >>> cid = community_id_from("L1", 7)
+        >>> c = Community(id=cid, level="L1", node_type="mixed", member_count=12)
         >>> (c.level, c.node_type, c.member_count, c.tags)
-        ('L1', 'entity', 12, [])
+        ('L1', 'mixed', 12, [])
     """
 
     id: str
     level: str = ""  # "L0" | "L1" | "L2" | "L3"
-    node_type: str = ""  # "entity" | "fact"
+    node_type: str = ""  # "entity" | "fact" | "mixed"
     summary: str = ""
     tags: list[str] = field(default_factory=list)
     member_count: int = 0
+    parent_id: str | None = None  # Deterministic id of parent community (None for roots)
+    parent_level: int | None = None  # Level integer of parent (None for roots)
 
 
-def community_id_from(node_type: str, level: str, cluster_id: int | str) -> str:
+def community_id_from(level: str, cluster_id: int | str) -> str:
     """Deterministic Community id from its detection-run identity.
 
-    Namespaced by ``node_type`` and ``level`` so entity community 3 at L0, fact
-    community 3 at L0 and entity community 3 at L1 are three distinct nodes
-    (Leiden numbers clusters from 0 independently per level and per graph).
+    Namespaced by ``level`` so community 3 at L0 and community 3 at L1 are
+    distinct nodes (Leiden numbers clusters from 0 independently per level).
     Deterministic so the delete-and-rebuild ``COMM_MEMBER`` projection re-derives
-    the same target ids every run and any summary/vector keyed on the same triple
+    the same target ids every run and any summary/vector keyed on the same pair
     lands on the same Community. Mirrors :func:`scope_id_from`, including the
     canonical-JSON hashing rationale (a ``:``-joined string would be ambiguous
     when a component contains the delimiter).
@@ -198,15 +199,14 @@ def community_id_from(node_type: str, level: str, cluster_id: int | str) -> str:
     ``community_L*`` column and its textual spelling map onto one Community.
 
     Args:
-        node_type: Which graph was clustered — ``"entity"`` or ``"fact"``.
-        level: Resolution level (``"L0"``..``"L3"``).
+        level: Resolution level (``"L0"``, ``"L1"``, ``"L2"``, etc.).
         cluster_id: Cluster number as stored in the ``community_{level}`` column.
 
     Returns:
         UUID5 string for the community.
     """
     name = json.dumps(
-        ["community", node_type, level, str(cluster_id)],
+        ["community", level, str(cluster_id)],
         ensure_ascii=True,
         separators=(",", ":"),
     )

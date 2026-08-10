@@ -24,6 +24,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     # Graph improvement: community detection, disambiguation, clustering
+    "graspologic-native==1.3.1",
     "leidenalg>=0.10",
     "python-igraph>=0.11",
     "scikit-learn>=1.4",
