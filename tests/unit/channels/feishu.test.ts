@@ -226,6 +226,80 @@ describe("Feishu auth and ingest parsing", () => {
     ).toBe("unauthorized")
   })
 
+  /**
+   * ★★★ 授权的两个过期时间必须**从 CLI 的响应里读**，不许硬编码 null。
+   *
+   * ## 实测的坏形态（用户截图 2026-08-10）
+   *
+   * 设置页飞书那一栏「凭证刷新至 —」「需重新授权 —」两行都是空的，
+   * 而钉钉那栏有真日期。原因是 `parseLarkAuthStatus` 里那三个字段写死了
+   * `null` —— 而 CLI **给了**它们（本机实测 `auth status --json --verify`）：
+   *
+   *     identities.user.expiresAt        2026-08-10T19:42:17+08:00
+   *     identities.user.refreshExpiresAt 2026-08-17T17:42:17+08:00
+   *
+   * 也就是说不是"渠道拿不到"，是这一层没读。
+   *
+   * ★ 这里的 payload 形状照**真实响应**（键名与嵌套层级），值全是编的。
+   *   形状错了就测不到真问题（那是本仓库 fixture 的一贯要求）。
+   */
+  it("★★★ 授权时间从 identities.user 读出来（原来硬编码 null → 界面两行「—」）", () => {
+    const now = new Date("2026-08-10T10:00:00.000Z")
+    const status = parseLarkAuthStatus(
+      {
+        verified: true,
+        identities: {
+          user: {
+            openId: "ou_self",
+            userName: "A同学",
+            tenantKey: "tenant",
+            tenantName: "示例租户",
+            status: "ready",
+            tokenStatus: "valid",
+            scope: REQUIRED_SCOPES.join(" "),
+            expiresAt: "2026-08-10T19:42:17+08:00",
+            refreshExpiresAt: "2026-08-17T17:42:17+08:00",
+          },
+        },
+      },
+      now,
+    )
+
+    expect(status.state).toBe("authorized")
+    if (status.state !== "authorized") return
+    expect(status.accessExpiresAt).toBe("2026-08-10T19:42:17+08:00")
+    expect(status.refreshExpiresAt).toBe("2026-08-17T17:42:17+08:00")
+    // 8-10 10:00Z → 8-17 09:42Z，差 6 天多 → floor = 6（与钉钉同一个 daysUntil）
+    expect(status.daysUntilRefreshExpiry).toBe(6)
+  })
+
+  /**
+   * ★★ 取不到时是 `null`，**不是 0**。
+   *
+   * `daysUntil` 对无法解析的串返回 0，而 0 的意思是"今天就到期" ——
+   * 那与"不知道"完全不同：界面会催用户去重新授权一个其实还有效的凭据。
+   */
+  it("★★ CLI 没给时间时是 null 而不是 0（0 = 今天到期，是另一件事）", () => {
+    const status = parseLarkAuthStatus({
+      verified: true,
+      identities: {
+        user: {
+          openId: "ou_self",
+          userName: "A同学",
+          tenantKey: "tenant",
+          tenantName: "示例租户",
+          status: "ready",
+          scope: REQUIRED_SCOPES.join(" "),
+        },
+      },
+    })
+
+    expect(status.state).toBe("authorized")
+    if (status.state !== "authorized") return
+    expect(status.refreshExpiresAt).toBeNull()
+    expect(status.daysUntilRefreshExpiry).toBeNull()
+  })
+
   it("normalizes IM messages into the shared channel contract", () => {
     const page = parseLarkMessagePage(
       {

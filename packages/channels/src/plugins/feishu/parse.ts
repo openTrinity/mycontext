@@ -6,6 +6,7 @@ import type {
   ParsedMessageLike,
 } from "../../types.js"
 import { normalizeUnix } from "../dingtalk/time.js"
+import { daysUntil } from "../dingtalk/parse.js"
 
 /**
  * 向用户索要的 OAuth 权限。
@@ -130,7 +131,7 @@ export function parseLarkIdentity(payload: unknown): LarkIdentity | null {
   }
 }
 
-export function parseLarkAuthStatus(payload: unknown): AuthStatus {
+export function parseLarkAuthStatus(payload: unknown, now: Date = new Date()): AuthStatus {
   const data = record(payload)
   const identities = record(data["identities"])
   const user = record(identities["user"] ?? data["identity"])
@@ -143,15 +144,43 @@ export function parseLarkAuthStatus(payload: unknown): AuthStatus {
     rawStatus === "authenticated" || tokenStatus === "valid" || bool(user["authenticated"])
   const hasScopes = LARK_AUTH_SCOPES.every((scope) => scopes.includes(scope))
   if (identity === null || (!verified && !valid) || !hasScopes) return { state: "unauthorized" }
+  /**
+   * 两个过期时间。CLI 用 camelCase（`expiresAt`/`refreshExpiresAt`），
+   * 但也兜一下 snake_case —— 上游换风格时不至于静默变回「—」。
+   */
+  const accessExpiresAt = str(user["expiresAt"], user["expires_at"], data["expiresAt"])
+  const refreshExpiresAt = str(
+    user["refreshExpiresAt"],
+    user["refresh_expires_at"],
+    data["refreshExpiresAt"],
+  )
   return {
     state: "authorized",
     corpId: identity.tenantKey,
     corpName: identity.tenantName,
     userId: identity.openId,
     userName: identity.userName,
-    accessExpiresAt: null,
-    refreshExpiresAt: null,
-    daysUntilRefreshExpiry: null,
+    /**
+     * ★★ 这三个原来硬编码 `null`，界面上就是两行「—」（用户截图）。
+     *
+     * CLI **给了**这两个时间，在 `identities.user` 下（实测本机响应）：
+     *
+     *     expiresAt        2026-08-10T19:42:17+08:00   access token
+     *     refreshExpiresAt 2026-08-17T17:42:17+08:00   refresh token（7 天）
+     *
+     * 也就是说不是"拿不到"，是这一层没读。
+     *
+     * ★ `daysUntilRefreshExpiry` 复用钉钉那侧的 `daysUntil` —— 两处各写一份
+     * 会让同一个界面上出现两种口径（一个按自然日、一个按 24 小时整除，
+     * 跨零点时差一天）。它已经导出，直接用。
+     *
+     * ★ 取不到时仍是 `null`（而不是 0）：`daysUntil` 对无法解析的串返回 0，
+     * 而 0 的意思是"今天就到期" —— 那与"不知道"完全不同，会让界面催用户
+     * 去重新授权一个其实还有效的凭据。
+     */
+    accessExpiresAt: accessExpiresAt ?? refreshExpiresAt,
+    refreshExpiresAt,
+    daysUntilRefreshExpiry: refreshExpiresAt === null ? null : daysUntil(refreshExpiresAt, now),
   }
 }
 
