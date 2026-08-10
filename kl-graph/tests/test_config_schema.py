@@ -41,6 +41,7 @@ EXPECTED_LEAVES = {
     "storage.vector.qdrant.api_key",
     "storage.vector.zvec.index_type",
     "storage.vector.zvec.metric",
+    "pipelines.communities.enabled",
     "pipelines.ingestion.keep_extraction_cache",
     "pipelines.ingestion.v1_entities_path",
     "pipelines.ingestion.generic_sources",

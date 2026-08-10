@@ -39,6 +39,12 @@ EMBEDDING_DIM = int(cfg.services.embedding.dim)
 
 
 def main():
+    if not bool(cfg.pipelines.communities.enabled):
+        raise SystemExit(
+            "Community features are experimental and disabled; set "
+            "KL_COMMUNITIES_ENABLED=1 to embed them."
+        )
+
     t0 = time.time()
     print("=== Embedding Community Summaries ===\n")
 

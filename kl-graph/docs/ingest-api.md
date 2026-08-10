@@ -35,7 +35,7 @@ use `improve_mode`.
 |---|---|---|
 | `auto` | If graph nodes exist but no full community baseline exists, run full improvement once. Otherwise improve only nodes affected by this batch. An empty batch does nothing. | Normal production ingestion. |
 | `incremental` | Force batch-targeted ANN similarity and one-hop frontier community assignment. Fails when no full baseline exists. | You know the graph was fully initialized and want to prevent a global pass. |
-| `full` | Force graph-wide similarity, disambiguation, and community reconstruction. | Initial seeding, intentional re-clustering, or repair. |
+| `full` | Force graph-wide similarity and disambiguation; also reconstruct communities when the community feature is enabled. | Initial seeding, intentional global refresh, or repair. |
 | `off` | Skip all similarity/community improvement. | Fast loading when only chunk/entity/fact retrieval is needed, or periodic dependencies are unavailable. |
 
 The full-baseline requirement for forced `incremental` mode is checked when
@@ -64,10 +64,11 @@ Content-Type: application/json
 ```
 
 `mode` is optional and currently accepts only `full`. The job rebuilds
-graph-wide fact/entity similarity, runs entity disambiguation, reconstructs the
-hierarchical communities and their summaries, then refreshes the server's
-in-memory adjacency index. It does not create chunks, entities, or facts from
-source data.
+graph-wide fact/entity similarity, runs entity disambiguation, and refreshes the
+server's in-memory adjacency index. It does not create chunks, entities, or
+facts from source data. Hierarchical detection and its LLM summaries run only
+when `pipelines.communities.enabled: true` (or
+`KL_COMMUNITIES_ENABLED=1`); communities are disabled by default.
 
 `POST /improve` and `POST /ingest` use the same single-writer queue, so a full
 maintenance pass cannot overlap an ingestion write. Use this endpoint for

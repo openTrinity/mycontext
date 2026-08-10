@@ -863,6 +863,7 @@ def build_local_context(
     text_unit_prop: float = TEXT_UNIT_PROP,
     top_k_entities: int = TOP_K_ENTITIES,
     top_k_relationships: int = TOP_K_RELATIONSHIPS,
+    communities_enabled: bool = True,
 ) -> LocalContext:
     """Build GraphRAG-style local context from recall outputs.
 
@@ -886,7 +887,9 @@ def build_local_context(
         and assembled context_text.
     """
     budgets = {
-        "community": int(max_context_tokens * community_prop),
+        "community": (
+            int(max_context_tokens * community_prop) if communities_enabled else 0
+        ),
         "text_units": int(max_context_tokens * text_unit_prop),
         # Relationships get the remainder implicitly
     }
@@ -896,17 +899,22 @@ def build_local_context(
     seed_ids = [s["id"] for s in seeds]
 
     # Step 2: Community context (handles empty summaries gracefully)
-    try:
-        community_context = _gather_community_context(
-            store, seeds, budgets["community"]
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"Community context gathering failed: {e}")
-        community_context = []
+    community_context = []
+    if communities_enabled:
+        try:
+            community_context = _gather_community_context(
+                store, seeds, budgets["community"]
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Community context gathering failed: {e}")
 
     # Step 3: Relationship context
     try:
         relationships = _gather_relationships(store, seeds, top_k_relationships)
+        if not communities_enabled:
+            relationships = [
+                rel for rel in relationships if rel.edge_type != "COMM_MEMBER"
+            ]
     except Exception as e:  # noqa: BLE001
         logger.debug(f"Relationship gathering failed: {e}")
         relationships = []

@@ -19,12 +19,6 @@ import time
 
 from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, cfg
 from kl_graph.ingest.checkpoint import IngestCheckpoint, run_if_needed
-from kl_graph.periodic.community_detection import (
-    _build_community_graph,
-    detect_communities_hierarchical,
-    project_community_membership_edges,
-    store_communities,
-)
 from kl_graph.periodic.entity_disambiguation import run_entity_disambiguation
 from kl_graph.periodic.entity_similarity import build_entity_similarity_edges
 from kl_graph.periodic.fact_similarity import build_fact_similarity_edges
@@ -59,6 +53,7 @@ def run_periodic_improvement(
     llm_max_budget: int = 500,
     # Community summarization
     run_summarization: bool = True,
+    communities_enabled: bool | None = None,
 ):
     """Run the full periodic improvement phase.
 
@@ -71,6 +66,8 @@ def run_periodic_improvement(
             matching parameters) and skips if so.
     """
     t0 = time.time()
+    if communities_enabled is None:
+        communities_enabled = bool(cfg.pipelines.communities.enabled)
     # Per-step wall-clock tracking: _lap() prints the elapsed time since the
     # previous lap, so each improve step's cost is visible in build logs.
     _lap_t = [t0]
@@ -195,13 +192,23 @@ def run_periodic_improvement(
         # Step 4: hierarchical community detection
         # This forms one logical unit: it deletes-and-rebuilds all community
         # assignments, so either all are done or all must re-run.
-        community_params = {}
-        if checkpoint and checkpoint.is_done(
+        community_params = {} if communities_enabled else None
+        if community_params is None:
+            print("\n[4/6] Skipping communities (feature disabled)")
+            assignments = {}
+        elif checkpoint and checkpoint.is_done(
             "improve.communities", params=community_params
         ):
             print("\n[4/6] Community detection — skipping (already done)")
             assignments = {}
         else:
+            from kl_graph.periodic.community_detection import (
+                _build_community_graph,
+                detect_communities_hierarchical,
+                project_community_membership_edges,
+                store_communities,
+            )
+
             # Step 4: hierarchical community detection
             print("\n[4/6] Building community graph for hierarchical Leiden...")
             edges, label_map = _build_community_graph(store)

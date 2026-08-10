@@ -1,9 +1,17 @@
 # Query API
 
 HTTP reference for reading and searching a running KL-Graph server. The default
-base URL is `http://127.0.0.1:8200`. All endpoints below use `POST` with a JSON
-body. The server also publishes generated OpenAPI documentation at `/docs` and
-the raw schema at `/openapi.json`.
+base URL is `http://127.0.0.1:8200`. Retrieval endpoints use `POST` with a JSON
+body; capability discovery uses `GET`. The server also publishes generated
+OpenAPI documentation at `/docs` and the raw schema at `/openapi.json`.
+
+Community features are disabled by default through
+`pipelines.communities.enabled` (`KL_COMMUNITIES_ENABLED=0`). While disabled,
+community vectors are not opened, `COMM_MEMBER` edges are excluded from the
+serving adjacency index, `/global_search` returns
+`reason: communities_disabled`, and direct community endpoints return 404.
+Existing community artifacts remain on disk and are used again only after the
+gate is enabled and a full improvement refreshes them.
 
 ## Conventions
 
@@ -23,6 +31,7 @@ the raw schema at `/openapi.json`.
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /capabilities` | Discover the live feature-gated query command surface |
 | `/search` | Vector search within one collection |
 | `/ask` | Hybrid retrieval, optional answer synthesis, and initial graph walk |
 | `/global_search` | Community-summary map/reduce for conceptual questions |
@@ -37,6 +46,32 @@ the raw schema at `/openapi.json`.
 | `/graph_hop` | Continue the interactive graph walk returned by `/ask` |
 | `/chunk` | Batch-read full chunk content by ID |
 | `/path` | Find shortest graph paths between two entities |
+
+### `GET /capabilities`
+
+Agents and other dynamic callers should query this before choosing a retrieval
+command. The response is server-derived and therefore reflects feature gates
+used by the running process:
+
+```json
+{
+  "schema_version": 1,
+  "features": {
+    "communities": {"enabled": false, "experimental": true}
+  },
+  "commands": {
+    "ask": {"enabled": true},
+    "global-search": {
+      "enabled": false,
+      "experimental": true,
+      "reason": "communities_disabled"
+    }
+  }
+}
+```
+
+The CLI exposes the same contract through `kl capabilities --json`. `ask` is
+always available.
 
 ## Search and question answering
 

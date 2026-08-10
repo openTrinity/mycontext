@@ -28,8 +28,9 @@ def _edge(
 
 
 def test_incremental_adjacency_reconciles_inserts_and_membership_deletes(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
+    monkeypatch.setattr(kl_server, "COMMUNITIES_ENABLED", True)
     store = SQLiteStore(tmp_path / "graph.db")
     store.insert_edges(
         [
@@ -66,6 +67,25 @@ def test_incremental_adjacency_reconciles_inserts_and_membership_deletes(
         assert refreshed.get(node_id, ()) == rebuilt.get(node_id, ())
     # Published immutable buckets outside the dirty shards remain reusable.
     assert refreshed["untouched"] is original["untouched"]
+    store.close()
+
+
+def test_disabled_communities_are_hidden_without_deleting_edges(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(kl_server, "COMMUNITIES_ENABLED", False)
+    store = SQLiteStore(tmp_path / "graph.db")
+    store.insert_edges(
+        [_edge("entity", "e1", "community", "retained", EdgeType.COMM_MEMBER)]
+    )
+
+    adjacency = kl_server._build_adjacency(store)
+
+    assert "e1" not in adjacency
+    assert "retained" not in adjacency
+    assert any(
+        edge[4] == "COMM_MEMBER" for edge in store.scan_entity_edges()
+    )
     store.close()
 
 

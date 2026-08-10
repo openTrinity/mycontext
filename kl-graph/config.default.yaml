@@ -60,6 +60,11 @@ storage:
       metric: ${oc.env:KL_ZVEC_METRIC,cosine}
 
 pipelines:
+  communities:
+    # Disabled until incremental hierarchical maintenance is validated. Existing
+    # community artifacts remain on disk but are ignored while this is false.
+    enabled: ${oc.env:KL_COMMUNITIES_ENABLED,0}
+
   ingestion:
     keep_extraction_cache: ${oc.env:KL_KEEP_EXTRACTION_CACHE,1}
     v1_entities_path: ${oc.env:KL_V1_ENTITIES_PATH,""}

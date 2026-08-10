@@ -63,6 +63,7 @@ SQLITE_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 QUERY_MAX_CONCURRENCY = int(cfg.pipelines.query.max_concurrency)
 CURRENT_USER = str(cfg.pipelines.query.global_search.current_user or "")
+COMMUNITIES_ENABLED = bool(cfg.pipelines.communities.enabled)
 
 from kl_graph.query import graph_walk as gw
 from kl_graph.query.adjacency import AdjacencyEntry, AdjacencyIndex
@@ -240,6 +241,8 @@ def _build_adjacency_buckets_full(store: KnowledgeStore) -> dict:
         target_id,
         edge_type,
     ) in store.scan_entity_edges():
+        if edge_type == "COMM_MEMBER" and not COMMUNITIES_ENABLED:
+            continue
         _append_adjacency_edge(
             adj, (source_type, source_id, target_type, target_id, edge_type)
         )
@@ -322,6 +325,8 @@ def _scan_incident_edges(
     seen: set[EdgeRecord] = set()
     edges: list[EdgeRecord] = []
     for edge_type, source_type, target_type in _EDGE_ENDPOINTS:
+        if edge_type == "COMM_MEMBER" and not COMMUNITIES_ENABLED:
+            continue
         if edge_types is not None and edge_type not in edge_types:
             continue
         node_ids = {
@@ -487,7 +492,7 @@ def _hot_swap_graph(update: ServingIndexUpdate | None = None):
     remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(
         cfg.storage.vector.qdrant.host
     )
-    if state.qdrant_communities is None and (
+    if COMMUNITIES_ENABLED and state.qdrant_communities is None and (
         remote_qdrant or COMMUNITY_VECTOR_PATH.exists()
     ):
         try:
@@ -744,7 +749,7 @@ async def lifespan(app: FastAPI):
     remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(
         cfg.storage.vector.qdrant.host
     )
-    if remote_qdrant or COMMUNITY_VECTOR_PATH.exists():
+    if COMMUNITIES_ENABLED and (remote_qdrant or COMMUNITY_VECTOR_PATH.exists()):
         logger.info("Opening community vector store: %s", COMMUNITY_VECTOR_PATH)
         state.qdrant_communities = create_vector_store(
             VECTOR_BACKEND,
@@ -754,7 +759,7 @@ async def lifespan(app: FastAPI):
             collections=["communities"],
         )
         logger.info("Community vector store: ready")
-    else:
+    elif COMMUNITIES_ENABLED:
         logger.warning(f"Community store not found: {COMMUNITY_VECTOR_PATH}")
 
     # 5. Hybrid query engine — shares the warm store (configured backend) +
@@ -1009,6 +1014,58 @@ async def get_status():
     }
 
 
+@app.get("/capabilities")
+async def get_capabilities():
+    """Return the live server feature and CLI-query command surface."""
+
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+
+    community_reason = None if COMMUNITIES_ENABLED else "communities_disabled"
+    commands = {
+        name: {"enabled": True}
+        for name in (
+            "ask",
+            "chunk",
+            "context",
+            "entity",
+            "expand",
+            "facts",
+            "hop",
+            "path",
+            "search",
+            "timeline",
+        )
+    }
+    commands["expand"]["deprecated"] = True
+    search_collections = [
+        "chunks",
+        "messages",
+        "facts",
+        "entities",
+    ]
+    if COMMUNITIES_ENABLED:
+        search_collections.append("communities")
+    commands["search"]["collections"] = search_collections
+    for name in ("community", "members", "global-search"):
+        commands[name] = {
+            "enabled": COMMUNITIES_ENABLED,
+            "experimental": True,
+            "reason": community_reason,
+        }
+
+    return {
+        "schema_version": 1,
+        "features": {
+            "communities": {
+                "enabled": COMMUNITIES_ENABLED,
+                "experimental": True,
+            }
+        },
+        "commands": commands,
+    }
+
+
 @app.post("/ingest")
 async def ingest(req: IngestRequest):
     """Scan a server-local directory and incrementally ingest unseen units."""
@@ -1101,6 +1158,8 @@ async def search(req: EmbedSearchRequest):
         raise HTTPException(503, "Server not ready")
     if state.engine is None:
         raise HTTPException(503, "Query engine not available")
+    if req.collection == "communities" and not COMMUNITIES_ENABLED:
+        raise HTTPException(404, "Community features are disabled")
 
     t0 = time.time()
     async with _query_sema():
@@ -1227,6 +1286,7 @@ async def ask(req: AskRequest):
                     result.matched_entities,
                     result.chunk_hits,
                     result.fact_hits,
+                    communities_enabled=COMMUNITIES_ENABLED,
                 )
                 answer = await state.engine.synthesize(
                     req.query, result, local_context=local_ctx.context_text
@@ -1265,6 +1325,7 @@ async def ask(req: AskRequest):
             result.matched_entities,
             result.chunk_hits,
             result.fact_hits,
+            communities_enabled=COMMUNITIES_ENABLED,
         )
 
         # Run Phase-2 synthesis with local context if requested
@@ -1328,6 +1389,9 @@ async def global_search(req: GlobalSearchRequest):
         if extra:
             body.update(extra)
         return body
+
+    if not COMMUNITIES_ENABLED:
+        return _no_data("communities_disabled")
 
     async with _query_sema():
         # One grounded-error boundary for the whole post-admission flow: any
@@ -1706,7 +1770,7 @@ def _entity_lookup_impl(req: EntityRequest):
         c[1]
         for c in state.sqlite_conn.execute("PRAGMA table_info(entities)").fetchall()
     ]
-    has_community = "community_L0" in cols
+    has_community = COMMUNITIES_ENABLED and "community_L0" in cols
     base_cols = (
         "id, name, entity_type, mention_count, first_seen, last_seen,"
         " community_L0, community_L1, community_L2, community_L3"
@@ -2092,6 +2156,8 @@ def _community_browse_impl(req: CommunityRequest):
     """Browse communities with summaries."""
     if not state.ready:
         raise HTTPException(503, "Server not ready")
+    if not COMMUNITIES_ENABLED:
+        raise HTTPException(404, "Community features are disabled")
 
     # community_summaries is created by the community summarizer / embed step,
     # not the base schema. Degrade gracefully instead of 500 when it's absent.
@@ -2173,6 +2239,8 @@ def _community_members_impl(req: MembersRequest):
     """List community members."""
     if not state.ready:
         raise HTTPException(503, "Server not ready")
+    if not COMMUNITIES_ENABLED:
+        raise HTTPException(404, "Community features are disabled")
 
     col = f"community_{req.level}"
 
@@ -2589,6 +2657,8 @@ def _has_community_labels() -> bool:
     Freshly-built graphs (ingest only, no scripts/improve) lack these columns,
     so the graph endpoints must degrade gracefully instead of erroring.
     """
+    if not COMMUNITIES_ENABLED:
+        return False
     cols = state.sqlite_conn.execute("PRAGMA table_info(entities)").fetchall()
     return any(c[1] == "community_L1" for c in cols)
 

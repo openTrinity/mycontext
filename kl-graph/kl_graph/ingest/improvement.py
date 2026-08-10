@@ -199,9 +199,13 @@ def run_incremental_improvement(
     """Update similarities and communities for nodes affected by one batch."""
 
     similarity_name = str(cfg.pipelines.ingestion.incremental.similarity_strategy)
-    community_name = str(cfg.pipelines.ingestion.incremental.community_strategy)
+    communities_enabled = bool(cfg.pipelines.communities.enabled)
+    community_name = (
+        str(cfg.pipelines.ingestion.incremental.community_strategy)
+        if communities_enabled
+        else "disabled"
+    )
     similarity = get_similarity_strategy(similarity_name)
-    communities = get_community_strategy(community_name)
     params = {
         "batch_id": batch_id,
         "similarity_strategy": similarity_name,
@@ -230,6 +234,15 @@ def run_incremental_improvement(
                 params=params,
                 count=similarity_edges,
             )
+
+    if not communities_enabled:
+        return ImprovementResult(
+            requested_mode="incremental",
+            applied_mode="incremental",
+            similarity_edges=similarity_edges,
+        )
+
+    communities = get_community_strategy(community_name)
 
     changed: set[str] = set()
     changed_keys: set[tuple[str, str, int]] = set()
@@ -329,17 +342,16 @@ def run_improvement(
     if applied == "off":
         return ImprovementResult(requested, "off")
 
-    # Improvement is an atomic policy decision for the caller. Check the shared
-    # clustering dependencies before inserting any similarity edges so ``auto``
-    # cannot leave a half-improved batch when the optional extra is absent.
-    try:
-        import igraph  # noqa: F401
-        import leidenalg  # noqa: F401
-    except ImportError as exc:
-        raise ImportError(
-            "improvement requires the 'periodic' extra "
-            "(python-igraph and leidenalg)"
-        ) from exc
+    # Only the experimental full community path requires hierarchical Leiden.
+    # Check before similarity writes so an explicitly enabled but incomplete
+    # installation cannot leave a half-improved run.
+    if applied == "full" and bool(cfg.pipelines.communities.enabled):
+        try:
+            import graspologic_native  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "community improvement requires graspologic-native"
+            ) from exc
 
     if applied == "incremental":
         result = run_incremental_improvement(

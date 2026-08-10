@@ -269,12 +269,23 @@ does not imply deletion.
 
 > **Periodic full improvement.** `POST /improve` runs the graph-wide Improve
 > phase without scanning or ingesting source data. It is serialized with
-> ingestion jobs, rebuilds the derived similarity/community layer from the
-> current authoritative graph, and refreshes the server's adjacency index after
-> committing. This is the normal periodic maintenance path for an
-> incremental-first deployment; `POST /ingest` with `improve_mode=full` remains
+> ingestion jobs, rebuilds the derived similarity layer (and the experimental
+> community layer when enabled) from the current authoritative graph, and
+> refreshes the server's adjacency index after committing. This is the normal
+> periodic maintenance path for an incremental-first deployment; `POST /ingest`
+> with `improve_mode=full` remains
 > available when a source batch and a full rebuild intentionally belong to the
 > same job.
+
+> **Community feature gate.** Community detection, summarization, projection,
+> and community-based query behavior are controlled together by
+> `pipelines.communities.enabled` (`KL_COMMUNITIES_ENABLED`). The default is
+> disabled until a cost-efficient incremental hierarchy is validated. When
+> disabled, improvement still builds similarity relationships and may run
+> disambiguation, but it neither rebuilds nor deletes existing community data;
+> serving ignores any retained community assignments, summaries, vectors, and
+> `COMM_MEMBER` edges. Re-enabling the gate followed by a full improvement
+> refreshes the retained derived layer.
 
 > **No watermark.** Timestamps are ordering metadata only. Re-running ingestion
 > is idempotent because committed composite unit ids are skipped. A late message

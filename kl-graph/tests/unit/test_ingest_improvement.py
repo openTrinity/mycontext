@@ -75,6 +75,10 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
             "kl_graph.ingest.improvement.get_community_strategy",
             return_value=communities,
         ),
+        patch(
+            "kl_graph.ingest.improvement.cfg.pipelines.communities.enabled",
+            True,
+        ),
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
     ):
         result = run_improvement(
@@ -94,6 +98,38 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
     communities.assign_communities.assert_called_once()
     _args, kwargs = communities.assign_communities.call_args
     assert "structural_cache" not in kwargs
+    store.close()
+
+
+def test_incremental_skips_experimental_communities_when_disabled(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "graph.db")
+    _add_community_columns(store)
+    similarity = MagicMock()
+    similarity.compute_similarity_edges.return_value = []
+    communities = MagicMock()
+
+    with (
+        patch(
+            "kl_graph.ingest.improvement.get_similarity_strategy",
+            return_value=similarity,
+        ),
+        patch(
+            "kl_graph.ingest.improvement.get_community_strategy",
+            return_value=communities,
+        ),
+    ):
+        result = run_improvement(
+            "incremental",
+            store=store,
+            qdrant=MagicMock(),
+            targets=ImprovementTargets(entity_ids=("e1",)),
+            batch_id="batch-disabled",
+        )
+
+    assert result.applied_mode == "incremental"
+    similarity.compute_similarity_edges.assert_called_once()
+    communities.assert_not_called()
+    assert result.changed_communities == 0
     store.close()
 
 
@@ -126,6 +162,10 @@ def test_incremental_invalidates_current_community_summaries(tmp_path) -> None:
             "kl_graph.ingest.improvement._invalidate_summaries",
             return_value=1,
         ) as inval,
+        patch(
+            "kl_graph.ingest.improvement.cfg.pipelines.communities.enabled",
+            True,
+        ),
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
     ):
         result = run_improvement(

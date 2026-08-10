@@ -231,7 +231,14 @@ class QueryPipelineConfig(_ConfigModel):
     global_search: GlobalSearchConfig
 
 
+class CommunitiesPipelineConfig(_ConfigModel):
+    """Experimental community build and serving feature gate."""
+
+    enabled: bool = False
+
+
 class PipelinesConfig(_ConfigModel):
+    communities: CommunitiesPipelineConfig = CommunitiesPipelineConfig()
     ingestion: IngestionPipelineConfig
     query: QueryPipelineConfig
 

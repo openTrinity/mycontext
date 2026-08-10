@@ -160,6 +160,9 @@ def _patch_state(monkeypatch):
     state.ready = True
     state.store = store
     monkeypatch.setattr(kl_server, "CURRENT_USER", "")
+    # This module tests the experimental community feature itself; production
+    # defaults it off.
+    monkeypatch.setattr(kl_server, "COMMUNITIES_ENABLED", True)
     yield store
     state.sqlite_conn, state.ready, state.store = orig
     store.close()
@@ -178,6 +181,16 @@ def client() -> TestClient:
 
 
 # ── grounded no-data paths (zero LLM calls) ──────────────────────────────────
+
+
+def test_disabled_feature_returns_grounded_no_data(client, llm, monkeypatch) -> None:
+    monkeypatch.setattr(kl_server, "COMMUNITIES_ENABLED", False)
+
+    response = client.post("/global_search", json={"query": "我的任务"})
+
+    assert response.status_code == 200
+    assert response.json()["reason"] == "communities_disabled"
+    assert llm.calls == []
 
 
 def test_missing_summaries_table_hint_zero_calls(client, llm) -> None:

@@ -5,6 +5,7 @@ All heavy operations (Qdrant, embeddings) are delegated to kl-server.
 This CLI only does: HTTP request -> format output.
 
 Usage:
+    kl capabilities --json Discover live enabled query commands
     kl status              Show server status
     kl start               Start kl-server (retrieval only)
     kl start embedding     Start vLLM embedding server (requires GPU)
@@ -407,9 +408,9 @@ def status():
             f"  SQLite: {sq['messages']:,} msgs, {sq['entities']:,} entities, "
             f"{sq['facts']:,} facts, {sq['edges']:,} edges"
         )
-        qd = data["qdrant"]
-        for coll, count in qd.items():
-            click.echo(f"  Qdrant/{coll}: {count:,} vectors")
+        vectors = data.get("vectors", data.get("qdrant", {}))
+        for coll, count in vectors.items():
+            click.echo(f"  Vectors/{coll}: {count:,}")
         ing = data.get("ingest") or {}
         if ing.get("state") and ing["state"] != "idle":
             pct = ing.get("percent", 0.0) * 100
@@ -438,6 +439,30 @@ def status():
             click.echo(
                 "  No GPUs detected (set KL_EMBED_BASE_URL for remote embedding)"
             )
+
+
+@cli.command()
+@click.option("--json", "json_out", is_flag=True, help="Emit machine-readable JSON")
+def capabilities(json_out: bool):
+    """Show query commands supported by the running server."""
+
+    data = _server_request("GET", "/capabilities")
+    if json_out:
+        click.echo(json.dumps(data, ensure_ascii=False, indent=2))
+        return
+
+    click.echo("Query capabilities:")
+    for name, details in data.get("commands", {}).items():
+        enabled = bool(details.get("enabled"))
+        suffix = ""
+        if details.get("experimental"):
+            suffix += " (experimental)"
+        if details.get("deprecated"):
+            suffix += " (deprecated)"
+        reason = details.get("reason")
+        if reason and not enabled:
+            suffix += f" — {reason}"
+        click.echo(f"  {'yes' if enabled else 'no ':>3}  {name}{suffix}")
 
 
 @cli.command()
@@ -662,8 +687,8 @@ def stats():
     click.echo(f"Facts:     {sq['facts']:,}")
     click.echo(f"Edges:     {sq['edges']:,}")
     click.echo(f"Adjacency: {data['adjacency_entities']} entities indexed")
-    click.echo("\nQdrant vectors:")
-    for coll, count in data["qdrant"].items():
+    click.echo("\nVectors:")
+    for coll, count in data.get("vectors", data.get("qdrant", {})).items():
         click.echo(f"  {coll}: {count:,}")
 
 

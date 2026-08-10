@@ -30,9 +30,15 @@ def main() -> int:
         from kl_graph.config import load_config
         load_config(args.config)
 
-    from kl_graph.config import DATA_DIR
+    from kl_graph.config import DATA_DIR, cfg
     from kl_graph.periodic.community_summarizer import run_community_summarization
     from kl_graph.storage.sqlite_store import SQLiteStore
+
+    if not bool(cfg.pipelines.communities.enabled):
+        raise SystemExit(
+            "Community features are experimental and disabled; set "
+            "KL_COMMUNITIES_ENABLED=1 to summarize them."
+        )
 
     sqlite_path = DATA_DIR / "knowledge.db"
     store = SQLiteStore(sqlite_path)
