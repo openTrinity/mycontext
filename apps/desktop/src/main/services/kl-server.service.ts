@@ -24,7 +24,7 @@
  * 只借它"长驻 + 可主动关 + onExit 回调"这三件事。
  */
 import { join } from "node:path"
-import { mkdirSync, existsSync, rmSync, writeFileSync, readFileSync } from "node:fs"
+import { mkdirSync, existsSync, readdirSync, rmSync, writeFileSync, readFileSync } from "node:fs"
 import Database from "better-sqlite3"
 import type { BrowserWindow } from "electron"
 import { type Clock, type Logger } from "@mycontext/kernel"
@@ -1674,11 +1674,73 @@ export class KlServerService {
   /** 清空图数据 + 抽取缓存（重建前用；必须在 server stop 后调）。 */
   private wipeGraphData(): void {
     const dir = this.dataDir
-    for (const name of ["knowledge.db", "knowledge.db-shm", "knowledge.db-wal", "qdrant_data"]) {
+    /**
+     * ★★ 必须连 **ladybug 图库**与 **checkpoint** 一起删。
+     *
+     * ## 实测：漏掉 checkpoint 会让「清空重建」永久失败
+     *
+     * 一次真机现场（用户："点开始学习没反应"）：
+     *
+     * ```
+     * 14:05:36  graph build started {fresh: true} → 删了 knowledge.db / qdrant
+     * 14:05:47  graph build failed:
+     *           "Checkpoint batch '…' has no durable workset;
+     *            run Phase A before any chunk-dependent phase"
+     * ```
+     *
+     * 根因：`ingest_checkpoint.<source_id>.json` 留着，而它记着
+     * `phase_a.persist_chunks` / `phase_b.extraction` 等步骤**已完成** ——
+     * 而库刚被删空。于是 kl 跳过 Phase A 直奔 chunk 相关阶段，
+     * 那时 workset 不存在 → 每次重建都报同一个错，且**清库也修不好**。
+     *
+     * 而 `building` 在失败路径上会复位，但 `graphBusy()` 那一瞬间仍为真 ——
+     * 于是 work 层每轮都让路，playbook 永远等不到。一个漏删的文件
+     * 沿着两条链路把两个功能一起卡住，且都不报"根因"。
+     *
+     * ## ladybug 同理
+     *
+     * 边在默认后端下存 `graph.ladybug`（SQLite 的 `edges` 表按设计恒空，
+     * 见 `graph-query.service.ts` 的长注释）。只删 `knowledge.db` 会留下
+     * 一份**指向已删实体**的旧边集 —— 新图与旧边混在一起，而没有任何地方
+     * 会报错。
+     *
+     * ★ `extraction_cache.db` 那一行的文件名也修了：上游从目录改成了单文件，
+     * 而我们还按旧名删（`extraction_cache`，无扩展名）—— 于是那句
+     * 「删了才会真的重抽」**一直没做到**。这个改名漏了一处的形状，
+     * 与 `WORK_CORPUS_FACETS` 里那个 `ownership` 是同一类。
+     */
+    for (const name of [
+      "knowledge.db",
+      "knowledge.db-shm",
+      "knowledge.db-wal",
+      "qdrant_data",
+      // ★ 边在这里（ladybug 后端），不在 SQLite 的 edges 表
+      "graph.ladybug",
+      "graph.ladybug.wal",
+    ]) {
       rmSync(join(dir, name), { recursive: true, force: true })
     }
-    // 抽取缓存删了才会真的重抽（cache key = md5(msg.id)，不删就命中旧结果）。
-    rmSync(join(dir, "extraction_cache"), { recursive: true, force: true })
+    /**
+     * ★★ checkpoint —— 见上面那段：不删它，「清空重建」会永久报
+     * "has no durable workset"。
+     *
+     * 按前缀删所有 source_id 的：文件名含 `source_id`（`dingtalk` /
+     * 将来可能有别的渠道），写死一个名字会在多渠道时漏掉。
+     */
+    for (const entry of existsSync(dir) ? readdirSync(dir) : []) {
+      if (entry.startsWith("ingest_checkpoint.") && entry.endsWith(".json")) {
+        rmSync(join(dir, entry), { force: true })
+      }
+    }
+    /**
+     * 抽取缓存删了才会真的重抽（cache key = md5(chunk.id)，不删就命中旧结果）。
+     *
+     * ★ 两个名字都删：上游历史上是目录 `extraction_cache/`，现在是单文件
+     * `extraction_cache.db`。只删旧名等于这句注释说的事从来没发生过。
+     */
+    for (const name of ["extraction_cache", "extraction_cache.db"]) {
+      rmSync(join(dir, name), { recursive: true, force: true })
+    }
     /**
      * ★ 文件删了，建图水位也必须清零 —— 否则「待建条数」会少算两个数量级。
      *

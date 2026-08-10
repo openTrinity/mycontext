@@ -12,7 +12,7 @@
  *  · stop() 走 close()，且 onExit 不误报 failed；
  *  · 状态变化推 IPC 事件（getWindow）。
  */
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -1927,5 +1927,69 @@ describe("KlServerService · 生命周期绑定（pidfile 自愈 + 建图不 ado
     expect(existsSync(join(dir, "kl-server.pid"))).toBe(false)
     // 也没 spawn 自己的
     expect(runner.getSpec()).toBeNull()
+  })
+})
+
+/**
+ * ★★ 「清空重建」必须删干净，否则它**永久失败**。
+ *
+ * ## 实测现场（用户："点开始学习没反应"）
+ *
+ * ```
+ * 14:05:36  graph build started {fresh: true}   → 删了 knowledge.db / qdrant
+ * 14:05:47  graph build failed:
+ *           "Checkpoint batch '…' has no durable workset;
+ *            run Phase A before any chunk-dependent phase"
+ * ```
+ *
+ * 根因：`ingest_checkpoint.<source_id>.json` **没被删**，而它记着
+ * `phase_a.persist_chunks` 等步骤已完成 —— 而库刚被删空。于是 kl 跳过
+ * Phase A 直奔 chunk 相关阶段，每次都报同一个错，**连"清空重建"也修不好**。
+ *
+ * 而它同时卡住第二条链路：`graphBusy()` 在那一瞬间为真 → work 层每轮让路
+ * → playbook 永远等不到。一个漏删的文件沿两条路把两个功能一起卡死，
+ * 且都不报根因。
+ *
+ * ★ 用源码断言：真实现要一个 kl 子进程 + 真图库。而这里要守的性质很窄
+ * ——"那份删除清单里有这几个名字" —— 源码断言直接对上它。
+ */
+describe("★★ wipeGraphData 的删除清单", () => {
+  const source = readFileSync(
+    join(
+      import.meta.dirname,
+      "..",
+      "..",
+      "..",
+      "apps/desktop/src/main/services/kl-server.service.ts",
+    ),
+    "utf8",
+  )
+  /** 只看 `wipeGraphData` 那一段（别被别处的同名字符串蒙过去）。 */
+  const body = (() => {
+    const at = source.indexOf("private wipeGraphData")
+    expect(at, "找不到 wipeGraphData —— 结构变了，这条断言要跟着改").toBeGreaterThan(0)
+    return source.slice(at, at + 4000)
+  })()
+
+  it("★★ 删 checkpoint（不删它，清空重建会永久报 no durable workset）", () => {
+    expect(body).toContain("ingest_checkpoint.")
+  })
+
+  it("★★ 删 ladybug 图库（边在那里，SQLite 的 edges 表按设计恒空）", () => {
+    expect(body).toContain("graph.ladybug")
+  })
+
+  it("★★ 抽取缓存两个名字都删（上游从目录改成了单文件）", () => {
+    /**
+     * 原来只删 `extraction_cache`（无扩展名的旧目录名），而真实文件是
+     * `extraction_cache.db` —— 于是那句"删了才会真的重抽"一直没做到。
+     * 这与 `WORK_CORPUS_FACETS` 里那个 `ownership` 是同一类改名漏了一处。
+     */
+    expect(body).toContain('"extraction_cache.db"')
+  })
+
+  it("★ 仍然删 knowledge.db 与 qdrant（原有行为不许丢）", () => {
+    expect(body).toContain('"knowledge.db"')
+    expect(body).toContain('"qdrant_data"')
   })
 })

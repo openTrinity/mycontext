@@ -35,6 +35,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type Clock, type Logger } from "@mycontext/kernel"
 import type { ProcessRunner, ResolvedPython } from "@mycontext/runtime-env"
+import { WORK_LAYER_SKILL_PATH as WORK_LAYER_PATH } from "./persona-gate.js"
 import {
   SelfIdentityRepository,
   openStore,
@@ -44,6 +45,17 @@ import {
 
 /** forge 的三步。顺序固定：语料 → 特征 → 产物。 */
 export type ForgeStep = "pull" | "build" | "publish"
+
+/**
+ * work 层产物在 skill 包里的相对路径。
+ *
+ * ★ **真源在 `persona-gate.ts`**（那里写了为什么放那儿）。这里 re-export 是为了
+ * 让 `startup.ts` 继续从这个模块拿它 —— 一个字符串常量有三个消费者
+ * （这里进 `externalSkillFiles`、startup 拼落盘路径、persona.service 进参考件
+ * 白名单），各写一份字面量必然漂，而漂的表现是静默的：写在 A 路径、读 B 路径，
+ * 文件在磁盘上却没人读，不报错。
+ */
+export { WORK_LAYER_SKILL_PATH } from "./persona-gate.js"
 
 /**
  * 单步超时。
@@ -205,6 +217,21 @@ export class ForgeService {
     skillRoot: string
     /** 只蒸这个时间点之后的（unix ms）；null = 用 forge 的增量水位 */
     since: number | null
+    /**
+     * 只**测量**最近这么多天（`build --window-days`）。
+     *
+     * ## ★ 为什么这个参数与 `since` 不能合并
+     *
+     * `since` 管的是「什么进语料库」，这个管的是「build 看哪一段」，两者不等价：
+     * 语料库一旦有了半年（用户选过宽范围，或 `resolveSince` 回扫过），之后每次
+     * build 都会把半年全部测进去 —— 也就是**「重蒸最近 30 天」做不到**，
+     * 除非先清掉派生库，而那会扔掉不可再采的历史。
+     *
+     * 窗口是非破坏性的：语料一条不删，下次不传这个参数就又是全量。
+     *
+     * `undefined` = 不传（读 forge 配置里的 `measureWindowDays`，默认 0 = 全量）。
+     */
+    windowDays?: number | null
     signal?: AbortSignal
     /**
      * 每进入一个阶段回调一次。
@@ -279,7 +306,17 @@ export class ForgeService {
     const inserted = pulled.inserted ?? 0
 
     input.onStep?.("build")
-    const build = await this.runStep("build", configPath, input.signal)
+    /**
+     * ★ 把测量窗口传下去。
+     *
+     * 不传（`undefined` / `null`）时 forge 读配置里的 `measureWindowDays`
+     * （缺省 0 = 全量），与改这个参数之前的行为一致。
+     */
+    const buildArgs =
+      input.windowDays === undefined || input.windowDays === null || input.windowDays <= 0
+        ? []
+        : ["--window-days", String(Math.floor(input.windowDays))]
+    const build = await this.runStep("build", configPath, input.signal, buildArgs)
     if (!build.ok) {
       return { ...empty, messages: inserted, failedStep: "build", reason: build.reason }
     }
@@ -624,6 +661,22 @@ export class ForgeService {
        */
       ownsOutput: true,
       /**
+       * ★ work 层的产物由**应用**写，forge 既不生成也不能删。
+       *
+       * `references/work.md` 是「他负责什么、怎么做事、定过什么规矩」——
+       * 那些没有结构化信号可测（数不出来），所以走 LLM 抽取
+       * （`packages/distill` 的 work facet），而 forge 的前提是零模型调用。
+       *
+       * 它落在 forge 的产物目录里，因为对加载 skill 的 agent 来说那是**一个**包。
+       * 但不登记的话 `publish` 会把它当成"上一版留下的残留"删掉，而且是静默的：
+       * prune 把它报成普通清理，应用按自己的节奏又写回去 —— 于是这个文件的
+       * 存在与否取决于谁最后跑，而抽它花掉的 token 就那么没了。
+       *
+       * 同时 `forge lock` 也会跳过它（否则应用下一轮重写会 PermissionError，
+       * 而那条路是定时跑的，表现为「work 层悄悄不更新了」）。
+       */
+      externalSkillFiles: [WORK_LAYER_PATH],
+      /**
        * 全量回溯的起点：库里最早那条消息的日期。
        *
        * 不写死一个远古日期（forge 会从那天起逐 7 天切片跑到今天，空片也要跑），
@@ -774,6 +827,68 @@ function readGrade(skillRoot: string): { grade: string | null; unreadable: boole
   return match?.[1] === undefined
     ? { grade: null, unreadable: true }
     : { grade: match[1], unreadable: false }
+}
+
+/**
+ * 读 forge 测出的 ask 频率与衰减半衰期，给 `work.md` 的 `tasks` 一节引用。
+ *
+ * ## ★ 这次读的是**结构化输出**，与 `readGrade` 不同
+ *
+ * `readGrade` 只能正则捞 `fidelity.md` 里的一句 Markdown（那个数没进任何 JSON），
+ * 所以它注释里说"上游改文案就静默失效"。这里不一样：
+ * `derived/features.json` 是 forge 自己写的结构化产物
+ * （`decisions.replyPropensity` / `meta.recency`），读它不是权宜。
+ *
+ * ## ★ 为什么必须由 forge 给，而不是让 work 层自己数
+ *
+ * 一个数出现两次就会打架，而打架时没有任何机制决定谁赢。分工是硬的：
+ * **频率是测量（forge），内容是抽取（LLM）**。work 层只把两者摆在一起。
+ *
+ * 读不到（还没蒸过 / 文件坏了）时返回空 —— 渲染那侧会**省掉**频率那段，
+ * 而不是写「0 次」。「测出来 0 次」与「没测」是两件事（同 `fidelity.md` 的约定）。
+ */
+export function readForgeWorkContext(forgeRoot: string): {
+  askKinds: Record<string, { asks: number; answerRatePct: number }>
+  staleAfterDays: number
+} {
+  const empty = { askKinds: {}, staleAfterDays: 0 }
+  const path = join(forgeRoot, "derived", "features.json")
+  if (!existsSync(path)) return empty
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      decisions?: { replyPropensity?: Record<string, unknown> }
+      meta?: { recency?: { halfLifeDays?: unknown; enabled?: unknown } }
+    }
+    const askKinds: Record<string, { asks: number; answerRatePct: number }> = {}
+    for (const [kind, raw] of Object.entries(parsed.decisions?.replyPropensity ?? {})) {
+      // `_baseline` 那一行不是 ask 类型（forge 用下划线前缀标内部键）
+      if (kind.startsWith("_") || typeof raw !== "object" || raw === null) continue
+      const row = raw as { asks?: unknown; answerRatePct?: unknown }
+      /**
+       * ★ 取 `asks`（**原始**次数）而不是 `total`（衰减后的加权质量）。
+       *
+       * 产物里写的是"确实发生过 N 次"，那必须是能被人核对的整数。
+       * 加权质量是个小数，写进去无法验证，而 forge 自己也是把两者并列发布的。
+       */
+      const asks = typeof row.asks === "number" ? row.asks : 0
+      const rate = typeof row.answerRatePct === "number" ? row.answerRatePct : 0
+      if (asks > 0) askKinds[kind] = { asks, answerRatePct: rate }
+    }
+    const recency = parsed.meta?.recency
+    const half = typeof recency?.halfLifeDays === "number" ? recency.halfLifeDays : 0
+    // 衰减关着时不标「较早」：那时 forge 自己也不认为旧证据该降权，
+    // 两层对"多旧算旧"给出不同答案会让读的人无从判断。
+    const staleAfterDays = recency?.enabled === true ? half : 0
+    return { askKinds, staleAfterDays }
+  } catch {
+    /**
+     * 读坏了就当没有 —— 不抛。
+     *
+     * 这是一个**装饰性**输入：缺了它 `work.md` 少一个括号，而抽出来的内容
+     * 一条不少。为一个装饰让整轮 work 层失败是不成比例的。
+     */
+    return empty
+  }
 }
 
 /** unix ms → 指定偏移下的 `YYYY-MM-DD HH:MM:SS`（forge 比的是本地墙钟串）。 */

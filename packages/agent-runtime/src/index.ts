@@ -1,6 +1,8 @@
 export {
   buildOpencodeSpawn,
   resolveGatewayModelConfig,
+  resolveModelName,
+  DEFAULT_GATEWAY_MODEL,
   assertHardened,
   stripPermissionOverrides,
   assertNoPermissionOverrides,

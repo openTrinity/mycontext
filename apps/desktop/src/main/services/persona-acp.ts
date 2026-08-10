@@ -55,12 +55,57 @@ import { delimiter, join } from "node:path"
 import type { AgentDirs } from "./agent-dirs.js"
 
 /**
- * 一轮 turn 的最长等待。
+ * **协议动作**的超时（`initialize` / `session/new` / `session/dispose`）。
  *
- * 比搜索那侧（120s）短：数字分身是**替人回消息**，一条回复等两分钟已经
- * 失去意义了 —— 那时该出草稿让人来写，而不是继续等。
+ * 这些要么毫秒级返回，要么就是真的坏了（opencode 没起来 / 协议不匹配）。
+ * 90s 足够宽松，同时保证一个起不来的子进程不会让调用方永久挂住。
+ *
+ * ★ `session/prompt` **不**走这个值 —— 见 `ACP_METHOD_TIMEOUTS`。
  */
-const TURN_TIMEOUT_MS = 90_000
+const PROTOCOL_TIMEOUT_MS = 90_000
+
+/**
+ * 按方法覆盖超时。`null` = 不设限。
+ *
+ * ## ★★ 为什么 agent turn 不能有墙钟超时（真机实测，不是保险起见）
+ *
+ * 这里曾经是一个全局 `TURN_TIMEOUT_MS = 90_000`，理由写的是"数字分身是
+ * 替人回消息，一条回复等两分钟已经失去意义"。那个**目标**是对的，
+ * 但用墙钟超时去实现它掐掉的是「慢但有效」，而不是「坏了」：
+ *
+ * ```
+ * 16:07:38  persona agent workspace ready
+ * 16:09:09  persona acp turn failed  ACP 请求超时：session/prompt   ← 91s
+ * 16:09:09  compose falling back to direct llm  reason: acp_turn_empty
+ * 那一轮 latency_ms = 118445：91s 花在能查图谱的 ACP 路上，
+ * 超时后降级到**没有工具**的直连又跑 27s，最终回了一句"不知道"。
+ * ```
+ *
+ * 而一次 `kl ask` 实测就要 21–37s（建图抢网关时更久）。也就是说
+ * "读上下文 + 调一次图谱 + 组织回答"本来就塞不进 90s —— 这个预算
+ * 等于**禁用了 kl skill**：agent 每次刚查到东西就被掐掉。
+ *
+ * ★ 更糟的是失败形态：超时被 `acp_turn_empty` 吃掉，那一轮的
+ * thought / tool_call **不落库**，于是草稿卡上「看生成过程」是空的，
+ * 而降级生成的回复与正常回复长得一模一样。用户看到的只是"它说不知道"。
+ *
+ * 搜索侧早就是不设限的（`search.service.ts` 的 `ACP_METHOD_TIMEOUTS`），
+ * 它的注释记着同一次教训：「按一个猜出来的秒数掐它，掐掉的是慢但有效」。
+ *
+ * ## 那靠什么终止
+ *
+ * 靠**事实**而不是推测：子进程死了 / 连接断了 → `AcpClient.close()`
+ * 拒掉所有在途请求（见那里的注释，那是不设限请求的终止保证）。
+ * 也就是判据从"猜它太慢"变成"连接确实没了"。
+ *
+ * ## ★ "不该等太久"这个目标去哪了
+ *
+ * 它仍然成立，只是**不该由这一层实现**。数字分身的时效性归调度那一层：
+ * 一条消息等太久就出草稿让人来写（那是 `decision` 的事），
+ * 而不是掐掉一个正在调工具的 agent 再用无工具的直连去编一个答案 ——
+ * 后者产出的是**自信且无依据**的回复，比慢一点糟得多。
+ */
+const ACP_METHOD_TIMEOUTS = { "session/prompt": null } as const
 
 /**
  * `session/prompt` 响应之后，还要等流"安静"多久才算收完。
@@ -131,10 +176,44 @@ export interface PersonaAcpOptions {
    * 由调用方落回 LlmClient 直连。
    */
   dirs: () => AgentDirs | null
-  /** kl-graph 代码根：前插进 PATH，让 skill 里的裸 `kl` 命中它 */
+  /**
+   * kl-graph 代码根：追加进 PATH，让 skill 里的裸 `kl` 能被找到。
+   *
+   * ★★ **排在 venv/bin 之后**，不是最前 —— 见 `pythonEnv()` 上方那段。
+   * 顺序放反会让裸 `kl` 命中上游那个坏掉的包装脚本，而失败被记成 success。
+   */
   klRoot: string
   /** kl-server 端口（注入 env，kl CLI 据此连服务） */
   klPort: number
+  /**
+   * 取激活后的 Python 环境（`VIRTUAL_ENV` + `PATH` 前插 venv/bin）。
+   *
+   * ## ★★ 不给它 = agent **用不了 kl skill**（实测，且失败是静默的）
+   *
+   * 与 `SearchService.getPythonEnv` 同一个旋钮、同一个理由。这里曾经没有
+   * 它，PATH 只是 `${klRoot}:${process.env.PATH}` —— 而那导致裸 `kl`
+   * 命中的是仓库里那个包装脚本，它第 5 行无条件 exec
+   * `${SCRIPT_DIR}/.venv/bin/python`，那个目录在我们的部署里**不存在**
+   * （解释器在 `vendor/python/<platform>/venv`，不在 kl-graph 里）。
+   *
+   * 系统里有**两个** `kl`，谁在 PATH 前面决定成败：
+   *
+   * ```
+   * <venv>/bin/kl        ← 我们生成的入口，能跑（实测 kl status 正常）
+   * <klRoot>/kl          ← 上游包装脚本，exec 一个不存在的 .venv → 失败
+   * ```
+   *
+   * ★ 而这个失败**记成 `tool_status: success`**：包装脚本 exec 不到解释器
+   * 时"执行命令"这个动作本身没报错，于是 agent 看到命令跑完了、输出是一行
+   * `No such file or directory`，然后按 skill 里「检索不到时不要编」的指示
+   * 正常地回一句敷衍的话。库里那唯一一次 kl 调用就是这个形态
+   * （tool_call 记 success，内容是两行 exec 报错）。日志里零 error ——
+   * 又一例 CLAUDE.md §4 说的静默降级。
+   *
+   * 不给 / 返回 null → 退回 `process.env`，agent 查不了图谱但仍能回消息
+   * （明确的能力降级，不阻止建会话）。
+   */
+  getPythonEnv?: () => Promise<{ python: string; env: NodeJS.ProcessEnv } | null>
   /**
    * skill 目录列表 —— 透传给 opencode 的 `skills.paths`（**指目录**，不再拷进 cwd）。
    *
@@ -146,6 +225,20 @@ export interface PersonaAcpOptions {
    * 那时 agent 什么外部 skill 都读不到 —— 是明确的能力降级。
    */
   getSkillPaths?: () => readonly string[]
+  /**
+   * 这一轮用哪个模型（`runtimeConfig.resolved().modelMain`）。
+   *
+   * ★ 回调而不是值，与 `getSkillPaths` 同一个理由：opencode 是懒启动的，
+   * 传值会锁死在构造那一刻，而设置页改完模型后应当"下次起 agent 就生效"。
+   *
+   * 为什么不直接读 env：`save()` 会 re-seed `process.env`，所以 env 那条路
+   * 也是新的 —— 但 `resolved()` 才是三层解析（存的 > `.env` > 内置）的唯一
+   * 真源。读它就不必依赖"seed 过了"这个前提；而那个前提一旦被破坏，
+   * 表现是静默用错模型（不报错、只是回复风格变了）。
+   *
+   * 不给 = 退回 env（`MYCONTEXT_MODEL_MAIN`）再退回内置默认。单测走这条。
+   */
+  getModel?: () => string
   /**
    * agent 的**过程**有更新时回调（thinking / 正文 / tool 调用组）。
    *
@@ -586,18 +679,59 @@ export class PersonaAcp {
     return dirs
   }
 
+  /**
+   * 激活后的 Python 环境，缓存一次。
+   *
+   * 缓存的理由与搜索侧一致：`getPythonEnv` 可能要装依赖（一次性的事），
+   * 而 `startAgent` 每次 agent 重起都会调到。**null 也缓存** —— 避免反复
+   * 重试一个注定失败的准备过程，那会让每次 turn 都白卡几秒。
+   */
+  private pythonEnvCache: { value: { python: string; env: NodeJS.ProcessEnv } | null } | null = null
+
+  private async pythonEnv(): Promise<{ python: string; env: NodeJS.ProcessEnv } | null> {
+    if (this.pythonEnvCache !== null) return this.pythonEnvCache.value
+    const get = this.options.getPythonEnv
+    const value = get === undefined ? null : await get().catch(() => null)
+    this.pythonEnvCache = { value }
+    return value
+  }
+
   private async startAgent(): Promise<AgentHandle | null> {
     const usable = this.resolveOnce()
     // 版本闸没过就降级 —— 用一份太老的 opencode 起 ACP 会一路 -32603（见 binaries.ts）。
     if (!usable.ok) return null
     const resolved = usable.binary
     try {
-      const modelConfig = resolveGatewayModelConfig(process.env)
+      const modelConfig = resolveGatewayModelConfig(process.env, this.options.getModel?.())
+      /**
+       * ★★ 基底是**激活后的 Python 环境**，`klRoot` 追加在 venv/bin **之后**。
+       *
+       * 顺序是这一段的全部要点，见 `getPythonEnv` 选项上方那段：两个同名的
+       * `kl` 里只有 venv 那个能跑，而上游包装脚本失败时会被记成 success。
+       * 这里曾经是 `PATH: ${klRoot}:${process.env.PATH}`（klRoot 在最前、
+       * 且完全不激活 venv），于是数字分身这一路**从来没成功调起过 kl** ——
+       * 而同期搜索 tab 是好的，因为它一直是这么拼的（`search.service.ts`）。
+       *
+       * ★ 曾经这行的注释写着「与搜索同一个口径」。那句话是错的，
+       * 而正是它让这个差异一直没被看见 —— 注释里的"实测结论"有保质期
+       * （CLAUDE.md §4），与当前行为冲突时要重新实测，不要照抄。
+       */
+      const activated = await this.pythonEnv()
+      const basePath = activated?.env["PATH"] ?? process.env["PATH"] ?? ""
       const baseEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        // 让 skill 里的裸 `kl` 命中 kl-graph 的可执行（与搜索同一个口径）
-        PATH: `${this.options.klRoot}${delimiter}${process.env["PATH"] ?? ""}`,
+        ...(activated?.env ?? process.env),
+        PATH: `${basePath}${delimiter}${this.options.klRoot}`,
         KL_SERVER_PORT: String(this.options.klPort),
+      }
+      /**
+       * ★ 拿不到 venv 时说出来 —— 那意味着 agent 这一轮查不了图谱。
+       * 静默退回 `process.env` 的表现是"它就是没查"，与"它查了但没结果"
+       * 在界面上一模一样。
+       */
+      if (activated === null) {
+        this.options.logger.warn("python env unavailable; persona cannot query the graph", {
+          klRoot: this.options.klRoot,
+        })
       }
       /**
        * ★ agentHome 按 vault 走；npm 缓存留在应用级一份（见 AgentDirs）。
@@ -638,8 +772,23 @@ export class PersonaAcp {
           this.options.logger.warn("persona opencode exited", {
             code: info.code,
             signal: info.signal,
+            /** 有在途请求时说出来 —— 那意味着这一轮是被进程死亡打断的 */
+            pending: client.pendingCount,
           })
           if (this.agent?.transport === transport) this.agent = null
+          /**
+           * ★★ 必须拒掉在途请求 —— 这是 `session/prompt` **不设限**之后的
+           * 终止保证（见 `ACP_METHOD_TIMEOUTS`）。
+           *
+           * 没有墙钟定时器的请求不会自己放弃：子进程死了而没人 `close()`，
+           * 那个 promise 就**永久挂住**，`handleBatch` 一直 await，
+           * 这个会话的草稿再也不出，而日志里只有一行 exited。
+           * 那是把"超时失败"换成了"静默卡死" —— 更难查。
+           *
+           * `close()` 幂等（内部先置 `closed`），所以与 `dispose()` 那条路
+           * 重复调没有副作用。
+           */
+          client.close()
         },
       })
 
@@ -657,7 +806,9 @@ export class PersonaAcp {
             }),
           "fs/write_text_file": () => handlers.writeTextFile(),
         },
-        requestTimeoutMs: TURN_TIMEOUT_MS,
+        requestTimeoutMs: PROTOCOL_TIMEOUT_MS,
+        // ★ `session/prompt` 不设限 —— 见 `ACP_METHOD_TIMEOUTS` 上方那段实测
+        methodTimeouts: ACP_METHOD_TIMEOUTS,
       })
 
       await client.request("initialize", {

@@ -16,8 +16,9 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ManualClock, createLogger } from "@mycontext/kernel"
-import { staticLlmProvider } from "@mycontext/llm"
+import { LlmClient, staticLlmProvider } from "@mycontext/llm"
 import { DistillService, type ForgeRunOutcome } from "@main/services/distill.service.js"
+import { ChangelogRepository } from "@mycontext/store"
 import { openTestVault } from "../../helpers/vault.js"
 
 const NOW = 1_785_000_000_000
@@ -26,6 +27,30 @@ const logger = createLogger("Test", { level: "error" })
 afterEach(() => {
   vi.useRealTimers()
 })
+
+/**
+ * 一个不打网络的假 LLM。返回一条形状合法但内容为空的 JSON —— work 层那几条
+ * 只关心"有没有发起调用"，不关心抽出了什么（那由 map.test.ts 覆盖）。
+ */
+function fakeLlm(): LlmClient {
+  return new LlmClient({
+    baseUrl: "https://fake.invalid",
+    apiKey: "k",
+    model: "m",
+    sleep: () => Promise.resolve(),
+    fetchImpl: () =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            choices: [{ message: { content: "[]" } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+        text: () => Promise.resolve(""),
+      } as unknown as Response),
+  })
+}
 
 /** 一轮成功的 forge 结果。用具名字段而不是 0，好让断言有区分度。 */
 function ok(overrides: Partial<ForgeRunOutcome> = {}): ForgeRunOutcome {
@@ -47,6 +72,7 @@ function makeService(options: {
     signal?: AbortSignal,
     onStep?: (step: "pull" | "build" | "publish") => void,
     since?: number | null,
+    windowDays?: number | null,
   ) => Promise<ForgeRunOutcome>
   resetForge?: () => boolean
   forgeAvailability?: () => { ok: boolean; reason: string | null }
@@ -55,17 +81,54 @@ function makeService(options: {
   onCorpusReady?: () => void
   /** LLM 抽取那半。缺省关（与生产一致）—— 只有"遗留任务"那组要打开它对照 */
   llmFacets?: boolean
+  /**
+   * 可变的开关（模拟用户在设置页现改）。给它就忽略 `llmFacets`。
+   *
+   * 单独一个字段而不是让 `llmFacets` 收函数：绝大多数 case 只想说
+   * "开着/关着"，用 boolean 读起来清楚得多。
+   */
+  llmFacetsRef?: { on: boolean }
+  /**
+   * 可用的假 LLM。缺省是 `null`（= 未配置模型），因为绝大多数 case 只跑 forge。
+   *
+   * work 层那几条要它：判据里有一条 `llmReady`（没配模型就不跑，见
+   * work-refresh.ts）—— 不给的话那些 case 会因为"没模型"而跳过，
+   * 于是断言的其实不是它想断言的那件事。
+   */
+  llm?: LlmClient | null
+  /**
+   * 在 `attach()` **之前**往 changelog 写一条。
+   *
+   * attach 里那一次评估读的是当时的 changelog head —— 测"登录时开关已是开"
+   * 那条必须让数据先在库里，否则判据给 `no-new-data`，而那样这条用例就
+   * 成了一条永远绿的空用例（它验的是"空库不跑"）。
+   */
+  seedChangelog?: boolean
+  /** work 层落盘。给"攒批"那组用来观察它有没有被跑起来 */
+  writeWorkFile?: (content: string | null) => void
+  workArtifactExists?: () => boolean
+  /** 建图在跑吗 —— 给"让路"那组用 */
+  graphBusy?: () => boolean
 }) {
   const clock = new ManualClock(NOW)
   const vault = openTestVault()
   const service = new DistillService({
     clock,
     logger,
-    llmProvider: staticLlmProvider(null),
+    llmProvider: staticLlmProvider(options.llm ?? null),
     getWindow: () => null,
     // 缺省关掉自动重蒸：只有那一组用例要它，别处开着会让计数不稳
     autoIntervalMs: options.autoIntervalMs ?? 0,
-    ...(options.llmFacets === undefined ? {} : { llmFacets: options.llmFacets }),
+    /**
+     * ★ `llmFacets` 是**回调**（用户可在设置页随时改，见它的注释）。
+     * 测试仍用 boolean 表达意图，在这里包成回调 —— 那样每个 case 读起来
+     * 是"开着/关着"，而不是"传了个函数"。
+     */
+    ...(options.llmFacetsRef !== undefined
+      ? { llmFacets: () => options.llmFacetsRef?.on === true }
+      : options.llmFacets === undefined
+        ? {}
+        : { llmFacets: () => options.llmFacets === true }),
     ...(options.runForge === undefined ? {} : { runForge: options.runForge }),
     ...(options.resetForge === undefined ? {} : { resetForge: options.resetForge }),
     ...(options.forgeAvailability === undefined
@@ -75,8 +138,23 @@ function makeService(options: {
       ? {}
       : { onProfileChanged: options.onProfileChanged }),
     ...(options.onCorpusReady === undefined ? {} : { onCorpusReady: options.onCorpusReady }),
+    ...(options.graphBusy === undefined ? {} : { graphBusy: options.graphBusy }),
   })
-  service.attach(vault.db)
+  if (options.seedChangelog === true) {
+    new ChangelogRepository(vault.db).append([
+      {
+        op: "upsert" as const,
+        entityType: "message" as const,
+        entityId: "m-seed",
+        channelId: "dingtalk" as const,
+        domain: "chat" as const,
+        occurredAt: NOW,
+        emittedAt: NOW,
+        digest: "d-seed",
+      },
+    ])
+  }
+  service.attach(vault.db, undefined, undefined, options.writeWorkFile, options.workArtifactExists)
   return { service, vault, clock }
 }
 
@@ -843,6 +921,116 @@ describe("★★ 选的时间范围要真的到 forge", () => {
 })
 
 /**
+ * ★★ 选的时间范围还要限住**测量**，不只是采集。
+ *
+ * ## 为什么修完 `since` 还不够
+ *
+ * 上面那组锁住了「days → since」，也就是**采集**下界。但 forge 的 `build`
+ * 从不受 `since` 约束：它每次都全量重扫派生库里的**全部**语料。
+ *
+ * 于是只要语料库里已经有更早的历史 —— 用户上次选过宽范围，或
+ * `ForgeService.resolveSince` 判定"vault 比 forge 语料更早"而回扫补过 ——
+ * 选 30 天与选 180 天**产出仍然完全相同**。症状与那个已修的 bug 一模一样，
+ * 而且同样静默：pull 如实只采 30 天，build 照常出数字，grade 可能还是 A。
+ *
+ * 所以同一个 days 还要作为 `build --window-days` 传下去。窗口是非破坏性的：
+ * 语料一条不删，下次选「不限」就又是全量（见 `Rules.window_clause`）。
+ */
+describe("★★ 选的时间范围要限住测量窗口，不只是采集", () => {
+  it("★★ days 同时作为测量窗口传给 runForge", async () => {
+    let seen: number | null | undefined = undefined
+    const { service, vault } = makeService({
+      runForge: (_signal, _onStep, _since, windowDays) => {
+        seen = windowDays
+        return Promise.resolve(ok())
+      },
+    })
+
+    service.start({ days: 30 })
+    await vi.waitFor(() => {
+      expect(service.progress().forge.lastOk).toBe(true)
+    })
+
+    expect(seen, "只限采集不限测量 → 库里已有的更早语料照样被测进画像").toBe(30)
+    await service.detach()
+    vault.close()
+  })
+
+  it("★ 不同的 days 得到不同的窗口（锁住「真的读了那个值」）", async () => {
+    const seen: (number | null | undefined)[] = []
+    const { service, vault } = makeService({
+      runForge: (_signal, _onStep, _since, windowDays) => {
+        seen.push(windowDays)
+        return Promise.resolve(ok())
+      },
+    })
+
+    service.start({ days: 30 })
+    await vi.waitFor(() => expect(service.progress().forge.running).toBe(false))
+    service.start({ days: 180 })
+    await vi.waitFor(() => expect(seen).toHaveLength(2))
+
+    expect(seen[0]).toBe(30)
+    expect(seen[1]).toBe(180)
+    await service.detach()
+    vault.close()
+  })
+
+  it("★ 不传 days = null（全量测量）", async () => {
+    let seen: number | null | undefined = undefined
+    const { service, vault } = makeService({
+      runForge: (_signal, _onStep, _since, windowDays) => {
+        seen = windowDays
+        return Promise.resolve(ok())
+      },
+    })
+
+    service.start()
+    await vi.waitFor(() => {
+      expect(service.progress().forge.lastOk).toBe(true)
+    })
+
+    // null 而不是 undefined：「不限」是一个明确的选择，不是"忘了传"
+    expect(seen).toBeNull()
+    await service.detach()
+    vault.close()
+  })
+
+  it("★★ 自动重蒸**沿用**测量窗口（与 since 相反）", async () => {
+    /**
+     * 两个参数的时效性不同，所以自动重蒸对它们的处理必须相反：
+     *
+     * · `since` 是一次性动作参数（「这次回溯多远」）→ 不沿用，否则每 6 小时
+     *   重采半年；
+     * · `windowDays` 是长期口味（「我要一个反映最近 30 天的画像」）→ 必须沿用，
+     *   否则用户选的 30 天窗口会在 6 小时后被定时任务悄悄换回全量，
+     *   而界面上没有任何迹象说画像变了。
+     */
+    vi.useFakeTimers()
+    const seen: { since?: number | null; windowDays?: number | null }[] = []
+    const { service, vault } = makeService({
+      autoIntervalMs: 1000,
+      runForge: (_signal, _onStep, since, windowDays) => {
+        seen.push({ since, windowDays })
+        return Promise.resolve(ok())
+      },
+    })
+
+    service.start({ days: 30 })
+    await vi.waitFor(() => expect(seen).toHaveLength(1))
+    expect(seen[0]?.windowDays).toBe(30)
+
+    await vi.advanceTimersByTimeAsync(1100)
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThanOrEqual(2))
+
+    expect(seen[1]?.since, "自动重蒸不该重采半年").toBeNull()
+    expect(seen[1]?.windowDays, "自动重蒸不该把窗口悄悄换回全量").toBe(30)
+    await service.detach()
+    vault.close()
+  })
+})
+
+/**
  * ★★ 蒸馏完要**立刻**踢一轮图谱同步。
  *
  * ## 这修的是"点了开始学习不会建图"
@@ -900,6 +1088,396 @@ describe("★★ 蒸馏完立刻踢图谱同步（否则要干等 10 分钟）",
       expect(service.progress().forge?.running).toBe(false)
     })
     expect(kicked).toBe(1)
+    vault.close()
+  })
+})
+
+/**
+ * ★★ work 层必须攒批，不能跟着 forge 每轮都跑。
+ *
+ * forge 免费（零模型调用，实测 4400 条约 5 秒），所以它挂在 6 小时定时器上
+ * 无所谓。work 层每个 facet 是一次上万 token 的调用 —— 挂同一个定时器就是
+ * **每天 4 次为同一批老语料付钱**，而那正是 LLM 那半当年被整个关掉的原因
+ * （产出没人读、成本照付、且不报错）。原样复活那个成本模型等于把当时的结论作废。
+ *
+ * 判据本身在 `tests/unit/distill/work-refresh.test.ts` 里逐条锁了；
+ * 这里锁的是**接线**：定时器真的走了那个判据，而不是绕过它直接抽。
+ */
+describe("★★ 自动轮里的 work 层要过攒批判据", () => {
+  it("★★ 默认（llmFacets 关）自动轮不跑 work 层", async () => {
+    vi.useFakeTimers()
+    let wrote = 0
+    const { service, vault } = makeService({
+      autoIntervalMs: 1000,
+      runForge: () => Promise.resolve(ok()),
+      writeWorkFile: () => {
+        wrote += 1
+      },
+      // 产物不在 = 判据的「首次」分支成立 —— 唯一挡住它的只能是 llmFacets 关着
+      workArtifactExists: () => false,
+    })
+
+    await vi.advanceTimersByTimeAsync(1100)
+    await vi.waitFor(() => expect(service.progress().forge.lastRunAt).not.toBeNull())
+
+    /**
+     * forge 跑了，work 层没跑。这条红了意味着一个默认配置的用户
+     * 每 6 小时被计一次费，而他从没打开过这个功能。
+     *
+     * ★ 断言的是**结果**（没有产生费用）而不是某一行代码，所以实现怎么变
+     * 它都还成立 —— 那是刻意的：这里要守的性质是"默认配置不花钱"。
+     *
+     * （曾经这里写着"有两道防线，其中一道是关着时 runner 根本没被造出来"。
+     * runner 现在是**懒建**的了 —— 因为按开关建一次会让"登录后打开开关"
+     * 静默无效。也就是说那一道防线已经不存在，而这条断言不受影响。）
+     */
+    expect(wrote, "关着的 work 层不该被定时器跑起来").toBe(0)
+    await service.detach()
+    vault.close()
+  })
+
+  /**
+   * ★★ 开关是**运行中**可改的 —— 打开之后下一轮就该生效，不用重启。
+   *
+   * ## 这条锁的是一个真实踩过的形态
+   *
+   * `attach()` 只在登录那一刻跑,而开关在设置页里随时能改。原来 runner 是在
+   * `attach()` 里"按开关建一次"的,于是「登录 → 打开开关」这条最自然的路径下
+   * runner 永远是 null,那一轮 `if (runner === null) return` **静默返回**：
+   * 用户看到"我开了开关但它没反应",日志里连一行都没有。
+   *
+   * 所以 runner 改成懒建。这条断言就是那个改动的门禁 —— 它红了说明
+   * "打开开关要重启才生效"回来了,而那件事在界面上是看不出来的。
+   */
+  it("★★ 运行中打开开关,下一轮就生效（不需要重启/重新登录）", async () => {
+    vi.useFakeTimers()
+    const ref = { on: false }
+    let wrote = 0
+    const { service, vault } = makeService({
+      autoIntervalMs: 1000,
+      llmFacetsRef: ref,
+      llm: fakeLlm(),
+      runForge: () => Promise.resolve(ok()),
+      writeWorkFile: () => {
+        wrote += 1
+      },
+      workArtifactExists: () => false,
+    })
+
+    /**
+     * ★ 先让库里有"新数据"。
+     *
+     * 判据的「首次」分支要求 `latestSeq > 0`（`latestSeq === 0` → `no-new-data`）
+     * —— 空库里 work 层无论开关如何都会跳过，那样这条用例就成了一条
+     * 永远绿的空用例：它验的是"空库不跑"，而不是"开关生效"。
+     */
+    new ChangelogRepository(vault.db).append([
+      {
+        op: "upsert" as const,
+        entityType: "message" as const,
+        entityId: "m-1",
+        channelId: "dingtalk" as const,
+        domain: "chat" as const,
+        occurredAt: NOW,
+        emittedAt: NOW,
+        digest: "d-1",
+      },
+    ])
+
+    // 第一轮：关着 —— 不该有任何花费
+    await vi.advanceTimersByTimeAsync(1100)
+    await vi.waitFor(() => expect(service.progress().forge.lastRunAt).not.toBeNull())
+    expect(wrote, "关着时不该跑").toBe(0)
+
+    // 用户在设置页打开开关（服务已经 attach 过了，不重启、不重新登录）
+    ref.on = true
+
+    /**
+     * 第二轮：开着 —— 现在该跑起来了。
+     *
+     * ★ 断言 `>= 1` 而不是 `=== 1`：这里要守的是"打开之后真的会跑",
+     * 而不是"恰好跑几次"。次数受攒批判据与轮数上限影响,钉死它会让
+     * 一个正确的判据调整误报成回归。
+     */
+    await vi.advanceTimersByTimeAsync(1100)
+    await vi.waitFor(() => expect(wrote).toBeGreaterThanOrEqual(1))
+    await service.detach()
+    vault.close()
+  })
+
+  /**
+   * ★★ 打开开关要**立刻**评估一次，不等 6 小时的下一轮。
+   *
+   * 实测踩到的形态：开关打开于 19:33:57，而最后一轮蒸馏是 19:33:34（早 23 秒）
+   * —— 于是那一晚什么都没发生。而界面上**不会说"在等下一轮"**，
+   * 用户看到的就是"我开了开关，它没反应"。
+   */
+  it("★★ 打开开关立刻评估一次（不用等下一个周期）", async () => {
+    const ref = { on: false }
+    let wrote = 0
+    const { service, vault } = makeService({
+      // ★ 定时器**关掉** —— 那样"跑了"只可能是开关触发的，不会是周期到了
+      autoIntervalMs: 0,
+      llmFacetsRef: ref,
+      llm: fakeLlm(),
+      runForge: () => Promise.resolve(ok()),
+      writeWorkFile: () => {
+        wrote += 1
+      },
+      workArtifactExists: () => false,
+    })
+    new ChangelogRepository(vault.db).append([
+      {
+        op: "upsert" as const,
+        entityType: "message" as const,
+        entityId: "m-toggle",
+        channelId: "dingtalk" as const,
+        domain: "chat" as const,
+        occurredAt: NOW,
+        emittedAt: NOW,
+        digest: "d-toggle",
+      },
+    ])
+
+    // 用户在设置页打开开关 → IPC handler 落库后调这个
+    ref.on = true
+    service.workLayerToggled(true)
+
+    await vi.waitFor(() => expect(wrote).toBeGreaterThanOrEqual(1))
+    await service.detach()
+    vault.close()
+  })
+
+  /**
+   * ★ **关掉**开关不该产生任何花费。
+   *
+   * ★ 诚实说明这条能锁住什么：它断言的是**结果**（没有花钱），而这件事有
+   * **两道**防线 —— `workLayerToggled` 里的 `if (!enabled) return`，以及判据
+   * 自己的 `disabled` 分支。实测拆掉前者这条仍然绿（后者接住了）。
+   *
+   * 那是刻意保留的：这里要守的性质是"关着就不花钱"，而不是"哪一行挡住了它"
+   * —— 与上面「默认配置不跑」那条同一个判断。想锁住某一行的方向，
+   * 该锁的是那一行的单元行为，而不是把这条改成白盒断言。
+   */
+  it("★ 关掉开关不产生任何花费（结果断言，两道防线）", async () => {
+    const ref = { on: true }
+    let wrote = 0
+    const { service, vault } = makeService({
+      autoIntervalMs: 0,
+      llmFacetsRef: ref,
+      llm: fakeLlm(),
+      runForge: () => Promise.resolve(ok()),
+      writeWorkFile: () => {
+        wrote += 1
+      },
+      workArtifactExists: () => false,
+    })
+
+    ref.on = false
+    service.workLayerToggled(false)
+
+    // 给它机会跑（如果真触发了，这段时间足够写一次）
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(wrote, "关掉开关竟然触发了一轮付费抽取").toBe(0)
+    await service.detach()
+    vault.close()
+  })
+
+  /**
+   * ★★ 「开始学习」**只跑 forge**，绝不在引导里跑 work 层。
+   *
+   * ## 这一条锁的是引导流程的核心取舍
+   *
+   * 原来这里断言的是「手动跑完之后游标前进」—— 那个前提是"开始学习也跑
+   * work 层"，而那正是被推翻的设计：
+   *
+   * | | forge | work 层 |
+   * | --- | --- | --- |
+   * | 耗时 | 实测 **5 秒** | 一轮最多 **40 分钟** |
+   * | 成本 | 零（纯 Python） | 每轮几万 token |
+   * | 产出 | 语气/句长/时延 —— 数字人**能用**的最小集 | 职责/流程/套路（增强） |
+   *
+   * 引导要回答的是「现在能用了吗」，而 forge 跑完就能用。让用户在引导页
+   * 干等 40 分钟去换一层**增强**是把主次搞反了 —— 而且设置页那个开关的
+   * 说明原文就写着「蒸馏在后台跑（6 小时一轮）」，同步跑等于当场违背它。
+   *
+   * ★ 所以这条断言反过来：开关开着时点「开始学习」，**forge 跑了、
+   * work 层没跑**。work 层的入口只有后台三条（attach 评估 / 6 小时定时器 /
+   * 用户打开开关）。
+   */
+  it("★★ 开关开着时点「开始学习」：forge 跑、work 层不跑", async () => {
+    let forgeRuns = 0
+    let wrote = 0
+    const { service, vault } = makeService({
+      // ★ 定时器与 attach 评估都关掉，那样"跑了"只可能是 start() 触发的
+      autoIntervalMs: 0,
+      llmFacets: true,
+      llm: fakeLlm(),
+      runForge: () => {
+        forgeRuns += 1
+        return Promise.resolve(ok())
+      },
+      writeWorkFile: () => {
+        wrote += 1
+      },
+      // ★ 产物"已存在" → attach 那次评估会因攒批判据跳过，不干扰这条断言
+      workArtifactExists: () => true,
+    })
+
+    service.start({ days: null })
+    await vi.waitFor(() => expect(forgeRuns).toBeGreaterThanOrEqual(1), { timeout: 5000 })
+
+    // ★ forge 跑了 —— 引导要等的就是它
+    expect(forgeRuns, "点了开始学习却没跑 forge —— 引导页会一直等").toBe(1)
+    /**
+     * ★★ 而 work 层没写产物。
+     *
+     * 写了就说明它在引导里同步跑了 —— 那会让用户干等几十分钟，
+     * 且与开关说明的「后台跑」矛盾。
+     */
+    expect(wrote, "「开始学习」把 work 层也跑了 —— 用户会被堵在引导页几十分钟").toBe(0)
+
+    await service.detach()
+    vault.close()
+  })
+
+  /**
+   * ★★ 开关**已经是开**的情况必须被覆盖 —— 这是最常见的那一种。
+   *
+   * ## 实测踩到的形态
+   *
+   * 用户上次会话里开了开关，然后重启应用。这一次启动**没有"打开"这个动作**，
+   * 于是三条路一条都不通：点击触发（这次没点）、自动轮（6 小时后）、
+   * 手动「开始学习」（要主动点）。结果是**开关明明是开的，却什么都不发生**，
+   * 而界面上不会说在等什么。
+   *
+   * 实测证据：开关 true、模型配着、语料 3.4 万条、任务 70 条 pending、
+   * work.md 不存在、日志里 0 条 work layer 记录。
+   *
+   * 所以 `attach()`（每次登录/切 vault）要评估一次。
+   */
+  it("★★ 登录时开关已是开 → 评估一次（不需要重新点开关）", async () => {
+    let wrote = 0
+    // ★ 定时器关掉、不点开关、不点开始学习 —— 那样"跑了"只可能是 attach 触发的
+    const { service, vault } = makeService({
+      autoIntervalMs: 0,
+      llmFacets: true,
+      llm: fakeLlm(),
+      runForge: () => Promise.resolve(ok()),
+      writeWorkFile: () => {
+        wrote += 1
+      },
+      workArtifactExists: () => false,
+      // ★ 在 attach **之前**就把新数据放进库里：attach 那一次评估要看得到它
+      seedChangelog: true,
+    })
+
+    await vi.waitFor(() => expect(wrote).toBeGreaterThanOrEqual(1), { timeout: 5000 })
+    await service.detach()
+    vault.close()
+  })
+
+  it("★★ 没有可用的 LLM 时不跑（不刷一轮注定失败的调用）", async () => {
+    vi.useFakeTimers()
+    let wrote = 0
+    const { service, vault } = makeService({
+      autoIntervalMs: 1000,
+      llmFacets: true,
+      runForge: () => Promise.resolve(ok()),
+      writeWorkFile: () => {
+        wrote += 1
+      },
+      workArtifactExists: () => false,
+    })
+
+    await vi.advanceTimersByTimeAsync(1100)
+    await vi.waitFor(() => expect(service.progress().forge.lastRunAt).not.toBeNull())
+
+    /**
+     * `makeService` 注入的是 `staticLlmProvider(null)` —— 没有 client。
+     * 起了的结果是每轮抛一次 `CONFIG_INVALID` 并刷一条同样的 warn，
+     * 而用户以为它在抽。
+     */
+    expect(wrote).toBe(0)
+    await service.detach()
+    vault.close()
+  })
+})
+
+/**
+ * ★★ forge 与 work 层的**先后与让路**规则。
+ *
+ * ## 这一组锁的是一次真实的用户体验事故
+ *
+ * 原来的顺序是「work 层任务排空 → 才跑 forge」，而 work 层一轮最多 40 分钟。
+ * 加上"建图在跑就让路"之后，`return` 把 forge 一起跳过了 —— 后果有两个，
+ * 都不报错：
+ *
+ * · **语气那一层迟迟不出** —— 而 forge 是纯 Python、零模型调用、实测 5 秒；
+ * · **`SKILL.md` 永远修不好** —— 那份索引表决定 ACP 路的 agent 能不能
+ *   *发现* `references/work.md`。实测磁盘上那份是旧的（缺 work.md 一行），
+ *   于是 work 层写了产物却没人读 —— 整层白做的那个形态。
+ *
+ * 现在的规则：**forge 先跑且从不让路 → work 层（可让路）→ 若跑完再 publish
+ * 一次让索引表与产物对齐**。
+ */
+describe("★★ forge 先跑、不让路；work 完成后再 publish", () => {
+  it("★★ 建图在跑时：forge 仍然跑，work 层让路", async () => {
+    let forgeRuns = 0
+    let wrote = 0
+    const { service, vault } = makeService({
+      autoIntervalMs: 0,
+      llmFacets: true,
+      llm: fakeLlm(),
+      seedChangelog: true,
+      workArtifactExists: () => false,
+      graphBusy: () => true, // ← 建图一直在跑
+      runForge: () => {
+        forgeRuns += 1
+        return Promise.resolve(ok())
+      },
+      writeWorkFile: () => {
+        wrote += 1
+      },
+    })
+
+    // makeService 里已经 attach → 那一次评估会跑（见「登录时开关已是开」那条）
+    await vi.waitFor(() => expect(forgeRuns).toBeGreaterThanOrEqual(1), { timeout: 5000 })
+
+    // ★ forge 跑了（语气那层是新的）—— 这是这条断言的全部意义
+    expect(forgeRuns, "建图在跑就把 forge 一起跳过了 —— 语气层永远不更新").toBe(1)
+    // ★ 而 work 层让路：没写产物（它在 graphBusy 分支前就 return 了）
+    expect(wrote).toBe(0)
+    await service.detach()
+    vault.close()
+  })
+
+  it("★★ 建图空闲时：work 层跑完 → forge 再 publish 一次（索引表跟上产物）", async () => {
+    let forgeRuns = 0
+    const { service, vault } = makeService({
+      autoIntervalMs: 0,
+      llmFacets: true,
+      llm: fakeLlm(),
+      seedChangelog: true,
+      workArtifactExists: () => false,
+      graphBusy: () => false,
+      runForge: () => {
+        forgeRuns += 1
+        return Promise.resolve(ok())
+      },
+      writeWorkFile: () => undefined,
+    })
+
+    await vi.waitFor(() => expect(forgeRuns).toBeGreaterThanOrEqual(2), { timeout: 8000 })
+
+    /**
+     * ★ 两次：开头一次（先出语气）+ 结尾一次（work 写完产物后让 SKILL.md 跟上）。
+     *
+     * 只有一次的话就回到那个 bug：产物变了而索引表没变，
+     * ACP 路的 agent 发现不了 `references/work.md`。
+     */
+    expect(forgeRuns, "work 写完产物之后没有再 publish —— SKILL.md 会停在旧版").toBe(2)
+    await service.detach()
     vault.close()
   })
 })

@@ -11,6 +11,8 @@
  * 这是本地权限提升 —— 因此这几条断言的作用是让**回退变成红灯**：
  * 有人在重构里删掉一行注入，除了这里没有任何信号。
  */
+import { readdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   assertHardened,
@@ -20,6 +22,8 @@ import {
   KL_SKILL_PERMISSION,
   HOST_TOOL_PREFIX,
   resolveGatewayModelConfig,
+  resolveModelName,
+  DEFAULT_GATEWAY_MODEL,
   stripPermissionOverrides,
 } from "@mycontext/agent-runtime"
 import { isAppError } from "@mycontext/kernel"
@@ -412,7 +416,7 @@ describe("resolveGatewayModelConfig", () => {
     const config = resolveGatewayModelConfig({
       ANTHROPIC_BASE_URL: "https://gw.example.com",
       ANTHROPIC_AUTH_TOKEN: "sk-abc",
-      MYCONTEXT_SEARCH_MODEL: "gpt-5.6-sol",
+      MYCONTEXT_MODEL_MAIN: "gpt-5.6-sol",
     }) as {
       provider: Record<string, { models: Record<string, { modalities?: { input?: string[] } }> }>
     }
@@ -434,13 +438,83 @@ describe("resolveGatewayModelConfig", () => {
     expect(config.provider["mycontext"]?.options.apiKey).toBe("sk-fallback")
   })
 
-  it("MYCONTEXT_SEARCH_MODEL 覆盖默认模型", () => {
+  it("MYCONTEXT_MODEL_MAIN 覆盖默认模型", () => {
     const config = resolveGatewayModelConfig({
       ANTHROPIC_BASE_URL: "https://gw.example.com",
       ANTHROPIC_AUTH_TOKEN: "sk-abc",
-      MYCONTEXT_SEARCH_MODEL: "claude-opus-4-6",
+      MYCONTEXT_MODEL_MAIN: "claude-opus-4-6",
     }) as { model: string }
     expect(config.model).toBe("mycontext/claude-opus-4-6")
+  })
+
+  /**
+   * ★★ 显式传入的模型优先于 env。
+   *
+   * 这一条锁的是「设置页改了模型立刻生效」。`seedProcessEnv` 只在装配阶段写
+   * 一次 `process.env`，而 opencode 是懒启动的 —— 用户改完设置之后子进程才
+   * spawn，读到的是那份**旧快照**。所以装配层必须能把 `resolved().modelMain`
+   * 显式传进来并**盖过** env。
+   *
+   * 这条红了的表现是最难查的一类：改了模型、日志也不报错、只是还在用旧的。
+   */
+  it("★★ 显式传入的模型优先于 env（否则「改了设置不生效」）", () => {
+    const config = resolveGatewayModelConfig(
+      {
+        ANTHROPIC_BASE_URL: "https://gw.example.com",
+        ANTHROPIC_AUTH_TOKEN: "sk-abc",
+        MYCONTEXT_MODEL_MAIN: "stale-from-env",
+      },
+      "fresh-from-settings",
+    ) as { model: string }
+    expect(config.model).toBe("mycontext/fresh-from-settings")
+  })
+
+  /**
+   * ★ 空串不算"给了值" —— 三档都是这条判据。
+   *
+   * env 里 `KEY=` 占位很常见，设置里也可能存了个空串。用 `??` 的话空串会被
+   * 当成有效模型名拼进 `mycontext/`，opencode 拿着一个空模型 id 去解析，
+   * 表现又是那条最难查的"session/prompt 永不返回"（见函数头注释）。
+   */
+  it("★ 空串的 override / env 都不算有效值（回退到下一档）", () => {
+    const base = {
+      ANTHROPIC_BASE_URL: "https://gw.example.com",
+      ANTHROPIC_AUTH_TOKEN: "sk-abc",
+    }
+    // override 是空串 → 落到 env
+    expect(
+      (
+        resolveGatewayModelConfig({ ...base, MYCONTEXT_MODEL_MAIN: "from-env" }, "   ") as {
+          model: string
+        }
+      ).model,
+    ).toBe("mycontext/from-env")
+    // override 与 env 都空 → 落到内置默认
+    expect(
+      (resolveGatewayModelConfig({ ...base, MYCONTEXT_MODEL_MAIN: "" }, "") as { model: string })
+        .model,
+    ).toBe(`mycontext/${DEFAULT_GATEWAY_MODEL}`)
+  })
+
+  /**
+   * ★★ 日志与实际用的模型必须同源。
+   *
+   * `search.service.ts` 要把"用了哪个模型"写进日志，而它走的是同一个
+   * `resolveModelName`。各写一份优先级的话两处会漂移 —— 而漂移的表现是
+   * 日志报的模型与实际用的不是一个，那比不报更糟（把排查引向错误方向）。
+   */
+  it("★★ resolveModelName 与 resolveGatewayModelConfig 给出同一个模型", () => {
+    const env = {
+      ANTHROPIC_BASE_URL: "https://gw.example.com",
+      ANTHROPIC_AUTH_TOKEN: "sk-abc",
+      MYCONTEXT_MODEL_MAIN: "env-model",
+    }
+    for (const override of [undefined, "explicit-model", ""]) {
+      const config = resolveGatewayModelConfig(env, override) as { model: string }
+      expect(config.model, `override=${JSON.stringify(override)}`).toBe(
+        `mycontext/${resolveModelName(env, override)}`,
+      )
+    }
   })
 
   it("缺 BASE_URL 或 TOKEN → null（调用方据此降级）", () => {
@@ -702,5 +776,51 @@ describe("★ 屏蔽用户本地 opencode 配置与外部 skill", () => {
       baseEnv: { OPENCODE_DISABLE_PROJECT_CONFIG: "1" },
     })
     expect(spawn.env["OPENCODE_DISABLE_PROJECT_CONFIG"]).toBe("1")
+  })
+})
+
+/**
+ * ★★ 旧的 `MYCONTEXT_SEARCH_MODEL` 不得有任何**读取点**。
+ *
+ * ## 为什么用 grep 而不是一条行为断言
+ *
+ * 统一模型名这件事的失败方式是「改了一处漏一处」：漏掉的那处仍然读旧变量，
+ * 而旧变量**没有任何人 seed 它** —— 于是那条路悄悄退回写死的兜底默认值。
+ * 没有报错、没有日志，只是某一条链路用的模型与其他链路不同，
+ * 而症状（"这里的回复风格不一样"）离原因隔了好几层。
+ *
+ * 行为断言只能覆盖到我想得到的调用点；扫源码能覆盖到**我没想到的那个**。
+ * 与 `check:kl-skill-sync` 那类门禁同一个思路：让"漏了一处"变成红灯。
+ *
+ * 注释与文档里可以留（那是在解释历史），所以只拦真正的读取形态
+ * `env["MYCONTEXT_SEARCH_MODEL"]` / `env.MYCONTEXT_SEARCH_MODEL`。
+ */
+describe("★★ 模型名统一：旧变量不再被读", () => {
+  it("★★ 仓库源码里没有 MYCONTEXT_SEARCH_MODEL 的读取点", () => {
+    const roots = ["apps", "packages", "scripts"]
+    const offenders: string[] = []
+    // `env["KEY"]` / `env.KEY` / `process.env["KEY"]` —— 读取的三种写法
+    const readPattern = /(?:\[\s*["']MYCONTEXT_SEARCH_MODEL["']\s*\]|\.MYCONTEXT_SEARCH_MODEL\b)/
+
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === ".tsbuild" || entry.name === "out") {
+          continue
+        }
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          walk(full)
+          continue
+        }
+        if (!/\.(ts|tsx|mjs|js)$/.test(entry.name)) continue
+        const text = readFileSync(full, "utf8")
+        for (const [index, line] of text.split("\n").entries()) {
+          if (readPattern.test(line)) offenders.push(`${full}:${String(index + 1)}`)
+        }
+      }
+    }
+    for (const root of roots) walk(root)
+
+    expect(offenders, "这些位置仍在读旧变量，会悄悄用另一个模型").toEqual([])
   })
 })

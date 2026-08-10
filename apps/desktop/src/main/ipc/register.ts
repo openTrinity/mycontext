@@ -54,6 +54,7 @@ import {
   saveIngestIntervalsInputSchema,
   setLanguageInputSchema,
   setQuitConfirmInputSchema,
+  setWorkLayerInputSchema,
   updateProfileInputSchema,
 } from "@mycontext/ipc-contract"
 import type { BootstrapState } from "@mycontext/ipc-contract"
@@ -180,6 +181,9 @@ export function registerIpc(deps: IpcDependencies): void {
         language: preferences.language(),
         // 同理下发退出确认状态：设置页首帧就要读它。
         quitConfirmSuppressed: preferences.quitConfirmSuppressed(),
+        // 工作层开关同理。对一个**花钱**的开关，首帧闪烁（先"关"再跳"开"）
+        // 会让人以为自己没开成，于是又点一次。
+        workLayerEnabled: preferences.workLayerEnabled(),
       }
     }),
   )
@@ -618,6 +622,25 @@ export function registerIpc(deps: IpcDependencies): void {
     attempt(() =>
       preferences.setQuitConfirmSuppressed(parse(setQuitConfirmInputSchema, payload).suppressed),
     ),
+  )
+
+  ipcMain.handle(IPC_CHANNELS.preferencesSetWorkLayer, (_event, payload: unknown) =>
+    attempt(() => {
+      const { enabled } = parse(setWorkLayerInputSchema, payload)
+      const result = preferences.setWorkLayerEnabled(enabled)
+      /**
+       * ★ 打开之后**立刻评估一次**，不等 6 小时的下一轮。
+       *
+       * 不接这一行的实测后果：开关打开于 19:33:57，而最后一轮蒸馏是 19:33:34
+       * （早 23 秒）—— 那一晚什么都没发生，而界面上不会说"在等下一轮"，
+       * 于是看起来就是"开了没反应"。
+       *
+       * 落库先于触发：那一轮读的是 `preferences.workLayerEnabled()`，
+       * 顺序颠倒的话它读到的还是旧值（关），于是判据直接 `disabled` 返回。
+       */
+      distill.workLayerToggled(enabled)
+      return result
+    }),
   )
 
   ipcMain.handle(IPC_CHANNELS.profileUpdate, (_event, payload: unknown) =>

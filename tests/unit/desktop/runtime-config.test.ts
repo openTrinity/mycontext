@@ -175,6 +175,35 @@ describe("seedProcessEnv", () => {
     expect(env["ANTHROPIC_AUTH_TOKEN"]).toBe("sk-abc-7777")
     ctx.close()
   })
+
+  /**
+   * ★★ 模型名也要 seed —— 否则 `.env` 里那一行是句谎话。
+   *
+   * opencode 子进程的模型配置（`resolveGatewayModelConfig`）从 env 读
+   * `MYCONTEXT_MODEL_MAIN`，而 `bootstrap/config.ts` **刻意不写 process.env**
+   * （见它的文件头）。少了这一行，dotenv 里的模型名就停在 `config.values` 里
+   * 到不了子进程，于是子进程永远用写死的兜底默认值 —— 而"配了但不生效"
+   * 是这个仓库里最难查的一类问题，因为每一层看起来都在正常工作。
+   */
+  it("★★ 模型名 seed 进 env（`.env` 里配的模型要真能到 agent 子进程）", () => {
+    const env: NodeJS.ProcessEnv = {}
+    const ctx = makeService(loadConfig(), env)
+    ctx.service.save({ modelMain: "probe-model-9" }, NOW)
+    expect(env["MYCONTEXT_MODEL_MAIN"]).toBe("probe-model-9")
+    ctx.close()
+  })
+
+  it("★ 没存覆盖值时 seed 的是默认层（而不是空串）", () => {
+    /**
+     * 空串会被 `resolveModelName` 当成"没给"而回退到内置默认 —— 那时
+     * 行为仍然对，但 env 里留一个空值会让排查的人以为"配过了"。
+     */
+    const env: NodeJS.ProcessEnv = {}
+    const ctx = makeService(loadConfig(), env)
+    ctx.service.seedProcessEnv()
+    expect(env["MYCONTEXT_MODEL_MAIN"]).toBe("glm-5.2")
+    ctx.close()
+  })
 })
 
 describe("apiKey 三态", () => {

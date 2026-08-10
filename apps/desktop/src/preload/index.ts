@@ -126,6 +126,7 @@ const api: MyContextApi = {
     setLanguage: (input) => ipcRenderer.invoke(IPC_CHANNELS.preferencesSetLanguage, input),
     setQuitConfirmSuppressed: (input) =>
       ipcRenderer.invoke(IPC_CHANNELS.preferencesSetQuitConfirm, input),
+    setWorkLayerEnabled: (input) => ipcRenderer.invoke(IPC_CHANNELS.preferencesSetWorkLayer, input),
   },
   profile: {
     update: (input) => ipcRenderer.invoke(IPC_CHANNELS.profileUpdate, input),

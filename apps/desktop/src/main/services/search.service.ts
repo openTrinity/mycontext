@@ -45,6 +45,7 @@ import {
   createReverseHandlers,
   mapSessionUpdate,
   resolveGatewayModelConfig,
+  resolveModelName,
   textBlock,
   toPlainText,
   type AgentEvent,
@@ -158,6 +159,15 @@ export interface SearchServiceOptions {
    * 返回 null = 环境不可用，agent 仍能起（只是查不了图谱）。
    */
   getPythonEnv?: () => Promise<{ python: string; env: NodeJS.ProcessEnv } | null>
+  /**
+   * 搜索 agent 用哪个模型（`runtimeConfig.resolved().modelMain`）。
+   *
+   * ★ 回调而不是值：opencode 是懒启动的单例进程，而用户可能在那之前
+   * 或之后改设置。传值会锁死在构造那一刻 —— 表现是"改了模型不生效"。
+   *
+   * 不给 = 退回 env（`MYCONTEXT_MODEL_MAIN`）再退回内置默认。
+   */
+  getModel?: () => string
   getWindow: () => BrowserWindow | null
 }
 
@@ -688,7 +698,9 @@ export class SearchService {
       // 从本机 env 解析网关模型配置（走 openai-compatible 内联 provider，
       // 绕开 models.dev 注册表——见 resolveGatewayModelConfig 的头注释）。
       // 解析不到（没配网关）时不传 modelConfig，并**显式告警**（见下）。
-      const modelConfig = resolveGatewayModelConfig(process.env)
+      // ★ 模型名由装配层显式给（`getModel`），env 只是兜底 —— 见 `getModel`。
+      const model = this.options.getModel?.()
+      const modelConfig = resolveGatewayModelConfig(process.env, model)
 
       /**
        * ★ 没配网关时**直接拒绝启动**，不是"告警后照常起"。
@@ -733,8 +745,10 @@ export class SearchService {
         )
       } else {
         // 成功路径也留一条：出问题时第一个要确认的就是"到底用了哪个模型"。
+        // ★ 走同一个 `resolveModelName`（而不是在这里重算优先级）：日志报的
+        // 模型与实际用的必须是同一个，否则它会把排查引向错误的方向。
         this.options.logger.info("search agent model configured", {
-          model: process.env["MYCONTEXT_SEARCH_MODEL"] ?? "claude-sonnet-4-6",
+          model: resolveModelName(process.env, model),
         })
       }
 

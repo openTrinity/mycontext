@@ -325,6 +325,76 @@ function applyHomeIsolation(env: Record<string, string>, agentHome: string): voi
   if (env["XDG_DATA_HOME"] === undefined && realHome !== undefined && realHome !== "") {
     env["XDG_DATA_HOME"] = `${realHome}/.local/share`
   }
+  /**
+   * ★★ 别让 zsh 读用户的启动脚本 —— 换掉 HOME 之后它们**必然半坏**。
+   *
+   * ## 实测症状
+   *
+   * agent 跑的每一条 `kl` 命令，输出第一行都是：
+   *
+   * ```
+   * /Users/<用户名>/.zshenv:.:1: no such file or directory:
+   *   <agentHome>/.cargo/env
+   * ```
+   *
+   * 因为 `.zshenv` 里那句 `. "$HOME/.cargo/env"` 是照真实 HOME 写的，
+   * 而我们把 `HOME` 换成了隔离目录 —— 于是同一句在 agent 进程里指向
+   * 一个不存在的路径。用户机器上的 rc 文件里这类 `$HOME/...` 引用很常见
+   * （rustup / nvm / pyenv / conda 都这么装）。
+   *
+   * ## 为什么它不只是噪音
+   *
+   * · 每条工具输出都被这行报错**污染**，而那些输出要进模型上下文 ——
+   *   等于每次调用都白烧一段 token 去讲一件与任务无关的事；
+   * · 更糟的是**模型会当真**：它看到 stderr 里有 `no such file or directory`
+   *   就可能判断"这条命令失败了"，然后重试或改写命令。真机那一轮里
+   *   agent 试了三种调用形态，这行报错是干扰源之一。
+   *
+   * ## 判据：rc 文件属于**用户的交互 shell**，不属于我们 spawn 的子进程
+   *
+   * 我们要的是一个干净的、可预测的执行环境；用户 rc 里的 PATH 定制
+   * 我们本来也不想继承（那正是 `PATH` 由我们显式拼的原因）。
+   * `ZDOTDIR` 指进隔离区（那里没有 rc 文件）比逐个 unset 更稳 ——
+   * 后者要穷举 `.zshenv`/`.zprofile`/`.zshrc`/`.zlogin`，漏一个就白做。
+   *
+   * ★ 只影响我们 spawn 的子进程，不碰用户自己的 shell。
+   */
+  env["ZDOTDIR"] = agentHome
+  /**
+   * bash 那一侧的等价物。`BASH_ENV` 是非交互 bash 会 source 的那个文件 ——
+   * 用户设过它的话同样带着 `$HOME` 引用。指向空串 = 不 source 任何东西。
+   */
+  env["BASH_ENV"] = ""
+}
+
+/**
+ * 模型 id 的兜底默认。
+ *
+ * 不是随手写的：网关实测这个 200，其余候选 503。只在「调用方没传 + env
+ * 也没有」时生效。
+ */
+export const DEFAULT_GATEWAY_MODEL = "claude-sonnet-4-6"
+
+/**
+ * 解析「这一轮到底用哪个模型」。**唯一一份**优先级实现。
+ *
+ * ★ 导出而不是内联进 `resolveGatewayModelConfig`：调用方还要把同一个值写进
+ * 日志（"到底用了哪个模型"是排查时的第一个问题）。各写一份的话两处会漂移，
+ * 而漂移的表现是**日志报的模型与实际用的不是一个** —— 比不报更糟，因为它
+ * 把排查引向错误的方向。
+ *
+ * 三档，都用"非空才算"（不是 `??`）：env 里的空串（`KEY=` 占位）与设置里
+ * 存了个空串都很常见，而空模型 id 拼进 `mycontext/` 会让 opencode 去解析
+ * 一个空引用，表现又是那条最难查的"session/prompt 永不返回"。
+ */
+export function resolveModelName(
+  env: NodeJS.ProcessEnv = process.env,
+  modelOverride?: string,
+): string {
+  if (modelOverride !== undefined && modelOverride.trim() !== "") return modelOverride
+  const fromEnv = env["MYCONTEXT_MODEL_MAIN"]
+  if (fromEnv !== undefined && fromEnv.trim() !== "") return fromEnv
+  return DEFAULT_GATEWAY_MODEL
 }
 
 /**
@@ -360,12 +430,34 @@ function applyHomeIsolation(env: Record<string, string>, agentHome: string): voi
  * 谁想给搜索单独指一个网关（比如临时换个模型服务）仍然能覆盖。
  *
  * · 拼 URL：base 不含 `/v1` 时补上；
- * · 模型 id 默认 `claude-sonnet-4-6`（网关实测 200；其余候选 503），
- *   可用 `MYCONTEXT_SEARCH_MODEL` 覆盖。
+ * · 模型 id：`modelOverride` → `MYCONTEXT_MODEL_MAIN` → `claude-sonnet-4-6`。
+ *
+ * ## ★ 模型名为什么统一到 `MYCONTEXT_MODEL_MAIN`
+ *
+ * 这里原来读的是 `MYCONTEXT_SEARCH_MODEL` —— 一个**只存在于 `process.env`**
+ * 的变量：不在 `kernel/config.ts` 的 schema 里、设置页没有、而
+ * `RuntimeConfigService.seedProcessEnv()` 也不 seed 任何模型名。于是
+ * `.env` 里写它**到不了这里**（`bootstrap/config.ts` 刻意不写 `process.env`），
+ * 用户在设置页改「主模型」也影响不到这条路。
+ *
+ * 后果是分裂的：数字人**常态**回复（走这里的 ACP 子进程）用 sonnet，
+ * 而**降级**回退到直连时用 `modelMain` —— 两个模型，用户一个都改不动，
+ * 且"回复风格突然变了"查不到原因。
+ *
+ * ★ `modelOverride` 优先于 env 是必需的，不是锦上添花：`seedProcessEnv`
+ * 只在装配阶段跑一次，而用户在设置里改完模型后子进程是**之后**才 spawn 的
+ * ——只靠 env 会读到那份旧快照。所以由持有 `runtimeConfig` 的装配层把
+ * 解析后的值显式传进来（与 kl 的 `llmModel` 同一个做法，见 `startup.ts`）。
+ *
+ * 默认值仍是 `claude-sonnet-4-6`：那不是随手写的，是实测结论（网关实测 200，
+ * 其余候选 503）。它只在「调用方没传 + env 也没有」时兜底。
  *
  * base 与 key 各自**两个来源都空**才返回 null（调用方据此降级）。
  */
-export function resolveGatewayModelConfig(env: NodeJS.ProcessEnv = process.env): unknown | null {
+export function resolveGatewayModelConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  modelOverride?: string,
+): unknown | null {
   // 取第一个非空值 —— `??` 不够：env 里常见的是**空字符串**（`KEY=` 占位），
   // 那种情况下 `??` 会把空串当有效值传下去，最后表现为"配了但认证失败"。
   const pick = (...keys: readonly string[]): string | undefined => {
@@ -380,7 +472,11 @@ export function resolveGatewayModelConfig(env: NodeJS.ProcessEnv = process.env):
   const apiKey = pick("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "MYCONTEXT_LLM_API_KEY")
   if (base === undefined || apiKey === undefined) return null
 
-  const model = env["MYCONTEXT_SEARCH_MODEL"] ?? "claude-sonnet-4-6"
+  /**
+   * ★ 走 `resolveModelName` 而不是在这里再判一次优先级：调用方还要把同一个
+   * 值写进日志，两份实现会漂移（见那个函数的注释）。
+   */
+  const model = resolveModelName(env, modelOverride)
   const baseURL = base.endsWith("/v1") ? base : `${base.replace(/\/$/, "")}/v1`
   const providerId = "mycontext"
   const modelRef = `${providerId}/${model}`

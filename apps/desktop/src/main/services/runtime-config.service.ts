@@ -334,6 +334,21 @@ export class RuntimeConfigService {
     set("MYCONTEXT_LLM_API_KEY", resolved.llmApiKey)
     set("ANTHROPIC_BASE_URL", resolved.llmBaseUrl)
     set("ANTHROPIC_AUTH_TOKEN", resolved.llmApiKey)
+    /**
+     * ★ 模型名也要 seed —— 否则 `.env` 里那一行是句谎话。
+     *
+     * `resolveGatewayModelConfig`（opencode 子进程的模型配置）从 env 读
+     * `MYCONTEXT_MODEL_MAIN`，而 `bootstrap/config.ts` **刻意不写 process.env**
+     * （见它的文件头：为了让优先级判定只由 `loadConfig` 决定）。少了这一行，
+     * dotenv 里的模型名就停在 `config.values` 里到不了子进程，于是子进程
+     * 永远用写死的兜底默认值 —— 而"配了但不生效"是最难查的一类问题。
+     *
+     * 只是这还不够：env 是进程级全局状态，谁都能改，而"这一次 spawn 用哪个
+     * 模型"该是个明确的输入。所以装配层另外把 `resolved().modelMain` 显式传给
+     * 两处 spawn（见 `startup.ts` 的 `getModel`）—— 那条路不依赖"seed 过了"
+     * 这个前提，而这一行让**没走那条路的调用方**（单测、脚本）也拿到正确值。
+     */
+    set("MYCONTEXT_MODEL_MAIN", resolved.modelMain)
   }
 
   /** 订阅配置变化（LlmHolder 重配 / 向渲染层推事件）。返回取消订阅。 */

@@ -26,7 +26,7 @@ import {
   SelfIdentityRepository,
   DistillSourceRepository,
 } from "@mycontext/store"
-import { ForgeService } from "@main/services/forge.service.js"
+import { ForgeService, WORK_LAYER_SKILL_PATH } from "@main/services/forge.service.js"
 
 const logger = createLogger("test", { level: "error" })
 const NOW = 1_785_000_000_000
@@ -205,6 +205,33 @@ describe("★ 产物落点", () => {
     vault.handle.close()
   })
 
+  it("★★ work 层产物登记进 externalSkillFiles（否则下一轮 publish 把它删掉）", async () => {
+    /**
+     * `references/work.md` 由**应用**写（work facet 的 LLM 抽取产物），落在
+     * forge 的产物目录里 —— 因为对加载 skill 的 agent 来说那是一个包。
+     *
+     * 不登记的话 `publish` 的 `_prune` 会把它当成"上一版留下的残留"删掉，
+     * 而且是静默的：prune 报成普通清理，应用按自己的节奏又写回去 ——
+     * 于是这个文件存在与否取决于谁最后跑，抽它花的 token 就那么没了。
+     * 顺带 `forge lock` 也会跳过它（否则应用下一轮重写会 PermissionError，
+     * 而那条路是定时跑的，表现为「work 层悄悄不更新了」）。
+     */
+    const { runner } = fakeRunner(HAPPY)
+    const vault = makeVault()
+    const roots = makeRoots()
+    await makeService(runner).run({
+      db: vault.handle.db,
+      vaultPath: vault.path,
+      ...roots,
+      since: null,
+    })
+    const config = JSON.parse(
+      readFileSync(join(roots.forgeRoot, "persona-config.json"), "utf8"),
+    ) as { externalSkillFiles: string[] }
+    expect(config.externalSkillFiles).toContain(WORK_LAYER_SKILL_PATH)
+    vault.handle.close()
+  })
+
   it("数据源指向这个 vault 的 core.sqlite（切账号不能读错库）", async () => {
     const { runner } = fakeRunner(HAPPY)
     const vault = makeVault()
@@ -335,6 +362,53 @@ describe("三步编排", () => {
     const pull = specs[0]!
     expect(pull.args[pull.args.indexOf("--since") + 1]).toBe("auto")
     vault.handle.close()
+  })
+
+  /**
+   * ★★ 测量窗口要真的进 `build` 的命令行。
+   *
+   * `since` 只管**采集**下界，而 `build` 从不受它约束 —— 语料库里已有的更早
+   * 历史照样会被全量测进画像。于是「重蒸最近 30 天」做不到，且症状静默：
+   * pull 如实只采 30 天，build 照常出数字，grade 可能还是 A。
+   *
+   * 断言的是 spawn 出去的**参数**而不是返回值：拼错标志名会静默无效
+   * （argparse 不认的话会报错，但少传一个参数不会），而那是这一层唯一
+   * 能被外部观察到的行为。
+   */
+  it("★★ windowDays 传成 build --window-days", async () => {
+    const { runner, specs } = fakeRunner(HAPPY)
+    const vault = makeVault()
+    const roots = makeRoots()
+    await makeService(runner).run({
+      db: vault.handle.db,
+      vaultPath: vault.path,
+      ...roots,
+      since: null,
+      windowDays: 30,
+    })
+    const build = specs.find((s) => s.args.includes("build"))!
+    expect(build.args[build.args.indexOf("--window-days") + 1]).toBe("30")
+    vault.handle.close()
+  })
+
+  it("★ windowDays 不传 / null / 0 时不加这个标志（= 全量测量）", async () => {
+    for (const windowDays of [undefined, null, 0]) {
+      const { runner, specs } = fakeRunner(HAPPY)
+      const vault = makeVault()
+      const roots = makeRoots()
+      await makeService(runner).run({
+        db: vault.handle.db,
+        vaultPath: vault.path,
+        ...roots,
+        since: null,
+        ...(windowDays === undefined ? {} : { windowDays }),
+      })
+      const build = specs.find((s) => s.args.includes("build"))!
+      // 不传标志（而不是传 0）：让 forge 读它配置里的 measureWindowDays 缺省，
+      // 也就是与加这个参数之前完全一致的行为。
+      expect(build.args, `windowDays=${String(windowDays)}`).not.toContain("--window-days")
+      vault.handle.close()
+    }
   })
 })
 

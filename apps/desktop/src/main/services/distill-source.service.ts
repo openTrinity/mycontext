@@ -136,6 +136,26 @@ export class DistillSourceService {
      * （分钟级、烧 LLM），而用户什么都没改。
      */
     const before = repo.list().find((row) => row.kind === input.kind)
+    /**
+     * ★ 临时诊断：保存进来的白名单到底有多少个。
+     *
+     * 现象：UI 上勾选计数 +1、点了下一步，但库里白名单个数不变。
+     * 链路每一环单独看都对（toggle / scopeChanged / zod / upsert 全量覆盖），
+     * 所以要看**真正传到主进程的那个数组**。
+     *
+     * ★ 只记个数与哈希，不记真实 id（那是 openConversationId，属于
+     * CLAUDE.md §1.1 不许出仓库的标识；日志文件在本机，但口径一致更安全）。
+     */
+    if (input.kind === "chat") {
+      const ids = input.scope.conversationIds ?? []
+      this.options.logger.info("distill scope save received", {
+        incoming: ids.length,
+        stored: before?.scope.conversationIds?.length ?? -1,
+        enabled: input.enabled,
+        // 便于确认"是不是同一批" —— 只是长度和的指纹，不含真实值
+        fingerprint: ids.reduce((sum, id) => sum + id.length, 0),
+      })
+    }
     repo.upsert(
       input.kind,
       { enabled: input.enabled, scope: input.scope },

@@ -15,6 +15,13 @@ import type { SettingsRepository } from "@mycontext/store"
 export const LANGUAGE_SETTING = "ui.language"
 /** 用户勾了"下次不再提醒"或在设置里主动关掉退出确认。 */
 export const QUIT_CONFIRM_SUPPRESSED_SETTING = "ui.quitConfirmSuppressed"
+/**
+ * 工作层抽取（LLM 抽职责/流程/经验 → skill 包里的 `work.md`）。
+ *
+ * ★ 与上面两个不同：这一位**控制的是花钱**。所以它的默认必须是关,
+ * 而且"读不出来"也必须落到关 —— 见 `workLayerEnabled()`。
+ */
+export const WORK_LAYER_SETTING = "distill.workLayerEnabled"
 
 export class PreferencesService {
   constructor(
@@ -49,6 +56,28 @@ export class PreferencesService {
   setQuitConfirmSuppressed(suppressed: boolean): true {
     const at = this.now().toISOString()
     this.settings.set(QUIT_CONFIRM_SUPPRESSED_SETTING, suppressed ? "true" : "false", at)
+    return true
+  }
+
+  /**
+   * 工作层抽取开着吗。**未设置 / 值非法都回落 false（关）。**
+   *
+   * ## ★ 为什么"读不出来"必须落到关
+   *
+   * 这一位与语言、退出确认不同类:它开着的时候每轮蒸馏会发起几万 token 的
+   * 模型调用。一个读值失败就自动开始花钱的开关是不可接受的 —— 而且那笔钱
+   * 是静默花掉的（蒸馏在后台跑,界面上只有一行"正在蒸馏"）。
+   *
+   * 所以这里刻意**不**用 `raw !== "false"` 这种写法:那会让任何脏值
+   * （空串、旧版本写的 "1"、手改坏的 JSON）都变成"开"。只认字面的 "true"。
+   */
+  workLayerEnabled(): boolean {
+    return this.settings.get(WORK_LAYER_SETTING) === "true"
+  }
+
+  setWorkLayerEnabled(enabled: boolean): true {
+    const at = this.now().toISOString()
+    this.settings.set(WORK_LAYER_SETTING, enabled ? "true" : "false", at)
     return true
   }
 }

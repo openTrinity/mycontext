@@ -6,8 +6,9 @@
  * 而不是让应用带着半初始化的状态打开窗口。
  */
 import { randomUUID } from "node:crypto"
-import { rmSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import Database from "better-sqlite3"
 import { app, powerMonitor, shell, type BrowserWindow } from "electron"
 import { resolveLanguage } from "@mycontext/i18n"
 import { createLogger, systemClock, type Logger } from "@mycontext/kernel"
@@ -55,7 +56,11 @@ import { FeedService } from "../services/feed.service.js"
 import { OnboardingService } from "../services/onboarding.service.js"
 import { DistillSourceService } from "../services/distill-source.service.js"
 import { DistillService } from "../services/distill.service.js"
-import { ForgeService } from "../services/forge.service.js"
+import {
+  ForgeService,
+  readForgeWorkContext,
+  WORK_LAYER_SKILL_PATH,
+} from "../services/forge.service.js"
 import { MediaService } from "../services/media.service.js"
 import { PersonaService } from "../services/persona.service.js"
 import { PersonaGate } from "../services/persona-gate.js"
@@ -528,6 +533,35 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 因为建图失败而回滚会把"已经删掉的越界数据"重新变成不确定状态。
      */
     onScopeChanged: () => {
+      /**
+       * ★★ `distill.reset()` 必须**最先**执行，不能排在建图之后。
+       *
+       * ## 实测踩到的竞争（用户："调了范围之后点开始学习没反应"）
+       *
+       * ```
+       * 13:16:14  scope save received                    ← 用户调范围
+       * 13:16:17  distill start requested → planned 18   ← 3 秒后点开始学习
+       * 13:16:21  distill reset {clearedTasks: 36}       ← 才轮到 reset，把刚建的一起清了
+       * ```
+       *
+       * 原因是它原来排在第 4 步，而第 3 步 `rebuildGraph(true)` 要**停 server +
+       * 删图库**，那要好几秒。于是 reset 落地时用户已经点过按钮了 ——
+       * 任务建好又被清空，界面归零，看起来就是"点了没反应"。
+       *
+       * ★ 提到最前面是安全的：`reset` 是同步且快的（一条 DELETE + 清内存态），
+       * 且**不依赖** purge / export / rebuild 的结果。而反过来的代价是真实的：
+       * 用户的下一个动作会被它吃掉。
+       *
+       * ★ 顺序变了但语义没变：这四件事都是"范围改了要重来"的一部分，
+       * 彼此之间没有数据依赖（各自 catch，见下）。
+       */
+      try {
+        distill.reset()
+      } catch (error) {
+        logger.warn("scope change distill reset failed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
       void (async () => {
         try {
           const report = dataPlane.applyScopeChange()
@@ -567,13 +601,6 @@ export function bootstrapApp(mainDir: string): AppContext {
           await klServer.rebuildGraph(true)
         } catch (error) {
           logger.warn("scope change graph rebuild failed", {
-            detail: error instanceof Error ? error.message : String(error),
-          })
-        }
-        try {
-          distill.reset()
-        } catch (error) {
-          logger.warn("scope change distill reset failed", {
             detail: error instanceof Error ? error.message : String(error),
           })
         }
@@ -721,6 +748,60 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 蒸馏的收尾。`tickGraphSync` 自己有 `inFlightSync` 挡并发。
      */
     onCorpusReady: () => void feed.tickGraphSync(),
+    /**
+     * ★★ 工作层抽取的开关 —— 这就是让 work 层从"代码写好了"变成"真的会跑"
+     * 的那一行。
+     *
+     * ## 为什么是回调而不是一个 boolean
+     *
+     * 用户在设置页里改这个开关时,`DistillService` 已经构造完了。传值会锁死在
+     * 装配那一刻 —— 表现是"打开了开关,但要重启应用才生效",而界面上没有任何
+     * 提示说需要重启。回调让每一轮判据现读。
+     *
+     * ## 为什么默认关
+     *
+     * 这一层每轮对四个维度各发一次请求、每次上万 token。而蒸馏是在后台跑的
+     * （6 小时一轮的定时器 + 用户点「开始学习」），界面上只有一行"正在蒸馏"
+     * —— 也就是说**开着它就是在静默花钱**。
+     *
+     * `preferences.workLayerEnabled()` 未设置/值非法时回落 false（见那里的
+     * 注释：一个读值失败就自动开始花钱的开关是不可接受的）。
+     */
+    llmFacets: () => preferences.workLayerEnabled(),
+    /**
+     * ★★ playbook 归纳的语料：kl 的图库（**只读**）。
+     *
+     * 由这一层打开而不是让 distill 自己开：`@mycontext/distill` 不依赖
+     * better-sqlite3（native 模块，本仓库的 Electron/Node ABI 反复踩过 ——
+     * 实测跑测试时会直接报模块加载失败）。
+     *
+     * ★ 返回 `null` 的三种情况都是**正常状态**，不是故障：还没登录
+     * （没有 vault）、还没建过图、或图库正被建图热切换。
+     * 归纳那一层拿到 null 就跳过这一轮。
+     */
+    openGraphDb: () => {
+      const klRoot = vaultPaths?.klRoot
+      if (klRoot === undefined || klRoot === "") return null
+      const dbPath = join(klRoot, "knowledge.db")
+      if (!existsSync(dbPath)) return null
+      try {
+        const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+        return { db: db as unknown as SqliteDatabase, close: () => db.close() }
+      } catch {
+        // 正被热切换（kl 的 hot-swap）—— 下一轮再试
+        return null
+      }
+    },
+    /**
+     * ★★ 建图在跑时**跳过** playbook 归纳。
+     *
+     * 实测：建图用 12 并发打同一个 LLM 网关时，归纳这条路**必然** HTTP 524
+     * （Cloudflare 前置，源站 100s 内没返回完整响应）。两边抢同一个网关，
+     * 而归纳是单次长请求 —— 它必然是输的那一方。
+     *
+     * 所以串行：跳过一轮比烧一次注定失败的调用好。
+     */
+    graphBusy: () => klServer.status().building,
   })
 
   /**
@@ -771,7 +852,7 @@ export function bootstrapApp(mainDir: string): AppContext {
      * ★ agent 路径：每个 conversation 一个 opencode ACP session。
      *
      * 这四样凑齐才启用（见 PersonaService 的构造）：起不来时
-     * `PersonaAcp.turn` 返回 null，`generateDraft` 自己落回 LlmClient 直连
+     * `PersonaAcp.turn` 返回 null，`PersonaComposer.compose` 自己落回 LlmClient 直连
      * 并记一条 `via: "llm"` —— 静默降级是这个项目反复出现的那类失效。
      *
      * `agentHome` 不是可选的美化：不给它 opencode 会从 `$HOME/.claude/skills`
@@ -782,10 +863,31 @@ export function bootstrapApp(mainDir: string): AppContext {
     klRoot: paths.klRoot,
     klPort,
     /**
+     * 数字分身的 agent 进程也用内置 Python 环境。
+     *
+     * ★★ 与搜索侧同一个旋钮（见那边同名项）。这里**曾经漏了** ——
+     * 于是数字分身的 PATH 首段是 klRoot，裸 `kl` 命中上游那个 exec
+     * 不存在 `.venv` 的包装脚本，agent 从来没成功查过图谱；而失败被记成
+     * `tool_status: success`，日志里零 error（见 `persona-acp.ts` 里
+     * `getPythonEnv` 上方那段实测记录）。
+     *
+     * 与 KlServerService / SearchService 共用同一份准备逻辑，幂等 ——
+     * 已就绪时不做任何事，所以三处都调不会重复装依赖。
+     */
+    getPythonEnv: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
+    /**
      * ★ 共用 holder：用户在设置里改网关后，`runtimeConfig.onChange`
      * 会 `reconfigure` 它，数字人下一条 batch 就用新配置 —— 不必重启。
      */
     llmProvider: llmHolder,
+    /**
+     * ★ ACP 那条路的模型 —— 与 `llmProvider` 用的是**同一个值**。
+     *
+     * 统一之前这两条路是两个不同的模型（ACP 读那个只存在于真实 env 的旧变量、
+     * 直连读 `modelMain`），而用户在设置页一个都改不动 —— 于是"常态回复"
+     * 与"降级回复"风格不同，且查不到原因。
+     */
+    getModel: () => runtimeConfig.resolved().modelMain,
     getWindow: () => window,
     /**
      * 授权用的 CLI。
@@ -896,6 +998,20 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 与 KlServerService 共用同一份准备逻辑，幂等 —— 就绪时不做任何事。
      */
     getPythonEnv: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
+    /**
+     * ★ 搜索 agent 用哪个模型 —— 显式给，不靠 env 透传。
+     *
+     * `save()` 确实会 re-seed `process.env`（见 `seedProcessEnv`），所以 env
+     * 那条路**在设置页改完之后也是新的**。显式传的价值在别处：
+     *
+     * · env 是进程级的全局可写状态,谁都能改;而这里要的是"这一次 spawn
+     *   用哪个模型"这个明确的输入。显式传让它成为签名的一部分,
+     *   而不是一个隐式约定;
+     * · `resolved()` 是三层解析（存的 > `.env` > 内置）的唯一真源,直接读它
+     *   就不必依赖"seed 过了"这个前提 —— 而那个前提一旦哪天被破坏
+     *   （少一次 re-seed、或 seed 顺序变了）,表现是静默用错模型。
+     */
+    getModel: () => runtimeConfig.resolved().modelMain,
     getWindow: () => window,
   })
 
@@ -1363,13 +1479,20 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     distill.attach(
       handle.db,
-      (signal, onStep, since) =>
+      (signal, onStep, since, windowDays) =>
         forge.run({
           db: handle.db,
           vaultPath: vp.database,
           forgeRoot: vp.forgeRoot,
           skillRoot: vp.skillRoot,
           since: since ?? null,
+          /**
+           * ★ 测量窗口（`build --window-days`）。与 `since` 是两件事：
+           * `since` 管采集下界，这个管 build 看哪一段。只传 `since` 时
+           * 语料库里已有的更早历史照样会被测进去 —— 于是「选 30 天」与
+           * 「选 180 天」产出相同，与那个已修的 `since` bug 症状一致。
+           */
+          windowDays: windowDays ?? null,
           ...(signal === undefined ? {} : { signal }),
           // 阶段回调透传：让界面能显示"正在测量"而不是干等一句"正在蒸馏"
           ...(onStep === undefined ? {} : { onStep }),
@@ -1379,6 +1502,45 @@ export function bootstrapApp(mainDir: string): AppContext {
        * 不在 vault 里，所以这一步只能由持有路径的这一层给。
        */
       () => forge.resetWatermark(vp.forgeRoot),
+      /**
+       * ★ work 层产物落进 forge 的 skill 包。
+       *
+       * 路径与 forge 的 `skillRoots` 必须是**同一个**（`<skillRoot>/persona-persona`）
+       * —— 写到别处等于没接上：persona 的 workspace 只装那个包，
+       * 而这个文件的全部意义就是被那里的 agent 读到。
+       *
+       * 已在 forge 配置的 `externalSkillFiles` 里登记（见 `writeConfig`），
+       * 所以 `publish` 不会把它当残留删掉、`lock` 也不会锁成只读。
+       *
+       * `content === null` = 这轮没有够格的结论 → **删掉**旧文件。留着会让
+       * agent 读到上一轮的结论，而那份可能正是这轮被判为置信度不足的。
+       */
+      (content) => {
+        const file = join(vp.skillRoot, "persona-persona", WORK_LAYER_SKILL_PATH)
+        if (content === null) {
+          rmSync(file, { force: true })
+          return
+        }
+        mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+        // 0600：产物含蒸馏出的工作内容，与 vault 同一档（见 vendor/forge/README.md）
+        writeFileSync(file, content, { encoding: "utf8", mode: 0o600 })
+      },
+      /**
+       * ★ 攒批判据的「首次」分支读这个，而不是读游标是否为 0。
+       *
+       * 两者不是一回事：产物可能被删过（换 vault、用户清过 skill 包、上一轮
+       * 因置信度不足而删了它），那时游标还在。只看游标会让这些情况**永远
+       * 不再产出** —— 而界面上看不出来。
+       */
+      () => existsSync(join(vp.skillRoot, "persona-persona", WORK_LAYER_SKILL_PATH)),
+      /**
+       * ★ forge 测出的 ask 频率 → `work.md` 的「别人找他做什么」那一节。
+       *
+       * 频率**只能**来自这里（测量），内容来自 LLM（抽取）。让 work 层自己
+       * 数一遍会造出第二个真源，而两个数并排写在同一行、打架时没有任何
+       * 机制决定谁赢 —— 那是最坏的一种不一致：不报错，随机生效。
+       */
+      () => readForgeWorkContext(vp.forgeRoot),
     )
     /**
      * agent 的三个目录：workspace 与 HOME 按 vault，npm 缓存应用级一份。

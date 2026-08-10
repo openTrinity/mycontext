@@ -198,10 +198,18 @@ export interface PersonaServiceOptions {
    */
   runtime?: RuntimeEnv
   processes?: ProcessRunner
-  /** kl-graph 代码根：前插进 PATH，让 skill 里的裸 `kl` 命中它 */
+  /** kl-graph 代码根：追加进 PATH（**排在 venv/bin 之后**，见 `getPythonEnv`） */
   klRoot?: string
   /** kl-server 端口（注入 env，kl CLI 据此连服务） */
   klPort?: number
+  /**
+   * 取激活后的 Python 环境，透传给 `PersonaAcp`。
+   *
+   * ★ 不给 = agent 用不了 kl skill（裸 `kl` 会命中上游那个坏掉的包装脚本，
+   * 且失败被记成 success）。完整实测记录见 `PersonaAcpOptions.getPythonEnv`。
+   * 单测省略 —— 那条路不起真进程。
+   */
+  getPythonEnv?: () => Promise<{ python: string; env: NodeJS.ProcessEnv } | null>
   /** 生成回复用的 LLM。provider.get() 为 null 时降级成"只出占位草稿" */
   llmProvider: LlmProvider
   /**
@@ -506,6 +514,14 @@ export class PersonaService {
             dirs: () => this.dirs,
             klRoot: options.klRoot ?? "",
             klPort: options.klPort ?? 0,
+            /**
+             * ★ 透传激活后的 Python 环境 —— agent 能不能用 kl skill 全看这个
+             * （见 `PersonaAcpOptions.getPythonEnv` 上方那段实测记录）。
+             * 单测不给：那条路不起真进程。
+             */
+            ...(options.getPythonEnv === undefined
+              ? {}
+              : { getPythonEnv: options.getPythonEnv }),
             /**
              * ★ 用回调，不是数组。
              *
