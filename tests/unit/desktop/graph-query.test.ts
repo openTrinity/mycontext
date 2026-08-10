@@ -23,6 +23,9 @@ import { describe, expect, it } from "vitest"
 import type { Logger } from "@mycontext/kernel"
 import { GraphQueryService, type GraphReadHandle } from "@main/services/graph-query.service"
 
+/** `entitiesByName`/`allEntities` 返回的行，测试里只用到 id/name。 */
+type EntityRow = ReturnType<GraphReadHandle["entitiesByName"]>[number]
+
 const NOW = new Date(2026, 6, 31, 12, 0, 0).getTime()
 
 /**
@@ -49,9 +52,15 @@ const noopLogger: Logger = {
 }
 
 /** 记录 `searchFacts` 收到的入参，并按需返回行。 */
-function fakeDb(rows: number, capture: { query?: Parameters<GraphReadHandle["searchFacts"]>[0] }) {
+function fakeDb(
+  rows: number,
+  capture: { query?: Parameters<GraphReadHandle["searchFacts"]>[0] },
+  /** 按实体筛的真实关联（`factIdsForEntity` 先 entitiesByName 再问 kl）用得到 */
+  entities: EntityRow[] = [],
+) {
   const handle: GraphReadHandle = {
-    entitiesByName: () => [],
+    entitiesByName: (names) => entities.filter((e) => names.includes(e.name)),
+    allEntities: () => entities,
     factLinksAround: () => [],
     factConversations: () => [],
     entitiesByIds: () => [],
@@ -74,37 +83,45 @@ function fakeDb(rows: number, capture: { query?: Parameters<GraphReadHandle["sea
   return handle
 }
 
-function makeService(rows: number, capture: { query?: unknown } = {}) {
+function makeService(
+  rows: number,
+  capture: { query?: unknown } = {},
+  extra: {
+    entities?: EntityRow[]
+    factsOfEntity?: (entityId: string) => Promise<ReadonlySet<string>>
+  } = {},
+) {
   return new GraphQueryService({
     logger: noopLogger,
     dataDir: () => dataDirWithDb(),
     now: () => NOW,
     getSelfNames: () => ["小周"],
     getChannelByConversation: () => new Map(),
-    openDb: () => fakeDb(rows, capture as { query?: never }),
+    openDb: () => fakeDb(rows, capture as { query?: never }, extra.entities ?? []),
+    ...(extra.factsOfEntity === undefined ? {} : { factsOfEntity: extra.factsOfEntity }),
   })
 }
 
 const BASE = { days: null, types: [], entityName: null, keyword: "", limit: 20, offset: 0 }
 
 describe("★ 时间范围换算成时间戳下界", () => {
-  it("days 给了 → since = now - days（不是天数原样传下去）", () => {
+  it("days 给了 → since = now - days（不是天数原样传下去）", async () => {
     const capture: { query?: { since: number | null } } = {}
-    makeService(3, capture).facts({ ...BASE, days: 7 })
+    await makeService(3, capture).facts({ ...BASE, days: 7 })
     expect(capture.query?.since).toBe(NOW - 7 * MS_PER_DAY)
   })
 
-  it("days 为 null → since 也是 null（「全部」不该被算成 0 时刻）", () => {
+  it("days 为 null → since 也是 null（「全部」不该被算成 0 时刻）", async () => {
     const capture: { query?: { since: number | null } } = {}
-    makeService(3, capture).facts({ ...BASE, days: null })
+    await makeService(3, capture).facts({ ...BASE, days: null })
     expect(capture.query?.since).toBeNull()
   })
 })
 
 describe("★ 过滤条件原样透到查询层", () => {
-  it("类型多选、实体、关键词、分页都传下去", () => {
+  it("类型多选、实体、关键词、分页都传下去", async () => {
     const capture: { query?: Record<string, unknown> } = {}
-    makeService(3, capture).facts({
+    await makeService(3, capture).facts({
       days: 30,
       types: ["DECISION", "DELEGATE"],
       entityName: "小吴",
@@ -121,39 +138,102 @@ describe("★ 过滤条件原样透到查询层", () => {
 })
 
 /**
- * ★ 空结果的两种解释。
+ * ★★★ 按实体筛：走 kl 的真实关联，而不是正文匹配。
  *
- * 这一条锁的是"用户不知道该做什么"那类失效：同一个空列表，
- * 一种要他放宽条件，另一种要他去建图。给同一句话等于什么都没说。
+ * 这一组锁的是一次真实的 bug（点「紫蓝」→ 事实 0 条，而那人明明有 60 条
+ * 关联）。双重根因里的关系那一半：`edges` 表恒空、facts 没有实体外键，
+ * 所以唯一真实的 fact↔entity 关系只能问 kl `/facts`。原来用 `text LIKE`
+ * 近似，会漏（紫蓝真实 60、正文 35），名字有更全写法时漏更多。
  */
+describe("★★★ 按实体筛走 kl 真实关联（不是正文匹配）", () => {
+  const ZILAN: EntityRow = { id: "e-zilan", name: "紫蓝", type: "PERSON", mentions: 74 }
+
+  it("★★★ 有 factsOfEntity → 传的是 fact id 交集，不是 text LIKE", async () => {
+    const capture: { query?: Record<string, unknown> } = {}
+    const service = makeService(3, capture, {
+      entities: [ZILAN],
+      factsOfEntity: () => Promise.resolve(new Set(["fa", "fb", "fc"])),
+    })
+    await service.facts({ ...BASE, entityName: "紫蓝" })
+    // 反面：不能退回正文匹配（那是 bug 的来源）
+    expect(capture.query?.["factIds"]).toEqual(["fa", "fb", "fc"])
+  })
+
+  it("★★ 同名多实体（抽取出两条同名 id）→ 两个 id 的 fact 并起来", async () => {
+    // 图里同名实体可能不止一条（抽取/合并的产物）。entitiesByName 精确名命中
+    // 返回多行时，每条都要问一遍再并起来，否则会漏。
+    const dupA: EntityRow = { id: "e-a", name: "紫蓝", type: "PERSON", mentions: 40 }
+    const dupB: EntityRow = { id: "e-b", name: "紫蓝", type: "PERSON", mentions: 34 }
+    const capture: { query?: Record<string, unknown> } = {}
+    const service = makeService(3, capture, {
+      entities: [dupA, dupB],
+      factsOfEntity: (id) =>
+        Promise.resolve(id === "e-a" ? new Set(["fa", "fb"]) : new Set(["fb", "fc"])),
+    })
+    await service.facts({ ...BASE, entityName: "紫蓝" })
+    // 只查一个 id 会漏掉只挂在第二条上的 fc
+    expect(new Set(capture.query?.["factIds"] as string[])).toEqual(new Set(["fa", "fb", "fc"]))
+  })
+
+  it("★★ kl 读不到（factsOfEntity 未注入）→ 退回正文匹配，而不是恒 0", async () => {
+    const capture: { query?: Record<string, unknown> } = {}
+    // 不给 factsOfEntity
+    const service = makeService(3, capture, { entities: [ZILAN] })
+    await service.facts({ ...BASE, entityName: "紫蓝" })
+    // factIds 不传（undefined）→ searchFacts 那侧走 text LIKE
+    expect("factIds" in (capture.query ?? {})).toBe(false)
+  })
+
+  it("★★ 全部 factsOfEntity 都抛 → 退回正文（undefined），不谎称没有", async () => {
+    const capture: { query?: Record<string, unknown> } = {}
+    const service = makeService(3, capture, {
+      entities: [ZILAN],
+      factsOfEntity: () => Promise.reject(new Error("kl busy")),
+    })
+    await service.facts({ ...BASE, entityName: "紫蓝" })
+    expect("factIds" in (capture.query ?? {})).toBe(false)
+  })
+
+  it("★★ 查无此实体 → 传空数组（恒空），而不是退回正文撞词", async () => {
+    const capture: { query?: Record<string, unknown> } = {}
+    const service = makeService(3, capture, {
+      entities: [], // entitiesByName 查不到
+      factsOfEntity: () => Promise.resolve(new Set(["x"])),
+    })
+    await service.facts({ ...BASE, entityName: "查无此人" })
+    expect(capture.query?.["factIds"]).toEqual([])
+  })
+})
+
+
 describe("★ 「筛空了」与「图里没有」要给不同的话", () => {
-  it("有筛选条件且 0 条 → 提示放宽条件", () => {
-    const result = makeService(0).facts({ ...BASE, keyword: "查无此词" })
+  it("有筛选条件且 0 条 → 提示放宽条件", async () => {
+    const result = await makeService(0).facts({ ...BASE, keyword: "查无此词" })
     expect(result.available).toBe(true)
     expect(result.total).toBe(0)
     expect(result.reason).toContain("当前筛选下没有")
   })
 
-  it("★ 没有任何筛选却 0 条 → 那是图本身空的，提示去建图", () => {
-    const result = makeService(0).facts(BASE)
+  it("★ 没有任何筛选却 0 条 → 那是图本身空的，提示去建图", async () => {
+    const result = await makeService(0).facts(BASE)
     expect(result.reason).toContain("图里还没有事实")
     // 不该给"放宽条件"—— 没有条件可放宽
     expect(result.reason).not.toContain("放宽")
   })
 
-  it("时间范围也算筛选条件（只选了近 7 天而 0 条 → 放宽）", () => {
-    expect(makeService(0).facts({ ...BASE, days: 7 }).reason).toContain("当前筛选下没有")
+  it("时间范围也算筛选条件（只选了近 7 天而 0 条 → 放宽）", async () => {
+    expect((await makeService(0).facts({ ...BASE, days: 7 })).reason).toContain("当前筛选下没有")
   })
 
-  it("有结果时 reason 为 null（不该在正常状态下摆一句提示）", () => {
-    const result = makeService(5).facts(BASE)
+  it("有结果时 reason 为 null（不该在正常状态下摆一句提示）", async () => {
+    const result = await makeService(5).facts(BASE)
     expect(result.reason).toBeNull()
     expect(result.facts.length).toBe(5)
   })
 })
 
 describe("★ 图库不存在时降级，而不是抛", () => {
-  it("给一句可行动的话（去建图），available 为 false", () => {
+  it("给一句可行动的话（去建图），available 为 false", async () => {
     const service = new GraphQueryService({
       logger: noopLogger,
       dataDir: () => "/tmp/definitely-not-a-real-kl-dir-xyz",
@@ -161,7 +241,7 @@ describe("★ 图库不存在时降级，而不是抛", () => {
       getSelfNames: () => ["小周"],
       getChannelByConversation: () => new Map(),
     })
-    const result = service.facts(BASE)
+    const result = await service.facts(BASE)
     expect(result.available).toBe(false)
     expect(result.reason).toContain("还没建过图")
     expect(result.facts).toEqual([])
@@ -183,7 +263,7 @@ describe("★ 图库不存在时降级，而不是抛", () => {
       getSelfNames: () => ["小周"],
       getChannelByConversation: () => new Map(),
     })
-    expect(service.facts(BASE).available).toBe(false)
+    expect((await service.facts(BASE)).available).toBe(false)
     expect((await service.ego()).available).toBe(false)
   })
 
@@ -200,7 +280,7 @@ describe("★ 图库不存在时降级，而不是抛", () => {
 })
 
 describe("★ 查询层抛错时整块降级，不让异常穿到 IPC", () => {
-  it("searchFacts 抛 → available:false + 原因带上 detail", () => {
+  it("searchFacts 抛 → available:false + 原因带上 detail", async () => {
     const service = new GraphQueryService({
       logger: noopLogger,
       dataDir: () => dataDirWithDb(),
@@ -209,6 +289,7 @@ describe("★ 查询层抛错时整块降级，不让异常穿到 IPC", () => {
       getChannelByConversation: () => new Map(),
       openDb: () => ({
         entitiesByName: () => [],
+        allEntities: () => [],
         factLinksAround: () => [],
         factConversations: () => [],
         entitiesByIds: () => [],
@@ -218,7 +299,7 @@ describe("★ 查询层抛错时整块降级，不让异常穿到 IPC", () => {
         close: () => undefined,
       }),
     })
-    const result = service.facts(BASE)
+    const result = await service.facts(BASE)
     expect(result.available).toBe(false)
     expect(result.reason).toContain("fts5")
   })

@@ -81,7 +81,15 @@ export function FactsExplorer({
   onTotalChange,
 }: FactsExplorerProps) {
   const { t } = useDynamicTranslation("graph")
-  const [days, setDays] = useState<number | null>(30)
+  /**
+   * ★ 默认「全部」而不是「近 30 天」。
+   *
+   * 图里的事实来自**历史导入**，多数带的是当时的聊天时间戳（实测本机最新
+   * 一条 fact 是两个月前），而且约一半 fact 的 `timestamp=0`（抽取没落上
+   * 时间）。默认卡 30 天的话，点任何一个人都筛出 0 条 —— 看起来像"这人
+   * 没有事实"，其实只是都落在窗外。默认全部，用户想收窄再点时间预设。
+   */
+  const [days, setDays] = useState<number | null>(null)
   const [types, setTypes] = useState<ReadonlySet<string>>(new Set())
   const [keyword, setKeyword] = useState("")
   /**

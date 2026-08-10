@@ -57,6 +57,17 @@ export interface GraphReadHandle {
     since: number | null
     types: readonly string[]
     entityName: string | null
+    /**
+     * 按实体筛时的**真实关联** fact id 集合（来自 kl `/facts`，见
+     * `factsOfEntity`）。这是这个后端（ladybug）下唯一真实的 fact↔entity
+     * 关系 —— `edges` 表恒空、facts 表没有实体外键，只能问 kl。
+     *
+     * · `undefined`/`null` = 没按实体筛，或 kl 读不到 → 走 `entityName` 的
+     *   正文兜底（`text LIKE`，会漏，但至少不是恒 0）；
+     * · `[]`（空数组）= 查无此实体 / kl 明确说这人没有关联 fact → 结果恒空
+     *   （`0=1`），而**不是**退回正文匹配（那会把"确实没有"变成同名撞词）。
+     */
+    factIds?: readonly string[] | null
     keyword: string
     limit: number
     offset: number
@@ -470,7 +481,7 @@ export class GraphQueryService {
     }
   }
 
-  facts(input: KlGraphFactsInput): KlGraphFacts {
+  async facts(input: KlGraphFactsInput): Promise<KlGraphFacts> {
     const empty = (reason: string): KlGraphFacts => ({
       available: false,
       reason,
@@ -485,10 +496,24 @@ export class GraphQueryService {
     try {
       db = (this.options.openDb ?? openGraphReadDb)(this.dbPath)
       const since = input.days === null ? null : this.options.now() - input.days * MS_PER_DAY
+      /**
+       * ★★ 按实体筛时先问 kl「这个人真实关联了哪些 fact」（`/facts`，
+       * 与 ego 图同一条关系）。这是这个后端下唯一真实的 fact↔entity 关系。
+       *
+       * 拿到 fact id 集合后交给 `searchFacts`，与时间/类型/关键词求交。
+       * 只有 kl 读不到时才退回正文匹配（`text LIKE`，会漏 ~40%，但不恒 0）。
+       * 详见 `searchFacts` 的 `factIds` 注释与 `factIdsForEntity`。
+       */
+      const factIds =
+        input.entityName === null || input.entityName === ""
+          ? undefined
+          : await this.factIdsForEntity(db, input.entityName)
       const result = db.searchFacts({
         since,
         types: input.types,
         entityName: input.entityName,
+        // exactOptionalPropertyTypes：只在真有值时带上这个键
+        ...(factIds === undefined ? {} : { factIds }),
         keyword: input.keyword,
         limit: input.limit,
         offset: input.offset,
@@ -530,6 +555,51 @@ export class GraphQueryService {
         // 同上
       }
     }
+  }
+
+  /**
+   * 「这个实体名对应的真实关联 fact id 集合」—— 走 kl `/facts`（`ABOUT` 边）。
+   *
+   * ## 为什么名字要先解析成实体 id
+   *
+   * `/facts` 按 **entity_id** 查，而界面传来的是名字。同一个人可能在实体表里
+   * 有多条（实测「紫蓝」与「黄紫蓝」是两个 id、mention_count 74 vs 2）——
+   * 都要问一遍再并起来，否则点「紫蓝」会漏掉只挂在「黄紫蓝」上的 fact。
+   *
+   * ## 三种返回，语义各不相同（见 `searchFacts` 的 `factIds`）
+   *
+   * · 实体表里查无此名 → `[]`（恒空，那是真的没有这个人）；
+   * · `factsOfEntity` 未注入 / kl 没起来 → `undefined`（让 searchFacts 退回
+   *   正文匹配，会漏但不恒 0）；
+   * · 正常 → 各实体 id 的 fact 并集。
+   *
+   * ★ 单个实体查失败当成"这条没有"（`catch → 空集`），而不是让整次筛选炸 ——
+   * 与 `linksViaKl` 同一条纪律。但**全部**都失败（一个都没成功）时返回
+   * `undefined` 退回正文，而不是返回空集谎称"没有" —— 那正是本项目最贵的
+   * 那类静默降级（把"读不到"记成"没有"）。
+   */
+  private async factIdsForEntity(
+    db: GraphReadHandle,
+    entityName: string,
+  ): Promise<readonly string[] | undefined> {
+    const factsOf = this.options.factsOfEntity
+    if (factsOf === undefined) return undefined
+
+    const matches = db.entitiesByName([entityName])
+    if (matches.length === 0) return [] // 查无此人 → 恒空（真的没有）
+
+    const union = new Set<string>()
+    let anyOk = false
+    for (const entity of matches) {
+      try {
+        for (const factId of await factsOf(entity.id)) union.add(factId)
+        anyOk = true
+      } catch {
+        // 单个失败当"没有"，继续问其余的
+      }
+    }
+    // 一个都没问成 → 退回正文匹配（undefined），而不是谎称"没有"（[]）
+    return anyOk ? [...union] : undefined
   }
 }
 
@@ -723,36 +793,36 @@ export function openGraphReadDb(path: string): GraphReadHandle {
       }
       if (query.entityName !== null && query.entityName !== "") {
         /**
-         * ★★★ 按实体筛：判据是 **fact 正文包含这个名字**，而不是查 `ABOUT` 边。
+         * ★★★ 按实体筛：**优先用 kl 的真实关联**（`query.factIds`，来自 `/facts`
+         * 的 `ABOUT` 边），只有 kl 读不到时才退回正文匹配。
          *
-         * ## 原来那句 SQL 恒返 0 条
+         * ## 为什么不能只靠正文匹配
          *
-         * 它写的是 `EXISTS (SELECT 1 FROM edges ... edge_type='ABOUT' ...)`，
-         * 而那张表在默认后端（ladybug）下**按设计恒空** —— 上游
-         * `kl_graph/storage/base.py:446` 明写「on the ladybug backend edges
-         * live in LadybugDB and the SQLite `edges` table is empty」，
-         * 而 `config.default.yaml:39` 的 `KL_GRAPH_BACKEND` 默认就是 ladybug。
+         * 这个后端（ladybug）下 fact↔entity 的**唯一**真实关系在 kl 里
+         * （`edges` 表恒空、`facts` 表没有实体外键，见文件头）。正文匹配
+         * `text LIKE '%名字%'` 是个近似：实测「紫蓝」真实关联 60 条、正文只
+         * 命中 35 条（漏 40%），而名字有更全的写法（「紫蓝」vs「黄紫蓝」）或
+         * 抽取时没把名字写进正文时会漏得更多。
          *
-         * 于是这是一个**只会排除、永不匹配**的筛选器：一旦填了实体名，
-         * 结果恒为 0 条，界面显示"没有匹配的事实"—— 看起来像真的没有。
+         * ## 三档，语义各不相同（对齐 `factIds` 的三种取值）
          *
-         * ## 为什么这里用正文匹配而不是像 ego 图那样问 kl
-         *
-         * 这个方法是**同步**的（`facts()` 不返回 Promise，界面上是随打随筛），
-         * 而问 kl 是异步的。改成异步要动 IPC 契约与渲染层的筛选交互，
-         * 那比这个 bug 本身大得多。
-         *
-         * ★ 正文匹配的**代价必须说清**：fact 正文里出现名字 ≈ 这条事实在说他，
-         * 但不严格等价 —— 同名的人会混进来，而只在 `involved_entities` 里
-         * 出现却没写进正文的会漏。实测本人花名：正文匹配 193 条、
-         * kl 的真实关联 265 条，也就是**会漏约 27%**。
-         *
-         * 这个取舍是刻意的：一个偏松的筛选器 vs 一个恒为空的筛选器 ——
-         * 后者是纯粹的谎。真要严格的话得等上游给批量 `fact_ids → entities`
-         * 的口（已提需求），那时把这里换掉。
+         * · `factIds` 是数组（哪怕空）→ 用它。空数组 = 查无此人 / kl 说
+         *   "没有关联" → `0=1`（恒空），而**不是**退回正文（退回会把"确实
+         *   没有"变成一堆同名撞词，那是另一种谎）。
+         * · `factIds` 是 null/undefined → kl 读不到 → 退回正文匹配。
+         *   一个偏松的筛 vs 一个读不到就恒 0 的筛，前者不那么坏。
          */
-        wheres.push("f.text LIKE ? ESCAPE '\\'")
-        params.push(`%${escapeLike(query.entityName)}%`)
+        if (query.factIds !== undefined && query.factIds !== null) {
+          if (query.factIds.length === 0) {
+            wheres.push("0 = 1")
+          } else {
+            wheres.push(`f.id IN (${query.factIds.map(() => "?").join(",")})`)
+            params.push(...query.factIds)
+          }
+        } else {
+          wheres.push("f.text LIKE ? ESCAPE '\\'")
+          params.push(`%${escapeLike(query.entityName)}%`)
+        }
       }
       const where = wheres.length === 0 ? "" : `WHERE ${wheres.join(" AND ")}`
 
