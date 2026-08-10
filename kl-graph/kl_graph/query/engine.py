@@ -31,6 +31,7 @@ RERANK_TOP_K = int(cfg.pipelines.query.reranking.top_k)
 RERANK_WINDOW = int(cfg.pipelines.query.reranking.window)
 from kl_graph.models.types import EntityType
 from kl_graph.query import fts
+from kl_graph.query.local_search import build_local_context
 from kl_graph.query.pagerank import compute_entity_pagerank
 from kl_graph.query.query_rewrite import (
     arewrite_query,
@@ -315,7 +316,14 @@ class QueryEngine:
         needs_phase2 = force_phase2
 
         if needs_phase2:
-            answer = self._phase2(text, phase1)
+            # Build local context from phase-1 recall (GraphRAG-style).
+            local_ctx = build_local_context(
+                self.store,
+                phase1.matched_entities,
+                phase1.chunk_hits,
+                phase1.fact_hits,
+            )
+            answer = self._phase2(text, phase1, local_context=local_ctx.context_text)
             latency = (time.time() - t0) * 1000
             return QueryResult(
                 answer=answer,
@@ -359,7 +367,16 @@ class QueryEngine:
         needs_phase2 = force_phase2
 
         if needs_phase2:
-            answer = await self._aphase2(text, phase1)
+            # Build local context from phase-1 recall (GraphRAG-style).
+            # Offload blocking work to thread (store I/O + tokenization).
+            local_ctx = await asyncio.to_thread(
+                build_local_context,
+                self.store,
+                phase1.matched_entities,
+                phase1.chunk_hits,
+                phase1.fact_hits,
+            )
+            answer = await self._aphase2(text, phase1, local_context=local_ctx.context_text)
             latency = (time.time() - t0) * 1000
             return QueryResult(
                 answer=answer,
@@ -817,15 +834,26 @@ class QueryEngine:
             dedup_stats=dedup_stats,
         )
 
-    def _phase2_prompt(self, query: str, phase1: RetrievalResult) -> tuple[str, str]:
+    def _phase2_prompt(
+        self, query: str, phase1: RetrievalResult, *, local_context: str | None = None,
+    ) -> tuple[str, str]:
         """Build (system_prompt, user_prompt) for Phase-2 synthesis.
 
         Shared by the sync and async synthesis paths; pure CPU (no I/O).
+        When ``local_context`` is provided, it is prepended as additional
+        graph-enriched evidence alongside the Phase-1 fact/message items
+        (local context first, then phase-1 evidence). Phase-1 items are
+        never dropped regardless of whether local_context is present.
         """
         # Build context from Phase 1 results
         context_parts = []
 
-        # Facts first (more informative)
+        if local_context:
+            # GraphRAG-style local context: community reports + relationships
+            # + chunks assembled by the local search builder.
+            context_parts.append(local_context)
+
+        # Facts first (more informative) - always include phase1 evidence
         facts = [i for i in phase1.items if i["type"] == "fact"][:10]
         if facts:
             context_parts.append("=== 已知事实 ===")
@@ -864,9 +892,13 @@ class QueryEngine:
         user_prompt = f"问题：{query}\n\n{context}"
         return system_prompt, user_prompt
 
-    def _phase2(self, query: str, phase1: RetrievalResult) -> str:
+    def _phase2(
+        self, query: str, phase1: RetrievalResult, *, local_context: str | None = None,
+    ) -> str:
         """Phase 2 (sync): LLM synthesis from retrieved context."""
-        system_prompt, user_prompt = self._phase2_prompt(query, phase1)
+        system_prompt, user_prompt = self._phase2_prompt(
+            query, phase1, local_context=local_context,
+        )
         try:
             resp = litellm.completion(
                 model=self.llm_model,
@@ -883,9 +915,13 @@ class QueryEngine:
         except Exception as e:  # noqa: BLE001
             return f"[Phase 2 synthesis failed: {e}]"
 
-    async def _aphase2(self, query: str, phase1: RetrievalResult) -> str:
+    async def _aphase2(
+        self, query: str, phase1: RetrievalResult, *, local_context: str | None = None,
+    ) -> str:
         """Phase 2 (async): same synthesis via ``litellm.acompletion``."""
-        system_prompt, user_prompt = self._phase2_prompt(query, phase1)
+        system_prompt, user_prompt = self._phase2_prompt(
+            query, phase1, local_context=local_context,
+        )
         try:
             resp = await litellm.acompletion(
                 model=self.llm_model,
@@ -901,6 +937,33 @@ class QueryEngine:
             return resp.choices[0].message.content
         except Exception as e:  # noqa: BLE001
             return f"[Phase 2 synthesis failed: {e}]"
+
+    async def synthesize(
+        self,
+        query: str,
+        recall: RetrievalResult,
+        *,
+        local_context: str | None = None,
+    ) -> str:
+        """Run Phase-2 synthesis with optional local context augmentation.
+
+        Exposed so the server can build local context (from the recall
+        outputs + the graph walk) and then re-run synthesis with the
+        richer evidence set — without re-executing the expensive Phase-1
+        recall.
+
+        Args:
+            query: The user's query string.
+            recall: A :class:`RetrievalResult` from Phase 1.
+            local_context: If provided, the assembled local context text
+                is prepended as additional graph-enriched evidence before
+                the Phase-1 fact/message items. Phase-1 items are always
+                included regardless of local_context presence.
+
+        Returns:
+            The synthesized answer string.
+        """
+        return await self._aphase2(query, recall, local_context=local_context)
 
     def _find_in_results(
         self, results: list[dict], key: str, value: str
