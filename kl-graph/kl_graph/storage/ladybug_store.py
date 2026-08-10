@@ -584,15 +584,13 @@ class LadybugStore(KnowledgeStore):
 
     # ─── Community summaries ─────────────────────────────────────
 
-    def get_community_summary(
-        self, level: str, community_id: int, node_type: str
-    ) -> dict | None:
+    def get_community_summary(self, level: int, community_id: int) -> dict | None:
         """Delegate to SQLite (community data lives in SQLite only)."""
-        return self._sqlite.get_community_summary(level, community_id, node_type)
+        return self._sqlite.get_community_summary(level, community_id)
 
-    def list_community_summaries(self, level: str, node_type: str) -> list[dict]:
+    def list_community_summaries(self, level: int) -> list[dict]:
         """Delegate to SQLite."""
-        return self._sqlite.list_community_summaries(level, node_type)
+        return self._sqlite.list_community_summaries(level)
 
     def store_community_summaries(self, summaries: list[dict]) -> None:
         """Delegate to SQLite."""

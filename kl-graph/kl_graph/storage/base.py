@@ -543,15 +543,12 @@ class KnowledgeStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_community_summary(
-        self, level: str, community_id: int, node_type: str
-    ) -> dict | None:
+    def get_community_summary(self, level: int, community_id: int) -> dict | None:
         """Retrieve a single community summary.
 
         Args:
-            level: Resolution level string (e.g. "L0", "L1", "L2", "L3").
+            level: Resolution level (0, 1, 2, 3, ...).
             community_id: Numeric community identifier at that level.
-            node_type: "entity" or "fact".
 
         Returns:
             Dict with summary data if found, else None.
@@ -559,12 +556,11 @@ class KnowledgeStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_community_summaries(self, level: str, node_type: str) -> list[dict]:
-        """List all community summaries at a given level and node type.
+    def list_community_summaries(self, level: int) -> list[dict]:
+        """List all community summaries at a given level.
 
         Args:
-            level: Resolution level string (e.g. "L0").
-            node_type: "entity" or "fact".
+            level: Resolution level (0, 1, 2, 3, ...).
 
         Returns:
             List of summary dicts.
@@ -573,10 +569,10 @@ class KnowledgeStore(ABC):
 
     @abstractmethod
     def store_community_summaries(self, summaries: list[dict]) -> None:
-        """Bulk upsert community summaries. Replaces existing summaries with same (level, community_id, node_type).
+        """Bulk upsert community summaries. Replaces existing summaries with same (level, community_id).
 
         Args:
-            summaries: List of dicts with keys: level, community_id, node_type, summary, member_count, tags, top_members.
+            summaries: List of dicts with keys: level, community_id, summary, member_count, tags, top_members.
         """
         raise NotImplementedError
 

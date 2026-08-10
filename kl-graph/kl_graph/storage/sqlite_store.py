@@ -194,14 +194,19 @@ class SQLiteStore(KnowledgeStore):
             );
 
             CREATE TABLE IF NOT EXISTS community_summaries (
-                level TEXT NOT NULL,
+                level INTEGER NOT NULL,
                 community_id INTEGER NOT NULL,
-                node_type TEXT NOT NULL,
-                member_count INTEGER NOT NULL DEFAULT 0,
+                member_count INTEGER NOT NULL,
+                entity_count INTEGER NOT NULL,
+                fact_count INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
                 summary TEXT NOT NULL DEFAULT '',
+                rating REAL NOT NULL DEFAULT 0.0,
+                rating_explanation TEXT NOT NULL DEFAULT '',
+                findings TEXT NOT NULL DEFAULT '[]',
                 tags TEXT NOT NULL DEFAULT '[]',
                 top_members TEXT NOT NULL DEFAULT '[]',
-                PRIMARY KEY (level, community_id, node_type)
+                PRIMARY KEY (level, community_id)
             );
 
             CREATE TABLE IF NOT EXISTS communities (
@@ -210,7 +215,9 @@ class SQLiteStore(KnowledgeStore):
                 node_type TEXT NOT NULL DEFAULT '',
                 summary TEXT NOT NULL DEFAULT '',
                 tags TEXT NOT NULL DEFAULT '[]',
-                member_count INTEGER NOT NULL DEFAULT 0
+                member_count INTEGER NOT NULL DEFAULT 0,
+                parent_id TEXT,
+                parent_level INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS ingest_meta (
@@ -334,7 +341,8 @@ class SQLiteStore(KnowledgeStore):
         """Add community columns missing from a pre-existing database.
 
         Adds ``summary_stale`` column (for incremental ingestion summary invalidation)
-        using the same ALTER TABLE pattern as ``_ensure_entity_columns``.
+        and ``parent_id`` / ``parent_level`` columns (for hierarchical rate-then-descend
+        selection) using the same ALTER TABLE pattern as ``_ensure_entity_columns``.
         """
         cols = {
             r[1] for r in self.conn.execute("PRAGMA table_info(communities)").fetchall()
@@ -346,6 +354,20 @@ class SQLiteStore(KnowledgeStore):
                 )
             except Exception as exc:  # noqa: BLE001 - column may already exist in concurrent opens
                 logger.debug("summary_stale column already exists (skipping): %s", exc)
+        if "parent_id" not in cols:
+            try:
+                self.conn.execute(
+                    "ALTER TABLE communities ADD COLUMN parent_id TEXT"
+                )
+            except Exception as exc:  # noqa: BLE001 - column may already exist in concurrent opens
+                logger.debug("parent_id column already exists (skipping): %s", exc)
+        if "parent_level" not in cols:
+            try:
+                self.conn.execute(
+                    "ALTER TABLE communities ADD COLUMN parent_level INTEGER"
+                )
+            except Exception as exc:  # noqa: BLE001 - column may already exist in concurrent opens
+                logger.debug("parent_level column already exists (skipping): %s", exc)
 
     def _ensure_entities_fts(self) -> None:
         """Create the ``entities_fts`` FTS5 index, if this build supports FTS5.
@@ -1612,8 +1634,8 @@ class SQLiteStore(KnowledgeStore):
             return
         self.conn.executemany(
             """INSERT OR REPLACE INTO communities
-               (id, level, node_type, summary, tags, member_count)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (id, level, node_type, summary, tags, member_count, parent_id, parent_level)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     c.id,
@@ -1622,6 +1644,8 @@ class SQLiteStore(KnowledgeStore):
                     c.summary,
                     json.dumps(c.tags, ensure_ascii=False),
                     int(c.member_count),
+                    c.parent_id,
+                    c.parent_level,
                 )
                 for c in communities
             ],
@@ -1651,32 +1675,33 @@ class SQLiteStore(KnowledgeStore):
             summary=d["summary"] or "",
             tags=json.loads(tags) if tags else [],
             member_count=d["member_count"] or 0,
+            parent_id=d.get("parent_id"),
+            parent_level=d.get("parent_level"),
         )
 
     def get_community_summary(
-        self, level: str, community_id: int, node_type: str
+        self, level: int, community_id: int
     ) -> dict | None:
         """Retrieve one community summary by its composite key.
 
         Args:
-            level: Resolution level (e.g. "L0").
+            level: Resolution level (e.g. 0, 1, 2, 3).
             community_id: Community number.
-            node_type: "entity" or "fact".
 
         Returns:
             Summary dict or None.
         """
         row = self.conn.execute(
-            "SELECT * FROM community_summaries WHERE level = ? AND community_id = ? AND node_type = ?",
-            (level, community_id, node_type),
+            "SELECT * FROM community_summaries WHERE level = ? AND community_id = ?",
+            (level, community_id),
         ).fetchone()
         return dict(row) if row else None
 
-    def list_community_summaries(self, level: str, node_type: str) -> list[dict]:
-        """List all summaries at a given level and node_type."""
+    def list_community_summaries(self, level: int) -> list[dict]:
+        """List all summaries at a given level."""
         rows = self.conn.execute(
-            "SELECT * FROM community_summaries WHERE level = ? AND node_type = ?",
-            (level, node_type),
+            "SELECT * FROM community_summaries WHERE level = ?",
+            (level,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1684,15 +1709,22 @@ class SQLiteStore(KnowledgeStore):
         """Bulk upsert community summaries."""
         self.conn.executemany(
             "INSERT OR REPLACE INTO community_summaries "
-            "(level, community_id, node_type, member_count, summary, tags, top_members) "
-            "VALUES (:level, :community_id, :node_type, :member_count, :summary, :tags, :top_members)",
+            "(level, community_id, member_count, entity_count, fact_count, "
+            "title, summary, rating, rating_explanation, findings, tags, top_members) "
+            "VALUES (:level, :community_id, :member_count, :entity_count, :fact_count, "
+            ":title, :summary, :rating, :rating_explanation, :findings, :tags, :top_members)",
             [
                 {
-                    "level": s.get("level", ""),
+                    "level": s.get("level", 0),
                     "community_id": s.get("community_id", 0),
-                    "node_type": s.get("node_type", "entity"),
                     "member_count": s.get("member_count", 0),
+                    "entity_count": s.get("entity_count", 0),
+                    "fact_count": s.get("fact_count", 0),
+                    "title": s.get("title", ""),
                     "summary": s.get("summary", ""),
+                    "rating": s.get("rating", 0.0),
+                    "rating_explanation": s.get("rating_explanation", ""),
+                    "findings": s.get("findings", "[]"),
                     "tags": s.get("tags", "[]"),
                     "top_members": s.get("top_members", "[]"),
                 }
