@@ -2191,6 +2191,29 @@ export class IngestService {
            * > 但 276/277 页 `hasMore:false` —— 所以终止判据是 hasMore，不是 cursor。
            */
           const result = this.persist(page)
+          /**
+           * ★★★ 范围还没就绪 → **不推水位、中断这一轮**。
+           *
+           * 见 `persist` 里 `scopeNotReady` 那段：采集器可能比范围行先跑，
+           * 而那一轮拉到的消息会被全部丢掉。若照常推水位，那批消息就
+           * **永远回不来**（水位之后没有新消息 → 再也不拉）——
+           * 实测就是这个形态：飞书拉到 9 条、全丢、之后 20 分钟一条不采。
+           *
+           * `break` 而不是 `continue`：范围没就绪时后面的页同样会被全丢，
+           * 继续翻只是白烧 CLI 调用。下一轮 tick 时范围已经写好了。
+           */
+          /**
+           * ★ 用索引读而不是 `result.scopeNotReady`：`persist` 的正常返回是
+           * `PersistResult`（多处共用的类型，不该为这一个分支加字段），
+           * 只有"整页越界"那条 early-return 才带这个标记。
+           */
+          if ((result as { scopeNotReady?: boolean }).scopeNotReady === true) {
+            this.options.logger.info("ingest paused: collection scope not ready yet", {
+              channelId: this.options.plugin.meta.id,
+              windowStart: window.start,
+            })
+            break
+          }
           totals.changed += result.changed.length
           totals.unchanged += result.unchanged
           for (const message of result.changed) {
@@ -3277,8 +3300,46 @@ export class IngestService {
      * 这个折中是刻意的：两害相权，宁可留一段有保质期的原始响应，
      * 也不放弃"解析错了能重放"。
      */
+    /**
+     * ★★★ 范围**还没就绪**时丢弃 → 告诉调用方**别推水位**。
+     *
+     * ## 这是那个"飞书一条都采不到"的根因
+     *
+     * `readCollectionScope` 对「表里没有 chat 行」返回
+     * `restricted: true, allow: 空` —— 一个都不采。那个默认是对的
+     * （隐私优先，CLAUDE.md §5：判据不可靠时不采 < 采全部）。
+     *
+     * 但它和启动时序凑成了一个真 bug（实测日志，秒级）：
+     *
+     *     17:48:15  channel pipelines mounted {feishu}       ← 库挂上
+     *     17:48:16  ingest started {feishu}                   ← 采集立刻开跑
+     *     17:48:16  collection time window synced {feishu}    ← 范围同步在它之后
+     *     17:48:20  dropped: 9, kept: 0, allowed: 0, restricted: true
+     *
+     * 采集器比范围行**先跑**，于是第一轮拉到的 9 条全被丢掉 ——
+     * 而水位照常前移。之后 `since` 之后没有新消息，就**永远不再拉**。
+     * 用户看到的是「已采集消息 0」，日志里一个错都没有。
+     *
+     * ## 判据：`allow` 为空**且** restricted
+     *
+     * 那正是"白名单一个都没有"这个状态，它有两种成因：
+     * · 范围行还没写进来（本 bug）——几秒后就好；
+     * · 用户真的一个都不勾 —— 那时也不该推水位：他之后勾上时，
+     *   那些消息还应该能被采到（现在得手动重置水位才行，
+     *   而那个入口在设置页深处）。
+     *
+     * 两者的处置一样，所以不必区分。
+     *
+     * ★ 只在**整页都被丢掉**时才这样：页内有留下来的消息说明范围是有效的，
+     * 那时越界丢弃是正常工作（用户就是选了个子集），照常推水位。
+     */
+    const scopeNotReady =
+      scopedPage.messages.length === 0 &&
+      page.messages.length > 0 &&
+      scope.restricted &&
+      scope.allow.size === 0
     if (scopedPage.messages.length === 0 && page.messages.length > 0) {
-      return { changed: [] as MessageRow[], unchanged: 0 }
+      return { changed: [] as MessageRow[], unchanged: 0, scopeNotReady }
     }
 
     const self = new SelfIdentityRepository(this.options.db).get(this.options.plugin.meta.id)

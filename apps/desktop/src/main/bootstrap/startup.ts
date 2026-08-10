@@ -1803,6 +1803,30 @@ export function bootstrapApp(mainDir: string): AppContext {
     const db = mountedVault
     const vp = vaultPaths
     if (db === null || vp === null) return
+    /**
+     * ★★★ 顺序要紧：**先写范围，再起采集**。
+     *
+     * 这两行原来是反的（先 `dataPlane.attach` 起采集、再 `distillSources.attach`
+     * 写范围），而那之间只隔几百毫秒 —— 却足够让采集器跑完第一轮：
+     *
+     *     17:48:15  channel pipelines mounted {feishu}
+     *     17:48:16  ingest started {feishu}                  ← 采集先跑
+     *     17:48:16  collection time window synced {feishu}   ← 范围后写
+     *     17:48:20  dropped: 9, kept: 0, allowed: 0, restricted: true
+     *
+     * `readCollectionScope` 对「表里没有 chat 行」返回"一个都不采"
+     * （隐私优先，那是对的），于是那一轮拉到的 9 条全被丢掉。
+     * 用户看到「已采集消息 0」而日志里一个错都没有。
+     *
+     * ★ 这一步是**双保险的第一道**：`IngestService` 那侧已经改成
+     * 「范围没就绪时不推水位」（见 `persist` 的 `scopeNotReady`），
+     * 所以即使顺序再被人改回去也不会丢数据。但把顺序摆对能让那一轮
+     * 压根不发生 —— 少一次白跑的 CLI 调用，也少一条会让人困惑的日志。
+     */
+    distillSources.attach(
+      db,
+      pipelines.all().map((item) => ({ channelId: item.channelId, db: item.parts.db })),
+    )
     await dataPlane.attach(
       db,
       vp.database,
@@ -1813,11 +1837,6 @@ export function bootstrapApp(mainDir: string): AppContext {
         handoffFile: vp.handoffFile,
       },
       sourceAttachments(),
-    )
-    // ★ 范围也要补写进新挂上的渠道库（否则那个渠道按全量采）
-    distillSources.attach(
-      db,
-      pipelines.all().map((item) => ({ channelId: item.channelId, db: item.parts.db })),
     )
   }
 

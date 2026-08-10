@@ -198,6 +198,47 @@ describe("★★ 全局窗的越界消息在落库前被丢掉（隐私边界）
     vault.close()
   })
 
+  /**
+   * ★★★ 范围没就绪时跑过一轮 → 补上范围后**那批消息还能采到**。
+   *
+   * ## 锁的是「飞书一条都采不到」那个 bug
+   *
+   * 实测日志（打包态，秒级）：
+   *
+   *     17:48:16  ingest started {feishu}                   ← 采集先跑
+   *     17:48:16  collection time window synced {feishu}    ← 范围后写
+   *     17:48:20  dropped: 9, kept: 0, allowed: 0, restricted: true
+   *
+   * 采集器比范围行先跑，那一轮的 9 条全被丢掉 —— 而**水位照常前移**，
+   * 于是之后再也不拉，用户看到「已采集消息 0」且日志里一个错都没有。
+   *
+   * 修法是「因范围未就绪而丢弃时不推水位」：水位的语义是"这之前的都处理
+   * 完了"，而**丢弃不是处理**。
+   *
+   * 反证：把 `persist` 里那个 `scopeNotReady` 去掉（照常推水位）→ 这条必红。
+   */
+  it("★★★ 范围没就绪跑过一轮后，补上范围仍能采到那批消息", async () => {
+    const { vault, service } = setup({})
+
+    // 第一轮：库里没有 chat 行 → 一个都不采（且不该推水位）
+    await service.tickPull()
+    expect(countIn(vault, PICKED)).toBe(0)
+
+    // 范围补上（真机上这是 `syncTimeWindowToSources` / 用户保存范围那一步）
+    new DistillSourceRepository(vault.db).upsert(
+      "chat",
+      { enabled: true, scope: { conversationIds: [PICKED] } },
+      START,
+    )
+
+    // 第二轮：那批消息必须还能被采到
+    await service.tickPull()
+    expect(countIn(vault, PICKED)).toBeGreaterThan(0)
+    // 没勾的那个照旧不采
+    expect(countIn(vault, NOT_PICKED)).toBe(0)
+    vault.close()
+  })
+
   it("★★ 配了范围但一个都没勾 → 一条都不采（不是「不限」）", async () => {
     const { vault, service } = setup({ picked: [] })
 
