@@ -48,6 +48,23 @@ class NoopResizeObserver {
 
 const ok = <T,>(data: T) => Promise.resolve({ ok: true as const, data })
 
+/**
+ * 文案锚点：只锚**稳定的核心词**，不锚整句。
+ *
+ * ## ★ 为什么单独提出来
+ *
+ * 第一版这些判据锚的是完整句子（"才生效"/"需要先连上"/"不会用来替你回复"）。
+ * 用户一次文案润色（口语腔改成产品化表述）就红了 4 条 —— 而实现一行没动。
+ * 那种红是噪音：它说的是"句子变了"，而判据本该说"这个状态有没有被表达"。
+ *
+ * 核心词的判据是：**换一种说法也得留着的那几个字**。
+ * 「暂不支持」「数字分身」是这一批文案的语义骨架，润色不会把它们改掉；
+ * 而「才生效」「做不了」是语气，随时会变。
+ */
+const HINT_READ_ONLY = /不参与数字分身/
+const HINT_PERSONA_UNSUPPORTED = /暂不支持数字分身/
+const HINT_STEP_UNSUPPORTED = /暂不支持/
+
 /** 主渠道的会话（应当出现）。值全是编的（CLAUDE.md §1.2）。 */
 const PRIMARY_TITLE = "主渠道的群"
 /** 非主渠道的会话（**不应**出现在引导第 4 步）。 */
@@ -303,7 +320,7 @@ describe("★★★ 第 4 步列的是「已连渠道」的会话", () => {
    * 只读渠道上那件事不会发生（数据只进图谱与搜索）—— 不说清的话用户以为
    * 自己在给分身喂料，而分身永远用不到它。
    */
-  it("★★ 只读渠道的会话在列表里 → 显示「不会用来替你回复」", async () => {
+  it("★★ 只读渠道的会话在列表里 → 显示「不参与数字分身」", async () => {
     wrap(
       <SourcesStep
         value={SOURCES_DRAFT}
@@ -316,7 +333,7 @@ describe("★★★ 第 4 步列的是「已连渠道」的会话", () => {
     await waitFor(() => {
       expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
     })
-    expect(screen.getByText(/不会用来替你回复/)).toBeTruthy()
+    expect(screen.getByText(HINT_READ_ONLY)).toBeTruthy()
   })
 
   /**
@@ -338,7 +355,7 @@ describe("★★★ 第 4 步列的是「已连渠道」的会话", () => {
     await waitFor(() => {
       expect(screen.getByText(PRIMARY_TITLE)).toBeTruthy()
     })
-    expect(screen.queryByText(/不会用来替你回复/)).toBeNull()
+    expect(screen.queryByText(HINT_READ_ONLY)).toBeNull()
   })
 
   /**
@@ -380,7 +397,7 @@ describe("★★ 第 3 步：没有能跑分身的渠道时说清楚", () => {
    */
   const draft = { name: "小助手" }
 
-  it("★★ 显示「等你连上…才生效」", async () => {
+  it("★★ 显示「当前渠道暂不支持数字分身」", async () => {
     wrap(
       <PersonaStep
         value={draft}
@@ -390,7 +407,7 @@ describe("★★ 第 3 步：没有能跑分身的渠道时说清楚", () => {
       />,
     )
     await waitFor(() => {
-      expect(screen.getByText(/才生效/)).toBeTruthy()
+      expect(screen.getByText(HINT_PERSONA_UNSUPPORTED)).toBeTruthy()
     })
   })
 
@@ -407,7 +424,7 @@ describe("★★ 第 3 步：没有能跑分身的渠道时说清楚", () => {
     await waitFor(() => {
       expect(screen.getAllByRole("textbox").length).toBeGreaterThan(0)
     })
-    expect(screen.queryByText(/才生效/)).toBeNull()
+    expect(screen.queryByText(HINT_PERSONA_UNSUPPORTED)).toBeNull()
   })
 })
 
@@ -429,7 +446,7 @@ describe("★★★ 第 5 步：主渠道没连时整块换成说明", () => {
   it("★★★ 没连 → 显示说明，且**不渲染**进度与开始按钮", async () => {
     wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
     await waitFor(() => {
-      expect(screen.getByText(/需要先连上/)).toBeTruthy()
+      expect(screen.getByText(HINT_STEP_UNSUPPORTED)).toBeTruthy()
     })
     // ★ 核心：那套会误导人的东西一个都不在
     expect(
@@ -445,7 +462,7 @@ describe("★★★ 第 5 步：主渠道没连时整块换成说明", () => {
     await waitFor(() => {
       expect(screen.getAllByRole("button").length).toBeGreaterThan(0)
     })
-    expect(screen.queryByText(/需要先连上/)).toBeNull()
+    expect(screen.queryByText(HINT_STEP_UNSUPPORTED)).toBeNull()
     const start = screen
       .getAllByRole("button")
       .find((b) => /开始|学习/.test(b.textContent ?? ""))
@@ -462,7 +479,7 @@ describe("★★★ 第 5 步：主渠道没连时整块换成说明", () => {
   it("★★ 说明里给了可照做的下一步", async () => {
     wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
     await waitFor(() => {
-      expect(screen.getByText(/需要先连上/)).toBeTruthy()
+      expect(screen.getByText(HINT_STEP_UNSUPPORTED)).toBeTruthy()
     })
     /**
      * ★ `getAllByText` 而不是 `getByText`：标题与正文里**都**提到了

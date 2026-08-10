@@ -124,7 +124,7 @@
       "styleSection": "Style",
       "detailSection": "Fine-tune"
     },
-    "noPersonaHost": "The channel you connected is read-only — its chat history only answers your questions; it is never used to reply on your behalf. What you fill in here is saved, and takes effect once you connect DingTalk."
+    "noPersonaHost": "The digital twin currently supports DingTalk only. The name and avatar you set here are saved and take effect once DingTalk is connected."
   },
   "sourcesStep": {
     "range30": "Last 30 days",
@@ -166,7 +166,7 @@
     "collapseList": "Show less",
     "sourcesReady": "Available now",
     "sourcesPlanned": "Planned",
-    "readOnlyChannelHint": "For read-only channels (e.g. Feishu): the conversations you pick only power your questions — they are never used to reply on your behalf."
+    "readOnlyChannelHint": "Read-only channels are not used for the digital twin's auto-replies."
   },
   "distillStep": {
     "phasesTitle": "Learning progress",
@@ -212,8 +212,8 @@
     "graphEdges": "links between them",
     "graphBuilding": "Organizing — needs a model, takes minutes. You can close this page",
     "graphAbsent": "Not organized yet: {{reason}}. It runs automatically on next launch once a model is set.",
-    "needPrimaryTitle": "This step needs DingTalk connected",
-    "needPrimaryHint": "Learning reads your DingTalk chat history, and it isn't connected — so this step can't run yet. Go back to step 1 to connect it, or skip for now; you can come back to this step from Settings."
+    "needPrimaryTitle": "Not available for this channel",
+    "needPrimaryHint": "Profile learning currently supports DingTalk only, and this step affects the digital twin alone. Connect DingTalk in step 1, or skip this step."
   },
   "sourceKinds": {
     "chat": "Chat messages",

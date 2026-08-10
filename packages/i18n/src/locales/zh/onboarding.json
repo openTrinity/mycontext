@@ -124,7 +124,7 @@
       "styleSection": "风格",
       "detailSection": "细节调整"
     },
-    "noPersonaHost": "你连接的渠道是只读接入 —— 它的聊天记录只用来回答你的提问，不会用来替你回复。这里填的名字与形象会存下来，等你连上钉钉后才生效。"
+    "noPersonaHost": "当前渠道暂不支持数字分身，目前仅支持钉钉渠道。这里填写的名称与形象会保存，连接钉钉后生效。"
   },
   "sourcesStep": {
     "range30": "最近 30 天",
@@ -166,7 +166,7 @@
     "collapseList": "收起",
     "sourcesReady": "现在可用",
     "sourcesPlanned": "排期中",
-    "readOnlyChannelHint": "其中只读接入的渠道（比如飞书）：选中的会话只用来回答你的提问，不会用来替你回复。"
+    "readOnlyChannelHint": "只读接入的渠道不参与数字分身的自动回复。"
   },
   "distillStep": {
     "phasesTitle": "学习进度",
@@ -212,8 +212,8 @@
     "graphEdges": "它们之间的联系",
     "graphBuilding": "正在整理 —— 要调模型，分钟级。可以关掉页面",
     "graphAbsent": "还没整理：{{reason}}。配好模型后下次启动会自动整理。",
-    "needPrimaryTitle": "这一步需要先连上钉钉",
-    "needPrimaryHint": "学习读的是钉钉的聊天记录 —— 现在它没连上，所以这一步暂时做不了。回第 1 步连上钉钉，或先跳过：之后在设置里可以重新走这一步。"
+    "needPrimaryTitle": "当前渠道暂不支持",
+    "needPrimaryHint": "画像学习目前仅支持钉钉渠道，这一步只影响数字分身。可在第 1 步连接钉钉，或跳过本步。"
   },
   "sourceKinds": {
     "chat": "聊天消息",
