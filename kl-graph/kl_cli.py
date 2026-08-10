@@ -842,6 +842,21 @@ def ask(
     if ents:
         click.echo(f"\n  entities: {', '.join(ents)}")
 
+    # Community context section (from local search)
+    community_context = data.get("community_context", [])
+    if community_context:
+        click.echo(f"\n  community context ({len(community_context)} reports):")
+        for ctx in community_context:
+            level = ctx.get("level", "?")
+            title = ctx.get("title", "")
+            summary = _truncate(ctx.get("summary", ""), 100)
+            rating = ctx.get("rating", 0.0)
+            community_id = ctx.get("community_id", "?")
+            click.echo(
+                f"    [L{level}] {title} (rating: {rating:.1f}, id: {community_id})"
+            )
+            click.echo(f"      {summary}")
+
     # Graph view: mermaid diagrams + per-component nodes/edges + recalled chunks
     graph_data = data.get("graph", {})
     components = graph_data.get("components", [])
@@ -1300,8 +1315,15 @@ def community(
             click.echo(data["error"])
             return
         click.echo(
-            f"[{data['level']}] {data['node_type']} community {data['community_id']} ({data['member_count']} members)"
+            f"[{data['level']}] community {data['community_id']} "
+            f"({data['member_count']} members)"
         )
+        title = data.get("title", "")
+        if title:
+            click.echo(f"  Title: {title}")
+        rating = data.get("rating")
+        if rating is not None:
+            click.echo(f"  Rating: {rating}")
         click.echo(f"  Summary: {data['summary']}")
         click.echo(f"  Tags: {', '.join(data['tags'])}")
         click.echo(
@@ -1309,11 +1331,13 @@ def community(
         )
     else:
         communities = data.get("communities", [])
-        click.echo(f"[{level}] {node_type} communities (top {top_k} by size):\n")
+        click.echo(f"[{level}] communities (top {top_k} by size):\n")
         for c in communities:
-            click.echo(
-                f"  #{c['community_id']} ({c['member_count']} members): {_truncate(c['summary'], 80)}"
-            )
+            title = c.get("title", "")
+            header = f"  #{c['community_id']} ({c['member_count']} members)"
+            if title:
+                header += f" {title}"
+            click.echo(f"{header}: {_truncate(c['summary'], 80)}")
             click.echo(f"    tags: {', '.join(c['tags'])}")
 
 

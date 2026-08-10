@@ -41,33 +41,33 @@ def main():
     t0 = time.time()
     print("=== Embedding Community Summaries ===\n")
 
-    # Load summaries from SQLite
+    # Load summaries from SQLite (current schema: no node_type column)
     sqlite = SQLiteStore(SQLITE_PATH)
     rows = sqlite.conn.execute("""
-        SELECT level, community_id, node_type, member_count, summary, tags, top_members
+        SELECT level, community_id, member_count, title, summary, tags, top_members
         FROM community_summaries
         WHERE summary != ''
-        ORDER BY level, node_type, community_id
+        ORDER BY level, community_id
     """).fetchall()
     sqlite.close()
 
     print(f"  Communities to embed: {len(rows)}")
 
-    # Prepare texts for embedding: summary + tags
+    # Prepare texts for embedding: title + summary + tags
     texts = []
     metadata = []
     for row in rows:
-        level, community_id, node_type, member_count, summary, tags_json, top_members_json = row
+        level, community_id, member_count, title, summary, tags_json, top_members_json = row
         tags = json.loads(tags_json)
 
-        # Embed: summary + tags for semantic matching
-        embed_text = f"{summary} {' '.join(tags)}"
+        # Embed: title + summary + tags for semantic matching
+        embed_text = f"{title} {summary} {' '.join(tags)}"
         texts.append(embed_text)
         metadata.append({
             "level": level,
             "community_id": community_id,
-            "node_type": node_type,
             "member_count": member_count,
+            "title": title,
             "summary": summary,
             "tags": tags_json,
             "top_members": top_members_json,
@@ -87,10 +87,10 @@ def main():
     # Build points
     points = []
     for i, (vec, meta) in enumerate(zip(vectors, metadata)):
-        # Deterministic ID from level + node_type + community_id
+        # Deterministic ID from level + community_id
         point_id = str(uuid.uuid5(
             uuid.NAMESPACE_DNS,
-            f"community:{meta['level']}:{meta['node_type']}:{meta['community_id']}"
+            f"community:{meta['level']}:{meta['community_id']}"
         ))
         points.append(PointStruct(
             id=point_id,

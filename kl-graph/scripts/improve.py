@@ -48,12 +48,6 @@ def main():
                         help="Embedding threshold for entity ANN pre-filter (default: 0.65)")
     parser.add_argument("--entity-hybrid-threshold", type=float, default=0.45,
                         help="Hybrid score threshold for entity ENTITY_SIMILAR (default: 0.45)")
-    parser.add_argument("--entity-resolution", type=float, default=2.0,
-                        help="Leiden resolution for entity communities (default: 2.0)")
-    parser.add_argument("--fact-resolution", type=float, default=1.5,
-                        help="Leiden resolution for fact communities (default: 1.5)")
-    parser.add_argument("--fact-min-cluster", type=int, default=5,
-                        help="HDBSCAN min_cluster_size for facts (default: 5)")
     # Disambiguation options
     parser.add_argument("--skip-disambiguation", action="store_true",
                         help="Skip entity disambiguation entirely")
@@ -92,9 +86,6 @@ def main():
         fact_sim_threshold=args.fact_threshold,
         entity_emb_threshold=args.entity_emb_threshold,
         entity_hybrid_threshold=args.entity_hybrid_threshold,
-        entity_resolution=args.entity_resolution,
-        fact_resolution=args.fact_resolution,
-        fact_min_cluster_size=args.fact_min_cluster,
         run_disambiguation=not args.skip_disambiguation,
         skip_llm_judge=args.skip_llm_judge,
         llm_max_budget=args.llm_budget,
