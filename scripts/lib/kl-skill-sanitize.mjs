@@ -135,6 +135,93 @@ export const TRADEMARK_TO_NEUTRAL = Object.freeze({
   ["M" + "uleRun"]: "AcmeCloud",
 })
 
+/**
+ * ★★ 我们这套部署与上游假设不符的地方 —— 注入在 SKILL.md **正文之前**。
+ *
+ * ## 为什么必须注入，而不是"让 agent 自己摸索"
+ *
+ * 真机实测一轮（206 秒、`kl ask` 最终成功）里，agent 白跑了 3 次失败调用
+ * 才找到能用的形态。三个原因都源自上游那份文档对**它自己的仓库布局**
+ * 的合理假设，而我们的部署把那些假设打破了：
+ *
+ * ① **`KL_REPO` 推导规则在我们这里不成立。** 上游写「skill 文件在
+ *    `<repo>/.claude/skills/kl/SKILL.md`，所以 repo 根是它的 `../../..`」。
+ *    我们把 skill **单独打进 `Resources/skills/kl/`**（与 kl-graph 代码根
+ *    是两个位置 —— 见 `personaSkillPaths` 里"两类来源生命周期不同"那段），
+ *    于是 agent 推出来的是 `resources/skills/kl`，那里没有 `kl` 可执行。
+ *    实测它据此跑了两条命令，两条都失败。
+ *
+ * ② **`.venv` 那条回退路径也不成立。** 上游的 `kl` 包装脚本 exec
+ *    `<repo>/.venv/bin/python`，而我们的解释器在 `vendor/python/<平台>/venv`
+ *    （不在 kl-graph 里）。文档教的两种调用方式**都指向 `.venv`**。
+ *    我们注入的 PATH 里已经把能用的 `kl` 放在首位（见 `persona-acp.ts`
+ *    的 `getPythonEnv`），所以正确答案是**直接用裸 `kl`**，别推路径。
+ *
+ * ③ **管道会被权限层硬拒。** `bash` 的白名单只放行 `kl` 与 `kl *`
+ *    （`KL_SKILL_PERMISSION`），而 `kl ask "…" 2>&1 | head -100` 整条
+ *    不匹配那个 glob → 直接不执行。上游文档没写管道，是 agent 自己加的
+ *    （它以为要截断长输出）。
+ *
+ * ★ 这里**不放宽白名单**：那是安全边界（CLAUDE.md §5），放开一条命令
+ * 就是扩大攻击面。正确做法是告诉 agent 不要生成那种形态 ——
+ * `kl` 自己有 `-k` / `--pretty` 控制输出量，不需要 `head`。
+ *
+ * 注入而不是改上游那份：与脱敏同一个理由（改了会在 `sync:kl-graph`
+ * 合并时冲突，且算法团队看不到）。放在正文**之前**是因为 agent 读到
+ * 上游那段 `KL_REPO` 推导规则时，得先知道"在这个宿主里别那么做"。
+ */
+const HOST_PREAMBLE = `<!-- 由 sync:kl-skill 注入：本宿主（MyContext 桌面端）的运行环境与上游假设不同 -->
+# 在这个宿主里怎么调 kl（先读这一段，它覆盖下文的路径推导）
+
+这份 skill 跑在 MyContext 桌面端的 agent 里。宿主已经把可用的 \`kl\`
+放进 PATH 首位，所以：
+
+- **直接用裸 \`kl\`** —— \`kl status\` / \`kl ask "…"\` / \`kl context <id>\`。
+- **不要推导 \`KL_REPO\`**，也不要拼 \`"$KL_REPO/kl"\` 或
+  \`.venv/bin/python kl_cli.py\`。下文那套"从 SKILL.md 上跳三级"的规则
+  在这个宿主里得到的是 skill 资源目录，那里没有可执行文件 —— 会失败。
+- **不要用管道、重定向或任何其他命令**（\`| head\`、\`| jq\`、\`2>&1\`、
+  \`cat\`、\`pwd\` …）。权限层只放行 \`kl\` 本身，带管道的整条命令会被
+  **直接拒绝执行**。输出太长时用 \`kl\` 自己的参数控制（如 \`-k\` 限条数、
+  \`--pretty\`），而不是截断。
+- \`kl-server\` 由宿主启动并保持运行，**不需要** \`kl start\`。
+
+下文是上游原文，其中的路径推导与启动说明按上面这几条替换。
+
+---
+
+`
+
+/**
+ * 给外发的那份 SKILL.md 加上宿主适配前言。
+ *
+ * ★ 幂等：已经有前言的文本再跑一次不变（判据是那行注入标记）——
+ * 与 `sanitize` 同一个要求，否则重复同步会叠出好几段前言。
+ * 只对 SKILL.md 做（其余文件是参考资料，agent 不从那里学怎么调命令）。
+ */
+export function withHostPreamble(text) {
+  if (text.includes("由 sync:kl-skill 注入")) return text
+  return HOST_PREAMBLE + text
+}
+
+/**
+ * 某个文件在外发前要做的**全部**变换。
+ *
+ * ★★ 生产者（`sync-kl-skill.mjs`）与门禁（`check-kl-skill-sync.mjs`）
+ * 必须共用这一个入口。两处各写一遍"SKILL.md 要加前言、其余只脱敏"的
+ * 判据，结局是它们迟早差一个字，而那时门禁**永远红**且错误信息说
+ * "请运行 pnpm sync:kl-skill"（真实原因是两份判据不一致）——
+ * 这个模块的头注释里已经记过同一个坑，别再犯第二次。
+ *
+ * `rel` 是相对 skill 根的路径（如 `SKILL.md`、`reference/xxx.md`）。
+ * 只有**顶层的 SKILL.md** 加前言：那是 agent 学"怎么调命令"的地方，
+ * 而参考资料不是。
+ */
+export function transformFor(rel, text) {
+  const normalized = rel.split("\\").join("/")
+  return normalized === "SKILL.md" ? withHostPreamble(sanitize(text)) : sanitize(text)
+}
+
 /** 把文本里的真名与商标换掉。幂等 —— 已经换过的文本再跑一次不变。 */
 export function sanitize(text) {
   let out = text

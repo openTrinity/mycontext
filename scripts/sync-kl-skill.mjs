@@ -23,13 +23,16 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
 import { writeFileSync } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
-import { findResidual, sanitize } from "./lib/kl-skill-sanitize.mjs"
+import { findResidual, transformFor } from "./lib/kl-skill-sanitize.mjs"
 
 const root = resolve(import.meta.dirname, "..")
 /**
  * ★ 源是 `kl-graph/skills/kl`（上游 `74dea06` 从 `.claude/skills/kl` 搬到这里）。
  * `.claude/` 被本仓库 `.gitignore` 掉，那份旧副本停在搬家前、不再更新 ——
  * 盯它会把停更的旧 skill 打进 .app（详见 check-kl-skill-sync.mjs 的注释）。
+ *
+ * ★ 上游再移一次仍会这样。真正的判据应该是「找得到 SKILL.md 吗」而不是
+ * 「某个固定路径在吗」—— 那属于门禁的设计改动，先记在这里。
  */
 const source = join(root, "kl-graph/skills/kl")
 const target = join(root, "apps/desktop/resources/skills/kl")
@@ -77,7 +80,12 @@ const walk = (dir) => {
     }
     const original = readFileSync(full, "utf8")
     for (const { kind } of findResidual(original)) replaced.add(kind)
-    writeFileSync(dest, sanitize(original), "utf8")
+    /**
+     * ★ SKILL.md 额外加宿主适配前言（见 `withHostPreamble`）——
+     * 其余文本文件只脱敏。判据必须与 `check-kl-skill-sync.mjs` 里那个
+     * `transform` **完全一致**，否则漂移门禁会永远红且原因指向"忘了同步"。
+     */
+    writeFileSync(dest, transformFor(rel, original), "utf8")
     textFiles += 1
   }
 }

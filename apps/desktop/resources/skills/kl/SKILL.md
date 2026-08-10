@@ -1,13 +1,50 @@
+<!-- 由 sync:kl-skill 注入：本宿主（MyContext 桌面端）的运行环境与上游假设不同 -->
+# 在这个宿主里怎么调 kl（先读这一段，它覆盖下文的路径推导）
+
+这份 skill 跑在 MyContext 桌面端的 agent 里。宿主已经把可用的 `kl`
+放进 PATH 首位，所以：
+
+- **直接用裸 `kl`** —— `kl status` / `kl ask "…"` / `kl context <id>`。
+- **不要推导 `KL_REPO`**，也不要拼 `"$KL_REPO/kl"` 或
+  `.venv/bin/python kl_cli.py`。下文那套"从 SKILL.md 上跳三级"的规则
+  在这个宿主里得到的是 skill 资源目录，那里没有可执行文件 —— 会失败。
+- **不要用管道、重定向或任何其他命令**（`| head`、`| jq`、`2>&1`、
+  `cat`、`pwd` …）。权限层只放行 `kl` 本身，带管道的整条命令会被
+  **直接拒绝执行**。输出太长时用 `kl` 自己的参数控制（如 `-k` 限条数、
+  `--pretty`），而不是截断。
+- `kl-server` 由宿主启动并保持运行，**不需要** `kl start`。
+
+下文是上游原文，其中的路径推导与启动说明按上面这几条替换。
+
+---
+
 ---
 name: kl
-description: Query the DingTalk spatio-temporal knowledge graph (tens of thousands of messages/chunks, plus entities, facts, and multi-resolution communities). Use when answering questions about workplace conversations, team structures, project decisions, people, or system relationships from the DingTalk export. Triggered by questions about who said what, project timelines, team composition, technical decisions, conceptual/aggregate questions about a person ("what are my recent tasks", "what does X mainly work on" — use `kl global-search`), or any question that can be grounded in workplace chat history.
+description: Query the DingTalk spatio-temporal knowledge graph for grounded workplace answers. Always run `kl capabilities --json` first and use only live-enabled commands; communities and global search are optional experimental features.
 ---
 
 # Knowledge Graph Query (kl)
 
-CLI tool for querying a spatio-temporal knowledge graph built from DingTalk workplace messages (and other exported sources). Contains entities (people, systems, projects), facts (decisions, statuses, relations), and multi-resolution community structures. Run `kl status` for live counts.
+CLI tool for querying a spatio-temporal knowledge graph built from DingTalk workplace messages and other exported sources. It contains entities and facts, plus optional experimental multi-resolution communities. Discover capabilities before checking status or querying.
 
 **Architecture**: kl CLI is a thin HTTP client talking to kl-server (port 8200). The server keeps Qdrant + SQLite warm in memory. All commands require the server to be running.
+
+## Mandatory capability discovery
+
+**Before running `status` or choosing any query command, call:**
+
+```bash
+kl capabilities --json
+```
+
+On Windows use the invocation form documented below, but keep
+`capabilities --json` as the first CLI arguments. Parse `commands` and use only
+entries whose `enabled` value is `true`; never infer availability from this
+static skill text. In particular, `global-search`, `community`, `members`, and
+the `communities` search collection are experimental and normally disabled.
+`ask` is always available and is the primary retrieval command. If discovery
+fails because the server is not running, start the server, then retry
+capability discovery before querying.
 
 ## Invoking `kl` (any directory, macOS & Windows)
 
@@ -257,6 +294,7 @@ Notes:
 
 ```bash
 # Lifecycle
+kl capabilities --json # REQUIRED FIRST: live enabled/disabled query commands
 kl status              # Server status + DB stats (+ ingest progress)
 kl start               # Start kl-server (retrieval)
 kl start embedding [--model P] [--dp N] [--tp N] [--port 8100] [--gpu-util 0.4]
@@ -275,14 +313,14 @@ kl facts --fact-id <id>  # A single fact by its id (exact/prefix); minimal —
                        #   use `kl context` for full source provenance
 kl expand <entity_id>  # [DEPRECATED] ENTITY_SIMILAR neighbors — same as the
                        #   "similar" block of `kl entity --id <id>`
-kl community [-l L0|L1|L2|L3] [-t entity|fact] [--id N]
-kl members <id> [-l L1] [-t entity]
+kl community [-l L0|L1|L2|L3] [-t entity|fact] [--id N]  # capability-gated
+kl members <id> [-l L1] [-t entity]                       # capability-gated
 kl context <fact_id>   # Source message + context + entities
 kl timeline "<entity>" [--from YYYY-MM-DD] [--to YYYY-MM-DD]
 kl stats               # Detailed statistics
 kl search "<query>" [-c chunks|messages|facts|entities|communities] [-k 10]  # vector ANN, one collection
 kl ask "<question>" [-k 10] [--phase2] [--seed-k 6] [--radius 1] [--max-nodes 40]  # hybrid retrieval + graph walk (+ optional synthesis)
-kl global-search "<question>" [--user "<name>"] [--json]  # GraphRAG map-reduce over a person's community summaries
+kl global-search "<question>" [--user "<name>"] [--json]  # experimental; use only when capability says enabled
 kl hop -n <node_id> -c '<cursor_json>'   # expand one node one hop deeper (no LLM/embed)
 ```
 
@@ -392,9 +430,10 @@ enough for querying.
 
 How to use `kl` well, in priority order:
 
-1. **Check the server first.** Every query command needs `kl start` running;
-   run `kl status` and confirm `"status": "ready"` before querying. If a build
-   is in progress, remember the service is usable after Phase A.
+1. **Discover capabilities first.** Run `kl capabilities --json` and use only
+   commands whose live `enabled` value is true. Then run `kl status` to inspect
+   health and ingestion progress. If the server is unavailable, start it and
+   retry capabilities before selecting a query command.
 2. **Plan before you query.** Think about what the user is really asking and
    which commands answer it; don't fire commands blindly (see the Query
    strategy callout under Retrieval Patterns).
@@ -402,8 +441,8 @@ How to use `kl` well, in priority order:
    point (hybrid retrieval + graph walk); reserve `kl search` for narrow
    single-collection lookups `kl ask` can't serve. For **conceptual,
    person-scoped "what has X been about / what are my recent tasks" questions**
-   that need aggregation rather than a single hit, use `kl global-search`
-   (see Retrieval Pattern 8).
+   that need aggregation rather than a single hit, use `kl global-search` only
+   when the live capabilities report it enabled (see Retrieval Pattern 8).
 4. **Trace before you trust.** Ground every claim in source: take a `fact_id`
    from `ask`/`entity`/`facts`/`timeline` and run `kl context <fact_id>` to see
    the original message before reporting it.
@@ -582,7 +621,11 @@ Notes:
 - `hop` does no embedding/LLM (pure in-memory walk) — cheap to chain.
 - Ground any interesting fact node with `kl context <fact_id>` as usual.
 
-### 8. Global Search (conceptual / aggregate questions about a person)
+### 8. Global Search (experimental, capability-gated)
+
+Use this pattern only when `kl capabilities --json` reports
+`commands.global-search.enabled=true`. Otherwise use `ask`, `facts`, and
+`timeline`; do not call the disabled command.
 
 Use `kl global-search` when the question is **conceptual and person-scoped** —
 it must be *aggregated* over everything a person has been involved in, not

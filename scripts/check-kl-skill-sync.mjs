@@ -41,7 +41,7 @@
 import { createHash } from "node:crypto"
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { join, relative, resolve } from "node:path"
-import { findResidual, sanitize } from "./lib/kl-skill-sanitize.mjs"
+import { findResidual, transformFor } from "./lib/kl-skill-sanitize.mjs"
 
 const root = resolve(import.meta.dirname, "..")
 /**
@@ -71,7 +71,8 @@ const TEXT_EXT = /\.(md|txt|json|yml|yaml|sh|py|ts|js|mjs)$/i
 /**
  * 目录内容的指纹：相对路径 + 内容 hash，排序后再 hash。
  *
- * `transform` 让源那侧先过一遍净化 —— 产物那侧传恒等函数。
+ * `transform(rel, text)` 让源那侧先过一遍净化（SKILL.md 还要加宿主前言，
+ * 见 `transformFor`）—— 产物那侧传恒等函数。按 `rel` 分派，所以签名带它。
  * 文本文件按 utf8 读（要做字符串替换），其余按字节。
  */
 function fingerprint(dir, transform) {
@@ -85,7 +86,7 @@ function fingerprint(dir, transform) {
       }
       const rel = relative(dir, full)
       const content = TEXT_EXT.test(name)
-        ? Buffer.from(transform(readFileSync(full, "utf8")), "utf8")
+        ? Buffer.from(transform(rel, readFileSync(full, "utf8")), "utf8")
         : readFileSync(full)
       entries.push(`${rel}:${createHash("sha256").update(content).digest("hex")}`)
     }
@@ -145,8 +146,8 @@ if (residual.length > 0) {
   process.exit(1)
 }
 
-const from = fingerprint(source, sanitize)
-const to = fingerprint(target, (text) => text)
+const from = fingerprint(source, transformFor)
+const to = fingerprint(target, (_rel, text) => text)
 
 if (from.digest !== to.digest) {
   console.error(
