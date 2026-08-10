@@ -389,6 +389,18 @@ const SUSPEND_SELF_HEAL_MS = 2 * 60 * 60_000
  */
 const GATE_LOG_THROTTLE_MS = 5 * 60_000
 /**
+ * `tickPull` 被闸住的原因。**字面量联合**而不是 string：
+ * 排查时是拿它当判别式用的（每个值对应完全不同的处置，见 `notePullSkipped`），
+ * 写错一个拼写就会变成一条永远对不上的日志。
+ */
+type PullSkipReason =
+  | "no_ingest_capability"
+  | "not_running"
+  | "busy"
+  | "blocked"
+  | "suspended"
+  | "backoff"
+/**
  * 被 `session_expired` 闸住之后，隔多久**主动复核**一次登录态。
  *
  * ## ★★ 为什么必须有这个复核 —— 否则登录好了应用也不会动
@@ -727,6 +739,14 @@ export class IngestService {
    * （导出照跑、条数不变、一条错都没有），只能靠翻 `pmset` 反推。
    */
   private gateLoggedAt = new Map<string, number>()
+  /**
+   * 上一次 `tickPull` 被闸住的原因（`null` = 上一轮真的跑了）。
+   *
+   * 只为了让 `notePullSkipped` **只在原因变化时**打一条 —— 见那里的注释：
+   * `not_running` 每一轮都成立，无条件 info 等于永久刷屏，而刷屏会把真正的
+   * 错误埋掉（这一轮已经因此漏看过一次 `auth login`）。
+   */
+  private lastPullSkipReason: PullSkipReason | null = null
   private lastError: string | null = null
   private blockedReason: IngestSnapshot["blockedReason"] = null
   /**
@@ -2103,16 +2123,27 @@ export class IngestService {
    */
   async tickPull(): Promise<{ changed: number; unchanged: number }> {
     const ingest = this.options.plugin.ingest
-    // ★ `running` 也要查：stop 之后起新一轮 = 往已关闭的库上写。
+    /**
+     * ★★ `running` 也要查：stop 之后起新一轮 = 往已关闭的库上写。
+     *
+     * ★★★ 这条 return 与下面三道闸**都必须留痕** —— why 与 reason 的含义
+     * 见 `notePullSkipped`（那里也解释了为什么只在原因变化时打）。
+     */
     if (ingest === undefined || !this.running || this.busy) {
+      this.notePullSkipped(
+        ingest === undefined ? "no_ingest_capability" : !this.running ? "not_running" : "busy",
+      )
       return { changed: 0, unchanged: 0 }
     }
     if (this.blockedReason !== null) {
       this.noteGated("blocked", "pull")
+      // ★ 见上面那段：这一道也要能在打包态的日志里看见（noteGated 是 debug）
+      this.notePullSkipped("blocked", { blockedReason: this.blockedReason })
       return { changed: 0, unchanged: 0 }
     }
     if (this.suspendedNow()) {
       this.noteGated("suspended", "pull")
+      this.notePullSkipped("suspended")
       return { changed: 0, unchanged: 0 }
     }
     this.busy = true
@@ -2121,12 +2152,14 @@ export class IngestService {
     // 用户是显式要求，会先 clearBackoff 再跑。
     if (this.backoffRounds > 0) {
       this.backoffRounds -= 1
-      this.options.logger.debug("ingest pull skipped by backoff", {
-        remaining: this.backoffRounds,
-      })
+      // ★ info 而不是 debug：打包态 logLevel 是 info，debug 一条都不落盘
+      this.notePullSkipped("backoff", { remaining: this.backoffRounds })
       this.busy = false
       return { changed: 0, unchanged: 0 }
     }
+    // ★ 真跑起来了 → 复位跳过原因，下次再被闸住时那条日志才会重新打
+    // （不复位的话"停了 → 好了 → 又停了"只在第一次留痕）。
+    this.lastPullSkipReason = null
     // 记下在途 promise 供 `stop()` await：不等它就关库会抛无人 catch 的 rejection。
     const pending = this.runPull(ingest).finally(() => {
       this.busy = false
@@ -3835,6 +3868,42 @@ export class IngestService {
       // blocked 的具体类型要带上：session_expired 与 permission_required
       // 的处置完全不同（前者重新扫码、后者去来源应用授权）。
       ...(reason === "blocked" ? { blockedReason: this.blockedReason } : {}),
+    })
+  }
+
+  /**
+   * 「这一轮 pull 没跑成，原因是 X」—— `tickPull` 开头那四道闸的**唯一**出口。
+   *
+   * ## ★★★ 为什么加它（`noteGated` 明说过不记 running/busy，这里为什么反过来）
+   *
+   * 上面那段的判据是"只记该采而没采的情况"，那对**周期轮询**是对的。
+   * 但实测出现了它覆盖不到的形态：**用户点「立即同步」，日志里一条记录都没有**
+   * —— 采集没跑，也没有任何解释。而 `tickPull` 开头四道闸
+   * （no_ingest_capability / not_running / busy / blocked / suspended / backoff）
+   * 任何一道拦住都长这样，排查时无从分辨是哪一道（这一轮我已经猜错过几次）。
+   *
+   * 六个 reason 对应完全不同的处置，所以 `reason` 必须是可判别的字面量：
+   * · `no_ingest_capability` —— 这个渠道没实现采集能力（接线问题）；
+   * · `not_running` —— 采集器没起来（未授权 / 已 stop / 库没挂）；
+   * · `busy` —— 上一轮还在跑（正常；但若永久为 true 就是状态泄漏）；
+   * · `blocked` / `suspended` / `backoff` —— 见各自的闸。
+   *
+   * ## ★★ 只在 reason **变化**时打一条
+   *
+   * 无条件 info 会把日志刷满 —— 而这一轮反复踩的正是这个坑：重复日志
+   * 把真正的错误埋掉（钉钉那串 19 条重连 warn 就让我漏看了夹在中间的
+   * `auth login`）。`not_running` 尤其危险：它会每一轮都成立，等于永久刷屏。
+   *
+   * 变化沿（含"从没打过"）恰好就是要抓的瞬间：什么时候开始不跑的、
+   * 什么时候换了原因。稳态重复没有新信息。
+   */
+  private notePullSkipped(reason: PullSkipReason, extra: Record<string, unknown> = {}): void {
+    if (this.lastPullSkipReason === reason) return
+    this.lastPullSkipReason = reason
+    this.options.logger.info("ingest pull skipped", {
+      channelId: this.options.plugin.meta.id,
+      reason,
+      ...extra,
     })
   }
 

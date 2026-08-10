@@ -678,7 +678,30 @@ export class DataPlaneService {
         .filter(([id]) => this.activeChannels.has(id) && wanted(id))
         .map(([, source]) => source),
     ]
-    if (active.length === 0) return { changed: 0, unchanged: 0 }
+    /**
+     * ★★★ 一个能跑的源都没有 → **必须留痕**。
+     *
+     * 实测（打包态）：用户点「立即同步」之后日志里一条记录都没有 ——
+     * 而这个 return 正是最可能的出口之一，它原来完全静默。
+     *
+     * 把判据的三个输入都打出来，才能回答"为什么这个渠道没被算进去"：
+     * · `wanted` —— 这次点的是哪个渠道（undefined = 全部）；
+     * · `activeChannels` —— 哪些渠道的采集器起来了。★ 一个渠道要进这个集合
+     *   得在 `attach` 那一刻 `auth.status()` 返回 authorized；而
+     *   `activateChannel()`（注释说"授权成功时补起来"的那条路）
+     *   **目前没有任何调用点** —— 也就是刚授权完那一刻如果 status 还没 ready，
+     *   这个渠道就再也不会被补进来，直到下次重启；
+     * · `sourceIngest` —— 非主渠道的采集器实例（管线挂上了没有）。
+     */
+    if (active.length === 0) {
+      this.options.logger.info("ingest run once skipped: no active source", {
+        wanted: channelId ?? "(all)",
+        activeChannels: [...this.activeChannels],
+        sourceChannels: [...this.sourceIngest.keys()],
+        primaryAttached: ingest !== null,
+      })
+      return { changed: 0, unchanged: 0 }
+    }
     const results = await Promise.all(
       active.map(async (source) => {
         source.clearBackoff()
