@@ -144,6 +144,30 @@ export interface CompleteOptions {
   temperature?: number
   maxTokens?: number
   signal?: AbortSignal
+  /**
+   * 只对**这一次**调用生效的超时（毫秒）。省略时用 client 的默认。
+   *
+   * ## ★★ 为什么需要按调用覆盖，而不是把 client 的默认调大
+   *
+   * 同一个 `LlmClient` 被两类消费者共用（`LlmHolder` 只持有一个实例）：
+   *
+   * · **数字分身回消息** —— 用户在等，慢了就该出草稿让人来写；
+   * · **蒸馏的 facet 抽取** —— 后台批处理，没人在等。
+   *
+   * 两者对"等多久算太久"的答案相反，而默认 90s 是按前者定的。
+   * 实测后果：facet 抽取单次调用约 125s（400 条语料 / 4 批），
+   * 于是**超时阈值比正常耗时还短** —— 语料长的窗口必然失败：
+   *
+   * ```
+   * 已成功窗口   400 条  6768 字符（均 17 字符/条）  ✓
+   * 05-12 窗口   400 条 14680 字符（均 37 字符/条）  ✗ role/tasks 双双超时
+   * ```
+   *
+   * 而且这是**可复现的失败**而不是偶发：那一轮 `llm retry` 打到 attempt=2，
+   * 每次重试都白烧一整个 prompt 的 token。把 client 默认调大能修它，
+   * 但代价是数字分身也跟着等 —— 那是另一个方向的错。
+   */
+  timeoutMs?: number
   /** 可用工具。给了之后模型可能返回 `toolCalls` 而不是正文 */
   tools?: readonly LlmToolSpec[]
 }
@@ -405,7 +429,9 @@ export class LlmClient {
      * （用户关掉蒸馏页时那些在途请求会继续烧配额）。
      */
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    // ★ 调用方给了 `timeoutMs` 就用它（见 `CompleteOptions.timeoutMs`）
+    const timeoutMs = input.timeoutMs ?? this.timeoutMs
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
     const onAbort = () => controller.abort()
     input.signal?.addEventListener("abort", onAbort, { once: true })
 
@@ -577,7 +603,9 @@ export class LlmClient {
         throw new AppError("PROCESS_FAILED", "LLM 调用超时或被取消", {
           messageKey: "errors:byCode.PROCESS_FAILED",
           // 外部取消不该重试；超时可以。用调用方 signal 的状态区分
-          context: { retryable: input.signal?.aborted !== true, timeoutMs: this.timeoutMs },
+          // ★ 报**这一次实际用的**超时，不是 client 默认 —— 否则日志里写着 90s
+          // 而实际等了 300s，排查时会往错的方向找
+          context: { retryable: input.signal?.aborted !== true, timeoutMs },
         })
       }
       if (error instanceof AppError) throw error
