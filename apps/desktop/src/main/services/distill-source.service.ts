@@ -439,16 +439,57 @@ export class DistillSourceService {
      * 而单渠道时那两件事都退化成"就这一个"。
      */
     const primaryId = this.options.plugin.meta?.id ?? "primary"
+    /**
+     * ★★ 主渠道的库**没挂上时不抛错**，只是这一桶不参与。
+     *
+     * 这里原来是 `db: this.requireDb()` —— 无条件调用，而 `requireDb()` 在
+     * `db === null` 时抛 `DB_UNAVAILABLE`。于是整个列表变成红字「数据库不可用」，
+     * 连另一个已挂上的渠道的会话都拿不到。
+     *
+     * ## 什么时候会撞上（实测）
+     *
+     * 授权流程里存在一个「身份已绑、vault 还没挂完」的窗口。渲染层在授权
+     * 成功后会把缓存全部作废并立刻重取（见 `useChannelMutation` 的注释 ——
+     * 那个全失效本身是对的，它修的是"授权后列表停在授权前那份空结果"），
+     * 而重取正好落在这个窗口里的话就抛了。
+     *
+     * 更糟的是它**不会自己恢复**：那一刻之后没有下一次失效事件，
+     * 于是红字一直挂着，用户只能重启应用。
+     *
+     * ## 为什么降级而不是抛
+     *
+     * "库还没挂上"不是错误，是**还没准备好** —— 与下面"渠道没有列举能力"
+     * 是同一类：能给多少给多少，并用 `truncated` 说清这不是全集。
+     * 抛错的代价是整块不可用（且不可恢复），而降级的代价只是这一轮少一个
+     * 渠道 —— 后者明显更小，且下一次重取就补上了。
+     *
+     * ★ 仍然**留痕**（warn）：静默降级是本仓库最贵的那类 bug，
+     * 一个空列表必须能在日志里区分"真的没有会话"与"库还没挂上"。
+     */
+    const primaryDb = this.db
     const targets: { channelId: string; db: SqliteDatabase; plugin: ChannelPlugin }[] = [
-      { channelId: primaryId, db: this.requireDb(), plugin: this.options.plugin },
+      ...(primaryDb === null
+        ? []
+        : [{ channelId: primaryId, db: primaryDb, plugin: this.options.plugin }]),
       ...[...this.sourceDbs.entries()].flatMap(([channelId, db]) => {
         const plugin = this.options.sourcePlugins?.().find((p) => p.meta.id === channelId)
         return plugin === undefined ? [] : [{ channelId, db, plugin }]
       }),
     ]
+    if (primaryDb === null) {
+      this.options.logger.warn("conversation list: primary db not attached yet; listing others", {
+        channelId: primaryId,
+        others: targets.length,
+      })
+    }
 
     const items: ChannelConversationView[] = []
-    let truncated = false
+    /**
+     * ★ 主渠道的库没挂上 → 这一轮**必然**是截断的（少了整整一个渠道）。
+     * 不标的话 0 项会被界面读成"这个账号真的没有会话"，
+     * 而实际是"再等一下就有了"。
+     */
+    let truncated = primaryDb === null
     for (const target of targets) {
       const local = this.localConversations(target.db).map((row) => ({
         ...row,

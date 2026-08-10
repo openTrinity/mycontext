@@ -1010,12 +1010,31 @@ export function useUploadImage() {
   })
 }
 
+/**
+ * 可选会话列表。
+ *
+ * ## ★★ 结果**截断**时不当终态缓存，短周期重取
+ *
+ * `truncated` 是主进程给的"这不是全集"的信号，它有两个可恢复的成因：
+ * 主渠道的库还没挂完（授权刚成功的那个窗口），或渠道 CLI 这一次调用失败。
+ * 两者都会在几秒内自己好转 —— 而 `staleTime: 5 * 60_000` 会把那一刻的
+ * 残缺结果按住 5 分钟，用户看到的是一个空列表（或缺一个渠道），
+ * 且**不会自己恢复**。
+ *
+ * 所以：完整结果照旧缓存 5 分钟（这个列表要跑渠道 CLI，不便频繁问）；
+ * 截断结果只缓存 5 秒，并开一个 8 秒的轮询直到它变完整。
+ *
+ * ★ 判据用主进程给的 `truncated` 而不是"items 为空"：真的没有会话
+ * （新账号、全是保密群）也会是空，那时不该无限轮询。
+ */
 export function useChannelConversations(enabled: boolean) {
   return useQuery({
     queryKey: QUERY_KEYS.channelConversations,
     queryFn: async () => unwrap(await window.mycontext.channels.conversations()),
     enabled,
-    staleTime: 5 * 60_000,
+    staleTime: (query) => (query.state.data?.truncated === true ? 5_000 : 5 * 60_000),
+    // 截断 → 每 8 秒再问一次；完整 → 停（false）
+    refetchInterval: (query) => (query.state.data?.truncated === true ? 8_000 : false),
   })
 }
 
