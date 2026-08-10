@@ -31,6 +31,7 @@ import {
 } from "@mycontext/store"
 import type {
   ChannelConversationListView,
+  ChannelConversationSourceView,
   ChannelConversationView,
   DistillScopeInput,
   DistillSourceView,
@@ -490,6 +491,19 @@ export class DistillSourceService {
      * 而实际是"再等一下就有了"。
      */
     let truncated = primaryDb === null
+    /**
+     * 逐渠道的交代 —— `truncated` 只说"不是全集"，而用户要知道
+     * **哪个渠道、为什么**（见契约里 `channelConversationSourceSchema`）。
+     */
+    const sources: ChannelConversationSourceView[] = []
+    if (primaryDb === null) {
+      sources.push({
+        channelId: primaryId,
+        count: 0,
+        state: "not-ready",
+        reason: "这个渠道的数据库还在挂载中",
+      })
+    }
     for (const target of targets) {
       const local = this.localConversations(target.db).map((row) => ({
         ...row,
@@ -497,9 +511,31 @@ export class DistillSourceService {
       }))
       const list = target.plugin.conversations
       if (list === undefined) {
-        // 渠道没有列举能力 → 只有本地已采的那部分，必然是截断的
+        /**
+         * ★★ 这个渠道**没有会话列举能力** —— 只能给本地已采的那部分。
+         *
+         * 飞书就是这样（设计如此，不是缺失）：它的白名单里没有任何列举命令，
+         * 采集走 `im +messages-search` 按时间窗搜，会话是**从搜到的消息里
+         * 反推**出来的。所以"先列会话再勾选"这个模型对它不成立，
+         * 得先采过一轮 `local` 才有内容。
+         *
+         * ★★ 必须留痕。这里原来只有 `truncated = true` 一句注释、
+         * **一条日志都没有** —— 于是新库上飞书贡献 0 项且完全无声，
+         * 排查时只能靠"两个 warn 之间缺了什么"反推。
+         * 这正是 CLAUDE.md 第 4 节说的静默降级。
+         */
+        this.options.logger.info("conversation list: channel cannot enumerate; local only", {
+          channelId: target.channelId,
+          local: local.length,
+        })
         items.push(...local)
         truncated = true
+        sources.push({
+          channelId: target.channelId,
+          count: local.length,
+          state: "cannot-enumerate",
+          reason: null,
+        })
         continue
       }
       try {
@@ -524,18 +560,52 @@ export class DistillSourceService {
           remote: remote.items.length,
           local: local.length,
         })
+        sources.push({
+          channelId: target.channelId,
+          count: byId.size,
+          state: "ok",
+          reason: null,
+        })
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
         this.options.logger.warn("channel conversation list failed; using local only", {
           channelId: target.channelId,
-          detail: error instanceof Error ? error.message : String(error),
+          detail,
         })
         items.push(...local)
         truncated = true
+        /**
+         * ★ 登录过期与"这次调用失败"要分开：前者**靠等永远不会好**
+         * （用户必须去重新授权），后者下一次轮询就可能成功。
+         * 混成一种的话界面只能给一句无差别的"读取失败"，
+         * 而用户对着一个过期的渠道等下去。
+         *
+         * 判据走 `AppError` 的 code —— 渠道层已经把它归好类了：
+         * · `SESSION_EXPIRED` —— 「渠道登录已过期，需要重新授权」
+         *   （`dingtalk/cli.ts:704`）；
+         * · `CHANNEL_IDENTITY_UNAVAILABLE` —— 「还没绑定渠道身份，拒绝执行
+         *   渠道命令」（同文件 :814，安全边界）。
+         *
+         * ★ 这两个都要**照抄 kernel 的枚举**，不能凭印象写：我第一版写的
+         * `AUTH_EXPIRED` / `IDENTITY_UNBOUND` / `AUTH_REQUIRED` 三个
+         * 全都不存在，typecheck 用 TS2367（"两个类型没有交集"）抓了出来 ——
+         * 而那个比对若不是字面量类型就会静默恒 false，这一整个分类白写。
+         */
+        const code = error instanceof AppError ? error.code : null
+        sources.push({
+          channelId: target.channelId,
+          count: local.length,
+          state:
+            code === "SESSION_EXPIRED" || code === "CHANNEL_IDENTITY_UNAVAILABLE"
+              ? "expired"
+              : "failed",
+          reason: detail,
+        })
       }
     }
 
     items.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))
-    return { items, truncated }
+    return { items, truncated, sources }
   }
 
   private localConversations(db: SqliteDatabase): ChannelConversationView[] {

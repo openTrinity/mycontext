@@ -398,17 +398,33 @@ export class LarkCli {
   }
 
   /**
-   * Pin the CLI master key to our isolated HOME before OAuth writes user tokens.
+   * Pin the CLI master key to our isolated HOME before anything touches the
+   * system Keychain.
    *
-   * On macOS, `config init` prefers the system Keychain. Electron can read the
-   * app secret during device-flow setup, then fail only after the browser says
-   * success when it tries to persist the user token from another process. The
-   * official CLI's supported automation path is `keychain-downgrade`: it keeps
-   * the Keychain entry as a backup and makes subsequent processes read the
+   * On macOS, `config init` and `auth login` prefer the system Keychain. Our
+   * HOME points at the vault, which has no Keychain entry, so the OS puts up a
+   * modal — "cannot find the keychain for master.key" with Cancel / Reset to
+   * Default. Reset writes into the user's real login keychain (exactly what we
+   * avoid: credentials must travel with the vault), and Cancel aborts the flow.
+   *
+   * The official CLI's supported automation path is `keychain-downgrade`: it
+   * keeps the Keychain entry as a backup and makes subsequent processes read the
    * 0600 `master.key.file` under HOME instead.
    *
-   * This is intentionally idempotent and runs for every authorization attempt,
-   * including re-authorization where `config init` is not called at all.
+   * Verified 2026-08 on the bundled CLI: running this in a completely empty
+   * isolated HOME succeeds and reports
+   *
+   *     OK: system Keychain was empty; generated a new master key and wrote it
+   *     to …/master.key.file. The OS Keychain was not modified.
+   *
+   * so it creates its own directories and never touches the Keychain. That is
+   * why `FeishuAuth.login` calls this **first**, before `config init` — an
+   * earlier comment here claimed it had to run after `config init` ("no config
+   * directory before that"), which no longer holds and was the reason the modal
+   * appeared at all.
+   *
+   * Idempotent by design, so it also covers re-authorization (which skips
+   * `config init` entirely).
    */
   async ensureAutomationCredentialAccess(options: { signal?: AbortSignal } = {}): Promise<void> {
     if ((this.options.platform ?? process.platform) !== "darwin") return

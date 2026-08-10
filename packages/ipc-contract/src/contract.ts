@@ -634,15 +634,59 @@ export const channelConversationSchema = z.object({
 export type ChannelConversationView = z.infer<typeof channelConversationSchema>
 
 /**
+ * 一个渠道在这次列举里的结果。
+ *
+ * ## ★★ 为什么需要它（`truncated` 那个布尔说不出「为什么」）
+ *
+ * 界面上「没读到任何会话」曾经把三种完全不同的情况说成同一句话，
+ * 而它们要用户做的事**恰好相反**：
+ *
+ * · `expired` —— 渠道登录过期 → 去重新授权（等下去永远不会有）；
+ * · `cannot-enumerate` —— 这个渠道**没有会话列举能力**（飞书就是这样，
+ *   设计如此：它按时间窗搜消息，会话是从搜到的消息里反推的）→
+ *   这一步不用选，采过一轮之后自然就有了；
+ * · `ok` 且 0 项 —— 真的没有会话（新账号 / 全是保密群）。
+ *
+ * 实测踩到的正是这个：新库上钉钉过期 + 飞书不能列举 → 两个渠道都 0 项，
+ * 界面一句「没读到任何会话」，而用户对着它无事可做。
+ */
+export const channelConversationSourceSchema = z.object({
+  channelId: z.string(),
+  /** 这个渠道贡献了多少项（远端与本地合并去重之后）。 */
+  count: z.number().int().nonnegative(),
+  state: z.enum([
+    /** 正常列到了（可能仍是窗口内的一部分，见 `truncated`）。 */
+    "ok",
+    /** 登录过期 / 未绑身份 —— 靠等不会好，要用户去授权。 */
+    "expired",
+    /** 这个渠道不支持预先列举会话（采过之后才有）。 */
+    "cannot-enumerate",
+    /** 库还没挂上（刚授权那个窗口）—— 几秒后自己好转。 */
+    "not-ready",
+    /** 其他失败（渠道命令报错）。 */
+    "failed",
+  ]),
+  /** 失败时的原因（给用户看的那句）；正常时 null。 */
+  reason: z.string().nullable(),
+})
+
+export type ChannelConversationSourceView = z.infer<typeof channelConversationSourceSchema>
+
+/**
  * 会话列表结果。
  *
  * `truncated` 必须透到 UI：钉钉侧拿不到全量单聊（渠道分页能力的硬限制，
  * 见 channels/plugins/dingtalk/conversations.ts）。不透的话 UI 只能
  * 把一个有窗口的列表说成"全部会话"，用户找不到某个群时会以为是我们漏读了。
+ *
+ * ★ `sources` 是**逐渠道**的交代（见上面那个 schema）：`truncated` 只说
+ * "不是全集"，而用户需要知道**哪个渠道、为什么**，否则一个空列表无事可做。
+ * 可选是为了兼容旧主进程（渲染层要能在缺这个字段时退回旧文案）。
  */
 export const channelConversationListSchema = z.object({
   items: z.array(channelConversationSchema),
   truncated: z.boolean(),
+  sources: z.array(channelConversationSourceSchema).optional(),
 })
 
 export type ChannelConversationListView = z.infer<typeof channelConversationListSchema>

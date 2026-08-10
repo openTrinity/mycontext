@@ -166,7 +166,11 @@
     "collapseList": "Show less",
     "sourcesReady": "Available now",
     "sourcesPlanned": "Planned",
-    "readOnlyChannelHint": "Read-only channels are not used for the digital twin's auto-replies."
+    "readOnlyChannelHint": "Read-only channels are not used for the digital twin's auto-replies.",
+    "sourceExpired": "{{channel}} sign-in has expired. Reconnect it and its conversations will show up here.",
+    "sourceCannotEnumerate": "{{channel}} can't list conversations upfront — it reads by date range, and they'll appear here as it goes. Nothing to pick for it in this step.",
+    "sourceNotReady": "{{channel}} is still getting ready. This will refresh on its own in a moment.",
+    "sourceFailed": "Couldn't read conversations from {{channel}}: {{reason}}"
   },
   "distillStep": {
     "phasesTitle": "Learning progress",

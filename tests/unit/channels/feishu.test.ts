@@ -135,11 +135,32 @@ describe("Feishu auth and ingest parsing", () => {
     })
 
     expect(status.state).toBe("authorized")
-    const requestedScopes = calls[0]?.[3]?.split(",") ?? []
+    /**
+     * ★ 按**命令名**找那次 login，不再用 `calls[0]`：钥匙串降级现在排在
+     * 它前面（见下面那段长注释）。按下标取会让"顺序变了"表现成
+     * "scope 变空了"，而那是个误导性的失败信息。
+     */
+    const loginCall = calls.find((args) => args[0] === "auth" && args[1] === "login")
+    const requestedScopes = loginCall?.[3]?.split(",") ?? []
     expect(requestedScopes).toEqual(REQUIRED_SCOPES)
     expect(calls.map((args) => args.join(" "))).toEqual([
-      expect.stringContaining("auth login --scope"),
+      /**
+       * ★★★ 钥匙串降级是**第一条**命令，在 `auth login` 之前。
+       *
+       * 这条测试原来锁的是旧顺序（downgrade 排在 `auth login` 之后、
+       * 且断言它在"开浏览器"之后）—— 而那正是那个系统弹窗的成因：
+       * macOS 上 `config init` / `auth login` 会先去问系统钥匙串，
+       * 而我们的 HOME 指向 vault、那里没有钥匙串条目，于是弹出
+       * 「找不到用于储存 "master.key" 的钥匙串」，选项是取消 / 还原为默认
+       * （后者会往用户真实的登录钥匙串里写，正是要避免的）。
+       *
+       * 实测（2026-08，随包 CLI）：空的隔离 HOME 里直接跑
+       * `config keychain-downgrade` 就能成功并写出 master.key.file，
+       * 且明确 "The OS Keychain was not modified" —— 所以先降级是可行的，
+       * 也是唯一能挡住弹窗的位置。
+       */
       "config keychain-downgrade",
+      expect.stringContaining("auth login --scope"),
       /**
        * ★★ `--json` 是必须的，而这条测试原来锁的是**漏掉它**的那一版。
        *
@@ -157,7 +178,14 @@ describe("Feishu auth and ingest parsing", () => {
       "auth login --device-code device-1 --json",
       "auth status --json --verify",
     ])
-    expect(events.indexOf("open browser")).toBeLessThan(events.indexOf("config keychain-downgrade"))
+    /**
+     * ★★ 降级必须在**开浏览器之前** —— 与改动前的断言恰好相反。
+     *
+     * 弹窗出现在"点了开始授权"之后、浏览器打开之前，用户看到的是一个
+     * 突然冒出来的系统安全框而不是授权页。降级排在最前面才没有那个窗口。
+     */
+    expect(calls.findIndex((args) => args.join(" ") === "config keychain-downgrade")).toBe(0)
+    expect(events.indexOf("open browser")).toBeGreaterThan(-1)
   })
 
   /**

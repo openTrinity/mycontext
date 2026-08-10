@@ -58,6 +58,41 @@ export class FeishuAuth implements ChannelAuth {
   async login(ctx: AuthContext): Promise<AuthStatus> {
     ctx.onProgress({ phase: "starting" })
     try {
+      /**
+       * ★★★ 把 master key 钉到隔离 HOME —— **必须是第一步**。
+       *
+       * ## 为什么提到这里（原来它在等浏览器之后）
+       *
+       * macOS 上 `config init` / `auth login` 会优先找系统钥匙串里的
+       * `master.key`。而我们把 HOME 重定向到了 vault 下的隔离目录，
+       * 那里没有钥匙串条目 —— 于是**系统弹出模态框**
+       * 「找不到用于储存 "master.key" 的钥匙串」，两个按钮是
+       * 「取消」与「还原为默认」：
+       *
+       * · 点「还原为默认」= 往用户真实的登录钥匙串里写，
+       *   那正是我们要避免的（凭据必须跟着 vault 走，两个身份不能共用）；
+       * · 点「取消」= 授权流程从这里断掉。
+       *
+       * 用户看到的就是一个突然冒出来的系统安全弹窗，而它出现在
+       * 「点了开始授权」之后、浏览器打开之前。
+       *
+       * ## 为什么现在可以放在最前面（实测，2026-08）
+       *
+       * 原注释说"必须在 `config init` 之后，那之前没有配置目录"。
+       * **那条结论已经过期** —— 当前 CLI 版本在一个完全空的隔离目录里
+       * 直接跑 `config keychain-downgrade` 就能成功：
+       *
+       *     OK: system Keychain was empty; generated a new master key and
+       *     wrote it to …/home/Library/Application Support/lark-cli/master.key.file.
+       *     The OS Keychain was not modified.
+       *
+       * 它自己会建目录、自己生成 key、且明确不碰系统钥匙串。
+       * 所以"先降级再做任何别的事"既可行，也是唯一能挡住那个弹窗的位置
+       * —— 弹窗的成因就是"在还没有 master.key.file 时去问钥匙串"。
+       *
+       * ★ 幂等，所以两条路径（首次配置 / 重新授权）都从这里过一次就够。
+       */
+      await this.cli.ensureAutomationCredentialAccess({ signal: ctx.signal })
       const loginArgs = [
         "auth",
         "login",
@@ -106,21 +141,17 @@ export class FeishuAuth implements ChannelAuth {
       }
       ctx.onProgress({ phase: "waiting" })
 
-      /**
-       * 把凭据存储从系统钥匙串降级到文件 —— **必须在这个位置**。
+      /*
+       * ★ 钥匙串降级已经在 `login()` 的**第一步**做过了（见那里的长注释）。
        *
-       * 时机的两个边界：
-       * · 在 `config init` / 设备码初始化**之后**（那之前没有配置目录）；
-       * · 在 OAuth 成功写入凭据**之前**（写进钥匙串就来不及了）。
+       * 这里原来是它的唯一调用点，注释写着"必须在 config init 之后、
+       * OAuth 写凭据之前"。前半句已被实测推翻（空目录下也能跑），而把它留在
+       * 这个位置的代价是：`config init` / `auth login` 在它之前就去问了
+       * 系统钥匙串 → 弹出「找不到钥匙串」的系统模态框。
        *
-       * ★ 为什么必须降级：钥匙串是按**机器用户**存的，而我们要的是按
-       * **身份**隔离（凭据跟着 vault 走）。存进钥匙串就没法隔离 ——
-       * 两个身份会共用同一份 token。
-       *
-       * ★ 重新授权会跳过 `config init`，所以这一步只能放在两条路径都
-       * 经过的公共段上，不能挂在初始化分支里。
+       * 不在这里重复调用：它是幂等的，但每次都要 spawn 一个子进程，
+       * 而这条路径上已经有一次成功的降级了。
        */
-      await this.cli.ensureAutomationCredentialAccess({ signal: ctx.signal })
       /**
        * ★★ 必须带 `--json` —— 不带的话一次**成功的**授权会被判成失败。
        *

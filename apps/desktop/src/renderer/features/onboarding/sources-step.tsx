@@ -156,6 +156,12 @@ export function SourcesStep({
   readOnlyChannelIds,
 }: SourcesStepProps) {
   const { t } = useDynamicTranslation("onboarding")
+  /**
+   * 渠道显示名走 `channels` 命名空间（那里已有 `feishu.label` / `dingtalk.label`）
+   * —— 不在 onboarding 里再抄一份：同一个名字两个来源，改了一处就不一致。
+   * 引导页已有先例（模型那一步的按钮文案读 settings 命名空间）。
+   */
+  const { t: tc } = useDynamicTranslation("channels")
   const errorText = useErrorText()
   /**
    * ★ 一进来就拉，不再"点开才拉"。
@@ -370,8 +376,48 @@ export function SourcesStep({
           </p>
         ) : (
           <div className="flex flex-col gap-[var(--gap-component-md)]">
-            {/* 截断提示放在列表**上方**：滚到底才看到就已经太晚了 */}
-            {conversations.data?.truncated === true ? (
+            {/*
+              ★★ 逐渠道交代**为什么**，不再只给一句无差别的「列表可能不完整」。
+
+              那一句把三种要用户做不同事情的情况说成同一件（实测撞到的正是
+              这个：钉钉登录过期 + 飞书不支持预先列举 → 两个渠道都 0 项，
+              界面一句「没读到任何会话」，而用户对着它无事可做）：
+
+              · `expired` —— 去重新连接，等下去永远不会有；
+              · `cannot-enumerate` —— 这一步不用为它选，读过之后自然出现；
+              · `not-ready` —— 稍等，会自己刷新；
+              · `failed` —— 带上原因。
+
+              ★ `sources` 缺席（旧主进程）时退回原来那句 `truncatedWarning`
+              —— 升级窗口里少一点信息量好过什么都不说。
+            */}
+            {conversations.data?.sources !== undefined ? (
+              conversations.data.sources
+                .filter((source) => source.state !== "ok")
+                .map((source) => {
+                  const channel = tc(`${source.channelId}.label`, {
+                    defaultValue: source.channelId,
+                  })
+                  const key =
+                    source.state === "expired"
+                      ? "sourcesStep.sourceExpired"
+                      : source.state === "cannot-enumerate"
+                        ? "sourcesStep.sourceCannotEnumerate"
+                        : source.state === "not-ready"
+                          ? "sourcesStep.sourceNotReady"
+                          : "sourcesStep.sourceFailed"
+                  return (
+                    <p
+                      key={source.channelId}
+                      data-channel={source.channelId}
+                      data-state={source.state}
+                      className="typography-caption-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--text-base-tertiary)]"
+                    >
+                      {t(key, { channel, reason: source.reason ?? "" })}
+                    </p>
+                  )
+                })
+            ) : conversations.data?.truncated === true ? (
               <p className="typography-caption-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--text-base-tertiary)]">
                 {t("sourcesStep.truncatedWarning")}
               </p>
