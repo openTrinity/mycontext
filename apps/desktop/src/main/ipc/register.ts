@@ -686,15 +686,34 @@ export function registerIpc(deps: IpcDependencies): void {
   /**
    * 立即同步。带 `channelId` 时只跑那一个渠道 —— 状态页按渠道分区，
    * 按钮该只作用于用户正在看的那个（见 `DataPlaneService.runOnce`）。
+   *
+   * ## ★★★ 为什么这里要打两条日志（进入 + 结果）
+   *
+   * 实测（打包态）：用户点了「立即同步」，日志里**一条记录都没有**。
+   * 而"没有日志"同时兼容两种完全不同的成因，无法分辨：
+   *
+   * ① 按钮是 disabled（`data.running` 为假），那一下压根没发出 IPC；
+   * ② IPC 发了、采集真跑了、只是一条新消息都没拉到 —— `runPull` 成功且
+   *    空的那条路全程不打日志。
+   *
+   * 处置完全相反（前者要去修 running 判据，后者要去看渠道那侧为什么没数据），
+   * 所以必须先把这条边界钉死：**这条日志在，就说明点到了**。
    */
   ipcMain.handle(IPC_CHANNELS.ingestRunOnce, (_event, payload: unknown) =>
-    attempt(() =>
-      dataPlane.runOnce(
+    attempt(async () => {
+      const channelId =
         typeof (payload as { channelId?: unknown } | null)?.channelId === "string"
           ? (payload as { channelId: string }).channelId
-          : undefined,
-      ),
-    ),
+          : undefined
+      logger.info("ingest run once requested", { channelId: channelId ?? "(all)" })
+      const result = await dataPlane.runOnce(channelId)
+      logger.info("ingest run once finished", {
+        channelId: channelId ?? "(all)",
+        changed: result.changed,
+        unchanged: result.unchanged,
+      })
+      return result
+    }),
   )
   ipcMain.handle(IPC_CHANNELS.ingestClearBlocked, () =>
     attempt(() => {

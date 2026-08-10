@@ -147,6 +147,24 @@ export function DataPlanePanel({
             size="sm"
             variant="secondary"
             disabled={!data.running || runOnce.isPending}
+            /**
+             * ★★ 禁用时给出**原因**。
+             *
+             * 实测：用户点「立即同步」，什么都没发生、日志里一条记录都没有 ——
+             * 因为按钮是 disabled 的（`data.running` 为假），而 disabled 的按钮
+             * 点下去与"跑了但没拉到新消息"在界面上**完全一样**。
+             *
+             * `running` 在主进程是「这个渠道进了 activeChannels **且**
+             * 采集器在跑」，也就是"这个渠道现在没在采"。这句话用户能看懂、
+             * 也知道下一步去哪（授权那一页）。
+             */
+            title={
+              data.running
+                ? undefined
+                : t("status.dataPlane.syncNowDisabled", {
+                    defaultValue: "这个渠道当前没有在采集，先完成授权",
+                  })
+            }
             onClick={() => runOnce.mutate({ channelId: channel })}
           >
             {t("status.dataPlane.syncNow")}

@@ -85,6 +85,7 @@
     },
     "dataPlane": {
       "syncNow": "立即同步",
+      "syncNowDisabled": "这个渠道当前没有在采集，先完成授权",
       "messages": "已采集消息",
       "conversations": "会话数",
       "outboxHead": "变更流水位",

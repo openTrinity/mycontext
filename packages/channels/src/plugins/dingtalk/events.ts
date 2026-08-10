@@ -282,6 +282,25 @@ export class DingTalkEventConsumer implements ChannelEvents {
     if (!this.options.runtime.hasPinnedIdentity()) {
       this.options.logger.info("event stream not started: no bound identity", {})
       this.state = "stopped"
+      /**
+       * ★★★ 也是终态 —— 不置这个标记的话重连循环会**永远转**。
+       *
+       * 上一版只把 `credentialsGone` 挂在 stderr 的 `no credentials found`
+       * 之类痕迹上，而那要求子进程**真的起来过**。这条 return 在 spawn
+       * 之前，于是标记永远为假 → 循环照转。实测（打包态，钉钉未登录）：
+       *
+       *     18:42:54  event stream not started: no bound identity
+       *     18:42:54  dingtalk event stream disconnected {reconnects: 1}
+       *     …每 60 秒一条，涨到 9 还在继续
+       *
+       * 没绑身份是**用户动作才能改变**的状态（去授权），重连一百次与一次
+       * 结果完全一样；而这串 warn 的真实代价是把别的错误埋掉 —— 上一轮
+       * 我就是被它带偏、漏看了夹在中间的 `auth login`。
+       *
+       * 复位点与凭据那条同一处（`start()` 与 `spawnOnce()` 开头），
+       * 所以授权完成后挂载链路重新 `start()` 就会重新尝试。
+       */
+      this.credentialsGone = true
       return Promise.resolve()
     }
     this.state = "starting"
