@@ -120,6 +120,10 @@ def test_default_config_contains_every_documented_field() -> None:
     assert _leaf_paths(_config_dict()) == EXPECTED_LEAVES
 
 
+def test_default_extraction_batch_size_is_five() -> None:
+    assert cfg.pipelines.ingestion.extraction.batch_size == 5
+
+
 def test_schema_rejects_missing_fields() -> None:
     value = deepcopy(_config_dict())
     del value["pipelines"]["query"]["reranking"]["top_k"]

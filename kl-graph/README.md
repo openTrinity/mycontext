@@ -418,7 +418,9 @@ local GPU needed.
 Start the server (if not already running), then use the `kl` CLI. `ask` and
 `search` output **JSON by default** (agent-friendly); add `--pretty` for a
 human view. Browsing commands (`entity`, `community`, …) are pretty by default
-and accept `--json`.
+and accept `--json`. For direct HTTP callers, see the
+[Query API reference](docs/query-api.md), including batch `/neighbors` reads
+and graph-walk cursor semantics.
 
 ```bash
 ./kl start                       # retrieval server on :8200 (~90s Qdrant warmup)

@@ -198,7 +198,7 @@ remaining delta. The same workflow handles the initial build and later updates.
 
 #### Extraction batching and cache identity
 
-LLM request batch size is a user control and defaults to `1`; the pipeline does
+LLM request batch size is a user control and defaults to `5`; the pipeline does
 not automatically alter it for RPM limits. Values greater than one must retain
 strict per-slot alignment and validation. Cache identity includes extraction
 item ID, model, prompt version, strategy version, and schema version so results

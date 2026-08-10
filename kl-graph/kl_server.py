@@ -921,20 +921,20 @@ async def get_status():
     stats["edges"] = state.store.count_edges() if state.store else 0
 
     # Vector collection counts
-    qdrant_stats = {}
+    vector_stats = {}
     for coll in ["chunks", "entities", "facts"]:
         try:
-            qdrant_stats[coll] = state.qdrant_main.count(coll)
+            vector_stats[coll] = state.qdrant_main.count(coll)
         except Exception:  # noqa: BLE001
-            qdrant_stats[coll] = 0
+            vector_stats[coll] = 0
 
     if state.qdrant_communities:
         try:
-            qdrant_stats["communities"] = state.qdrant_communities.count(
+            vector_stats["communities"] = state.qdrant_communities.count(
                 "communities"
             )
         except Exception:  # noqa: BLE001
-            qdrant_stats["communities"] = 0
+            vector_stats["communities"] = 0
 
     ingest_status = state.ingest_progress
     if ingest_status is None:
@@ -955,7 +955,7 @@ async def get_status():
         "vector_backend": cfg.storage.vector.backend,
         "adjacency_entities": len(state.adjacency) if state.adjacency else 0,
         "sqlite": stats,
-        "qdrant": qdrant_stats,
+        "vectors": vector_stats,
         "ingest": ingest_status or {"state": "idle", "percent": 0.0},
     }
 
