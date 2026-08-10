@@ -1593,13 +1593,22 @@ export class KlServerService {
    * 优化图谱：跑 `python -m scripts.improve`（periodic 阶段，**出网烧 LLM**）。
    *
    * 建图（ingest）只产原始的实体/事实/边；这一步在其上补：SIMILAR_TO 边、
-   * 实体消歧（~200-500 次 LLM）、社群检测（Leiden）。**社群检测会给 entities 表
-   * `ALTER TABLE ADD COLUMN community_L{0..3}`** —— kl-server 的 `/entity` 端点
-   * SELECT 这几列，没跑过 improve 就 `no such column` → 查询 500。所以这步是让
-   * `entity`/`community`/`members` 查询可用的前提。
+   * 实体消歧（~200-500 次 LLM）。
+   *
+   * ## ★ 社群（community）已被算法侧默认关闭，这一步不再是查询的前提
+   *
+   * 上游把社群划为 experimental 并默认关（`config` 的
+   * `pipelines.experimental.communities.enabled` = `KL_COMMUNITIES_ENABLED,0`）。
+   * 关着时 improve **只跑相似度**、提前返回，不做 Leiden、不建 `community_L*` 列。
+   *
+   * 而 `/entity` 已经**优雅降级**：kl_server 用 `PRAGMA table_info` 探列，
+   * `has_community = COMMUNITIES_ENABLED and "community_L0" in cols`，没有那几列
+   * 就少返回社群字段，**不再 500**（旧注释说的"没跑 improve 就 no such column
+   * → 500"在当前上游已不成立）。所以这一步现在是**可选优化**（补相似度边、
+   * 消歧），不是"让查询能用"的前置。我们仍把它与 ingest 分成两个入口
+   * （贵、可调参重跑）。
    *
    * 与建图同构：独占数据文件，先 stop → improve → 完成重启读优化后的图。
-   * kl 刻意把它与 ingest 分开（贵、可调参重跑），我们也分成两个入口。
    */
   async optimizeGraph(): Promise<KlGraphOptimizeResult> {
     const empty = { factEdges: 0, entityEdges: 0, entityCommunities: 0, factCommunities: 0 }
