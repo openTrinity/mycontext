@@ -286,6 +286,9 @@ importers:
       '@mycontext/llm':
         specifier: workspace:*
         version: link:../llm
+      '@mycontext/retrieval':
+        specifier: workspace:*
+        version: link:../retrieval
       '@mycontext/store':
         specifier: workspace:*
         version: link:../store
