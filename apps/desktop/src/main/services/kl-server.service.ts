@@ -827,6 +827,18 @@ export class KlServerService {
        */
       const stale = this.detectStaleGraphSchema()
       if (stale !== null) {
+        /**
+         * ★★ 必须复位 `building` —— 这条 early-return 在 `setBuilding(true)`
+         * **之后**。
+         *
+         * 忘了它的表现（本机实测，就是这个 bug 的第一版）：飞书那栏的按钮
+         * 永远显示「建图中」，而 kl 侧 3 毫秒前就已经失败了 —— 界面上那个
+         * 转圈会一直转下去，用户以为在跑（"飞书一共才那么点消息，是不是卡住了"）。
+         *
+         * ★ 这个类里每一条从 `rebuildGraph` 返回的路径都要经过
+         * `setBuilding(false)`，无一例外 —— 见其余几处 return 前的同一句。
+         */
+        this.setBuilding(false)
         return this.logBuildOutcome(fresh, {
           ok: false,
           reason: stale,

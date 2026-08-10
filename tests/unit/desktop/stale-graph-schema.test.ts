@@ -120,6 +120,28 @@ describe("旧版图库在建图前就被识别出来", () => {
     expect(out).toMatchObject({ entities: 0, facts: 0, edges: 0 })
   })
 
+  /**
+   * ★★★ 拦下之后 `building` 必须复位。
+   *
+   * ## 这一条是这次改动自己引入的 bug 的回归锁
+   *
+   * 那条 early-return 加在 `setBuilding(true)` **之后**，而我第一版忘了
+   * 在返回前 `setBuilding(false)`。表现（用户实测）：飞书那栏的按钮永远
+   * 显示「建图中」，而 kl 侧 3 毫秒前就已经失败了 —— 界面上那个转圈一直
+   * 转下去，用户以为在跑（原话：「飞书一共才那么点消息，是不是卡住了」）。
+   *
+   * ★ 判据落在 `status().building` 上而不是"有没有调 setBuilding" ——
+   * 后者是实现细节，而前者是**界面真正读到的那个值**。
+   */
+  it("★★★ 拦下之后 building 复位（否则界面永远显示「建图中」）", async () => {
+    const svc = service({ columns: ["id", "text", "source_message_id"] })
+
+    const out = await svc.rebuildGraph(false)
+
+    expect(out.ok).toBe(false)
+    expect(svc.status().building, "拦下了却还说在建图 —— 界面会一直转圈").toBe(false)
+  })
+
   it("★★ 新 schema → 放行（别修成「永远不给建图」）", async () => {
     const out = await service({ columns: ["id", "text", "source_chunk_id"] }).rebuildGraph(false)
 

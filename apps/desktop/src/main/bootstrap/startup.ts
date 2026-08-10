@@ -1440,6 +1440,27 @@ export function bootstrapApp(mainDir: string): AppContext {
         now: () => systemClock.now(),
         sourceChannelId: spec.channelId,
         /**
+         * ★★★ 关系（fact↔entity）问**这个渠道自己的** kl。
+         *
+         * ## 漏了它的表现：非主渠道的关系图恒空，而主渠道是对的
+         *
+         * SQLite 的 `edges` 表在默认后端（ladybug）下按设计恒空 —— 所以关系
+         * 必须问 kl 的 HTTP。主渠道那套装配（下面 `graphQuery`）接了这一条，
+         * 而这里**没接**，于是「它认识的人与事」在飞书上永远是空面板，
+         * 尽管图真的建好了（实测：`entities=11 facts=13 edges=120`，
+         * 而界面上一个点都没有）。
+         *
+         * ★ 这是「主渠道与非主渠道两套路径」这个形状的又一次复现：加一个
+         * 能力要在两处各写一遍，漏一处就是一次静默错位。`ChannelRuntime`
+         * 收拢的是**服务实例**，这类逐个 option 的接线还没收 ——
+         * 下一轮该把 `GraphQueryService` 的装配也提成一个共用函数。
+         *
+         * ★ 用 `channelKl`（这个渠道自己那个 kl，端口不同）而不是主渠道的
+         * `klServer`：问错 kl 会拿到另一个渠道的关系边，而那比空面板更糟
+         * （不报错，只是答错，且答的是"这个人和谁有往来"）。
+         */
+        factsOfEntity: (entityId) => channelKl.factsOfEntity(entityId),
+        /**
          * ★★ 读**这个渠道自己**的身份行。
          *
          * 这里原来是 `() => []`，理由写的是"ego 图只走主渠道，「我是谁」的
