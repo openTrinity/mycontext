@@ -62,6 +62,22 @@ def test_chunk_insert_rolls_back_when_unit_insert_fails(tmp_path) -> None:
     assert store.sql_conn.execute("SELECT COUNT(*) FROM units").fetchone()[0] == 0
 
 
+def test_duplicate_chunk_ids_are_rejected_before_persistence(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "knowledge.db")
+
+    with pytest.raises(ValueError, match="duplicate chunk ids"):
+        store.insert_chunks_with_units(
+            [
+                Chunk(id="wiki:node:0", content="first"),
+                Chunk(id="wiki:node:0", content="second"),
+            ],
+            [],
+            [],
+        )
+
+    assert store.count_chunks() == 0
+
+
 def test_batch_workset_commits_and_cleans_up_with_lineage(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "knowledge.db")
     chunk = Chunk(id="ding:c1", content="one", source_type="message")

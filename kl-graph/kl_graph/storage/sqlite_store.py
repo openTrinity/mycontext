@@ -572,6 +572,20 @@ class SQLiteStore(KnowledgeStore):
         source_hash: str | None = None,
     ) -> None:
         """Commit chunks, unit lineage, and the batch workset atomically."""
+        seen_chunk_ids: set[str] = set()
+        duplicate_chunk_ids: list[str] = []
+        for chunk in chunks:
+            if chunk.id in seen_chunk_ids:
+                duplicate_chunk_ids.append(chunk.id)
+            seen_chunk_ids.add(chunk.id)
+        if duplicate_chunk_ids:
+            sample = ", ".join(repr(value) for value in duplicate_chunk_ids[:5])
+            raise ValueError(
+                "duplicate chunk ids in one persistence batch: "
+                f"{sample}. Chunk ids must identify retrieval chunks, not their "
+                "shared source container."
+            )
+
         now = int(time.time())
         with self.conn:
             if batch_id is not None:

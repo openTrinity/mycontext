@@ -11,6 +11,7 @@ is a coherent section rather than a whole document.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 from kl_graph.ingest.chunker import chunk_text
@@ -52,18 +53,26 @@ def load_wiki(wiki_dir: Path) -> list[Chunk]:
             continue
         scope = scopes.get(rec.get("scope_id"))
         node_id = _node_id_from_scope(scope, rec.get("scope_id", ""))
+        # A wiki node is a container, not necessarily one source unit. In
+        # particular, an aitable exports its schema and every row as separate
+        # ``document_unit`` records under the same node. Key lineage by the
+        # record identity and include it in chunk identity so every record can
+        # start its own segment numbering without colliding at ``:0``.
+        unit_id = str(rec.get("id") or f"wiki-node:{node_id}")
+        unit_key = uuid.uuid5(uuid.NAMESPACE_URL, unit_id).hex
         title = scope_title(scope)
         url = data.get("docUrl")
         parts = _split_markdown(body)
         for i, part in enumerate(parts):
             chunks.append(Chunk(
-                id=f"wiki:{node_id}:{i}",
+                id=f"wiki:{node_id}:{unit_key}:{i}",
                 content=part,
                 source_type="wiki",
                 timestamp=0,
                 source_ref=url,
                 metadata={
-                    "unit_id": node_id,
+                    "unit_id": unit_id,
+                    "record_id": unit_id,
                     "node_id": node_id,
                     "title": title,
                     "seg_idx": i,

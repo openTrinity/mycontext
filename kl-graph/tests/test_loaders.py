@@ -328,6 +328,44 @@ def test_wiki_split():
     check(all(len(p) <= 1000 for p in parts2), "hard-cut bounds chunks with no breaks")
 
 
+def test_wiki_records_in_one_node_have_distinct_chunk_and_unit_ids(tmp_path):
+    wiki_dir = _write_source(
+        tmp_path,
+        "wiki",
+        records=[
+            {
+                "id": "doc_unit:wiki/node-1/row-a",
+                "scope_id": "document:wiki/node-1",
+                "type": "document_unit",
+                "data": {"text": "first row"},
+            },
+            {
+                "id": "doc_unit:wiki/node-1/row-b",
+                "scope_id": "document:wiki/node-1",
+                "type": "document_unit",
+                "data": {"text": "second row"},
+            },
+        ],
+        scopes=[
+            {
+                "id": "document:wiki/node-1",
+                "type": "document",
+                "data": {"node": {"nodeId": "node-1", "name": "Table"}},
+            }
+        ],
+    )
+
+    chunks = load_wiki(wiki_dir)
+
+    assert len(chunks) == 2
+    assert len({chunk.id for chunk in chunks}) == 2
+    assert {chunk.metadata["unit_id"] for chunk in chunks} == {
+        "doc_unit:wiki/node-1/row-a",
+        "doc_unit:wiki/node-1/row-b",
+    }
+    assert {chunk.metadata["node_id"] for chunk in chunks} == {"node-1"}
+
+
 def test_sqlite_chunk_roundtrip():
     """Generic chunks table round-trips + type filter."""
     print("test_sqlite_chunk_roundtrip")
