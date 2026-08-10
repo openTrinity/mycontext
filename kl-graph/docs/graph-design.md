@@ -313,14 +313,15 @@ Pure retrieval logic that reads the graph but does not mutate it. Separated from
 | Q.2 | **Graph walk expansion** — BFS/DFS from seed nodes along typed edges | Expands context window |
 | Q.3 | **Community-guided retrieval** — use community membership to pull related content | Thematic expansion |
 | Q.4 | **PageRank / personalized scoring** — weight nodes by structural importance | Relevance ranking |
+| Q.5 | **Batch exact-neighbor lookup** — filter incident edges for typed nodes by edge type, direction, and neighbor type through the in-memory adjacency index built from the configured graph authority; preserve input order and paginate per node | Backend-neutral graph primitive |
 
 #### Sophisticated Operations (LLM, per-query)
 
 | Step | Operation | Effect |
 |------|-----------|--------|
-| Q.5 | **Query rewrite** — decompose complex queries into sub-queries | Better recall |
-| Q.6 | **LLM rerank** — rerank candidate set using LLM scoring | Precision boost |
-| Q.7 | **Global search** — GraphRAG-style map-reduce over the current user's community summaries for conceptual questions | Aggregated, grounded answer (read-only) |
+| Q.6 | **Query rewrite** — decompose complex queries into sub-queries | Better recall |
+| Q.7 | **LLM rerank** — rerank candidate set using LLM scoring | Precision boost |
+| Q.8 | **Global search** — GraphRAG-style map-reduce over the current user's community summaries for conceptual questions | Aggregated, grounded answer (read-only) |
 
 ---
 

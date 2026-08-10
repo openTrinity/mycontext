@@ -107,6 +107,36 @@ def test_similar_to_and_mentions_now_reached():
     print("ok  ENTITY_SIMILAR (entity) + MENTIONS (chunk) now walked")
 
 
+def test_fact_relationships_are_walk_reachable():
+    """The complete adjacency cache makes every designed fact edge walkable."""
+    adjacency = {
+        "F0": [
+            ("FACT_SIMILAR", "F1", "fact", "out"),
+            ("ENTAILS", "F2", "fact", "out"),
+            ("CONTRADICTS", "F3", "fact", "out"),
+        ]
+    }
+
+    nodes, edges, _ = gw.graph_walk(
+        adjacency,
+        [("fact:F0", 1.0)],
+        radius=1,
+        lambda_=0.5,
+        mini_threshold=0.0,
+    )
+
+    assert {node["id"] for node in nodes} >= {
+        "fact:F1",
+        "fact:F2",
+        "fact:F3",
+    }
+    assert {edge["type"] for edge in edges} >= {
+        "FACT_SIMILAR",
+        "ENTAILS",
+        "CONTRADICTS",
+    }
+
+
 def test_non_node_target_skipped_by_guard_and_no_crash():
     """An edge whose *edge_type is walkable* but whose *related_type* is not a
     modeled node (a bare conversation id, an unknown type) must be dropped by the

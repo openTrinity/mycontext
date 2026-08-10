@@ -217,28 +217,20 @@ def _query_sema() -> asyncio.Semaphore:
 
 
 def _build_adjacency_buckets_full(store: KnowledgeStore) -> dict:
-    """Build in-memory adjacency index from edges via KnowledgeStore.
+    """Index both endpoints of every graph-authority edge in memory.
 
-    Key: entity_id, fact_id, chunk_id or community_id (namespacing is applied
-    by the walk layer)
+    Key: bare node id (namespacing is applied by the walk layer)
     Value: list of (edge_type, related_id, related_type, direction)
 
-    Stores entity-keyed edges (for ego subgraph traversal and ENTITY_SIMILAR
-    expansion) plus fact-keyed ABOUT edges so an interactive walk sitting *on a
-    fact* can reach its entities, chunk-keyed edges from both ends (so a walk
-    that lands on a chunk via ``STATES``/``MENTIONS`` can expand along
-    ``TEMPORAL``/``REPLY_TO``/``MENTIONS`` instead of dead-ending), plus both
-    ends of every COMM_MEMBER edge so node→community and community→members are
-    traversable. ~125K edges -> ~10MB in memory.
+    Traversal policy remains in the graph-walk layer. The complete cache also
+    supports exact-neighbor reads for endpoints the walk may reject, such as
+    scopes, without querying the graph backend per request.
     """
     logger.info("Building in-memory adjacency index...")
     t0 = time.time()
     adj: dict[str, list] = {}
 
-    index_entries = 0
-    fact_count = 0
-    chunk_count = 0
-    community_count = 0
+    edge_count = 0
 
     for (
         source_type,
@@ -247,83 +239,15 @@ def _build_adjacency_buckets_full(store: KnowledgeStore) -> dict:
         target_id,
         edge_type,
     ) in store.scan_entity_edges():
-        # Entity as source (outgoing)
-        if source_type == "entity":
-            if source_id not in adj:
-                adj[source_id] = []
-            adj[source_id].append((edge_type, target_id, target_type, "out"))
-            index_entries += 1
-
-        # Entity as target (incoming) — for ABOUT edges (fact -> entity)
-        if target_type == "entity":
-            if target_id not in adj:
-                adj[target_id] = []
-            adj[target_id].append((edge_type, source_id, source_type, "in"))
-            index_entries += 1
-
-        # Fact-keyed walkable edges (fact -> entity via ABOUT)
-        if source_type == "fact" and edge_type == "ABOUT":
-            if source_id not in adj:
-                adj[source_id] = []
-            adj[source_id].append((edge_type, target_id, target_type, "out"))
-            fact_count += 1
-
-        # Chunk endpoints, both directions. A chunk is never an entity/fact key,
-        # so without this a walk that lands on a chunk (via a fact's STATES edge
-        # or an entity's MENTIONS edge) would dead-end instead of following
-        # TEMPORAL/REPLY_TO to its neighbours. The fact-keyed branch above only
-        # covers ABOUT, so the fact side of STATES is indexed here too. The
-        # entity end is skipped when the entity branches already indexed it, so
-        # no neighbour is listed twice.
-        if source_type == "chunk":
-            if source_id not in adj:
-                adj[source_id] = []
-            adj[source_id].append((edge_type, target_id, target_type, "out"))
-            chunk_count += 1
-        if target_type == "chunk":
-            if target_id not in adj:
-                adj[target_id] = []
-            adj[target_id].append((edge_type, source_id, source_type, "in"))
-            chunk_count += 1
-            if source_type not in ("entity", "chunk"):
-                if source_id not in adj:
-                    adj[source_id] = []
-                adj[source_id].append((edge_type, target_id, target_type, "out"))
-                chunk_count += 1
-
-        # Community endpoints, both directions: the fact-keyed branch above only
-        # covers ABOUT, so a fact's COMM_MEMBER would otherwise be unreachable,
-        # and the community itself is never an entity/fact key. Indexing both ends
-        # is what makes node<->community walkable (fan-out is capped at walk time
-        # by max_fanout). The node end is skipped when the entity branches above
-        # already indexed it, so no neighbour is listed twice.
-        if target_type == "community":
-            if source_type != "entity":
-                if source_id not in adj:
-                    adj[source_id] = []
-                adj[source_id].append((edge_type, target_id, target_type, "out"))
-                community_count += 1
-            if target_id not in adj:
-                adj[target_id] = []
-            adj[target_id].append((edge_type, source_id, source_type, "in"))
-            community_count += 1
-        elif source_type == "community":
-            if source_id not in adj:
-                adj[source_id] = []
-            adj[source_id].append((edge_type, target_id, target_type, "out"))
-            community_count += 1
-            if target_type != "entity":
-                if target_id not in adj:
-                    adj[target_id] = []
-                adj[target_id].append((edge_type, source_id, source_type, "in"))
-                community_count += 1
-
+        _append_adjacency_edge(
+            adj, (source_type, source_id, target_type, target_id, edge_type)
+        )
+        edge_count += 1
     elapsed = time.time() - t0
     logger.info(
-        f"Adjacency index: {len(adj)} keys, "
-        f"{index_entries} entity index entries + {fact_count} fact-keyed entries "
-        f"+ {chunk_count} chunk-keyed entries "
-        f"+ {community_count} community-keyed entries, {elapsed:.1f}s"
+        f"Adjacency index: {len(adj)} keys, {edge_count} edges / "
+        f"{sum(len(entries) for entries in adj.values())} endpoint entries, "
+        f"{elapsed:.1f}s"
     )
     return adj
 
@@ -365,28 +289,8 @@ def _append_adjacency_edge(
         if only_ids is None or node_id in only_ids:
             adjacency.setdefault(node_id, []).append(entry)
 
-    if source_type == "entity":
-        append(source_id, (edge_type, target_id, target_type, "out"))
-    if target_type == "entity":
-        append(target_id, (edge_type, source_id, source_type, "in"))
-    if source_type == "fact" and edge_type == "ABOUT":
-        append(source_id, (edge_type, target_id, target_type, "out"))
-
-    if source_type == "chunk":
-        append(source_id, (edge_type, target_id, target_type, "out"))
-    if target_type == "chunk":
-        append(target_id, (edge_type, source_id, source_type, "in"))
-        if source_type not in ("entity", "chunk"):
-            append(source_id, (edge_type, target_id, target_type, "out"))
-
-    if target_type == "community":
-        if source_type != "entity":
-            append(source_id, (edge_type, target_id, target_type, "out"))
-        append(target_id, (edge_type, source_id, source_type, "in"))
-    elif source_type == "community":
-        append(source_id, (edge_type, target_id, target_type, "out"))
-        if target_type != "entity":
-            append(target_id, (edge_type, source_id, source_type, "in"))
+    append(source_id, (edge_type, target_id, target_type, "out"))
+    append(target_id, (edge_type, source_id, source_type, "in"))
 
 
 def _adjacency_buckets(
@@ -929,6 +833,23 @@ class FactsRequest(BaseModel):
     limit: int = 20
 
 
+class NeighborNodeRequest(BaseModel):
+    type: Literal["entity", "fact", "chunk", "scope", "community"]
+    id: str = Field(min_length=1)
+
+
+class NeighborsRequest(BaseModel):
+    nodes: list[NeighborNodeRequest] = Field(max_length=2000)
+    edge_types: list[str] | None = None
+    direction: Literal["in", "out", "both"] = "both"
+    target_types: list[
+        Literal["entity", "fact", "chunk", "scope", "community"]
+    ] | None = None
+    limit_per_node: int = Field(default=100, ge=1, le=2000)
+    cursor: dict[str, int] = Field(default_factory=dict)
+    hydrate: bool = True
+
+
 class CommunityRequest(BaseModel):
     level: str = "L1"
     node_type: str = "entity"
@@ -960,7 +881,8 @@ class TimelineRequest(BaseModel):
 
 class GraphHopRequest(BaseModel):
     node_id: str  # "ent:.." | "fact:.."
-    cursor: dict  # echoed from the previous response
+    # Omit or pass {} for the first hop; otherwise echo the prior response cursor.
+    cursor: dict = Field(default_factory=dict)
     max_fanout: int = 10
 
 
@@ -1871,6 +1793,189 @@ def _entity_facts_impl(req: FactsRequest):
             }
             for f in facts
         ],
+    }
+
+
+@app.post("/neighbors")
+async def neighbors(req: NeighborsRequest):
+    """Read exact, filtered graph neighbors for a batch of typed nodes."""
+    async with _query_sema():
+        return await asyncio.to_thread(_neighbors_impl, req)
+
+
+def _hydrate_neighbor_nodes(
+    refs: set[tuple[str, str]],
+) -> dict[tuple[str, str], dict]:
+    """Hydrate graph-node references in bounded SQLite batches."""
+    hydrated: dict[tuple[str, str], dict] = {}
+    by_type: dict[str, list[str]] = {}
+    for node_type, node_id in refs:
+        by_type.setdefault(node_type, []).append(node_id)
+
+    specs = {
+        "entity": (
+            "entities",
+            "id, name, entity_type, mention_count",
+            "quality_status = 'active'",
+        ),
+        "fact": (
+            "facts",
+            "id, text, fact_type, timestamp, confidence",
+            None,
+        ),
+        "chunk": (
+            "chunks",
+            "id, source_type, timestamp, source_ref",
+            None,
+        ),
+        "scope": (
+            "scopes",
+            "id, scope_type, title",
+            None,
+        ),
+        "community": (
+            "communities",
+            "id, level, node_type, summary, member_count",
+            None,
+        ),
+    }
+    for node_type, ids in by_type.items():
+        spec = specs.get(node_type)
+        if spec is None:
+            continue
+        table, columns, extra_where = spec
+        unique_ids = list(dict.fromkeys(ids))
+        for start in range(0, len(unique_ids), 500):
+            batch = unique_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            where = f"id IN ({placeholders})"
+            if extra_where:
+                where += f" AND {extra_where}"
+            rows = state.sqlite_conn.execute(
+                f"SELECT {columns} FROM {table} WHERE {where}",  # noqa: S608
+                batch,
+            ).fetchall()
+            for row in rows:
+                base = {"type": node_type, "id": row[0]}
+                if node_type == "entity":
+                    base.update(
+                        name=row[1], entity_type=row[2], mention_count=row[3]
+                    )
+                elif node_type == "fact":
+                    base.update(
+                        text=row[1],
+                        fact_type=row[2],
+                        timestamp=row[3],
+                        confidence=row[4],
+                    )
+                elif node_type == "chunk":
+                    base.update(
+                        source_type=row[1], timestamp=row[2], source_ref=row[3]
+                    )
+                elif node_type == "scope":
+                    base.update(scope_type=row[1], title=row[2])
+                elif node_type == "community":
+                    base.update(
+                        level=row[1],
+                        community_node_type=row[2],
+                        summary=row[3],
+                        member_count=row[4],
+                    )
+                hydrated[(node_type, str(row[0]))] = base
+    return hydrated
+
+
+def _neighbors_impl(req: NeighborsRequest):
+    """Return exact adjacency pages without graph-walk scoring.
+
+    Edges come from the backend-neutral in-memory adjacency index, never from
+    SQLite's edge table (which is intentionally empty when LadybugDB is the
+    configured graph authority). Node properties use bounded SQLite reads; the
+    vector stores are not opened or queried.
+    """
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+
+    adjacency = state.adjacency or {}
+    edge_types = {value.upper() for value in req.edge_types or ()}
+    target_types = set(req.target_types or ())
+    source_refs: list[tuple[str, str, str]] = []
+    target_refs: set[tuple[str, str]] = set()
+    candidates: list[tuple[str, str, str, list[tuple]]] = []
+
+    for node in req.nodes:
+        bare_id = gw.strip_prefix(node.id)
+        cursor_key = gw.namespaced(bare_id, node.type)
+        source_refs.append((node.type, bare_id, cursor_key))
+        filtered = []
+        seen_edges: set[tuple] = set()
+        for edge_type, related_id, related_type, direction in adjacency.get(
+            bare_id, ()
+        ):
+            edge_key = (edge_type, related_type, related_id, direction)
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            if edge_types and edge_type.upper() not in edge_types:
+                continue
+            if req.direction != "both" and direction != req.direction:
+                continue
+            if target_types and related_type not in target_types:
+                continue
+            filtered.append(edge_key)
+        filtered.sort(key=lambda edge: (edge[0], edge[1], edge[2], edge[3]))
+        candidates.append((node.type, bare_id, cursor_key, filtered))
+        target_refs.update((edge[1], edge[2]) for edge in filtered)
+
+    hydrated = _hydrate_neighbor_nodes(
+        {(node_type, node_id) for node_type, node_id, _key in source_refs}
+        | target_refs
+    )
+    next_cursor: dict[str, int] = {}
+    results = []
+    for node_type, node_id, cursor_key, candidate_edges in candidates:
+        source = hydrated.get((node_type, node_id))
+        visible_edges = [
+            edge
+            for edge in candidate_edges
+            if (edge[1], edge[2]) in hydrated
+        ]
+        offset = max(0, int(req.cursor.get(cursor_key, 0)))
+        page = visible_edges[offset : offset + req.limit_per_node]
+        total = len(visible_edges)
+        next_offset = min(total, offset + len(page))
+        next_cursor[cursor_key] = next_offset
+        edges = []
+        for edge_type, related_type, related_id, direction in page:
+            target = hydrated.get((related_type, related_id))
+            if target is None:
+                continue
+            edges.append(
+                {
+                    "type": edge_type,
+                    "direction": direction,
+                    "node": target
+                    if req.hydrate
+                    else {"type": related_type, "id": related_id},
+                }
+            )
+        results.append(
+            {
+                "node": source
+                if req.hydrate and source is not None
+                else {"type": node_type, "id": node_id},
+                "found": source is not None,
+                "edges": edges if source is not None else [],
+                "total": total if source is not None else 0,
+                "has_more": source is not None and next_offset < total,
+            }
+        )
+
+    return {
+        "results": results,
+        "count": len(results),
+        "cursor": next_cursor,
+        "has_more": any(result["has_more"] for result in results),
     }
 
 

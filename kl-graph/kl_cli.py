@@ -1014,8 +1014,9 @@ def global_search(query: str, user_name: str | None, json_out: bool):
 @click.option(
     "--cursor",
     "-c",
-    required=True,
-    help="Opaque cursor JSON echoed from a prior 'ask'/'hop' response",
+    default="{}",
+    show_default=True,
+    help="Prior ask/hop cursor JSON; use {} or omit for the first hop",
 )
 @click.option("--max-fanout", type=int, default=10, help="Max neighbors to expand")
 @click.option(
