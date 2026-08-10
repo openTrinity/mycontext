@@ -8,6 +8,7 @@
  * 混在组件里的话只能靠 CDP 探针去读渲染结果，那种断言又慢又脆。
  */
 import type {
+  DashboardTrends,
   DistillProgressView,
   FeedInfo,
   IngestSnapshot,
@@ -751,4 +752,160 @@ export function readIdentityProblem(input: {
   const adoptable = input.adoptable
   if (adoptable === null || adoptable === undefined) return { kind: "resolve" }
   return { kind: "adopt", corpName: adoptable.corpName, userName: adoptable.userName }
+}
+
+// ---------------------------------------------------------------
+// 时序 + 消化漏斗
+// ---------------------------------------------------------------
+
+/**
+ * 一个周期的汇总（时序图上方那几个数）。
+ *
+ * ★ 全部是**这个窗口内**的量，与仪表盘顶部的"总共有多少"是两回事。
+ * 混在一起是这一页最容易读错的地方，所以文案上必须带周期
+ * （"近 30 天收到 8,142 条"而不是"收到 8,142 条"）。
+ */
+export interface TrendSummary {
+  /** 窗口内收到的消息数 */
+  inbound: number
+  /** 窗口内发出的消息数 */
+  outbound: number
+  /** 窗口内进了图谱的块数 */
+  chunks: number
+  /** 日均（按**有数据的天**算，不是按窗口天数）*/
+  perDay: number
+  /** 最忙的那天（unix ms + 条数）；null = 窗口内一条都没有 */
+  busiest: { at: number; count: number } | null
+  /**
+   * 窗口内**一条消息都没有**的天数。
+   *
+   * ★ 单独摊出来：那些天是"采集断了"还是"周末"，用户自己知道 ——
+   * 但界面必须先让他看见有几天是空的。曲线上的低谷不带数字，
+   * 而"11 天没有数据"是个能立刻判断的事实。
+   */
+  emptyDays: number
+}
+
+export function readTrendSummary(trends: DashboardTrends | null): TrendSummary | null {
+  if (trends === null || trends.days.length === 0) return null
+  let inbound = 0
+  let outbound = 0
+  let chunks = 0
+  let emptyDays = 0
+  let busiest: { at: number; count: number } | null = null
+  for (const day of trends.days) {
+    inbound += day.inbound
+    outbound += day.outbound
+    chunks += day.chunks
+    const total = day.inbound + day.outbound
+    if (total === 0) emptyDays += 1
+    if (busiest === null || total > busiest.count) busiest = { at: day.at, count: total }
+  }
+  /**
+   * ★ 日均按**有数据的天**算。
+   *
+   * 按窗口天数算的话，一个刚采了 3 天的库选「近 90 天」会显示一个
+   * 除以 90 的日均 —— 那个数字既不是他的真实节奏，也不说明任何问题。
+   * `daysWithData` 为 0 时给 0（而不是 NaN）。
+   */
+  const denominator = trends.daysWithData > 0 ? trends.daysWithData : 0
+  return {
+    inbound,
+    outbound,
+    chunks,
+    perDay: denominator === 0 ? 0 : Math.round((inbound + outbound) / denominator),
+    // 最忙那天是 0 条时当成"没有"——一个全空的窗口没有"最忙的一天"
+    busiest: busiest !== null && busiest.count > 0 ? busiest : null,
+    emptyDays,
+  }
+}
+
+/**
+ * 图谱落后的一句话 + 语气。
+ *
+ * ## ★★ 判据：按**比例**而不是按绝对条数
+ *
+ * 绝对条数在小库上没有意义（刚装的库落后 500 条是正常的在途量），
+ * 而在大库上 500 条又太宽。用"消化了百分之多少"才在两端都成立。
+ *
+ * · ≥ 95% → good：追平了（留 5% 给在途）；
+ * · ≥ 70% → neutral：在追，正常；
+ * · ≥ 30% → warn：落后明显，多半是很久没建图；
+ * · 否则 → bad：实测本机就是这一档（8.4%）——那是"建图基本没跑过"。
+ *
+ * ★ `head === 0` 时返回 null（不是 good）：那是**还没有任何数据**，
+ * 而"追平了"会让一个空库看起来像一个健康的库。
+ */
+export interface GraphLagView {
+  /** 已消化的比例 0~1；null = 还没有数据 */
+  ratio: number | null
+  /** 落后的条数 */
+  behind: number
+  tone: MetricTone
+  /** 一句人话；null = 没什么要说的（已追平） */
+  text: string | null
+}
+
+export const GRAPH_LAG_GOOD = 0.95
+export const GRAPH_LAG_OK = 0.7
+export const GRAPH_LAG_WARN = 0.3
+
+export function readGraphLag(trends: DashboardTrends | null): GraphLagView | null {
+  if (trends === null) return null
+  const { head, build } = trends.graphLag
+  if (head === 0) return null
+  const ratio = Math.min(1, build / head)
+  const behind = Math.max(0, head - build)
+  if (ratio >= GRAPH_LAG_GOOD) {
+    return { ratio, behind, tone: "good", text: null }
+  }
+  const pct = `${(ratio * 100).toFixed(1)}%`
+  if (ratio >= GRAPH_LAG_OK) {
+    return {
+      ratio,
+      behind,
+      tone: "neutral",
+      text: `图谱已消化 ${pct}，还差 ${formatCount(behind)} 条`,
+    }
+  }
+  if (ratio >= GRAPH_LAG_WARN) {
+    return {
+      ratio,
+      behind,
+      tone: "warn",
+      text: `图谱只消化了 ${pct}（还差 ${formatCount(behind)} 条）—— 建议跑一次建图`,
+    }
+  }
+  return {
+    ratio,
+    behind,
+    tone: "bad",
+    /**
+     * ★ 这句话**必须指出"图里的数字是局部的"**。
+     *
+     * 实测本机 8.4%：仪表盘显示 602 个实体、975 条事实，而那是从 2,871 条
+     * （共 34,142 条）里抽出来的。用户会把那些数字当成"它了解我的全部"，
+     * 于是搜不到东西时以为是检索不行 —— 而真正的原因是大部分聊天还没进图。
+     */
+    text: `图谱只消化了 ${pct} 的数据（还差 ${formatCount(behind)} 条）—— 下面的实体与事实只覆盖这一小部分`,
+  }
+}
+
+/**
+ * fact 时间戳覆盖的一句话。
+ *
+ * ★ 这一条是**给时序图兜底的**：实测 54% 的 fact `timestamp=0`
+ * （CAUSAL 类 70%）。任何"事实按时间"的图都会静默丢掉那些，
+ * 所以必须有一句话说出被丢掉了多少。不说就是新的静默降级。
+ *
+ * `null` = 没什么要说的（全都有时间戳，或还没有 fact）。
+ */
+export function readFactTimestampGap(trends: DashboardTrends | null): string | null {
+  if (trends === null) return null
+  const { done, total } = trends.coverage.factsTimestamped
+  if (total === 0) return null
+  const missing = total - done
+  if (missing === 0) return null
+  const pct = ((missing / total) * 100).toFixed(0)
+  return `另有 ${formatCount(missing)} 条事实没有时间戳（${pct}%），不计入按时间的统计`
 }

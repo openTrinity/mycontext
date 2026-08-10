@@ -224,6 +224,91 @@ export function Distribution({ rows, onPick, selected }: DistributionProps) {
   )
 }
 
+export interface CoverageBarProps {
+  label: string
+  /** 分子：已完成的个数 */
+  done: number
+  /** 分母：总数 */
+  total: number
+  /** 条的颜色（已完成那一段） */
+  color: string
+  /**
+   * 覆盖率低于这个比例时把数值染成警告色。`null` = 从不染色。
+   *
+   * ★ 阈值由**调用方**给，因为"多少算低"随指标而变：媒体下载率 0.35%
+   * 是真问题，而社群摘要 4/16 只是还没跑完 improve。
+   * 写死一个 80% 会让后者天天亮黄灯 —— 而一个天天亮灯的仪表盘
+   * 等于没有仪表盘（见 `dashboard-data.ts` 里 `lagTone` 的同一个论证）。
+   */
+  warnBelow?: number | null
+  /** 一句话说清"没覆盖的那部分意味着什么" */
+  hint?: string
+}
+
+/**
+ * 覆盖度条：`已完成 / 总数`。
+ *
+ * ## ★ 为什么是「分子/分母」而不是一个百分比
+ *
+ * 百分比丢掉了量级，而量级恰恰决定要不要管：`0/0` 与 `0/2844` 都是
+ * "0%"，但前者是"还没有数据"（不用管），后者是"2844 个都没下载"
+ * （要管）。所以两个数都摊开，百分比只是辅助。
+ *
+ * 几何与 `Distribution` 保持一致（同一页里两种条不该长得不一样）：
+ * 10px 高、数据端 4px 圆角、同色系浅轨道、直接标数值。
+ */
+export function CoverageBar({
+  label,
+  done,
+  total,
+  color,
+  warnBelow = null,
+  hint,
+}: CoverageBarProps) {
+  /**
+   * ★ `total === 0` 时比例给 0 而不是 NaN —— `NaN%` 会直接进 DOM。
+   * 而这一档的语气是 `muted`（"这个数字现在没有意义"），
+   * 不是 `bad`：一个空系统不该看起来像一个坏系统。
+   */
+  const ratio = total === 0 ? 0 : done / total
+  const empty = total === 0
+  const warn = !empty && warnBelow !== null && ratio < warnBelow
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-3">
+        <span className="typography-caption-400 w-[92px] shrink-0 truncate text-[var(--text-base-secondary)]">
+          {label}
+        </span>
+        <span
+          className="relative h-[10px] min-w-0 flex-1 overflow-hidden rounded-[2px]"
+          style={{ background: `color-mix(in oklab, ${color} 12%, transparent)` }}
+        >
+          <span
+            className="absolute inset-y-0 left-0 rounded-l-[2px] rounded-r-[4px]"
+            style={{
+              width: `${String(Math.max(ratio * 100, done > 0 ? 1.5 : 0))}%`,
+              background: color,
+            }}
+          />
+        </span>
+        {/* 分子/分母。列对齐 → tabular-nums */}
+        <span
+          className={cn(
+            "typography-caption-400 w-[104px] shrink-0 text-right tabular-nums",
+            empty ? TONE_VALUE.muted : warn ? TONE_VALUE.warn : "text-[var(--text-base-primary)]",
+          )}
+        >
+          {empty ? "还没有" : `${done.toLocaleString()} / ${total.toLocaleString()}`}
+        </span>
+      </div>
+      {hint === undefined || empty ? null : (
+        <p className="typography-caption-400 pl-[104px] text-[var(--text-base-tertiary)]">{hint}</p>
+      )}
+    </div>
+  )
+}
+
 export interface SectionProps {
   title: string
   subtitle?: string

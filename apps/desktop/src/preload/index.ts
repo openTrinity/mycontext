@@ -179,6 +179,9 @@ const api: MyContextApi = {
       return () => ipcRenderer.removeListener(IPC_EVENTS.klServerStatus, handler)
     },
   },
+  dashboard: {
+    trends: (input) => ipcRenderer.invoke(IPC_CHANNELS.dashboardTrends, input),
+  },
   advancedAi: {
     read: () => ipcRenderer.invoke(IPC_CHANNELS.advancedAiRead),
     save: (input) => ipcRenderer.invoke(IPC_CHANNELS.advancedAiSave, input),

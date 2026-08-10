@@ -192,6 +192,19 @@ export function FactsExplorer({
             <button
               key={range.key}
               type="button"
+              /**
+               * ★ 标出这是**哪一组**时间范围。
+               *
+               * 仪表盘上现在有两组「近 7/30/90 天」——这一组筛事实，
+               * 另一组（`data-range-scope="trends"`）切时序图的窗口。
+               * 两组都是匿名的 `button[aria-pressed]` + 相同文案时，
+               * 按文案找元素的探针会**命中错的那一组**：实测
+               * `check-dashboard-ui` 因此把时序图切成 7 天，然后报
+               * 「事实过滤器没生效」—— 一个完全错误的结论。
+               *
+               * 所以这个属性是给门禁用的**稳定锚点**，不是样式钩子。
+               */
+              data-range-scope="facts"
               aria-pressed={days === range.days}
               onClick={() => reset(setDays)(range.days)}
               className={cn(

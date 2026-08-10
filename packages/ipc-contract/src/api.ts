@@ -53,6 +53,8 @@ import type {
   KlGraphEgo,
   KlGraphFacts,
   KlGraphFactsInput,
+  DashboardTrends,
+  DashboardTrendsInput,
   LanguagePreference,
   RuntimeConfigView,
   SaveRuntimeConfigInput,
@@ -490,6 +492,16 @@ export interface MyContextApi {
     graphOptimize(): Promise<Result<KlGraphOptimizeResult>>
     /** 订阅状态变化。返回取消订阅函数。 */
     onStatus(listener: (status: KlServerStatus) => void): () => void
+  }
+  dashboard: {
+    /**
+     * 时序（按天分桶）+ 消化漏斗 + 覆盖度。
+     *
+     * ★ 与 `ingest.snapshot()` **分开**的通道：分桶实测 108ms
+     * （本机 32,878 行），而快照是每批采集都发的热路径。
+     * 主进程侧按 changelog head 缓存 —— head 没动就是上次那份。
+     */
+    trends(input: DashboardTrendsInput): Promise<Result<DashboardTrends>>
   }
   advancedAi: {
     /** 读配置。apiKey 只回后 4 位 */

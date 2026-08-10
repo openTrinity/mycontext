@@ -32,6 +32,7 @@ import {
   mediaUploadImageInputSchema,
   mediaSaveAsInputSchema,
   klGraphFactsInputSchema,
+  dashboardTrendsInputSchema,
   personaMessagesInputSchema,
   personaRunsInputSchema,
   personaRunDetailInputSchema,
@@ -77,6 +78,7 @@ import type { DataPlaneService } from "../services/data-plane.service.js"
 import type { SearchService } from "../services/search.service.js"
 import type { KlServerService } from "../services/kl-server.service.js"
 import type { GraphQueryService } from "../services/graph-query.service.js"
+import type { DashboardTrendsService } from "../services/dashboard-trends.service.js"
 import type { AdvancedAiService } from "../services/advanced-ai.service.js"
 import type { DwsSourceService } from "../services/dws-source.service.js"
 import type { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
@@ -98,6 +100,8 @@ export interface IpcDependencies {
   search: SearchService
   klServer: KlServerService
   graphQuery: GraphQueryService
+  /** 仪表盘的时序 + 消化漏斗（独立通道，见该服务的文件头） */
+  dashboardTrends: DashboardTrendsService
   advancedAi: AdvancedAiService
   dwsSource: DwsSourceService
   runtimeConfig: RuntimeConfigService
@@ -139,6 +143,7 @@ export function registerIpc(deps: IpcDependencies): void {
     search,
     klServer,
     graphQuery,
+    dashboardTrends,
     advancedAi,
     dwsSource,
     runtimeConfig,
@@ -737,6 +742,19 @@ export function registerIpc(deps: IpcDependencies): void {
    */
   ipcMain.handle(IPC_CHANNELS.klGraphFacts, (_event, payload: unknown) =>
     attempt(() => Promise.resolve(graphQuery.facts(parse(klGraphFactsInputSchema, payload)))),
+  )
+
+  /**
+   * 仪表盘的时序（按天分桶）+ 消化漏斗 + 覆盖度。
+   *
+   * ★ 独立通道而不是并进 `ingestSnapshot`：分桶实测 108ms（本机 32,878 行），
+   * 而那个快照是每批采集都发的热路径。服务侧按 changelog head 缓存 ——
+   * head 没动就直接返回上次那份（1ms 判定）。
+   */
+  ipcMain.handle(IPC_CHANNELS.dashboardTrends, (_event, payload: unknown) =>
+    attempt(() =>
+      Promise.resolve(dashboardTrends.trends(parse(dashboardTrendsInputSchema, payload))),
+    ),
   )
 
   // ---------------- 隐藏的极客配置页 ----------------

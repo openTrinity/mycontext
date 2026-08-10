@@ -39,14 +39,15 @@
  * 配色是**验证过的**（见 `../graph/palette.ts` 文件头记的那两组
  * `ALL CHECKS PASS`），不是挑好看的。
  */
-import { useEffect, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { Avatar, Button } from "@mycontext/design"
+import { Avatar, Button, Panel, PanelHeader } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
   useAdoptableSession,
   useBootstrapState,
   useChannels,
+  useDashboardTrends,
   useDistillProgress,
   useFeedInfo,
   useIngestSnapshot,
@@ -62,22 +63,26 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useTheme } from "../../lib/use-theme.js"
 import { EgoGraphPanel } from "../graph/ego-graph-panel.js"
 import { FactsExplorer } from "../graph/facts-explorer.js"
-import { entityColor } from "../graph/palette.js"
+import { ENTITY_NEUTRAL, entityColor } from "../graph/palette.js"
 import { personaIdentityFromSteps } from "../persona/persona-identity.js"
 import { FocusBridge } from "./focus-bridge.js"
+import { Funnel } from "./funnel.js"
 import { GraphDetailPopover } from "./graph-detail-popover.js"
 import { GreetingRow, pickChannelNick, resolveGreetingName } from "./greeting-row.js"
 import { PersonaCard } from "./identity.js"
-import { Distribution, Section } from "./primitives.js"
+import { CoverageBar, Distribution, Section } from "./primitives.js"
 import {
   classifyGraphReason,
   describeKl,
   formatCount,
+  readFactTimestampGap,
+  readGraphLag,
   readIdentityBar,
   readIdentityProblem,
   readIngest,
   readPersona,
   readProcessing,
+  readTrendSummary,
 } from "./dashboard-data.js"
 
 /** 一句话的问题提示条。全页共用一种样式，于是"哪里坏了"扫一眼就找得到。 */
@@ -560,6 +565,25 @@ export function DashboardModule() {
       {/* ── 组 A 结束 ─────────────────────────────────────── */}
 
       {/*
+        ── 数据流水与消化 ───────────────────────────────────
+
+        ★ 这个板块回答的是组 A **答不了**的那个问题。
+
+        组 A 的数字全是**累计标量**（32,878 条消息、602 个实体）。它们说
+        "有多少"，但说不出两件事：
+
+        ① **节律** —— 一个周期内进来了多少、什么时候忙。曲线一眼就有，
+           而一个总数永远看不出来；
+        ② **消化率** —— 喂进去多少 vs 真的落地多少。实测本机图谱只消化了
+           8.4%（`graph-build` 水位 2,871 / changelog head 34,142），
+           而组 A 那 602 个实体看起来完全正常。
+
+        第二条是这一块存在的主要理由：那是一个**当前完全不可见**的缺口，
+        而它决定了检索与画像的上限。见 `readGraphLag` 的判据注释。
+      */}
+      <TrendsSection building={building} />
+
+      {/*
         ── 它认识的人与事 ───────────────────────────────────
 
         ★ 图与事实**合成一个板块**，不是两个。
@@ -737,5 +761,277 @@ function MiniStat({ label, value }: { label: string; value: string }) {
         {value}
       </span>
     </div>
+  )
+}
+
+/**
+ * 周期选项。
+ *
+ * ★ 与事实面板那组（7/30/90）保持一致 —— 同一页里两个周期选择器
+ * 给不同的档位，用户会以为它们量的是不同的东西。
+ */
+const TREND_RANGES = [
+  { days: 7, label: "近 7 天" },
+  { days: 30, label: "近 30 天" },
+  { days: 90, label: "近 90 天" },
+] as const
+
+/**
+ * ★★ recharts **懒加载**，这是本文件唯一的 `lazy`。
+ *
+ * 实测产物（`electron-vite build`，不是估算）：图表落到一个
+ * **801 KiB raw / 164 KiB gzip** 的独立 chunk，而首屏 entry 只从
+ * 6003 KiB 涨到 6028 KiB（+25 KiB，0.4%）—— 那 25 KiB 是与 renderer
+ * 共用的依赖被提到共享图上，不是 recharts 独有的开销。
+ * 产物里 `grep -c recharts`：chunk 75 次，首屏 entry **0 次**。
+ *
+ * 仪表盘是打开应用第一眼的那一页 —— 为一张要滚一下才看到的图在首屏
+ * 多解析 800 KiB 不值得。
+ *
+ * ★ 必须放在**模块顶层**：写在组件里的话每次渲染都造一个新的 lazy 组件，
+ * React 会把它当成不同的类型 → 每次重挂载 → 每次重播 Suspense 兜底。
+ */
+const TrendChart = lazy(() => import("./trend-chart.js"))
+
+/**
+ * 数据流水与消化。
+ *
+ * ## ★ 为什么单独一个组件而不是写在 `DashboardModule` 里
+ *
+ * 它有自己的 state（周期）与自己的 query。写在上面那个组件里的话，
+ * 切周期会让**整页**重渲染（含 ego 图那张 canvas 与事实列表）——
+ * 而实际变的只有这一块。
+ */
+function TrendsSection({ building }: { building: boolean }) {
+  const [days, setDays] = useState<number>(30)
+  const trends = useDashboardTrends(days, building)
+  const { resolved: mode } = useTheme()
+
+  const data = trends.data ?? null
+  const summary = readTrendSummary(data)
+  const lag = readGraphLag(data)
+  const factGap = readFactTimestampGap(data)
+
+  /**
+   * 图上有没有数据。
+   *
+   * ★ 判据是 `days.length > 0` 而**不是** `summary !== null`：
+   * vault 没挂载时 `days` 是空数组（见服务侧 `emptyTrends` 的注释 ——
+   * 刻意不返回一串 0，否则会画出一条"90 天全是 0"的曲线，
+   * 那看起来像采集彻底坏了）。
+   */
+  const hasData = data !== null && data.days.length > 0
+
+  return (
+    <Section
+      title="数据流水与消化"
+      grid={false}
+      subtitle={
+        summary === null
+          ? "还没有可统计的数据"
+          : `${formatCount(summary.inbound + summary.outbound)} 条消息 · 日均 ${formatCount(summary.perDay)} 条` +
+            (data !== null && data.daysWithData < data.windowDays
+              ? ` · 实际覆盖 ${String(data.daysWithData)} 天`
+              : "")
+      }
+      action={
+        /*
+          周期选择器。`aria-pressed` 而不是 `role="tablist"`：
+          它切的是同一块内容的取值范围，不是切换面板。
+
+          ★★ `data-range-scope="trends"` 是**必须的**，不是可选的元数据。
+
+          这一页现在有**两组**「近 7/30/90 天」：这一组切时序图的窗口，
+          事实面板那组筛事实。两组都是匿名 `button[aria-pressed]` 且文案
+          完全相同 —— 实测 `check-dashboard-ui` 因此命中了错的那一组
+          （它按文案 `.find()`，而本组在 DOM 里更靠前），把时序图切成
+          7 天之后报「事实过滤器没生效 159 → 159」。
+
+          那是一个**假故障**：过滤器好得很，是探针点错了按钮。
+          所以两组各带一个 scope，门禁按 scope 取自己那一组。
+        */
+        <div className="flex items-center gap-1">
+          {TREND_RANGES.map((range) => (
+            <button
+              key={range.days}
+              type="button"
+              data-range-scope="trends"
+              aria-pressed={days === range.days}
+              onClick={() => setDays(range.days)}
+              className={`typography-caption-400 rounded-[var(--radius-sm)] px-2 py-1 transition-colors duration-150 ${
+                days === range.days
+                  ? "bg-[var(--bg-card-z0)] text-[var(--text-base-primary)]"
+                  : "text-[var(--text-base-tertiary)] hover:bg-[var(--overlay-on-container-hover)]"
+              }`}
+            >
+              {range.label}
+            </button>
+          ))}
+        </div>
+      }
+    >
+      {/*
+        ★★ 图谱落后那句话排在**图之前**。
+
+        它是这一整块的结论（"下面的实体与事实只覆盖一小部分"），
+        而结论放在图后面就成了脚注 —— 用户看完图已经形成判断了。
+        只在 warn/bad 时出现（见 `readGraphLag`：追平时返回 null）。
+      */}
+      {lag?.text === undefined || lag.text === null ? null : (
+        <ProblemLine text={lag.text} tone={lag.tone === "bad" ? "bad" : "warn"} />
+      )}
+
+      <Panel tone="raised" className="flex flex-col gap-4">
+        {hasData ? (
+          <>
+            {/* 图例 —— 手写而不用 recharts 的 `<Legend>`：那个的排版与
+                字号跟不上这一页的 token，而这里只有三项。 */}
+            <div className="flex flex-wrap items-center gap-4">
+              <LegendDot color={entityColor("Person", mode)} label="收到" />
+              <LegendDot color={entityColor("System", mode)} label="发出" />
+              {data.graphAvailable ? (
+                <LegendDot color={ENTITY_NEUTRAL[mode]} label="进了图谱" />
+              ) : null}
+              {summary?.busiest === undefined || summary.busiest === null ? null : (
+                <span className="typography-caption-400 ml-auto text-[var(--text-base-tertiary)]">
+                  最忙{" "}
+                  {new Date(summary.busiest.at).toLocaleDateString("zh-CN", {
+                    month: "numeric",
+                    day: "numeric",
+                  })}
+                  {" · "}
+                  {formatCount(summary.busiest.count)} 条
+                </span>
+              )}
+            </div>
+            {/*
+              `Suspense` 的兜底是一个**等高的空块**，不是 spinner：
+              chunk 从本地磁盘加载是几十毫秒，一个转圈会闪一下就消失
+              —— 那比什么都不显示更吵。等高是为了不跳布局。
+            */}
+            <Suspense fallback={<div className="h-[260px]" />}>
+              <TrendChart
+                days={data.days}
+                mode={mode}
+                showChunks={data.graphAvailable}
+                height={260}
+              />
+            </Suspense>
+            {summary !== null && summary.emptyDays > 0 ? (
+              <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+                其中 {String(summary.emptyDays)} 天没有任何消息 —— 周末，或那几天采集没跑
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <p className="typography-body-small-400 py-8 text-center text-[var(--text-base-tertiary)]">
+            {trends.isLoading ? "正在统计…" : "还没有采集到数据 —— 先在设置里连上钉钉"}
+          </p>
+        )}
+      </Panel>
+
+      {/* 漏斗与覆盖度并排：两者都是"全不全"的问题，同一层级 */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Panel tone="raised" className="flex flex-col gap-3">
+          <PanelHeader title="消化漏斗" hint="喂进去多少 → 落地多少" />
+          <Funnel
+            stages={[
+              {
+                label: "消息",
+                value: data?.funnel.messages ?? null,
+                color: entityColor("Person", mode),
+              },
+              {
+                label: "处理单元",
+                value: data?.graphAvailable === true ? data.funnel.units : null,
+                color: entityColor("Person", mode),
+                hint: "含文档与听记，所以可能略多于消息数",
+              },
+              {
+                label: "文本块",
+                value: data?.graphAvailable === true ? data.funnel.chunks : null,
+                color: entityColor("Project", mode),
+                hint: "多条消息合成一块，掉下来是设计如此",
+              },
+              {
+                label: "事实",
+                value: data?.graphAvailable === true ? data.funnel.facts : null,
+                color: entityColor("Organization", mode),
+                hint: "每块抽出的陈述句 —— 这一步烧 LLM",
+              },
+              {
+                label: "实体",
+                value: data?.graphAvailable === true ? data.funnel.entities : null,
+                color: entityColor("System", mode),
+              },
+            ]}
+          />
+          {data?.graphAvailable === false ? (
+            <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              后四级读不到 —— 还没建过图谱（点上面那块的「同步」）
+            </p>
+          ) : null}
+        </Panel>
+
+        <Panel tone="raised" className="flex flex-col gap-3">
+          <PanelHeader title="覆盖度" hint="已经拿到的 / 应该有的" />
+          <div className="flex flex-col gap-3">
+            <CoverageBar
+              label="事实有时间"
+              done={data?.coverage.factsTimestamped.done ?? 0}
+              total={data?.coverage.factsTimestamped.total ?? 0}
+              color={entityColor("Organization", mode)}
+              /*
+                ★ 0.6 这个阈值：实测本机 450/975 = 46% 会亮黄。那是**对的** ——
+                一半的事实没有时间戳意味着"上周的决策有哪些"这类问题
+                只能在另一半里找。
+              */
+              warnBelow={0.6}
+              {...(factGap === null ? {} : { hint: factGap })}
+            />
+            <CoverageBar
+              label="媒体已下载"
+              done={data?.coverage.mediaDownloaded.done ?? 0}
+              total={data?.coverage.mediaDownloaded.total ?? 0}
+              color={entityColor("Project", mode)}
+              /*
+                ★ 0.5：实测本机 10/2844 = 0.35% 会亮黄。「登记了 2844 条资产」
+                与「能看 10 张图」是两件事，而现在的界面只显示前者。
+              */
+              warnBelow={0.5}
+              hint="没下载的那些只有登记，看不到原图"
+            />
+            <CoverageBar
+              label="社群有摘要"
+              done={data?.coverage.communitySummaries.done ?? 0}
+              total={data?.coverage.communitySummaries.total ?? 0}
+              color={entityColor("System", mode)}
+              /*
+                ★ 这一条**不设阈值**（null = 从不染色）。
+                社群摘要要跑 `kl improve` 才有，而那是用户显式触发的可选步骤
+                —— 没跑过不是故障。给它阈值就会天天亮黄灯，
+                而一个天天亮灯的仪表盘等于没有仪表盘（同 `lagTone` 的论证）。
+              */
+              warnBelow={null}
+              {...(data !== null && data.coverage.communitySummaries.stale > 0
+                ? {
+                    hint: `另有 ${String(data.coverage.communitySummaries.stale)} 个社群的摘要已过期`,
+                  }
+                : {})}
+            />
+          </div>
+        </Panel>
+      </div>
+    </Section>
+  )
+}
+
+/** 图例上的一项：色点 + 名字。 */
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="size-2 shrink-0 rounded-full" style={{ background: color }} />
+      <span className="typography-caption-400 text-[var(--text-base-secondary)]">{label}</span>
+    </span>
   )
 }

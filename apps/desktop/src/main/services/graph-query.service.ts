@@ -74,6 +74,31 @@ export interface GraphReadHandle {
   close(): void
 }
 
+/**
+ * 图谱侧的**聚合**读数（仪表盘漏斗与覆盖度用）。
+ *
+ * ★ 与上面那些查询分开成一个类型：那些是"给 ego 图/事实面板取行"，
+ * 这些是"数个数"。放一起时 `GraphReadHandle` 的实现方（含测试替身）
+ * 会被迫实现一堆用不到的方法。
+ */
+export interface GraphAggregates {
+  /** 漏斗后三级。`chunks` 是切块数，`facts`/`entities` 是抽取产出。 */
+  funnel: { chunks: number; facts: number; entities: number }
+  /** kl 侧登记的处理单元数（漏斗第二级） */
+  units: number
+  /**
+   * 有时间戳的 fact / 全部 fact。
+   *
+   * ★ 实测本机 **525/975 = 54% 的 fact `timestamp=0`**（CAUSAL 类 70%）。
+   * 不把这个比例摊开的话，任何"事实按时间"的图都在静默丢掉一半数据。
+   */
+  factsTimestamped: { done: number; total: number }
+  /** 社群摘要覆盖：有摘要的 / 全部 / 其中已过期的 */
+  communitySummaries: { done: number; total: number; stale: number }
+  /** 按天分桶的切块数（`day` = 当天 00:00 的 unix ms，本地时区） */
+  chunksByDay: Array<{ at: number; count: number }>
+}
+
 export interface GraphQueryOptions {
   logger: Logger
   /**
@@ -800,5 +825,100 @@ export function openGraphReadDb(path: string): GraphReadHandle {
     },
 
     close: () => db.close(),
+  }
+}
+
+/**
+ * 图谱侧的聚合读数（仪表盘漏斗 + 覆盖度 + 按天切块数）。
+ *
+ * ## ★ 为什么独立一个函数而不是 `GraphReadHandle` 上的方法
+ *
+ * 它只被仪表盘调用，且一次开一个只读连接、读完就关 —— 与 ego 图那条
+ * 路径没有共享状态。挂到那个接口上会让所有实现方（含测试替身）
+ * 被迫实现这几个用不到的方法。
+ *
+ * ## ★★ 刻意**不读** `edges` 表
+ *
+ * 那张表在默认后端（ladybug）下按设计恒空 —— 实测同一时刻
+ * `GET /status` 报 `edges: 26558` 而 `SELECT COUNT(*) FROM edges` 得 **0**
+ * （完整推理见本文件 `GraphQueryOptions.factsOfEntity` 的注释）。
+ * 把它放进漏斗会显示成"边全丢了"，那是拿一个读错的源当故障报。
+ *
+ * @param dayOffsetMs 本地时区相对 UTC 的偏移（ms）。**注入而不是用
+ *   SQLite 的 `'localtime'`**：那个修饰符跟随**进程**时区，于是同一份库
+ *   在不同机器上分桶结果不同，测试也没法固定。实测两种写法在本机
+ *   （+0800）结果逐日一致。
+ */
+export function readGraphAggregates(
+  path: string,
+  sinceMs: number,
+  dayOffsetMs: number,
+): GraphAggregates {
+  const db = new Database(path, { readonly: true, fileMustExist: true })
+  try {
+    const one = (sql: string, ...params: Array<string | number>): number =>
+      (db.prepare(sql).get(...params) as { c: number } | undefined)?.c ?? 0
+
+    /**
+     * ★ `units` 表可能不存在（旧版图库 schema）。缺表时给 0 而不是抛 ——
+     * 漏斗少一级好过整块面板消失。其余表（chunks/facts/entities）
+     * 从第一版就有，缺了才是真异常。
+     */
+    const units = (() => {
+      try {
+        return one("SELECT count(*) AS c FROM units")
+      } catch {
+        return 0
+      }
+    })()
+
+    const communities = (() => {
+      try {
+        return {
+          total: one("SELECT count(*) AS c FROM communities"),
+          done: one("SELECT count(*) AS c FROM community_summaries"),
+          stale: one("SELECT count(*) AS c FROM communities WHERE summary_stale = 1"),
+        }
+      } catch {
+        // `communities` 只在跑过 improve 之后才有内容；缺表 = 还没优化过
+        return { total: 0, done: 0, stale: 0 }
+      }
+    })()
+
+    return {
+      funnel: {
+        chunks: one("SELECT count(*) AS c FROM chunks"),
+        facts: one("SELECT count(*) AS c FROM facts"),
+        entities: one("SELECT count(*) AS c FROM entities"),
+      },
+      units,
+      factsTimestamped: {
+        /** `timestamp > 0` 而不是 `IS NOT NULL`：上游用 0 表示"没有时间" */
+        done: one("SELECT count(*) AS c FROM facts WHERE timestamp > 0"),
+        total: one("SELECT count(*) AS c FROM facts"),
+      },
+      communitySummaries: communities,
+      chunksByDay: (
+        db
+          .prepare(
+            /**
+             * ★★ `CAST(... AS INTEGER)` 是必须的：better-sqlite3 把 JS 的
+             * `number` 绑成 **`real`**（实测 `SELECT typeof(?)` → `real`），
+             * 而 SQLite 的 `/` 有一边是 real 就做浮点除法 —— 于是
+             * "取整到当天"完全失效，每条记录各自一桶。
+             * 完整的实测表现见 `dashboard-trends.service.ts` 里同一段注释。
+             */
+            `SELECT (CAST((timestamp + ?) / 86400000 AS INTEGER)) * 86400000
+                      - CAST(? AS INTEGER) AS at,
+                    count(*) AS c
+               FROM chunks
+              WHERE timestamp >= ? AND timestamp > 0
+              GROUP BY at ORDER BY at`,
+          )
+          .all(dayOffsetMs, dayOffsetMs, sinceMs) as Array<{ at: number; c: number }>
+      ).map((r) => ({ at: r.at, count: r.c })),
+    }
+  } finally {
+    db.close()
   }
 }

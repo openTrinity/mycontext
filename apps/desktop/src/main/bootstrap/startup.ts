@@ -63,6 +63,7 @@ import { SearchService } from "../services/search.service.js"
 import { KlServerService } from "../services/kl-server.service.js"
 import { ensurePythonEnv } from "../services/python-env.js"
 import { GraphQueryService } from "../services/graph-query.service.js"
+import { DashboardTrendsService } from "../services/dashboard-trends.service.js"
 import { AdvancedAiService } from "../services/advanced-ai.service.js"
 import { RuntimeConfigService } from "../services/runtime-config.service.js"
 import { SecretStore } from "../services/secret-store.js"
@@ -102,6 +103,8 @@ export interface AppContext {
   klServer: KlServerService
   /** 图谱只读查询（ego 图 + 事实检索）。与 klServer 分开，见构造处注释 */
   graphQuery: GraphQueryService
+  /** 仪表盘的时序 + 消化漏斗（独立通道 + 按 changelog head 缓存） */
+  dashboardTrends: DashboardTrendsService
   /** 隐藏的极客配置页（应用级，不随账号切换） */
   advancedAi: AdvancedAiService
   /** 模型网关运行时配置（用户可见，单一真源） */
@@ -1037,6 +1040,20 @@ export function bootstrapApp(mainDir: string): AppContext {
     factsOfEntity: (entityId) => klServer.factsOfEntity(entityId),
   })
 
+  /**
+   * 仪表盘的时序 + 漏斗。
+   *
+   * ★ 与 `graphQuery` 一样取**函数**而不是值（vault 跟着登录挂），
+   * 且刻意不并进 `IngestService.snapshot()` —— 那是每批采集都发的热路径，
+   * 而按天分桶实测 108ms（完整推理见该服务的文件头注释）。
+   */
+  const dashboardTrends = new DashboardTrendsService({
+    logger: logger.child("DashboardTrends"),
+    clock: systemClock,
+    db: () => vaultDb(),
+    klDataDir: () => vaultPaths?.klRoot ?? "",
+  })
+
   const dataPlane = new DataPlaneService({
     clock: systemClock,
     logger: logger.child("DataPlane"),
@@ -1692,6 +1709,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     search,
     klServer,
     graphQuery,
+    dashboardTrends,
     advancedAi,
     runtimeConfig,
     dwsSource,
@@ -1725,6 +1743,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     search,
     klServer,
     graphQuery,
+    dashboardTrends,
     advancedAi,
     runtimeConfig,
     settings,

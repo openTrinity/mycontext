@@ -217,6 +217,14 @@ export const IPC_CHANNELS = {
   /** 带过滤的事实检索（时间范围 / 类型 / 实体 / 关键词） */
   klGraphFacts: "mycontext:kl/graph-facts",
   klGraphOptimize: "mycontext:kl/graph-optimize",
+  /**
+   * 仪表盘的时序 + 消化漏斗。
+   *
+   * ★ 单独一个通道而不是并进 `ingestSnapshot`：按天分桶实测 108ms
+   * （本机 32,878 行），而那个快照是每批采集都发的热路径。
+   * 完整推理见 `dashboardTrendsSchema` 的注释。
+   */
+  dashboardTrends: "mycontext:dashboard/trends",
   // 隐藏的极客配置页
   advancedAiRead: "mycontext:advanced-ai/read",
   advancedAiSave: "mycontext:advanced-ai/save",
@@ -2507,6 +2515,169 @@ export const klGraphFactsSchema = z.object({
 })
 
 export type KlGraphFacts = z.infer<typeof klGraphFactsSchema>
+
+// ---------------------------------------------------------------
+// 仪表盘趋势与消化漏斗
+// ---------------------------------------------------------------
+
+/**
+ * 仪表盘的**时序 + 漏斗**数据。
+ *
+ * ## ★★ 为什么它不塞进 `IngestSnapshot`
+ *
+ * 那个快照是**热路径**：`ingest.service.ts` 的 `persist()` 每批都要发一次，
+ * 而它已经是 9 个全表 COUNT。那里记过一次实测教训 —— 逐条触发时
+ * 20 万条累计约 21 分钟主进程阻塞（0.29ms@1万 → 6.31ms@20万）。
+ *
+ * 而按天分桶**比那些 COUNT 更贵**：本机 32,878 行实测
+ * 「带 direction/has_media 的 90 天分桶」耗时 **108ms**
+ * （要回表，覆盖索引失效）。按同比例外推，20 万条时约 650ms 一次。
+ * 塞进快照就等于给每一批采集加半秒阻塞 —— 那是重演已经修过的 bug。
+ *
+ * 所以它是**独立通道 + 按 changelog head 缓存**：head 没动就直接返回上次
+ * 结果（`ChangelogRepository.head()` 实测 1ms）。
+ *
+ * ## ★ 为什么漏斗比"图里有多少"重要
+ *
+ * 现有 `KlGraphOverview` 回答"图里现在有多少实体/事实"。但本机实测：
+ * 32,878 条消息进去，落地 **975** 条 fact，而 `graph-build` 消费者的
+ * `acked_seq` 只有 2,871 —— changelog head 是 34,142，**落后 31,271 条，
+ * 只消化了 8.4%**。
+ *
+ * 界面上完全看不出来：实体数在涨、无错误、状态正常。唯一的症状是
+ * "结论有点少"，而"少"没有参照物。这正是本仓库最贵的那类 bug
+ * （静默降级，CLAUDE.md §4）。漏斗把每一级的绝对值摊开，
+ * 缺口就有了参照物。
+ */
+export const dashboardTrendsSchema = z.object({
+  /**
+   * 按天分桶的数据量。
+   *
+   * ## ★★ 空洞天必须由**服务端**补 0，不能只返回有数据的天
+   *
+   * 本机实测 90 天窗口里只有 **79 天**有消息（周末与假期）。
+   * 缺的那 11 天如果不在数组里，`type="monotone"` 会把缺口两端的点
+   * 连成一条**平滑曲线** —— 于是"那几天一条消息都没有"在图上表现为
+   * "那几天数据量平稳" 。凭空造出一个不存在的趋势，且不报任何错。
+   *
+   * 补 0 之后曲线会掉到底，那才是真相。
+   */
+  days: z.array(
+    z.object({
+      /** 当天 00:00 的 unix ms（本地时区）。x 轴用它 */
+      at: z.number(),
+      /** 收到的消息数 */
+      inbound: z.number(),
+      /** 发出的消息数 */
+      outbound: z.number(),
+      /** 带媒体的消息数 */
+      media: z.number(),
+      /**
+       * 当天的消息里有多少**进了图谱**（已切块）。
+       *
+       * ★ 与 `inbound+outbound` 画在同一张图上时，两条线的裂口就是
+       * "图谱落后"在时间上的分布 —— 比一个总数更能说明落后在哪一段。
+       * 图库不可读时恒 0（此时 `graphAvailable` 为 false，UI 据此不画这条线）。
+       */
+      chunks: z.number(),
+    }),
+  ),
+  /**
+   * 消化漏斗的五级绝对值。
+   *
+   * ★ 只给绝对值，**比率交给 UI 算** —— 口径留在一处（`dashboard-data.ts`）。
+   * 两边各算一次除法迟早漂移，而那时界面上两个百分比不一致。
+   *
+   * ★ **不含 `edges`**：那张表在默认后端（ladybug）下按设计恒空
+   * （实测 `/status` 报 26,558 而 `SELECT COUNT(*) FROM edges` 得 0，
+   * 完整推理见 `graph-query.service.ts` 的 `factsOfEntity` 注释）。
+   * 放进漏斗会显示成"边全丢了"。
+   */
+  funnel: z.object({
+    /** 采集侧的消息总数 */
+    messages: z.number(),
+    /** kl 侧登记的处理单元数 */
+    units: z.number(),
+    /** 切出来的块数 */
+    chunks: z.number(),
+    /** 抽出来的事实数 */
+    facts: z.number(),
+    /** 抽出来的实体数 */
+    entities: z.number(),
+  }),
+  /**
+   * 图谱建图落后多少（消费者水位对账）。
+   *
+   * ★ `build` 与 `export` 必须**分开**：实测本机 export 已到 34,106
+   * （只差 36，正常），而 build 停在 2,871。只报一个"图谱落后"
+   * 会把人引向错误的排查方向 —— 卡住的是建图，不是导出。
+   */
+  graphLag: z.object({
+    /** changelog 的头（分母） */
+    head: z.number(),
+    /** `graph-build` 消费者的 acked_seq */
+    build: z.number(),
+    /** `graph-export` 消费者的 acked_seq */
+    export: z.number(),
+  }),
+  /**
+   * 三组覆盖度。**分子分母都给** —— UI 不做除法之外的推断。
+   *
+   * 每一组都是一个真实的、当前不可见的缺口（本机实测）：
+   * · fact 有时间戳 450/975（**54% 没有**，CAUSAL 类高达 70%）；
+   * · 媒体已下载 10/2,844（**0.35%** —— "有 2844 张图"与"能看 10 张图"是两件事）；
+   * · 社群有摘要 4/16，另有 7 个标了 stale。
+   */
+  coverage: z.object({
+    /** 有时间戳的 fact / 全部 fact。★ 无时间戳的那些进不了任何时序图 */
+    factsTimestamped: z.object({ done: z.number(), total: z.number() }),
+    /** 已下载到本地的媒体 / 全部媒体资产 */
+    mediaDownloaded: z.object({ done: z.number(), total: z.number() }),
+    /** 有摘要的社群 / 全部社群，以及摘要已过期的个数 */
+    communitySummaries: z.object({
+      done: z.number(),
+      total: z.number(),
+      stale: z.number(),
+    }),
+  }),
+  /**
+   * 图库能不能读。
+   *
+   * ## ★ 为什么必须与"全 0"区分
+   *
+   * `false` = 还没建过图（文件不存在 / 没 schema）。那时 `funnel` 的后三级
+   * 与 `coverage` 里图谱那两组都是 0 —— 而"没建过图"与"建了但一条都没抽到"
+   * 的处置完全不同（前者去点建图，后者要查为什么抽空）。
+   *
+   * UI 据此把后三级显示成 `—` 而不是 `0`：把"不知道"显示成"零"
+   * 会让一个新装的库看起来像一个坏掉的库。
+   */
+  graphAvailable: z.boolean(),
+  /** 这份数据覆盖的窗口天数（回显入参，避免 UI 另写一份） */
+  windowDays: z.number(),
+  /**
+   * 库里**实际有数据**的天数。
+   *
+   * ★ 与 `windowDays` 分开：用户点「近 90 天」而库里只有 89 天跨度
+   * （本机实测 5-12 → 8-10）时，界面必须能说"实际覆盖 89 天"——
+   * 否则那张图看起来像是最早那一天之前的数据都是 0，
+   * 而真相是那之前**没有采集**。
+   */
+  daysWithData: z.number(),
+})
+
+export type DashboardTrends = z.infer<typeof dashboardTrendsSchema>
+
+/** 仪表盘趋势的入参。 */
+export const dashboardTrendsInputSchema = z.object({
+  /**
+   * 窗口天数。与 `klGraphFactsInputSchema.days` 同一套预设（7/30/90），
+   * 刻意不做自定义起止 —— 那是一个还没有人要过的日历控件。
+   */
+  days: z.number().int().positive().max(400),
+})
+
+export type DashboardTrendsInput = z.infer<typeof dashboardTrendsInputSchema>
 
 // ---------------------------------------------------------------
 // 高级 AI 配置（隐藏入口）

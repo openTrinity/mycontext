@@ -1585,3 +1585,32 @@ export function useKlGraphOptimize() {
     },
   })
 }
+
+/**
+ * 仪表盘的时序 + 消化漏斗。
+ *
+ * ## ★ 为什么不跟着 `ingestSnapshot` 走
+ *
+ * 那个快照每批采集都推一次，而这一份按天分桶实测 108ms（本机 32,878 行）
+ * —— 完整推理见主进程 `dashboard-trends.service.ts` 的文件头。
+ * 主进程侧按 changelog head 缓存，所以重复调用是便宜的（head 未变即命中）。
+ *
+ * ## ★ `staleTime` 与轮询
+ *
+ * 30s：数据只在"采集进了新消息"或"建图跑完"时才变，而两者都是分钟级。
+ * 建图中 5s 轮询 —— 那时用户正等着看漏斗后三级长上去
+ * （与 `useKlGraphOverview` 同一个理由）。
+ *
+ * ★ `placeholderData: keepPreviousData`：切周期时 queryKey 变，
+ * 没有它整张图会先塌成空再画回来（闪一下）。规范要求重取时保持上一次
+ * 渲染 —— 不做骨架屏、不跳布局。
+ */
+export function useDashboardTrends(days: number, building: boolean) {
+  return useQuery({
+    queryKey: ["dashboard", "trends", days] as const,
+    queryFn: async () => unwrap(await window.mycontext.dashboard.trends({ days })),
+    placeholderData: keepPreviousData,
+    refetchInterval: building ? 5_000 : false,
+    staleTime: 30_000,
+  })
+}

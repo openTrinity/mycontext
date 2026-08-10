@@ -153,7 +153,7 @@ try {
    * 是探针自己没复位）。
    */
   const rangeReset = await evaluate(`(() => {
-    const btn = [...document.querySelectorAll("button[aria-pressed]")]
+    const btn = [...document.querySelectorAll('button[data-range-scope="facts"]')]
       .find((n) => (n.textContent ?? "").trim() === "近 30 天")
     if (!btn) return "not-found"
     if (btn.getAttribute("aria-pressed") === "true") return "already"
@@ -228,12 +228,30 @@ try {
      * 就会把整个表达式截断 —— 而报错指向的是几十行之后的地方。）
      */
     const RANGE_LABELS = ["近 7 天", "近 30 天", "近 90 天", "全部"]
-    const ranges = [...document.querySelectorAll("button[aria-pressed]")]
+    /**
+     * ★★ 按 data-range-scope 取**事实面板那一组**，不按文案。
+     *
+     * 这一页有两组同文案的时间范围（事实筛选 + 时序图窗口）。原来这里是
+     * 按文案筛全页的 button[aria-pressed]，于是两组都被数进来 ——
+     * 实测报「预设应恰好 4 个，实际 7 个 / 选中应 1 个，实际 2 个」。
+     *
+     * 那两条报告本身没错（页面上确实有 7 个），但它们**问错了问题**：
+     * 这一段要验的是"事实面板的过滤器装起来了吗"，而它现在被另一个
+     * 无关组件的按钮数干扰。所以按 scope 精确取。
+     */
+    const ranges = [...document.querySelectorAll('button[data-range-scope="facts"]')]
       .map((n) => ({
         text: (n.textContent ?? "").trim(),
         on: n.getAttribute("aria-pressed") === "true",
       }))
       .filter((r) => RANGE_LABELS.includes(r.text))
+    /** 时序图那一组 —— 单独数，于是"两组各自都在"能分别断言 */
+    const trendRanges = [...document.querySelectorAll('button[data-range-scope="trends"]')].map(
+      (n) => ({
+        text: (n.textContent ?? "").trim(),
+        on: n.getAttribute("aria-pressed") === "true",
+      }),
+    )
     /** 事实类型那一组（分布条可点）—— 与范围分开数，否则两者互相掩护 */
     const typeRows = [...document.querySelectorAll("button[aria-pressed]")].filter((n) =>
       ["决策", "指派", "因果", "状态", "一般"].some((t) => (n.textContent ?? "").startsWith(t)),
@@ -375,6 +393,68 @@ try {
       factCount: factItems.length,
       rangeCount: ranges.length,
       rangeActive: ranges.filter((r) => r.on).length,
+      /** 时序图那一组时间范围（3 个预设，恰好 1 个选中） */
+      trendRangeCount: trendRanges.length,
+      trendRangeActive: trendRanges.filter((r) => r.on).length,
+      /**
+       * ── 时序图的结构（按 DOM 数，不看文本）───────────────
+       *
+       * recharts 给每个元素都挂了稳定的 class（recharts-* 前缀），所以这些
+       * 计数是可靠的锚点。用它们而不是截图比对：一张"全是 0 的曲线"
+       * 与一张正常曲线在像素上差别不大，而在刻度数上差别很大。
+       *
+       * （这段注释刻意不用反引号 —— 它在一个模板字符串里面，
+       *   一个反引号就会把整个表达式截断。实测踩到过：报错指向
+       *   几百行之前的那个反引号，看起来像文件开头坏了。）
+       */
+      trendSvgCount: document.querySelectorAll("svg.recharts-surface").length,
+      trendAreaCount: document.querySelectorAll("path.recharts-area-area").length,
+      trendGradientCount: document.querySelectorAll("linearGradient[id^='mc-trend']").length,
+      trendXTicks: document.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick").length,
+      trendYTicks: document.querySelectorAll(".recharts-yAxis .recharts-cartesian-axis-tick").length,
+      trendVGrid: document.querySelectorAll(".recharts-cartesian-grid-vertical line").length,
+      hasFunnel: text.includes("消化漏斗"),
+      hasCoverage: text.includes("覆盖度"),
+      /**
+       * 漏斗第一级的数值。
+       *
+       * ★ 按**结构**取（从「消化漏斗」标题往上找到那张卡，再取卡里第一个
+       * 纯数字单元），不按整页正则 —— 页面上别处也有消息数，
+       * 用整页匹配会假绿。
+       *
+       * ★★ 判据是"这一层里**有**纯数字 span"，而不是"className 含 flex-col"。
+       * 后者是我第一版写的，它命中的是**标题**那个 span（也叫 flex-col，
+       * 但不含任何数值）→ 于是恒返 null，报「trends IPC 没通」——
+       * 一个假故障（IPC 好得很）。锚点要锚在**要找的东西**上，
+       * 而不是一个恰好也叫这个名字的容器。
+       */
+      funnelFirstValue: (() => {
+        const header = [...document.querySelectorAll("span")].find(
+          (n) => (n.textContent ?? "").trim() === "消化漏斗",
+        )
+        if (header === undefined) return null
+        /**
+         * ★★ 用 [0-9] 而不是反斜杠 d。
+         *
+         * 这整块在一个**模板字符串**里，而模板会先解释反斜杠转义 ——
+         * 反斜杠 d 写进来之后到页面上退化成字母 d（于是那个字符组只匹配
+         * 字母 d 和逗号），恒不匹配 → 恒返 null → 报「trends IPC 没通」。
+         * 又一个假故障，且探针自己一声不响。
+         *
+         * 文件里别处（第 88 行的「共 N 条」）用的就是 [0-9,]，跟着那个写法。
+         *
+         * （这段注释也不用反引号 —— 同一个模板字符串陷阱，我刚在这里
+         *   踩了第二次：一个反引号就让 node --check 指向本行。）
+         */
+        const isNumber = (n) => /^[0-9,]+$/.test((n.textContent ?? "").trim())
+        for (let n = header.parentElement; n !== null; n = n.parentElement) {
+          const cells = [...n.querySelectorAll("span")].filter(isNumber)
+          if (cells.length > 0) {
+            return Number.parseInt((cells[0].textContent ?? "").replace(/,/g, ""), 10)
+          }
+        }
+        return null
+      })(),
       typeRowCount: typeRows.length,
       /** 事实类型翻成了中文（没翻会看到 STATUS/DECISION 原文） */
       translatedFactTypes: ["状态", "决策", "指派"].filter((s) => text.includes(s)),
@@ -518,9 +598,97 @@ try {
    */
   if (dash.factCount < 5) problems.push(`事实列表太短（${dash.factCount} 条）—— 检索 IPC 没通？`)
 
+  /**
+   * ── ★★ 数据流水与消化那一块 ──────────────────────────
+   *
+   * 这一块的失效形态与本文件开头列的那几个一模一样：**装不起来就是一片空白**，
+   * 而且不报任何错。具体三种：
+   *
+   * · 新通道 `dashboard/trends` 少注册 → invoke 抛错 → 整块显示"还没有数据"
+   *   （实测踩过：preload 重载了但 main 没重启，页面上就是那句话）；
+   * · recharts 懒加载的 chunk 没加载 / import 写错 → Suspense 兜底不消失，
+   *   于是那里是一个 260px 高的**空白块**；
+   * · 分桶 SQL 的整数除法退回浮点 → 每条消息各自一桶 → 全部落在窗口外 →
+   *   **曲线全是 0**（这个 bug 真的发生过，见 dashboard-trends.service.ts）。
+   *
+   * 三种在截图上都与"这个月没数据"很像，所以要按**结构**断言：
+   * svg 在、面积 path 在、坐标轴刻度在。
+   */
+  if (dash.trendRangeCount !== 3) {
+    problems.push(`时序图的周期预设应 3 个，实际 ${dash.trendRangeCount} 个`)
+  }
+  if (dash.trendRangeActive !== 1) {
+    problems.push(`时序图的周期选中项应恰好 1 个，实际 ${dash.trendRangeActive} 个`)
+  }
+  if (dash.trendSvgCount !== 1) {
+    problems.push(
+      `时序图应恰好 1 张 recharts svg，实际 ${dash.trendSvgCount} 张` +
+        `（0 = 懒加载没落地或 IPC 没通；>1 = 渲染了两次）`,
+    )
+  }
+  /**
+   * ★ 面积 path 至少 2 条（收 + 发）。
+   *
+   * 图库可读时是 3 条（多一条"进了图谱"），但那一条按 `graphAvailable`
+   * 才画 —— 所以判据是 `>= 2`，否则一个没建图的库会假红。
+   */
+  if (dash.trendAreaCount < 2) {
+    problems.push(`时序图的面积应至少 2 条（收/发），实际 ${dash.trendAreaCount} 条`)
+  }
+  /** 我们自己那两个渐变 def —— 没有它就是那个"帅气"的填充丢了 */
+  if (dash.trendGradientCount < 2) {
+    problems.push(`时序图的渐变 def 应 2 个，实际 ${dash.trendGradientCount} 个`)
+  }
+  /**
+   * ★★ 坐标轴刻度非空 —— 这一条锁的是那个**浮点除法**的 bug。
+   *
+   * 分桶失效时 recharts 仍然画得出 svg 与 path（数据是一串 0），
+   * 但 y 轴会退化成只有一个 0 刻度。所以刻度数是那个静默失效的探针。
+   */
+  if (dash.trendXTicks < 3) {
+    problems.push(`时序图 x 轴刻度太少（${dash.trendXTicks}）—— 分桶是不是空了？`)
+  }
+  if (dash.trendYTicks < 2) {
+    problems.push(`时序图 y 轴刻度太少（${dash.trendYTicks}）—— 数据全是 0？（见分桶的 CAST）`)
+  }
+  /**
+   * ★ 竖向网格线必须是 0。
+   *
+   * 本仓库的规范：网格 hairline 且**只横向**（见 primitives.tsx 文件头）。
+   * 参考实现（databuddy）用的是虚线 + 也只横向；这一条防的是有人"顺手"
+   * 把 `vertical` 打开 —— 那会让图变成一张表格。
+   */
+  if (dash.trendVGrid !== 0) {
+    problems.push(`时序图不该有竖向网格线，实际 ${dash.trendVGrid} 条（规范：只横向 hairline）`)
+  }
+  /** 漏斗与覆盖度两张卡在 */
+  for (const [label, present] of [
+    ["消化漏斗", dash.hasFunnel],
+    ["覆盖度", dash.hasCoverage],
+  ]) {
+    if (present !== true) problems.push(`「${label}」那一块没渲染出来`)
+  }
+  /**
+   * ★★ 漏斗第一级必须是**非零的真数**。
+   *
+   * 一个"五级全是 —"的漏斗与"图库读不到"长得一样，而第一级读的是
+   * 采集侧的 `messages`（与图库无关）—— 它是 0 就说明 IPC 根本没通。
+   */
+  if (dash.funnelFirstValue === null) {
+    problems.push("漏斗第一级读不到数值 —— trends IPC 没通？")
+  } else if (dash.funnelFirstValue <= 0) {
+    problems.push(`漏斗第一级是 ${dash.funnelFirstValue} —— 采集侧的消息数不该是 0`)
+  }
+
   console.log(
     `仪表盘：分组 ${dash.hasSections.length}/1，主数字 ${dash.hero[0]}，指标卡 ${dash.tileCount}，` +
       `小指标 ${dash.nonZeroMini}/${dash.miniCount} 非零，canvas ${dash.canvasCount}`,
+  )
+  console.log(
+    `  数据流水：svg ${dash.trendSvgCount}，面积 ${dash.trendAreaCount} 条，渐变 ${dash.trendGradientCount}，` +
+      `刻度 x${dash.trendXTicks}/y${dash.trendYTicks}，竖网格 ${dash.trendVGrid}（应 0），` +
+      `周期 ${dash.trendRangeCount}（选中 ${dash.trendRangeActive}）；` +
+      `漏斗首级 ${dash.funnelFirstValue ?? "读不到"}`,
   )
   console.log(
     `  身份卡：头像位 ${dash.identityCard.avatarSlots}，形象位 ${dash.identityCard.figureSlots}，四个数在卡内 ` +
@@ -548,7 +716,7 @@ try {
    */
   const totalBefore = await readFactTotal()
   const clicked = await evaluate(`(() => {
-    const btn = [...document.querySelectorAll("button[aria-pressed]")]
+    const btn = [...document.querySelectorAll('button[data-range-scope="facts"]')]
       .find((n) => (n.textContent ?? "").trim() === "近 7 天")
     if (!btn) return false
     btn.click()
