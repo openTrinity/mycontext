@@ -24,7 +24,6 @@ services:
     provider: ${oc.env:KL_LLM_FLASH_PROVIDER,${oc.env:KL_LLM_PROVIDER,anthropic}}
     base_url: ${oc.env:KL_LLM_FLASH_BASE_URL,${oc.env:KL_LLM_BASE_URL,""}}
     model: ${oc.env:KL_LLM_FLASH_MODEL,${oc.env:KL_LLM_MODEL,qwen3.7-flash}}
-    max_retries: ${oc.env:KL_LLM_FLASH_MAX_RETRIES,${oc.env:KL_LLM_MAX_RETRIES,2}}
     timeout: ${oc.env:KL_LLM_FLASH_TIMEOUT,${oc.env:KL_LLM_TIMEOUT,120}}
 
   reranker:
@@ -87,6 +86,7 @@ pipelines:
       batch_size: ${oc.env:KL_LLM_BATCH_SIZE,5}
       batch_timeout: ${oc.env:KL_LLM_BATCH_TIMEOUT,300}
       concurrency: ${oc.env:KL_LLM_CONCURRENCY,50}
+      max_retries: ${oc.env:KL_EXTRACTION_MAX_RETRIES,2}
       cache_max_entries: ${oc.env:KL_EXTRACTION_CACHE_MAX_ENTRIES,100000}
       prompt_language: zh
       strategies:

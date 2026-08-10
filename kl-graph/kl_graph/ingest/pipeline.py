@@ -349,7 +349,6 @@ def map_entity_type(raw_type: str) -> EntityType:
     mapping = {
         "Team": EntityType.ORGANIZATION,
         "Concept": EntityType.UNKNOWN,
-        "Event": EntityType.UNKNOWN,
         "Tool": EntityType.SYSTEM,
         "Service": EntityType.SYSTEM,
         "Platform": EntityType.SYSTEM,
@@ -368,7 +367,6 @@ def map_fact_type(raw_type: str) -> FactType:
         return FactType(raw)
     # Common mappings
     mapping = {
-        "OPINION": FactType.GENERAL,
         "INFORMATION": FactType.GENERAL,
         "FACT": FactType.GENERAL,
         "TASK": FactType.DELEGATE,

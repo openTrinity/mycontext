@@ -143,6 +143,19 @@ kl-graph/
     └── qdrant_communities/
 ```
 
+## Git Commit Convention
+
+Every commit message must use this exact structure:
+
+```text
+type(scope): title
+
+- Markdown bullet describing a material change
+- Markdown bullet describing another material change
+```
+
+The body is required and must be a Markdown bullet list.
+
 ## Running
 
 ```bash

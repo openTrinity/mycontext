@@ -28,6 +28,7 @@ def test_server_capabilities_hide_experimental_communities(monkeypatch) -> None:
         "ORGANIZATION",
         "LOCATION",
         "DOCUMENT",
+        "EVENT",
         "UNKNOWN",
     ]
     assert result["commands"]["ask"]["fact_types"] == [
@@ -35,6 +36,7 @@ def test_server_capabilities_hide_experimental_communities(monkeypatch) -> None:
         "DELEGATE",
         "STATUS",
         "CAUSAL",
+        "OPINION",
         "GENERAL",
     ]
     assert result["commands"]["global-search"] == {

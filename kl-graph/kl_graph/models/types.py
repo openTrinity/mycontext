@@ -39,6 +39,7 @@ class EntityType(str, Enum):
     ORGANIZATION = "Organization"
     LOCATION = "Location"
     DOCUMENT = "Document"
+    EVENT = "Event"
     UNKNOWN = "Unknown"
 
 
@@ -49,6 +50,7 @@ class FactType(str, Enum):
     DELEGATE = "DELEGATE"
     STATUS = "STATUS"
     CAUSAL = "CAUSAL"
+    OPINION = "OPINION"
     GENERAL = "GENERAL"
 
 

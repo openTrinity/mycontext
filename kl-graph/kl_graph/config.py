@@ -70,7 +70,6 @@ class LLMFlashServiceConfig(_ConfigModel):
     provider: str
     base_url: str
     model: str
-    max_retries: int
     timeout: float
 
 
@@ -147,6 +146,7 @@ class ExtractionConfig(_ConfigModel):
     batch_size: int
     batch_timeout: int
     concurrency: int = Field(gt=0)
+    max_retries: int = Field(ge=0)
     cache_max_entries: int = Field(gt=0)
     prompt_language: Literal["zh", "en"] = "zh"
     strategies: dict[str, str] = Field(default_factory=dict)

@@ -172,7 +172,9 @@ and missing batch slots are retried inside the current extraction step with
 exponential backoff and jitter. Successful slots are cached immediately and
 are not sent again when another slot from their batch fails. Permanent errors
 such as authentication, quota exhaustion, or invalid requests still abort the
-job.
+job. The retry count is an extraction-step setting,
+`pipelines.ingestion.extraction.max_retries` (`KL_EXTRACTION_MAX_RETRIES`,
+default `2`), and counts retries after the initial attempt.
 
 After the configured attempts are exhausted, failed items are excluded from
 the graph and the job completes with `outcome: partial`. They are never cached

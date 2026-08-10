@@ -22,7 +22,6 @@ EXPECTED_LEAVES = {
     "services.llm_flash.provider",
     "services.llm_flash.base_url",
     "services.llm_flash.model",
-    "services.llm_flash.max_retries",
     "services.llm_flash.timeout",
     "services.reranker.base_url",
     "services.reranker.model",
@@ -53,6 +52,7 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.extraction.batch_size",
     "pipelines.ingestion.extraction.batch_timeout",
     "pipelines.ingestion.extraction.concurrency",
+    "pipelines.ingestion.extraction.max_retries",
     "pipelines.ingestion.extraction.cache_max_entries",
     "pipelines.ingestion.extraction.prompt_language",
     "pipelines.ingestion.extraction.strategies.message",
@@ -126,6 +126,11 @@ def test_default_extraction_batch_size_is_five() -> None:
     assert cfg.pipelines.ingestion.extraction.batch_size == 5
 
 
+def test_default_extraction_retries_are_step_scoped() -> None:
+    assert cfg.pipelines.ingestion.extraction.max_retries == 2
+    assert "max_retries" not in cfg.services.llm_flash
+
+
 def test_schema_rejects_missing_fields() -> None:
     value = deepcopy(_config_dict())
     del value["pipelines"]["query"]["reranking"]["top_k"]
@@ -147,4 +152,12 @@ def test_schema_rejects_nonpositive_extraction_concurrency() -> None:
     value["pipelines"]["ingestion"]["extraction"]["concurrency"] = 0
 
     with pytest.raises(ValidationError, match="concurrency"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_negative_extraction_retries() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["max_retries"] = -1
+
+    with pytest.raises(ValidationError, match="max_retries"):
         AppConfig.model_validate(value)

@@ -31,7 +31,7 @@ LLM_PROVIDER = _FLASH_CONNECTION.provider
 LLM_BASE_URL = _FLASH_CONNECTION.base_url
 LLM_BATCH_SIZE = int(cfg.pipelines.ingestion.extraction.batch_size)
 LLM_BATCH_TIMEOUT = int(cfg.pipelines.ingestion.extraction.batch_timeout)
-LLM_MAX_RETRIES = int(cfg.services.llm_flash.max_retries)
+LLM_MAX_RETRIES = int(cfg.pipelines.ingestion.extraction.max_retries)
 LLM_MODEL = _FLASH_CONNECTION.model
 LLM_TIMEOUT = _FLASH_CONNECTION.timeout
 PROMPT_LANGUAGE = str(cfg.pipelines.ingestion.extraction.prompt_language)
@@ -356,7 +356,7 @@ class ExtractedEntity(BaseModel):
     entity_type: str = Field(
         description=(
             "One of: Person, System, Project, Organization, Location, Document, "
-            "Unknown"
+            "Event, Unknown"
         )
     )
     description: str = Field(
@@ -394,7 +394,7 @@ class ExtractedFact(BaseModel):
         description="Natural language statement preserving all specifics"
     )
     fact_type: str = Field(
-        description="One of: DECISION, DELEGATE, STATUS, CAUSAL, GENERAL"
+        description="One of: DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"
     )
     confidence: float = Field(
         default=0.9,
@@ -432,6 +432,7 @@ ENTITY RULES:
 - Do NOT extract abstract concepts (e.g., "性能", "问题") unless they refer to a specific named thing
 - Persons: use the most complete form of their name; for alias forms like "张三(花名)" → 名称: "张三"
 - Systems/Projects: use their known product name
+- Events: only a specific named event or milestone, not a generic activity
 - Do NOT extract generic words, verbs, or adjectives as entities
 
 ENTITY DESCRIPTION:
@@ -441,6 +442,8 @@ ENTITY DESCRIPTION:
 - Omit 描述 entirely when the message says nothing meaningful about the entity (e.g. a bare @-mention).
 
 FACT RULES:
+- Use OPINION for a subjective judgment, preference, or prediction; use the
+  other types for claims presented as objective facts
 - Each fact is a single, atomic claim
 - Preserve ALL specific details (numbers, dates, versions, decisions)
 - Include temporal bounds (生效/失效) if the message indicates when something started/ended
@@ -464,8 +467,8 @@ If the message is trivial (greetings, emoji, simple acknowledgments), return emp
 Example output:
 {"实体":[{"名称":"张三","类型":"Person","描述":"负责排查线上问题"},{"名称":"SystemA","类型":"System"}],"事实":[{"主体":"张三","客体":"SystemA","内容":"张三负责SystemA的线上问题排查","事类":"STATUS","置信":0.9}]}
 
-类型: Person, System, Project, Organization, Location, Document, Unknown
-事类: DECISION, DELEGATE, STATUS, CAUSAL, GENERAL"""
+类型: Person, System, Project, Organization, Location, Document, Event, Unknown
+事类: DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"""
 
 SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 
@@ -476,6 +479,7 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 - 不要抽取抽象概念（如"性能"、"问题"），除非指代具体命名事物
 - 人名使用最完整形式；花名形式如"张三(花名)"→名称用"张三"
 - 系统/项目使用产品名
+- Event仅用于具体命名的事件或里程碑，不要把泛指活动当作Event
 - 不要将动词、形容词或泛词作为实体
 
 实体描述：
@@ -484,6 +488,7 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 - 如果消息对该实体无有意义描述（如仅@提及），则省略描述字段
 
 事实规则：
+- 主观判断、偏好或预测使用OPINION；作为客观事实陈述的内容使用其他类型
 - 每条事实是单一原子性声明
 - 保留所有具体细节（数字、日期、版本、决策）
 - 如消息指出时间范围，填写生效/失效
@@ -506,8 +511,8 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 示例输出：
 {"实体":[{"名称":"张三","类型":"Person","描述":"负责排查线上问题"},{"名称":"SystemA","类型":"System"}],"事实":[{"主体":"张三","客体":"SystemA","内容":"张三负责SystemA的线上问题排查","事类":"STATUS","置信":0.9}]}
 
-类型取值：Person, System, Project, Organization, Location, Document, Unknown
-事类取值：DECISION, DELEGATE, STATUS, CAUSAL, GENERAL"""
+类型取值：Person, System, Project, Organization, Location, Document, Event, Unknown
+事类取值：DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"""
 
 SYSTEM_PROMPT = {
     "zh": SYSTEM_PROMPT_CN,

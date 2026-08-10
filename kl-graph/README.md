@@ -147,7 +147,7 @@ export KL_QUERY_EMBED_TIMEOUT=30               # shorter than ingestion
 # For an Anthropic-compatible base, do NOT append /v1 (litellm adds /v1/messages).
 export KL_LLM_FLASH_BASE_URL=https://your-llm-endpoint
 export KL_LLM_FLASH_PROVIDER=anthropic             # LiteLLM provider prefix
-export KL_LLM_FLASH_MODEL=qwen3.6-flash
+export KL_LLM_FLASH_MODEL=qwen3.7-flash
 export ANTHROPIC_AUTH_TOKEN=your-llm-key       # used as the LLM API key
 export KL_EXTRACTION_CACHE_MAX_ENTRIES=100000  # rolling LRU row limit
 # Force litellm onto its httpx transport (kl-graph also sets this in code).
@@ -302,7 +302,7 @@ kl status                           # persisted run, phase, counts, and errors
 
 # Community summaries are NOT produced by kl ingest — add them once the graph
 # is built so `search -c communities` and community labels work:
-python -m kl_graph.periodic.community_summarizer
+python scripts/summarize_communities.py
 python scripts/embed_communities.py
 ```
 
@@ -347,7 +347,8 @@ external backend paths or graph names must also be distinct.
 > **Improve phase.** The current improve phase uses Leiden; the HDBSCAN fact-topic
 > path exists in code but is disabled. All improve dependencies (leidenalg,
 > igraph, scikit-learn, pypinyin) are included in the main project dependencies,
-> so no separate install is needed. Omit `--improve` to skip it. It reads and writes edges
+> so no separate install is needed. Pass `kl ingest --no-improve` (or
+> `scripts.ingest --improve-mode off`) to skip it. It reads and writes edges
 > through the backend-agnostic store API, so it runs under either
 > `KL_GRAPH_BACKEND=ladybug` (default) or `sqlite`.
 
@@ -369,7 +370,7 @@ python -m scripts.ingest \
 python -m scripts.improve --skip-llm-judge
 
 # Community summaries + embed them for community-level vector search
-python -m kl_graph.periodic.community_summarizer
+python scripts/summarize_communities.py
 python scripts/embed_communities.py
 ```
 
@@ -395,10 +396,9 @@ resource characteristics of each phase.
 
 `scripts.improve` runs the **finalization sub-phase** standalone (similarity edges +
 communities). Useful for tuning parameters without re-running extraction. Flags
-include `--entity-resolution` / `--fact-resolution` (Leiden),
-`--fact-min-cluster` (reserved for the currently disabled HDBSCAN path),
-`--skip-disambiguation`, `--skip-llm-judge`,
-and `--llm-budget`.
+include `--fact-threshold`, `--entity-emb-threshold`, and
+`--entity-hybrid-threshold` (similarity cutoffs), `--skip-disambiguation`,
+`--skip-llm-judge`, `--llm-budget`, `--reset-checkpoint`, and `--no-checkpoint`.
 
 ### Optional: local GPU embedding server
 
@@ -444,8 +444,8 @@ and graph-walk cursor semantics.
 
 # Path — shortest path between two entities/facts in the knowledge graph
 ./kl path "李强" "杨帆"                        # single shortest path
-./kl path "张伟" "黄磊" --all-shortest        # all shortest paths
-./kl path "A" "B" --max-hops 3 --edge-types ABOUT,INVOLVES
+./kl path "张伟" "黄磊" --all                  # all shortest paths
+./kl path "A" "B" --max-hops 3 --edge-types ABOUT --edge-types ENTITY_SIMILAR
 
 # Entity lookup / alias resolution (no embedding needed)
 ./kl entity "张伟"
@@ -490,7 +490,7 @@ export KL_CURRENT_USER="your-name"   # server-side default identity (put it in .
 **Prerequisites.** Global search reads the `community_summaries` table in
 SQLite, so community detection + summarization must have run first (see
 [Pipeline](#pipeline)): `python -m scripts.improve` (or `kl ingest --improve`)
-plus `python -m kl_graph.periodic.community_summarizer`. Running
+plus `python scripts/summarize_communities.py`. Running
 `scripts/embed_communities.py` is **optional** for this command — the endpoint
 reads the SQLite summaries directly and does not require the
 `qdrant_communities` store.
@@ -536,16 +536,16 @@ kl-graph/
 │   │   ├── embedder.py       # litellm embedding client
 │   │   ├── llm_extractor.py  # async batched entity/fact extraction + cache
 │   │   └── loaders/          # per-source DWS loaders (chat/wiki/mail/minutes/generic)
-│   ├── models/           # types: Chunk, Message, Entity, Fact, Edge + enums
+│   ├── models/           # types: Chunk, SourceUnit, ChunkUnit, ExtractionItem, Scope, Entity, Fact, Edge + enums
 │   ├── periodic/         # similarity, disambiguation, communities, summarizer
 │   ├── query/            # engine, fts (BM25), graph_walk, pagerank, rerank, query_rewrite
 │   ├── storage/          # SQLite + Qdrant + LadybugDB/FalkorDB graph backends
 │   └── utils/            # RRF fusion, bounded async helpers
 ├── scripts/
-│   ├── ingest.py             # offline ingestion (Phase A/B)
-│   ├── improve.py            # offline periodic improvement
-│   ├── embed_communities.py  # embed community summaries
-│   └── query.py              # interactive REPL (direct engine, no server)
+│   ├── ingest.py                 # offline ingestion (Phase A/B)
+│   ├── improve.py                # offline periodic improvement
+│   ├── summarize_communities.py  # generate community summaries
+│   └── embed_communities.py      # embed community summaries
 ├── requirements.txt
 ├── .env                  # (gitignored) local endpoint/secret config
 └── data/                 # (gitignored) runtime data
@@ -576,9 +576,10 @@ matches the endpoint's output dimension.
   `(source_id, source_type, unit_id)` makes normal ingestion idempotent.
   Framework-owned chunk ids are namespaced by `source_id`, while entity/fact
   ids remain deterministic UUID5s of normalized content.
-- **Two query paths.** Production is `kl` → `kl_server.py` (direct
-  SQLite/Qdrant). `kl_graph/query/engine.py` (RRF + optional Phase-2 synthesis)
-  is the standalone path used by `scripts/query.py`.
+- **Query path.** Production is `kl` → `kl_server.py`, which shares warm
+  SQLite/Qdrant stores with `kl_graph/query/engine.py` (`QueryEngine`: dense +
+  sparse + RRF, optional rerank, and configurable Phase-2 synthesis). `/search`
+  and `/ask` delegate to that engine.
 - **Server warmup.** First startup mmaps Qdrant (~90s for a large store); after
   that most graph/browse queries are tens of milliseconds.
 - **Graph backend and upgrades.** LadybugDB is the default. It receives graph
@@ -588,5 +589,5 @@ matches the endpoint's output dimension.
   `python -m scripts.ingest --build-only` under the Ladybug backend, or continue
   using `KL_GRAPH_BACKEND=sqlite`. Do not switch backends without rebuilding the
   graph, because each backend has its own edge authority. LadybugDB handles
-  `--all-shortest` efficiently; SQLite BFS requires no graph dependency but can
-  be slow on high-degree nodes.
+  all-shortest-paths queries (`kl path --all`) efficiently; SQLite BFS requires
+  no graph dependency but can be slow on high-degree nodes.

@@ -9,8 +9,9 @@ onto:
 - ``entity_type_keywords`` — which :class:`EntityType` categories the answer is
   about (Person / System / Project / ...).
 - ``fact_type_keywords`` — which :class:`FactType` the answer wants (DECISION /
-  DELEGATE / STATUS / CAUSAL / GENERAL). This is kl-graph's answer-shape axis and
-  has no RAGFlow equivalent (RAGFlow has a single entity-type pool).
+  DELEGATE / STATUS / CAUSAL / OPINION / GENERAL). This is kl-graph's
+  answer-shape axis and has no RAGFlow equivalent (RAGFlow has a single
+  entity-type pool).
 
 Both type axes are chosen **from a corpus-derived pool** injected into the prompt,
 so the model picks real, in-domain categories rather than guessing.
@@ -119,6 +120,7 @@ Fact type meanings:
 - DELEGATE: division of work, assignment, ownership ("X owns this part")
 - STATUS: progress, state, completion ("X is live / still under test")
 - CAUSAL: cause, reason, impact ("because X, therefore Y")
+- OPINION: a subjective judgment, preference, or prediction
 - GENERAL: a general statement
 
 ---Instructions---

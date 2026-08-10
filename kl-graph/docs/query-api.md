@@ -64,8 +64,8 @@ used by the running process:
       "enabled": true,
       "caller_intent": true,
       "synthesize_default": false,
-      "entity_types": ["PERSON", "SYSTEM", "PROJECT", "ORGANIZATION", "LOCATION", "DOCUMENT", "UNKNOWN"],
-      "fact_types": ["DECISION", "DELEGATE", "STATUS", "CAUSAL", "GENERAL"]
+      "entity_types": ["PERSON", "SYSTEM", "PROJECT", "ORGANIZATION", "LOCATION", "DOCUMENT", "EVENT", "UNKNOWN"],
+      "fact_types": ["DECISION", "DELEGATE", "STATUS", "CAUSAL", "OPINION", "GENERAL"]
     },
     "global-search": {
       "enabled": false,

@@ -120,9 +120,14 @@ Node sub-types are **open vocabularies** — the values below are existing examp
 | Node | Type Field | Current Examples |
 |------|-----------|-----------------|
 | Chunk | `source_type` | `message`, `wiki`, `mail`, `minutes`, `drive`, `calendar`, `work` |
-| Entity | `entity_type` | `Person`, `System`, `Project`, `Organization`, `Location`, `Document` |
-| Fact | `fact_type` | `DECISION`, `DELEGATE`, `STATUS`, `CAUSAL`, `GENERAL` |
+| Entity | `entity_type` | `Person`, `System`, `Project`, `Organization`, `Location`, `Document`, `Event` |
+| Fact | `fact_type` | `DECISION`, `DELEGATE`, `STATUS`, `CAUSAL`, `OPINION`, `GENERAL` |
 | Scope | `scope_type` | `conversation`, `document`, `mail_thread`, `meeting`, `calendar_event` |
+
+`Event` is reserved for a specific named event or milestone, rather than a
+generic activity. `OPINION` marks subjective judgments, preferences, or
+predictions so retrieval clients can distinguish them from factual claims;
+like every fact node, it retains its source provenance.
 
 ---
 
