@@ -44,6 +44,20 @@ import {
 import type { KlGraphOverview } from "@mycontext/ipc-contract"
 import type { DuplexHandle, ProcessRunner } from "@mycontext/runtime-env"
 
+/**
+ * `facts` 表上「旧代」与「当代」的那一列。
+ *
+ * 上游把 `source_message_id` 改名成 `source_chunk_id`，且外键从 `messages`
+ * 改指 `chunks(id)`（见 `kl-graph/tests/test_sqlite_graph.py` 里
+ * `test_fact_source_chunk_id_roundtrip` 的说明）—— **没有配数据迁移**，
+ * 所以库分两代，而判据就是这一列叫什么。见 `detectStaleGraphSchema`。
+ *
+ * ★ 上游再改一次列名时这两个常量要跟着改，而那时
+ * `kl-ingest-body.test.ts` 里盯上游 pydantic 模型那条同类门禁会先红。
+ */
+const STALE_FACTS_COLUMN = "source_message_id"
+const CURRENT_FACTS_COLUMN = "source_chunk_id"
+
 /** kl-server 默认端口（可被 KL_SERVER_PORT 覆盖）。绑 127.0.0.1，不对外。 */
 const DEFAULT_KL_PORT = 8200
 
@@ -166,6 +180,17 @@ export interface KlBuildVolume {
  */
 export interface GraphDbHandle {
   count(table: string): number
+  /**
+   * 一张表有哪些列。
+   *
+   * ★ 为什么图库要暴露这个：上游 kl 会**改列名而不给迁移**（实测：
+   * `facts.source_message_id` → `source_chunk_id`），于是老库上每次建图都在
+   * kl 侧抛一句 SQL 错误，而那句话指不到"你的库是旧版的、点重建"。
+   * 有了列名就能在建图**之前**判出来并给一句可照做的话。
+   *
+   * 表不存在时返回空数组（schema 还没初始化 = 没有旧库要担心）。
+   */
+  columns(table: string): string[]
   groupBy(table: string, column: string): Array<{ type: string; count: number }>
   topEntities(limit: number): Array<{ name: string; type: string; mentions: number }>
   recentFacts(
@@ -772,6 +797,44 @@ export class KlServerService {
     if (fresh) {
       await this.stop()
       this.wipeGraphData()
+    } else {
+      /**
+       * ★★★ 增量建图之前先看一眼：现有图库是不是**上游改名之前**建的。
+       *
+       * ## 这一条修的是「建图按钮从此一直失败，而错误信息指不到原因」
+       *
+       * 上游把 `facts.source_message_id` 改名成 `source_chunk_id`
+       * （外键也从 messages 改指 chunks），**没有配数据迁移** ——
+       * 新库建出来是新 schema，而任何在那之前建过图的库都是旧的。
+       * 于是每次增量建图都在 kl 侧抛：
+       *
+       *     table facts has no column named source_chunk_id
+       *
+       * 实测（本机 2026-08-10）：钉钉那栏能建（我为查问题手动清过库），
+       * 飞书那栏必失败（从没清过）—— 同一份代码、同一个按钮，
+       * 差别只在库是哪个版本建的。
+       *
+       * ## 为什么在这里拦，而不是让它抛
+       *
+       * 那条 SQL 错误对用户毫无意义：他看到的是「建图失败：table facts
+       * has no column named source_chunk_id」，而**该做的事**（点旁边那个
+       * 「重建」）完全没有出现在信息里。更糟的是它每次都失败，
+       * 于是「知识图谱」这块功能对老用户彻底不可用而看不出为什么。
+       *
+       * ★ 不自动清库重建。那是**不可逆**的（删图 + 删抽取缓存，重抽要几十
+       * 分钟、还要花 LLM 的钱），必须是用户的显式动作 ——
+       * 与 `fresh=true` 只由「重建」按钮触发同一条原则。
+       */
+      const stale = this.detectStaleGraphSchema()
+      if (stale !== null) {
+        return this.logBuildOutcome(fresh, {
+          ok: false,
+          reason: stale,
+          entities: 0,
+          facts: 0,
+          edges: 0,
+        })
+      }
     }
     try {
       /**
@@ -1713,6 +1776,61 @@ export class KlServerService {
       const detail = error instanceof Error ? error.message : String(error)
       this.fail(`优化异常：${detail}`)
       return { ok: false, reason: detail, ...empty }
+    }
+  }
+
+  /**
+   * 现有图库是不是**上游改名之前**建的。是 → 返回给用户看的那句话；否 → null。
+   *
+   * ## 判据：`facts` 表有没有 `source_chunk_id`
+   *
+   * 上游把 `facts.source_message_id` 改名成 `source_chunk_id`（外键也从
+   * `messages` 改指 `chunks`），**没有配数据迁移**。所以库分两代，
+   * 而新代码只会写新列名 —— 老库上每次增量建图都在 kl 侧抛
+   * `table facts has no column named source_chunk_id`。
+   *
+   * 实测（本机 2026-08-10）：同一份代码、同一个按钮，钉钉那栏能建
+   * （查问题时手动清过库 → 新 schema），飞书那栏必失败（从没清过 → 旧
+   * schema）。差别只在库是哪个版本建的。
+   *
+   * ## 为什么"表还没有 / 库还没有"不算旧
+   *
+   * 那是"还没建过图"，走正常的首次建图路径（kl 会按新 schema 建表）。
+   * 判成旧的话会把一个正常的空状态变成一条要用户点重建的错误。
+   *
+   * ## 为什么探测失败时返回 null（放行）
+   *
+   * 探测本身出错（文件锁、ABI、库损坏）时**不该拦住建图** ——
+   * 那会把一个诊断能力变成一道新的故障源。放行的最坏结果是回到改动前：
+   * kl 抛那句 SQL 错误，与现在同样可见。
+   */
+  private detectStaleGraphSchema(): string | null {
+    const dbPath = join(this.dataDir, "knowledge.db")
+    if (!existsSync(dbPath)) return null
+    const open = this.options.openGraphDb ?? defaultOpenGraphDb
+    let db: GraphDbHandle | null = null
+    try {
+      db = open(dbPath)
+      const columns = db.columns("facts")
+      // 表还不存在（空库）→ 空数组 → 不是"旧"，是"还没建过"
+      if (columns.length === 0) return null
+      if (columns.includes(STALE_FACTS_COLUMN) && !columns.includes(CURRENT_FACTS_COLUMN)) {
+        this.options.logger.warn("graph schema is from before the upstream rename", {
+          dataDir: this.dataDir,
+          has: STALE_FACTS_COLUMN,
+          wants: CURRENT_FACTS_COLUMN,
+        })
+        return "现有图谱是旧版本建的（上游改了表结构且没有迁移），增量建图会失败。请点「重建」清空后重新构建。"
+      }
+      return null
+    } catch (error) {
+      // 探测失败不拦建图 —— 见上面那段
+      this.options.logger.debug("graph schema probe failed; letting the build proceed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    } finally {
+      db?.close()
     }
   }
 
@@ -2936,11 +3054,23 @@ function defaultOpenGraphDb(path: string): GraphDbHandle {
     "facts.fact_type": `SELECT fact_type AS type, COUNT(*) AS count FROM facts
                           GROUP BY fact_type ORDER BY count DESC LIMIT 12`,
   }
+  /**
+   * 允许查列的表 —— 与 `COUNTABLE` 同一条理由：**白名单而不是拼串**。
+   * `pragma_table_info` 的参数走绑定值，表名本身仍来自这里。
+   */
+  const INSPECTABLE = new Set(["facts", "entities", "edges", "chunks"])
   return {
     count: (table) => {
       const sql = COUNTABLE[table]
       if (sql === undefined) throw new Error(`未知的表：${table}`)
       return (db.prepare(sql).get() as { c: number } | undefined)?.c ?? 0
+    },
+    columns: (table) => {
+      if (!INSPECTABLE.has(table)) throw new Error(`未知的表：${table}`)
+      const rows = db
+        .prepare("SELECT name FROM pragma_table_info(?)")
+        .all(table) as Array<{ name: string }>
+      return rows.map((r) => r.name)
     },
     groupBy: (table, column) => {
       const sql = GROUPABLE[`${table}.${column}`]
