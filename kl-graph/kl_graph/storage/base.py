@@ -253,6 +253,13 @@ class KnowledgeStore(ABC):
         """
         raise NotImplementedError
 
+    def apply_entity_cleanup(self, entities: list[Entity]) -> None:
+        """Persist cleanup-only type/status changes without merge side effects.
+
+        Implementations must not change mention counts or timestamps.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def get_entity_by_name(self, name: str) -> Entity | None:
         """Look up an entity by exact name match.

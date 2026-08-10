@@ -333,6 +333,18 @@ class LadybugStore(KnowledgeStore):
                 e.description,
             )
 
+    def apply_entity_cleanup(self, entities: list[Entity]) -> None:
+        """Persist cleanup state in SQLite and refresh Ladybug node properties."""
+        self._sqlite.apply_entity_cleanup(entities)
+        for entity in entities:
+            self._graph.upsert_entity_node(
+                entity.id,
+                entity.name,
+                entity.entity_type.value,
+                entity.mention_count,
+                entity.description,
+            )
+
     def get_entity_by_name(self, name: str) -> Entity | None:
         """Delegate to SQLite (content query, not graph traversal)."""
         return self._sqlite.get_entity_by_name(name)

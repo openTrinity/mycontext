@@ -176,6 +176,22 @@ def load_all_messages(chat_dir: Path) -> list[Chunk]:
             metadata["conversation_title"] = title
         if chat_kind:
             metadata["chat_kind"] = chat_kind
+        # Extraction targets exclude the inlined quote so a reply does not
+        # restate the quoted message as a new fact. The quote remains in the
+        # stored retrieval chunk and is supplied separately as read-only context.
+        metadata["extraction_target_content"] = _render_content(
+            content,
+            sender,
+            chat_kind,
+            title,
+            None,
+            timestamp=to_unix_ms(data.get("createTime")),
+        )
+        if isinstance(quoted, dict):
+            q_sender = (quoted.get("sender") or "").strip()
+            q_body = quoted.get("content") or ""
+            if q_sender or q_body.strip():
+                metadata["quoted_context"] = f"↳ 回复 {q_sender}：{q_body}"
 
         messages.append(Chunk(
             id=data.get("openMessageId") or rec.get("id", ""),

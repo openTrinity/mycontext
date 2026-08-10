@@ -1,10 +1,10 @@
 """SQLite-backed cache for Phase-A LLM extraction results.
 
 Replaces the md5-sharded one-JSON-file-per-chunk cache with a separate,
-bounded ``data/extraction_cache.db`` SQLite database.  Keeping it separate from
+bounded ``data/extraction_cache.db`` SQLite database. Keeping it separate from
 ``knowledge.db`` preserves expensive LLM results across graph/content database
-rebuilds.  The cache is keyed by ``md5(chunk_id)`` — the exact digest the
-extractor used for its file paths — so the same chunk resolves to the same row.
+rebuilds. Source-aware rows include a model/prompt/strategy/schema fingerprint;
+legacy chunk-only keys remain readable for compatibility.
 
 Design invariant (see ``docs/todo/archive/extraction-cache-hardening-2026-08-05.md``): the cache
 holds only end-to-end-validated successful extractions. Failed/transient
@@ -230,8 +230,8 @@ class ExtractionCacheStore:
     # ─── Key derivation ───────────────────────────────────────────────────
 
     @staticmethod
-    def cache_key(chunk_id: str) -> str:
-        """Deterministic md5 key for a chunk id.
+    def cache_key(chunk_id: str, fingerprint: str | None = None) -> str:
+        """Deterministic md5 key for an item id and contract fingerprint.
 
         MUST match ``LLMExtractor._cache_key`` so both keying schemes agree.
 
@@ -241,11 +241,14 @@ class ExtractionCacheStore:
         Returns:
             The md5 hex digest of the utf-8-encoded chunk id.
         """
-        return hashlib.md5(chunk_id.encode()).hexdigest()
+        identity = chunk_id if fingerprint is None else f"{chunk_id}\0{fingerprint}"
+        return hashlib.md5(identity.encode()).hexdigest()
 
     # ─── Reads ────────────────────────────────────────────────────────────
 
-    def get(self, chunk_id: str, model: str) -> dict | None:
+    def get(
+        self, chunk_id: str, model: str, fingerprint: str | None = None
+    ) -> dict | None:
         """Return the cached result for a chunk, or None on any miss.
 
         A miss is: no row, a row produced by a different ``model``, or a row
@@ -261,16 +264,21 @@ class ExtractionCacheStore:
         """
         row = self.conn.execute(
             "SELECT payload, model FROM extraction_cache WHERE cache_key = ?",
-            (self.cache_key(chunk_id),),
+            (self.cache_key(chunk_id, fingerprint),),
         ).fetchone()
         if row is None or row["model"] != model:
             return None
         parsed = self._parse_payload(row["payload"])
         if parsed is not None:
-            self._queue_touch(self.cache_key(chunk_id))
+            self._queue_touch(self.cache_key(chunk_id, fingerprint))
         return parsed
 
-    def get_many(self, chunk_ids: list[str], model: str) -> dict[str, dict]:
+    def get_many(
+        self,
+        chunk_ids: list[str],
+        model: str,
+        fingerprints: dict[str, str] | None = None,
+    ) -> dict[str, dict]:
         """Return cached results for the given chunk ids, keyed by chunk_id.
 
         Only ``model``-matching rows with parsable payloads are included;
@@ -285,12 +293,16 @@ class ExtractionCacheStore:
             Mapping of chunk_id → extraction result dict for hits only.
         """
         results: dict[str, dict] = {}
-        keys = [self.cache_key(cid) for cid in chunk_ids]
+        fingerprints = fingerprints or {}
+        key_to_id = {
+            self.cache_key(cid, fingerprints.get(cid)): cid for cid in chunk_ids
+        }
+        keys = list(key_to_id)
         for start in range(0, len(keys), _IN_CHUNK):
             batch = keys[start:start + _IN_CHUNK]
             placeholders = ",".join("?" for _ in batch)
             rows = self.conn.execute(
-                f"SELECT chunk_id, payload, model FROM extraction_cache "  # noqa: S608 - placeholders only
+                f"SELECT cache_key, payload, model FROM extraction_cache "  # noqa: S608 - placeholders only
                 f"WHERE cache_key IN ({placeholders})",
                 batch,
             ).fetchall()
@@ -299,8 +311,8 @@ class ExtractionCacheStore:
                     continue
                 parsed = self._parse_payload(row["payload"])
                 if parsed is not None:
-                    results[row["chunk_id"]] = parsed
-                    self._queue_touch(self.cache_key(row["chunk_id"]))
+                    results[key_to_id[row["cache_key"]]] = parsed
+                    self._queue_touch(row["cache_key"])
         return results
 
     def all_results(self, model: str) -> dict[str, dict]:
@@ -317,14 +329,14 @@ class ExtractionCacheStore:
         """
         results: dict[str, dict] = {}
         rows = self.conn.execute(
-            "SELECT chunk_id, payload FROM extraction_cache WHERE model = ?",
+            "SELECT cache_key, chunk_id, payload FROM extraction_cache WHERE model = ?",
             (model,),
         ).fetchall()
         for row in rows:
             parsed = self._parse_payload(row["payload"])
             if parsed is not None:
                 results[row["chunk_id"]] = parsed
-                self._queue_touch(self.cache_key(row["chunk_id"]))
+                self._queue_touch(row["cache_key"])
         return results
 
     @staticmethod
@@ -361,7 +373,13 @@ class ExtractionCacheStore:
 
     # ─── Writes ───────────────────────────────────────────────────────────
 
-    def put(self, payload: dict, chunk_id: str, model: str) -> None:
+    def put(
+        self,
+        payload: dict,
+        chunk_id: str,
+        model: str,
+        fingerprint: str | None = None,
+    ) -> None:
         """Upsert one validated extraction result.
 
         Stores the FULL result dict (including ``_msg_*`` metadata the extractor
@@ -373,9 +391,13 @@ class ExtractionCacheStore:
             chunk_id: The originating chunk id.
             model: The model id that produced the result.
         """
-        self.put_many([(payload, chunk_id)], model)
+        self.put_many([(payload, chunk_id, fingerprint)], model)
 
-    def put_many(self, items: list[tuple[dict, str]], model: str) -> None:
+    def put_many(
+        self,
+        items: list[tuple[dict, str] | tuple[dict, str, str | None]],
+        model: str,
+    ) -> None:
         """Upsert a batch of validated results in one transaction.
 
         Args:
@@ -386,9 +408,13 @@ class ExtractionCacheStore:
             return
         now = int(time.time())
         first_access = self._next_access_tick()
+        normalized = [
+            (item[0], item[1], item[2] if len(item) == 3 else None)
+            for item in items
+        ]
         rows = [
             (
-                self.cache_key(chunk_id),
+                self.cache_key(chunk_id, fingerprint),
                 chunk_id,
                 json.dumps(payload, ensure_ascii=False),
                 model,
@@ -396,7 +422,7 @@ class ExtractionCacheStore:
                 now,
                 first_access + index,
             )
-            for index, (payload, chunk_id) in enumerate(items)
+            for index, (payload, chunk_id, fingerprint) in enumerate(normalized)
         ]
         self._last_access_tick = first_access + len(items) - 1
         self._flush_touches(commit=False)

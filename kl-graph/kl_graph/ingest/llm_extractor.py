@@ -8,7 +8,6 @@ can reuse them without re-running the expensive extraction.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import re
@@ -17,27 +16,37 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from kl_graph.config import cfg, DATA_DIR
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
+from kl_graph.utils.litellm_config import (
+    connection_from_service,
+    litellm,
+    provider_api_key,
+    provider_model,
+)
 
 # Derived constants from OmegaConf config
-LLM_PROVIDER = cfg.services.llm_flash.provider
-LLM_BASE_URL = cfg.services.llm_flash.base_url or ""
+_FLASH_CONNECTION = connection_from_service(cfg.services.llm_flash)
+LLM_PROVIDER = _FLASH_CONNECTION.provider
+LLM_BASE_URL = _FLASH_CONNECTION.base_url
 LLM_BATCH_SIZE = int(cfg.pipelines.ingestion.extraction.batch_size)
 LLM_BATCH_TIMEOUT = int(cfg.pipelines.ingestion.extraction.batch_timeout)
 LLM_MAX_RETRIES = int(cfg.services.llm_flash.max_retries)
-LLM_MODEL = cfg.services.llm_flash.model
-LLM_TIMEOUT = float(cfg.services.llm_flash.timeout)
+LLM_MODEL = _FLASH_CONNECTION.model
+LLM_TIMEOUT = _FLASH_CONNECTION.timeout
+PROMPT_LANGUAGE = str(cfg.pipelines.ingestion.extraction.prompt_language)
 EXTRACTION_CACHE_PATH = DATA_DIR / "extraction_cache.db"
 EXTRACTION_CACHE_MAX_ENTRIES = int(
     cfg.pipelines.ingestion.extraction.cache_max_entries
 )
 from kl_graph.ingest.extraction_cache import ExtractionCacheStore
-from kl_graph.models.types import Chunk
+from kl_graph.models.types import Chunk, ExtractionItem
+
+EXTRACTION_SCHEMA_VERSION = "extraction-v2"
+Extractable = Chunk | ExtractionItem
 
 logger = logging.getLogger(__name__)
 
 
-def _sender_of(chunk: Chunk) -> str:
+def _sender_of(chunk: Extractable) -> str:
     """Best-effort author label for any chunk.
 
     Chat chunks carry a real ``metadata["sender"]``; other sources fall back to
@@ -48,6 +57,26 @@ def _sender_of(chunk: Chunk) -> str:
     if isinstance(sender, str) and sender:
         return sender
     return chunk.source_ref or chunk.source_type
+
+
+def _strategy_directive(item: Extractable) -> str:
+    """Return a source-specific grounding rule for an extraction target."""
+    if not isinstance(item, ExtractionItem):
+        return ""
+    strategy = (item.metadata or {}).get("extraction_strategy")
+    if strategy == "chat_message":
+        return (
+            "Extract only claims and entities grounded in TARGET CONTENT. "
+            "Context is read-only and must not contribute standalone output. "
+            "Any line beginning with '↳ 回复' is quoted prior text: use it only "
+            "to interpret the reply and never extract it as a new claim."
+        )
+    if strategy == "document_chunk":
+        return (
+            "Treat headings, tables, field names, paths, and code as document "
+            "structure; create entities only for stable named things."
+        )
+    return "Extract only information grounded in the target content."
 
 
 # ─── @-mention / entity-name sanitizer ───────────────────────────────────
@@ -155,7 +184,12 @@ def _expand_compact_result(raw: dict) -> dict:
 
     # Top-level key mapping
     TOP_MAP = {"实体": "entities", "事实": "facts", "序号": "msg_index"}
-    ENTITY_MAP = {"名称": "name", "类型": "entity_type", "描述": "description"}
+    ENTITY_MAP = {
+        "名称": "name",
+        "类型": "entity_type",
+        "描述": "description",
+        "type": "entity_type",
+    }
     FACT_MAP = {
         "主体": "subject_entity",
         "客体": "object_entity",
@@ -164,17 +198,17 @@ def _expand_compact_result(raw: dict) -> dict:
         "置信": "confidence",
         "生效": "valid_at",
         "失效": "invalid_at",
+        "content": "fact_text",
+        "subject": "subject_entity",
+        "object": "object_entity",
+        "type": "fact_type",
     }
 
     def _remap(d: dict, mapping: dict) -> dict:
         """Remap keys in a dict using a mapping; pass through unknown keys."""
         return {mapping.get(k, k): v for k, v in d.items()}
 
-    # Detect if this is compact format (has Chinese top-level keys)
-    is_compact = any(k in raw for k in TOP_MAP)
-    if not is_compact:
-        return raw  # already in full-key format (old cache)
-
+    is_compact = any(key in raw for key in TOP_MAP)
     result = _remap(raw, TOP_MAP)
 
     # Expand entity dicts
@@ -185,7 +219,8 @@ def _expand_compact_result(raw: dict) -> dict:
             if isinstance(ent, dict):
                 expanded = _remap(ent, ENTITY_MAP)
                 # Fill defaults for omitted nullable fields
-                expanded.setdefault("description", "")
+                if is_compact:
+                    expanded.setdefault("description", "")
                 expanded_entities.append(expanded)
             else:
                 expanded_entities.append(ent)
@@ -199,10 +234,11 @@ def _expand_compact_result(raw: dict) -> dict:
             if isinstance(fact, dict):
                 expanded = _remap(fact, FACT_MAP)
                 # Fill defaults for omitted nullable fields
-                expanded.setdefault("object_entity", None)
-                expanded.setdefault("confidence", 0.9)
-                expanded.setdefault("valid_at", None)
-                expanded.setdefault("invalid_at", None)
+                if is_compact:
+                    expanded.setdefault("object_entity", None)
+                    expanded.setdefault("confidence", 0.9)
+                    expanded.setdefault("valid_at", None)
+                    expanded.setdefault("invalid_at", None)
                 expanded_facts.append(expanded)
             else:
                 expanded_facts.append(fact)
@@ -212,7 +248,7 @@ def _expand_compact_result(raw: dict) -> dict:
 
 
 def _normalize_result(result: dict) -> dict:
-    """Scrub entity names and reconstruct involved_entities for each fact.
+    """Scrub names and retain only grounded per-fact participants.
 
     Mutates and returns ``result`` in place. Applied before caching so the
     extraction cache is always clean regardless of which write path produced it.
@@ -244,17 +280,26 @@ def _normalize_result(result: dict) -> dict:
             kept_entities.append(ent)
         result["entities"] = kept_entities
 
-    # Reconstruct involved_entities for each fact from the full entity names list.
-    # This replaces the old per-fact involved_entities field the LLM used to emit.
+    # Keep only participants named by this fact and present in entities. Do not
+    # fan every entity in an extraction item out to every fact.
     facts = result.get("facts")
     if isinstance(facts, list) and kept_entities is not None:
-        all_entity_names = [
+        entity_names = {
             e["name"] for e in kept_entities if isinstance(e, dict) and e.get("name")
-        ]
+        }
         for fact in facts:
             if not isinstance(fact, dict):
                 continue
-            fact["involved_entities"] = list(all_entity_names)
+            participants = []
+            for value in (
+                fact.get("subject_entity"),
+                fact.get("object_entity"),
+                *(fact.get("involved_entities") or []),
+            ):
+                cleaned = _clean_mention(value) if isinstance(value, str) else None
+                if cleaned and cleaned in entity_names and cleaned not in participants:
+                    participants.append(cleaned)
+            fact["involved_entities"] = participants
 
     return result
 
@@ -421,7 +466,10 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 类型取值：Person, System, Project, Team, Concept, Event
 事类取值：DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"""
 
-SYSTEM_PROMPT = SYSTEM_PROMPT_CN
+SYSTEM_PROMPT = {
+    "zh": SYSTEM_PROMPT_CN,
+    "en": SYSTEM_PROMPT_EN,
+}[PROMPT_LANGUAGE]
 
 USER_PROMPT_TEMPLATE = """<CONTEXT MESSAGES>
 {context}
@@ -676,6 +724,20 @@ def _validated_result_or_none(raw: dict) -> dict | None:
         result["facts"], list
     ):
         return None
+    if any(
+        not isinstance(entity, dict)
+        or not isinstance(entity.get("name"), str)
+        or not isinstance(entity.get("entity_type", "Unknown"), str)
+        for entity in result["entities"]
+    ):
+        return None
+    if any(
+        not isinstance(fact, dict)
+        or not isinstance(fact.get("fact_text"), str)
+        or not isinstance(fact.get("subject_entity", ""), str)
+        for fact in result["facts"]
+    ):
+        return None
     return result
 
 
@@ -863,19 +925,33 @@ class LLMExtractor:
             self._cache.close()
             self._cache = None
 
-    def _cache_key(self, msg: Chunk) -> str:
-        """Deterministic cache key from chunk ID (kept for reference parity)."""
-        return hashlib.md5(msg.id.encode()).hexdigest()
+    def _fingerprint(self, msg: Extractable) -> str | None:
+        if not isinstance(msg, ExtractionItem):
+            return None
+        return "|".join((
+            self.model,
+            msg.prompt_version,
+            msg.strategy_version,
+            EXTRACTION_SCHEMA_VERSION,
+        ))
 
-    def _read_cache(self, msg: Chunk) -> dict | None:
+    def _cache_key(self, msg: Extractable) -> str:
+        """Deterministic cache key from chunk ID (kept for reference parity)."""
+        return self._store().cache_key(msg.id, self._fingerprint(msg))
+
+    def read_cached(self, msg: Extractable) -> dict | None:
         """Read the cached result for a chunk, or None on a miss.
 
         Delegates to the SQLite store, which returns None for a missing row, a
         row from a different model, or an unparsable payload (self-healing).
         """
-        return self._store().get(msg.id, self.model)
+        return self._store().get(msg.id, self.model, self._fingerprint(msg))
 
-    def _write_cache(self, msg: Chunk, result: dict):
+    def _read_cache(self, msg: Extractable) -> dict | None:
+        """Deprecated compatibility alias for :meth:`read_cached`."""
+        return self.read_cached(msg)
+
+    def _write_cache(self, msg: Extractable, result: dict):
         """Persist a result IFF it is a validated success (no ``_error`` marker).
 
         Success-only writes are the cache-poisoning guard: a failed, truncated,
@@ -886,7 +962,7 @@ class LLMExtractor:
         """
         if _is_failure_result(result):
             return
-        self._store().put(result, msg.id, self.model)
+        self._store().put(result, msg.id, self.model, self._fingerprint(msg))
 
     def _format_context(self, messages: list[Chunk], target_idx: int) -> str:
         """Format context window around target message."""
@@ -994,7 +1070,7 @@ class LLMExtractor:
             raise _RetryableResponseError("top-level JSON is not an object")
         return parsed
 
-    async def _call_llm(self, msg: Chunk, context: str) -> dict:
+    async def _call_llm(self, msg: Extractable, context: str) -> dict:
         """Make one LLM call for extraction.
 
         Returns a validated result dict on success, or a ``_transient`` failure
@@ -1004,7 +1080,7 @@ class LLMExtractor:
         request) is logged and RE-RAISED loudly to abort the run.
         """
         user_content = USER_PROMPT_TEMPLATE.format(
-            context=context,
+            context=f"{_strategy_directive(msg)}\n{context}".strip(),
             content=msg.content,  # full content, no truncation
         )
 
@@ -1063,8 +1139,8 @@ class LLMExtractor:
 
     async def extract_one(
         self,
-        msg: Chunk,
-        conversation_messages: list[Chunk],
+        msg: Extractable,
+        conversation_messages: list[Extractable],
         target_idx: int,
     ) -> dict:
         """Extract entities and facts from one message, with caching.
@@ -1078,13 +1154,16 @@ class LLMExtractor:
         # non-chat) is extracted. A trivial line folds into its session slice,
         # so per-message skipping is moot; add the guard back if it proves
         # necessary. Check cache
-        cached = self._read_cache(msg)
+        cached = self.read_cached(msg)
         if cached is not None:
             self.stats["cache_hits"] += 1
             return cached
 
         # Build context and call LLM
-        context = self._format_context(conversation_messages, target_idx)
+        context = (
+            msg.context if isinstance(msg, ExtractionItem)
+            else self._format_context(conversation_messages, target_idx)
+        )
         result = await self._call_llm(msg, context)
 
         # Scrub entity names + fact involved_entities before caching.
@@ -1092,6 +1171,10 @@ class LLMExtractor:
 
         # Annotate with metadata for traceability
         result["_msg_id"] = msg.id
+        result["_target_chunk_id"] = getattr(msg, "target_chunk_id", msg.id)
+        result["_source_unit_id"] = getattr(msg, "source_unit_id", None)
+        result["_strategy_version"] = getattr(msg, "strategy_version", None)
+        result["_prompt_version"] = getattr(msg, "prompt_version", None)
         result["_msg_sender"] = _sender_of(msg)
         result["_msg_timestamp"] = msg.timestamp
         result["_msg_content_preview"] = msg.content[:200]
@@ -1103,12 +1186,19 @@ class LLMExtractor:
         self._write_cache(msg, result)
         return result
 
-    async def _call_llm_batch(self, messages: list[Chunk]) -> list[dict]:
+    async def _call_llm_batch(self, messages: list[Extractable]) -> list[dict]:
         """Make one LLM call to extract from multiple messages at once."""
         # Format messages block
         lines = []
         for i, msg in enumerate(messages):
             lines.append(f"[Message {i}]")
+            directive = _strategy_directive(msg)
+            if directive:
+                lines.append(f"Directive: {directive}")
+            if isinstance(msg, ExtractionItem) and msg.context:
+                lines.append("Read-only context (do not extract from it):")
+                lines.append(msg.context)
+                lines.append("Target content (extract only this):")
             lines.append(f"{msg.content}")
             lines.append("")
 
@@ -1224,7 +1314,7 @@ class LLMExtractor:
 
     async def extract_all_flat(
         self,
-        all_messages: list[Chunk],
+        all_messages: list[Extractable],
         progress_callback=None,
     ) -> None:
         """Extract from all chunks using flat parallelism.
@@ -1245,7 +1335,7 @@ class LLMExtractor:
             self.stats["total"] += 1
             # C7: no trivial-skip — every chunk is a candidate; the SQLite cache
             # still short-circuits already-extracted slices.
-            cached = self._read_cache(msg)
+            cached = self.read_cached(msg)
             if cached is not None:
                 self.stats["cache_hits"] += 1
             else:
@@ -1298,7 +1388,7 @@ class LLMExtractor:
 
     @staticmethod
     def _batch_failure(
-        messages: list[Chunk], error: str, *, transient: bool
+        messages: list[Extractable], error: str, *, transient: bool
     ) -> list[dict]:
         """One marked failure per message — the whole batch failed to produce
         usable results (LLM error, bad/empty/truncated response, bad shape)."""
@@ -1341,7 +1431,7 @@ class LLMExtractor:
             by_index.setdefault(idx, entry)
         return by_index
 
-    async def _process_batch(self, messages: list[Chunk]) -> None:
+    async def _process_batch(self, messages: list[Extractable]) -> None:
         """Process a single batch: call LLM and cache results.
 
         The per-batch timeout is applied INSIDE _call_llm_batch (around the
@@ -1365,6 +1455,10 @@ class LLMExtractor:
 
                 # Annotate with metadata
                 result["_msg_id"] = msg.id
+                result["_target_chunk_id"] = getattr(msg, "target_chunk_id", msg.id)
+                result["_source_unit_id"] = getattr(msg, "source_unit_id", None)
+                result["_strategy_version"] = getattr(msg, "strategy_version", None)
+                result["_prompt_version"] = getattr(msg, "prompt_version", None)
                 result["_msg_sender"] = _sender_of(msg)
                 result["_msg_timestamp"] = msg.timestamp
                 result["_msg_content_preview"] = msg.content[:200]

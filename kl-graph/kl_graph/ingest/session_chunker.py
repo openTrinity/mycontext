@@ -259,10 +259,20 @@ def _slice_one_session(
         msg_tokens = num_tokens_from_string(content)
         sender = msg.metadata.get("sender", "")
         reply_to = msg.metadata.get("reply_to")
+        extraction_target = msg.metadata.get("extraction_target_content", "")
+        quoted_context = msg.metadata.get("quoted_context", "")
 
         if msg_tokens <= chunk_token_num:
             # Normal case: fits in a chunk
-            block = _Block(content, msg.id, sender, reply_to, msg.timestamp)
+            block = _Block(
+                content,
+                msg.id,
+                sender,
+                reply_to,
+                msg.timestamp,
+                extraction_target=extraction_target,
+                quoted_context=quoted_context,
+            )
             if buf and buf_tokens + msg_tokens > chunk_token_num:
                 packed.append(buf)
                 buf = []
@@ -308,7 +318,15 @@ class _Block:
     propagate to the slice metadata.
     """
 
-    __slots__ = ("message_id", "reply_to", "sender", "text", "timestamp")
+    __slots__ = (
+        "extraction_target",
+        "message_id",
+        "quoted_context",
+        "reply_to",
+        "sender",
+        "text",
+        "timestamp",
+    )
 
     def __init__(
         self,
@@ -317,12 +335,16 @@ class _Block:
         sender: str,
         reply_to: str | None,
         timestamp: int,
+        extraction_target: str = "",
+        quoted_context: str = "",
     ) -> None:
         self.text = text
         self.message_id = message_id
         self.sender = sender
         self.reply_to = reply_to
         self.timestamp = timestamp
+        self.extraction_target = extraction_target
+        self.quoted_context = quoted_context
 
 
 def _split_oversized(
@@ -488,6 +510,8 @@ def _emit_slice(
         "member_message_ids": member_ids,
         "senders": senders,
         "reply_to_message_ids": reply_tos,
+        "extraction_target_contents": [b.extraction_target for b in blocks],
+        "quoted_contexts": [b.quoted_context for b in blocks],
     }
     if is_first_slice:
         metadata["session_start"] = True

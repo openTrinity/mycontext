@@ -47,6 +47,7 @@ QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 from kl_graph.ingest.checkpoint import IngestCheckpoint
 from kl_graph.ingest.embedder import Embedder
+from kl_graph.ingest.extraction_strategy import build_extraction_items
 from kl_graph.ingest.llm_extractor import (
     LLMExtractor,
     summarize_entity_descriptions,
@@ -66,6 +67,7 @@ from kl_graph.models.types import (
     EdgeType,
     Entity,
     EntityType,
+    ExtractionItem,
     Fact,
     FactType,
     Scope,
@@ -278,7 +280,7 @@ def entity_id_from_name(name: str) -> str:
 
 
 def _fact_id(msg_id: str, fact_text: str) -> str:
-    """Deterministic fact ID from source chunk id + full fact text.
+    """Deterministic fact ID from extraction identity + full fact text.
 
     Single source of truth for the fact-id formula. Both ``_build_facts`` and
     ``_create_edges`` MUST derive the id through this helper so the two
@@ -712,7 +714,8 @@ class IngestionPipeline:
         self.extra_chunks: list[Chunk] = []  # non-chat source chunks
         self.all_entities: dict[str, Entity] = {}  # id → Entity
         self.all_facts: list[Fact] = []
-        self.extraction_results: dict[str, dict] = {}  # msg_id → raw result
+        self.extraction_results: dict[str, dict] = {}  # extraction_item_id -> result
+        self.extraction_items: list[ExtractionItem] = []
         self.source_units: list[SourceUnit] = []
         self.chunk_units: list[ChunkUnit] = []
         self.units_discovered = 0
@@ -1035,15 +1038,16 @@ class IngestionPipeline:
             print("\n[B.1] Loading chunks (chat + sources)...")
             self._load_workset()
             chunks = self.all_chunks()
+            self.extraction_items = build_extraction_items(chunks)
             print(
                 f"  Loaded {len(self.messages)} chat slices + "
                 f"{len(self.extra_chunks)} source chunks = {len(chunks)} total"
             )
 
-            self._validate_extraction_cache_capacity(len(chunks))
+            self._validate_extraction_cache_capacity(len(self.extraction_items))
 
             # C7: every chunk is extracted (no trivial-skip filter).
-            print(f"  Chunks to extract: {len(chunks)}")
+            print(f"  Extraction items: {len(self.extraction_items)}")
 
             # Initialize extractor
             if self.extractor is None:
@@ -1059,7 +1063,7 @@ class IngestionPipeline:
                 f"\n[B.2] Running LLM extraction (max_concurrent={self.max_concurrent_llm})..."
             )
             await self.extractor.extract_all_flat(
-                chunks, progress_callback=progress_callback
+                self.extraction_items, progress_callback=progress_callback
             )
 
             elapsed = time.time() - t0
@@ -1076,7 +1080,7 @@ class IngestionPipeline:
             print(f"  │  Time:               {elapsed:.1f}s ({elapsed / 60:.1f} min)")
             print("  └────────────────────────────────────────────┘")
 
-            ckpt.done(count=len(chunks))
+            ckpt.done(count=len(self.extraction_items))
 
     async def run_graph_build(self, progress_callback=None):
         """Build the graph (entities/facts/edges) from cached extraction results.
@@ -1115,22 +1119,25 @@ class IngestionPipeline:
         print("\n[B.4] Loading cached extraction results...")
         self._ensure_extraction_loaded()
         print(f"  Cached results loaded: {len(self.extraction_results)}")
-        # Warn if cache doesn't cover all chunks (e.g., source data changed
+        # Warn if cache doesn't cover all extraction items (e.g., source data changed
         # since extraction ran, or --build-only used without re-extracting).
-        n_chunks = len(self.all_chunks())
-        n_covered = sum(1 for c in self.all_chunks() if c.id in self.extraction_results)
-        if n_covered < n_chunks:
-            pct = n_covered / n_chunks * 100 if n_chunks else 100
+        n_items = len(self.extraction_items)
+        n_covered = sum(
+            1 for item in self.extraction_items
+            if item.id in self.extraction_results
+        )
+        if n_covered < n_items:
+            pct = n_covered / n_items * 100 if n_items else 100
             logger.warning(
-                "Extraction cache covers %d/%d chunks (%.0f%%). "
+                "Extraction cache covers %d/%d items (%.0f%%). "
                 "Run extraction first (or omit --build-only) for full coverage.",
                 n_covered,
-                n_chunks,
+                n_items,
                 pct,
             )
             print(
-                f"  ⚠ WARNING: extraction cache covers only {n_covered}/{n_chunks} "
-                f"chunks ({pct:.0f}%). Graph will be partial."
+                f"  WARNING: extraction cache covers only {n_covered}/{n_items} "
+                f"items ({pct:.0f}%). Graph will be partial."
             )
         _report(0.10)
 
@@ -1144,6 +1151,7 @@ class IngestionPipeline:
         print("\n[B.6] Building facts...")
         self._build_facts()
         print(f"  Facts: {len(self.all_facts)}")
+        await self._run_optional_cleanup()
         _report(0.35)
 
         # B.7: Embed the graph layer (entities + facts) — heaviest sub-step.
@@ -1243,18 +1251,71 @@ class IngestionPipeline:
                 cache_max_entries=self.cache_max_entries,
                 legacy_cache_db=self.legacy_cache_db,
             )
-        model = self.extractor.model
-        store = ExtractionCacheStore(
-            self.cache_db,
-            max_entries=self.cache_max_entries,
-            legacy_db_path=self.legacy_cache_db,
-        )
-        try:
-            results = store.all_results(model)
-        finally:
-            store.close()
+        chunks = self.all_chunks()
+        self._prepare_extraction_items(chunks)
+        if self.extraction_items:
+            results = {
+                item.id: result
+                for item in self.extraction_items
+                if (result := self.extractor.read_cached(item)) is not None
+            }
+        else:
+            # Compatibility for callers replaying a legacy chunk cache without
+            # loading source chunks. Real graph builds always take the exact,
+            # fingerprinted extraction-item branch above.
+            store = ExtractionCacheStore(
+                self.cache_db,
+                max_entries=self.cache_max_entries,
+                legacy_db_path=self.legacy_cache_db,
+            )
+            try:
+                results = store.all_results(self.extractor.model)
+            finally:
+                store.close()
         self.extraction_results.update(results)
         print(f"  Loaded {len(results)} cached results from {self.cache_db}")
+
+    def _prepare_extraction_items(self, chunks: list[Chunk]) -> None:
+        """Initialize one canonical item list, adapting direct legacy results once.
+
+        Normal ingestion always builds source-aware items. Tests and old callers
+        may inject a ``chunk_id -> result`` mapping directly; that legacy shape
+        is converted here into one stored-chunk item per result, after which all
+        consumers use the same extraction-item record path.
+        """
+        if getattr(self, "extraction_items", None):
+            return
+        legacy_chunk_ids = {
+            chunk.id for chunk in chunks if chunk.id in self.extraction_results
+        }
+        if legacy_chunk_ids:
+            self.extraction_items = [
+                ExtractionItem(
+                    id=chunk.id,
+                    source_type=chunk.source_type,
+                    content=getattr(chunk, "content", ""),
+                    target_chunk_id=chunk.id,
+                    timestamp=chunk.timestamp,
+                    source_ref=getattr(chunk, "source_ref", None),
+                    strategy_version="legacy-chunk-v1",
+                    prompt_version="legacy",
+                )
+                for chunk in chunks
+                if chunk.id in legacy_chunk_ids
+            ]
+            return
+        self.extraction_items = build_extraction_items(chunks)
+
+    def _extraction_records(self):
+        """Yield extraction items with their persistent target chunks/results."""
+        all_chunks = self.all_chunks()
+        self._prepare_extraction_items(all_chunks)
+        chunks = {chunk.id: chunk for chunk in all_chunks}
+        for item in self.extraction_items:
+            result = self.extraction_results.get(item.id)
+            chunk = chunks.get(item.target_chunk_id)
+            if result is not None and chunk is not None:
+                yield item, chunk, result
 
     async def _build_entities(self):
         """Build entities from extraction results. Exact name match → merge.
@@ -1277,11 +1338,7 @@ class IngestionPipeline:
             # entity_id → [(source_chunk_timestamp, description)], first-seen order.
             descriptions: dict[str, list[tuple[int, str]]] = {}
 
-            for msg in self.all_chunks():
-                result = self.extraction_results.get(msg.id)
-                if not result:
-                    continue
-
+            for item, msg, result in self._extraction_records():
                 raw_entities = result.get("entities", [])
                 for raw in raw_entities:
                     if not isinstance(raw, dict):
@@ -1399,11 +1456,7 @@ class IngestionPipeline:
         with self.step("phase_b.build_facts", on_skip=self._ensure_facts_loaded) as s:
             if s.skip:
                 return
-            for msg in self.all_chunks():
-                result = self.extraction_results.get(msg.id)
-                if not result:
-                    continue
-
+            for item, msg, result in self._extraction_records():
                 raw_facts = result.get("facts", [])
                 for raw in raw_facts:
                     if not isinstance(raw, dict):
@@ -1422,7 +1475,7 @@ class IngestionPipeline:
                     fact_type = map_fact_type(raw.get("fact_type", "GENERAL"))
 
                     # Deterministic ID from source chunk + (date-prefixed) fact text
-                    fact_id = _fact_id(msg.id, fact_text)
+                    fact_id = _fact_id(item.id, fact_text)
 
                     # LLM-generated confidence in [0,1]; clamp defensively and fall
                     # back to 0.9 when the model omits it or emits a bad value.
@@ -1439,6 +1492,8 @@ class IngestionPipeline:
                         timestamp=msg.timestamp,
                         confidence=confidence,  # LLM-generated, clamped to [0,1]
                         source_chunk_id=msg.id,
+                        source_unit_id=item.source_unit_id,
+                        extraction_item_id=item.id,
                     )
                     self.all_facts.append(fact)
 
@@ -1446,6 +1501,69 @@ class IngestionPipeline:
             if self.all_facts:
                 self.store.insert_facts(self.all_facts)
             s.done(count=len(self.all_facts))
+
+    async def _run_optional_cleanup(self) -> None:
+        """Run the optional budgeted LLM review before embedding and edges."""
+        cleanup_cfg = cfg.pipelines.ingestion.cleanup
+        if not cleanup_cfg.enabled:
+            return
+        from kl_graph.ingest.entity_cleanup import (
+            apply_cleanup_decisions,
+            rank_cleanup_candidates,
+            review_cleanup_candidates,
+        )
+
+        mention_contexts: dict[str, list[str]] = {}
+        type_votes: dict[str, set[str]] = {}
+        for item, _chunk, result in self._extraction_records():
+            for raw in result.get("entities", []):
+                if not isinstance(raw, dict):
+                    continue
+                name = str(raw.get("name") or "").strip().lstrip("@").strip()
+                if not name:
+                    continue
+                entity_id = entity_id_from_name(name)
+                mention_contexts.setdefault(entity_id, []).append(item.content[:500])
+                type_votes.setdefault(entity_id, set()).add(
+                    str(raw.get("entity_type") or "Unknown")
+                )
+        candidates = rank_cleanup_candidates(
+            list(self.all_entities.values()),
+            self.all_facts,
+            min_score=float(cleanup_cfg.min_suspicion_score),
+            mention_contexts=mention_contexts,
+            type_votes=type_votes,
+        )
+        decisions = await review_cleanup_candidates(
+            candidates,
+            budget=int(cleanup_cfg.max_entities),
+            dry_run=bool(cleanup_cfg.dry_run),
+        )
+        apply_cleanup_decisions(
+            self.all_entities, decisions, dry_run=bool(cleanup_cfg.dry_run)
+        )
+        if not cleanup_cfg.dry_run:
+            changed = [
+                self.all_entities[decision["entity_id"]]
+                for decision in decisions
+                if decision["action"] != "KEEP"
+                and decision["entity_id"] in self.all_entities
+            ]
+            if changed:
+                self.store.apply_entity_cleanup(changed)
+            self.all_entities = {
+                entity_id: entity
+                for entity_id, entity in self.all_entities.items()
+                if entity.quality_status == "active"
+            }
+        actions: dict[str, int] = {}
+        for decision in decisions:
+            actions[decision["action"]] = actions.get(decision["action"], 0) + 1
+        mode = "dry-run" if cleanup_cfg.dry_run else "applied"
+        print(
+            f"  Entity cleanup {mode}: {len(decisions)}/{len(candidates)} reviewed; "
+            f"actions={actions}"
+        )
 
     def _embed_texts_reusing_duplicates(
         self, texts: list[str], label: str
@@ -1634,6 +1752,8 @@ class IngestionPipeline:
                                     "timestamp": fact.timestamp,
                                     "confidence": fact.confidence,
                                     "source_chunk_id": fact.source_chunk_id,
+                                    "source_unit_id": fact.source_unit_id,
+                                    "extraction_item_id": fact.extraction_item_id,
                                 },
                             )
                         )
@@ -1938,6 +2058,7 @@ class IngestionPipeline:
         raw_fact: dict,
         all_entities: dict[str, Entity],
         chunk_ts: int = 0,
+        extraction_item_id: str | None = None,
     ) -> list[Edge]:
         """Build the STATES + ABOUT edges for one raw fact (pure, no I/O).
 
@@ -1973,7 +2094,7 @@ class IngestionPipeline:
         # the edge fact ids cannot diverge from the fact node ids.
         fact_text = _dated_fact_text(fact_text, chunk_ts)
 
-        fact_id = _fact_id(msg_id, fact_text)
+        fact_id = _fact_id(extraction_item_id or msg_id, fact_text)
         edges: list[Edge] = []
 
         # STATES: fact → source chunk
@@ -2066,10 +2187,7 @@ class IngestionPipeline:
 
             # MENTIONS edges (chunk → entity) from extraction results
             print("  Creating MENTIONS edges...")
-            for msg in self.all_chunks():
-                result = self.extraction_results.get(msg.id)
-                if not result:
-                    continue
+            for item, msg, result in self._extraction_records():
                 raw_entities = result.get("entities", [])
                 for raw in raw_entities:
                     if not isinstance(raw, dict):
@@ -2122,15 +2240,16 @@ class IngestionPipeline:
             # STATES edges (fact → source chunk)
             # ABOUT edges (fact → entities mentioned in fact)
             print("  Creating STATES/ABOUT edges...")
-            for msg in self.all_chunks():
-                result = self.extraction_results.get(msg.id)
-                if not result:
-                    continue
+            for item, msg, result in self._extraction_records():
                 raw_facts = result.get("facts", [])
                 for raw_fact in raw_facts:
                     edges.extend(
                         self._fact_edges(
-                            msg.id, raw_fact, self.all_entities, msg.timestamp
+                            msg.id,
+                            raw_fact,
+                            self.all_entities,
+                            msg.timestamp,
+                            item.id,
                         )
                     )
 

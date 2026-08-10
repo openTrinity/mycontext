@@ -105,6 +105,23 @@ class ChunkUnit:
 
 
 @dataclass(kw_only=True)
+class ExtractionItem:
+    """Ephemeral source-aware LLM target projected onto a stored chunk."""
+
+    id: str
+    source_type: str
+    content: str
+    target_chunk_id: str
+    context: str = ""
+    source_unit_id: str | None = None
+    timestamp: int = 0
+    source_ref: str | None = None
+    strategy_version: str = "stored-chunk-v1"
+    prompt_version: str = "zh-v1"
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass(kw_only=True)
 class Scope:
     """A source container that chunks belong to (chat conversation, doc, ...).
 
@@ -229,6 +246,9 @@ class Entity:
     # LLM-generalized paragraph once the bullet list grows past the gate. Small
     # by construction, so it stays an in-graph node property next to ``name``.
     description: str = ""
+    # Reversible cleanup state. Quarantined entities retain provenance but are
+    # excluded from retrieval, embedding, and new graph edges.
+    quality_status: str = "active"
 
 
 @dataclass
@@ -241,6 +261,8 @@ class Fact:
     timestamp: int = 0
     confidence: float = 0.8
     source_chunk_id: str = ""
+    source_unit_id: str | None = None
+    extraction_item_id: str | None = None
     embedding_id: str | None = None
 
 

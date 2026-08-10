@@ -151,14 +151,12 @@ def test_normalize_defensive_on_malformed():
     assert raw["entities"] == [
         {"name": "张伟", "entity_type": "Person"},
     ]
-    # All facts get involved_entities reconstructed from entity names list
-    assert raw["facts"][1]["involved_entities"] == ["张伟"]
-    assert raw["facts"][3]["involved_entities"] == ["张伟"]
+    # Malformed/unreferenced names never gain unrelated participants.
+    assert raw["facts"][1]["involved_entities"] == []
+    assert raw["facts"][3]["involved_entities"] == []
 
 
-def test_involved_entities_reconstructed_from_entity_names():
-    # involved_entities is now set to ALL entity names from the same message,
-    # regardless of what the LLM originally put there.
+def test_involved_entities_are_fact_local():
     raw = {
         "entities": [
             {"name": "Alice", "entity_type": "Person"},
@@ -167,12 +165,10 @@ def test_involved_entities_reconstructed_from_entity_names():
         "facts": [{"subject_entity": "Alice", "fact_text": "Alice did something"}],
     }
     _normalize_result(raw)
-    # Every entity is included in involved_entities for every fact
-    assert raw["facts"][0]["involved_entities"] == ["Alice", "Bob"]
+    assert raw["facts"][0]["involved_entities"] == ["Alice"]
 
 
-def test_involved_entities_reconstruction_with_multiple_facts():
-    # All facts get the same full entity names list.
+def test_involved_entities_differ_across_facts():
     raw = {
         "entities": [
             {"name": "Alice", "entity_type": "Person"},
@@ -188,9 +184,8 @@ def test_involved_entities_reconstruction_with_multiple_facts():
     # @Bob is cleaned to Bob in entities
     names = [e["name"] for e in raw["entities"]]
     assert names == ["Alice", "Bob", "Carol"]
-    # Both facts get the full cleaned entity names
-    assert raw["facts"][0]["involved_entities"] == ["Alice", "Bob", "Carol"]
-    assert raw["facts"][1]["involved_entities"] == ["Alice", "Bob", "Carol"]
+    assert raw["facts"][0]["involved_entities"] == ["Alice"]
+    assert raw["facts"][1]["involved_entities"] == ["Bob"]
 
 
 def test_involved_entities_noop_when_entities_absent():

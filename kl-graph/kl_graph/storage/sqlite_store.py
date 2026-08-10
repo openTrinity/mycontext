@@ -168,7 +168,8 @@ class SQLiteStore(KnowledgeStore):
                 last_seen INTEGER DEFAULT 0,
                 mention_count INTEGER DEFAULT 1,
                 embedding_id TEXT,
-                description TEXT NOT NULL DEFAULT ''
+                description TEXT NOT NULL DEFAULT '',
+                quality_status TEXT NOT NULL DEFAULT 'active'
             );
 
             CREATE TABLE IF NOT EXISTS facts (
@@ -178,6 +179,8 @@ class SQLiteStore(KnowledgeStore):
                 timestamp INTEGER DEFAULT 0,
                 confidence REAL DEFAULT 0.8,
                 source_chunk_id TEXT NOT NULL,
+                source_unit_id TEXT,
+                extraction_item_id TEXT,
                 embedding_id TEXT,
                 FOREIGN KEY (source_chunk_id) REFERENCES chunks(id)
             );
@@ -315,6 +318,7 @@ class SQLiteStore(KnowledgeStore):
             CREATE INDEX IF NOT EXISTS idx_ingest_runs_updated ON ingest_runs(updated_at);
         """)
         self._ensure_entity_columns()
+        self._ensure_fact_columns()
         self._ensure_chunk_columns()
         self._ensure_ingest_run_columns()
         self._ensure_community_columns()
@@ -336,6 +340,17 @@ class SQLiteStore(KnowledgeStore):
             self.conn.execute(
                 "ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT ''"
             )
+        if "quality_status" not in cols:
+            self.conn.execute(
+                "ALTER TABLE entities ADD COLUMN quality_status TEXT NOT NULL DEFAULT 'active'"
+            )
+
+    def _ensure_fact_columns(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(facts)")}
+        if "source_unit_id" not in cols:
+            self.conn.execute("ALTER TABLE facts ADD COLUMN source_unit_id TEXT")
+        if "extraction_item_id" not in cols:
+            self.conn.execute("ALTER TABLE facts ADD COLUMN extraction_item_id TEXT")
 
     def _ensure_community_columns(self) -> None:
         """Add community columns missing from a pre-existing database.
@@ -905,12 +920,13 @@ class SQLiteStore(KnowledgeStore):
             entities: Entities to upsert.
         """
         self.conn.executemany(
-            """INSERT INTO entities (id, name, entity_type, first_seen, last_seen, mention_count, embedding_id, description)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO entities (id, name, entity_type, first_seen, last_seen, mention_count, embedding_id, description, quality_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  last_seen = MAX(entities.last_seen, excluded.last_seen),
                  mention_count = entities.mention_count + 1,
-                 description = excluded.description""",
+                 description = excluded.description,
+                 quality_status = excluded.quality_status""",
             [
                 (
                     e.id,
@@ -921,11 +937,27 @@ class SQLiteStore(KnowledgeStore):
                     e.mention_count,
                     e.embedding_id,
                     e.description or "",
+                    e.quality_status,
                 )
                 for e in entities
             ],
         )
         self._index_entities_fts(entities)
+        self.conn.commit()
+
+    def apply_entity_cleanup(self, entities: list[Entity]) -> None:
+        """Update only cleanup-owned fields; preserve all occurrence counters."""
+        if not entities:
+            return
+        self.conn.executemany(
+            """UPDATE entities
+               SET entity_type = ?, quality_status = ?
+               WHERE id = ?""",
+            [
+                (entity.entity_type.value, entity.quality_status, entity.id)
+                for entity in entities
+            ],
+        )
         self.conn.commit()
 
     def _index_entities_fts(self, entities: list[Entity]) -> None:
@@ -949,7 +981,7 @@ class SQLiteStore(KnowledgeStore):
 
     def get_entity_by_name(self, name: str) -> Entity | None:
         row = self.conn.execute(
-            "SELECT * FROM entities WHERE name = ?", (name,)
+            "SELECT * FROM entities WHERE quality_status='active' AND name = ?", (name,)
         ).fetchone()
         if not row:
             return None
@@ -958,7 +990,7 @@ class SQLiteStore(KnowledgeStore):
     def search_entities_by_name(self, query: str, limit: int = 10) -> list[Entity]:
         """Substring match on entity names."""
         rows = self.conn.execute(
-            "SELECT * FROM entities WHERE name LIKE ? ORDER BY mention_count DESC LIMIT ?",
+            "SELECT * FROM entities WHERE quality_status='active' AND name LIKE ? ORDER BY mention_count DESC LIMIT ?",
             (f"%{query}%", limit),
         ).fetchall()
         return [self._row_to_entity(r) for r in rows]
@@ -995,7 +1027,7 @@ class SQLiteStore(KnowledgeStore):
                         f"""SELECT e.*, bm25({_ENTITIES_FTS}) AS _score
                             FROM {_ENTITIES_FTS}
                             JOIN entities e ON e.id = {_ENTITIES_FTS}.entity_id
-                            WHERE {_ENTITIES_FTS} MATCH ?
+                            WHERE {_ENTITIES_FTS} MATCH ? AND e.quality_status='active'
                             ORDER BY _score LIMIT ?""",
                         (match_expr, limit),
                     ).fetchall()
@@ -1011,7 +1043,7 @@ class SQLiteStore(KnowledgeStore):
 
         rows = self.conn.execute(
             """SELECT * FROM entities
-               WHERE name LIKE ? OR description LIKE ?
+               WHERE quality_status='active' AND (name LIKE ? OR description LIKE ?)
                ORDER BY mention_count DESC LIMIT ?""",
             (f"%{query}%", f"%{query}%", limit),
         ).fetchall()
@@ -1019,7 +1051,9 @@ class SQLiteStore(KnowledgeStore):
 
     def get_all_entity_names(self) -> dict[str, str]:
         """Return {name: id} for all entities."""
-        rows = self.conn.execute("SELECT id, name FROM entities").fetchall()
+        rows = self.conn.execute(
+            "SELECT id, name FROM entities WHERE quality_status='active'"
+        ).fetchall()
         return {r["name"]: r["id"] for r in rows}
 
     def count_entities(self) -> int:
@@ -1031,7 +1065,9 @@ class SQLiteStore(KnowledgeStore):
         Used for checkpoint-resume reload: populates the in-memory entity dict
         when the build_entities step is skipped.
         """
-        cursor = self.conn.execute("SELECT * FROM entities")
+        cursor = self.conn.execute(
+            "SELECT * FROM entities WHERE quality_status='active'"
+        )
         while True:
             row = cursor.fetchone()
             if row is None:
@@ -1057,8 +1093,9 @@ class SQLiteStore(KnowledgeStore):
         """Bulk insert facts."""
         self.conn.executemany(
             """INSERT OR IGNORE INTO facts
-               (id, text, fact_type, timestamp, confidence, source_chunk_id, embedding_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (id, text, fact_type, timestamp, confidence, source_chunk_id,
+                source_unit_id, extraction_item_id, embedding_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     f.id,
@@ -1067,6 +1104,8 @@ class SQLiteStore(KnowledgeStore):
                     f.timestamp,
                     f.confidence,
                     f.source_chunk_id,
+                    f.source_unit_id,
+                    f.extraction_item_id,
                     f.embedding_id,
                 )
                 for f in facts

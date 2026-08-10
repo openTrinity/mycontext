@@ -78,10 +78,28 @@ pipelines:
       timeout: ${oc.env:KL_EMBED_TIMEOUT,60}
 
     extraction:
-      batch_size: ${oc.env:KL_LLM_BATCH_SIZE,10}
+      batch_size: ${oc.env:KL_LLM_BATCH_SIZE,1}
       batch_timeout: ${oc.env:KL_LLM_BATCH_TIMEOUT,300}
       concurrency: ${oc.env:KL_LLM_CONCURRENCY,50}
       cache_max_entries: ${oc.env:KL_EXTRACTION_CACHE_MAX_ENTRIES,100000}
+      prompt_language: zh
+      strategies:
+        message: chat_message
+        wiki: document_chunk
+        mail: document_chunk
+        minutes: document_chunk
+        work: document_chunk
+        drive: document_chunk
+        calendar: document_chunk
+        contacts: document_chunk
+        attendance: document_chunk
+        default: stored_chunk
+
+    cleanup:
+      enabled: ${oc.env:KL_ENTITY_CLEANUP_ENABLED,0}
+      max_entities: ${oc.env:KL_ENTITY_CLEANUP_BUDGET,500}
+      min_suspicion_score: ${oc.env:KL_ENTITY_CLEANUP_MIN_SCORE,5}
+      dry_run: ${oc.env:KL_ENTITY_CLEANUP_DRY_RUN,1}
 
     entity_description:
       summarize: ${oc.env:KL_ENTITY_DESCRIPTION_SUMMARIZE,1}

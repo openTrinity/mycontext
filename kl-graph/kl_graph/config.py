@@ -148,6 +148,15 @@ class ExtractionConfig(_ConfigModel):
     batch_timeout: int
     concurrency: int = Field(gt=0)
     cache_max_entries: int = Field(gt=0)
+    prompt_language: Literal["zh", "en"] = "zh"
+    strategies: dict[str, str] = Field(default_factory=dict)
+
+
+class CleanupConfig(_ConfigModel):
+    enabled: bool = False
+    max_entities: int = Field(default=500, ge=0)
+    min_suspicion_score: float = Field(default=5.0, ge=0)
+    dry_run: bool = True
 
 
 class CommunitySummarizationConfig(_ConfigModel):
@@ -170,6 +179,7 @@ class IngestionPipelineConfig(_ConfigModel):
     generic_sources: list[str]
     embedding: IngestionEmbeddingConfig
     extraction: ExtractionConfig
+    cleanup: CleanupConfig = CleanupConfig()
     entity_description: EntityDescriptionConfig
     community_summarization: CommunitySummarizationConfig
     incremental: IncrementalConfig
