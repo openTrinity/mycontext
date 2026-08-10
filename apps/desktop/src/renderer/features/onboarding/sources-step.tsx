@@ -52,6 +52,39 @@ const RANGES: readonly { days: number | null; labelKey: string }[] = [
   { days: null, labelKey: "sourcesStep.rangeAll" },
 ]
 
+/** 群人数档位。见 `inMemberBucket`。 */
+export type MemberBucket = "all" | "0-100" | "101-200" | "201+"
+
+const MEMBER_BUCKETS: readonly { bucket: MemberBucket; labelKey: string }[] = [
+  { bucket: "all", labelKey: "sourcesStep.memberBucketAll" },
+  { bucket: "0-100", labelKey: "sourcesStep.memberBucket0_100" },
+  { bucket: "101-200", labelKey: "sourcesStep.memberBucket101_200" },
+  { bucket: "201+", labelKey: "sourcesStep.memberBucket201Plus" },
+]
+
+/**
+ * 一个群的人数落不落在选中的档位里。
+ *
+ * ## ★★ `memberCount === null` **恒通过**（不筛掉未知）
+ *
+ * 群列表接口当前对**所有**群都不返回人数（实测本机 73 个群 100% 为空）——
+ * 若把 null 当成"不匹配"筛掉，一选人数档就会把整组群清空，那是"筛选把数据
+ * 静默弄没了"（本仓库最忌讳的形态）。所以未知人数一律显示，宁可筛得松。
+ * 界面另给一句「人数读不到」的提示，让"筛不动"看得见而不是看起来像坏了。
+ *
+ * ## 边界
+ *
+ * `0-100` = 1..100（0 人的群不存在，但 `<= 100` 覆盖它无害）；
+ * `101-200` = 101..200；`201+` = >= 201。相邻档不重叠。
+ */
+export function inMemberBucket(memberCount: number | null, bucket: MemberBucket): boolean {
+  if (bucket === "all") return true
+  if (memberCount === null) return true
+  if (bucket === "0-100") return memberCount <= 100
+  if (bucket === "101-200") return memberCount >= 101 && memberCount <= 200
+  return memberCount >= 201
+}
+
 export interface SourcesDraft {
   /** 往前多少天；null = 不限。与 `customRange` 互斥 */
   rangeDays: number | null
@@ -261,6 +294,8 @@ export function SourcesStep({ value, onChange, sources }: SourcesStepProps) {
               onToggle={toggleConversation}
               onToggleAll={(visible) => toggleAll(visible)}
               showMemberCount
+              // 群才有人数档位筛选（单聊「2 人」无意义）
+              memberBuckets
             />
           </div>
         )}
@@ -396,6 +431,7 @@ function ConversationGroup({
   onToggle,
   onToggleAll,
   showMemberCount,
+  memberBuckets = false,
 }: {
   titleKey: string
   items: readonly ChannelConversationView[]
@@ -410,6 +446,8 @@ function ConversationGroup({
    */
   onToggleAll: (visible: readonly ChannelConversationView[]) => void
   showMemberCount: boolean
+  /** 显示人数档位筛选（只群聊传 true —— 单聊没有人数）。见 `inMemberBucket`。 */
+  memberBuckets?: boolean
 }) {
   const { t } = useDynamicTranslation("onboarding")
   /**
@@ -418,8 +456,14 @@ function ConversationGroup({
    * ★ 88 个会话靠滚动去找是不现实的。实测这个账号：单聊 52 / 群聊 36。
    * 用户心里通常已经有目标了（"把和小李的单聊加进去"），
    * 搜索比滚动快一个数量级。
+   *
+   * ★ 搜索框**始终显示**（原来只在 `items.length > COLLAPSED_ROWS` 时出现）——
+   * 用户明确要"加关键字筛选"，而一个只在会话多时才冒出来的搜索框等于没有：
+   * 会话不到 8 个时想搜也搜不了，且"有时有有时没有"本身让人以为功能坏了。
    */
   const [keyword, setKeyword] = useState("")
+  /** 群人数档位（`all` = 不按人数筛）。见 `inMemberBucket`。 */
+  const [bucket, setBucket] = useState<MemberBucket>("all")
   /** 展开全部。收起时只显示前 `COLLAPSED_ROWS` 条 —— 见下方列表的注释。 */
   const [expanded, setExpanded] = useState(false)
 
@@ -429,13 +473,27 @@ function ConversationGroup({
    * ★ 「全选」作用在过滤后的那批上 —— 那正是搜索的意义
    * （"把所有带『项目』的群都加进来"）。作用在全部上的话，
    * 用户搜完再点全选会莫名其妙地把 88 个都勾上。
+   *
+   * ★ 关键字与人数档位**叠加取交集**：搜"项目" + 选 101-200 = 名字带项目
+   * 且人数在这一档的群。人数未知（`memberCount===null`）的群不被档位筛掉
+   * （见 `inMemberBucket`）。
    */
-  const visible =
-    keyword.trim() === ""
-      ? items
-      : items.filter((item) =>
-          (item.title ?? item.externalId).toLowerCase().includes(keyword.trim().toLowerCase()),
-        )
+  const visible = items.filter((item) => {
+    const matchesKeyword =
+      keyword.trim() === "" ||
+      (item.title ?? item.externalId).toLowerCase().includes(keyword.trim().toLowerCase())
+    return matchesKeyword && inMemberBucket(item.memberCount, bucket)
+  })
+
+  /**
+   * 这一组的群人数**全都读不到**吗（有档位筛选时才关心）。
+   *
+   * 群列表接口当前对所有群都不返回人数（见 `inMemberBucket` 的注释）。
+   * 全为 null 时人数筛选实际筛不动任何东西 —— 那就说出来，别让一排点了
+   * 没反应的按钮看起来像坏了（本仓库最忌讳的静默无效）。
+   */
+  const memberCountAllUnknown =
+    memberBuckets && items.length > 0 && items.every((item) => item.memberCount === null)
 
   const chosen = items.filter((item) => selected.includes(item.externalId)).length
   /**
@@ -488,14 +546,47 @@ function ConversationGroup({
         )}
       </div>
 
-      {/* 会话超过一屏才给搜索框：少量会话时它只是噪音 */}
-      {items.length > COLLAPSED_ROWS ? (
+      {/* 搜索框始终显示（会话再少也能搜）—— 见 keyword state 的注释 */}
+      {items.length === 0 ? null : (
         <Input
           size="sm"
           value={keyword}
           placeholder={t("sourcesStep.searchPlaceholder")}
           onChange={(event) => setKeyword(event.target.value)}
         />
+      )}
+
+      {/* 群人数档位（只群聊有）—— pill 样式与时间范围那排一致 */}
+      {memberBuckets && items.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <div className="flex flex-wrap gap-2">
+            {MEMBER_BUCKETS.map((option) => (
+              <button
+                key={option.bucket}
+                type="button"
+                onClick={() => setBucket(option.bucket)}
+                aria-pressed={bucket === option.bucket}
+                className={cn(
+                  "typography-caption-400 rounded-full border px-2.5 py-0.5 transition-colors duration-150",
+                  bucket === option.bucket
+                    ? "border-[var(--text-accent-normal)] bg-[var(--bg-card-z0)] text-[var(--text-base-primary)]"
+                    : "border-[var(--border-divider-light)] text-[var(--text-base-secondary)] hover:bg-[var(--bg-card-z0)]",
+                )}
+              >
+                {t(option.labelKey)}
+              </button>
+            ))}
+          </div>
+          {/*
+            人数全读不到时说出来 —— 否则档位按钮点了几乎不改变列表，
+            看起来像坏了（见 `memberCountAllUnknown`）。
+          */}
+          {memberCountAllUnknown ? (
+            <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              {t("sourcesStep.memberCountUnavailable")}
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       {items.length === 0 ? (
