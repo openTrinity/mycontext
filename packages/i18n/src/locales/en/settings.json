@@ -135,7 +135,7 @@
       "build": "Build graph",
       "building": "Building…",
       "buildHint": "Extract entities from collected messages. Needs the gateway, takes minutes. Search stays available. Full the first time, incremental after.",
-      "buildDone": "Built: {{entities}} entities / {{facts}} facts / {{edges}} edges",
+      "buildDone": "Built: {{entities}} entities / {{facts}} facts / {{edges}} relations added",
       "buildFailed": "Build failed: {{reason}}",
       "rebuild": "Rebuild",
       "rebuildHint": "Deletes the current graph and extraction cache, then re-extracts everything. Slower and more expensive than incremental. Needed after you narrow the capture scope: incremental builds only add, so entities and relations from unchecked conversations stay in the graph.",

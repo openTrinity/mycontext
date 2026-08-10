@@ -41,7 +41,7 @@
  */
 import { useEffect, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { Avatar, Button, cn } from "@mycontext/design"
+import { Avatar, Button } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
   useAdoptableSession,
@@ -65,12 +65,12 @@ import { FactsExplorer } from "../graph/facts-explorer.js"
 import { entityColor } from "../graph/palette.js"
 import { personaIdentityFromSteps } from "../persona/persona-identity.js"
 import { FocusBridge } from "./focus-bridge.js"
+import { GraphDetailPopover } from "./graph-detail-popover.js"
 import { GreetingRow, pickChannelNick, resolveGreetingName } from "./greeting-row.js"
 import { PersonaCard } from "./identity.js"
 import { Distribution, Section } from "./primitives.js"
 import {
-  describeBuildSchedule,
-  describeBuildVolume,
+  classifyGraphReason,
   describeKl,
   formatCount,
   readIdentityBar,
@@ -222,8 +222,19 @@ export function DashboardModule() {
    * 上游百分比是两回事（后者 Phase B 恒 40%、停 server 时卡在 stale 值上，
    * 见契约里那段注释与 kl-panel-build-state 的门禁）。
    */
-  const buildSchedule = describeBuildSchedule(graph?.buildSchedule ?? null)
-  const buildVolume = describeBuildVolume(graph?.lastBuild ?? null)
+  /**
+   * ★ `graph.reason` 该常驻还是收进 popover —— 见 `classifyGraphReason`。
+   *
+   * `building` 取的是 kl 的状态机而不是"文案里有没有'正在建图'"：
+   * 后者会在改文案的那天静默失效，而失效的表现是"黄条又常驻了"。
+   */
+  const graphReasonKind = classifyGraphReason({
+    reason: graph?.reason ?? null,
+    building,
+    available: graph?.available ?? false,
+  })
+  /** 进度那一档的说明文字 —— 交给 popover 的第三段。 */
+  const graphProgressNote = graphReasonKind === "progress" ? (graph?.reason ?? null) : null
 
   /**
    * ★ 本人身份**未确认**：一条必须被看见的警示。
@@ -572,13 +583,22 @@ export function DashboardModule() {
             : `kl · ${klView.text}`
         }
         action={
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={kl === null || building || buildGraph.isPending}
-            onClick={() => buildGraph.mutate(false)}
-          >
-            {/*
+          /*
+            ★ 两颗放一行：ⓘ 在左、动作在右。
+
+            左信息右动作是这一页其余地方的既有顺序（数字分身右上角那排
+            也是"看"在前、"设"在后）。而 ⓘ 只在真有内容时渲染
+            （见 `GraphDetailPopover`：点开什么都没有的入口比没有更糟）。
+          */
+          <div className="flex items-center gap-1.5">
+            <GraphDetailPopover overview={graph ?? null} progressNote={graphProgressNote} />
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={kl === null || building || buildGraph.isPending}
+              onClick={() => buildGraph.mutate(false)}
+            >
+              {/*
               ★★ 文案必须说清这是**增量**，不能叫「重新建图」。
 
               叫「重新」而做增量是一次真实的语义 bug：图谱侧的写入全部
@@ -594,8 +614,9 @@ export function DashboardModule() {
               真正会清空重来的入口是状态页那个「重建」（`fresh=true`，
               它会删掉 knowledge.db + qdrant + 抽取缓存）。
             */}
-            {building ? "建图中…" : graph?.available === true ? "继续建图（增量）" : "开始建图"}
-          </Button>
+              {building ? "建图中…" : graph?.available === true ? "继续建图（增量）" : "开始建图"}
+            </Button>
+          </div>
         }
       >
         {/*
@@ -605,48 +626,22 @@ export function DashboardModule() {
         {buildGraph.data?.ok === false && buildGraph.data.reason !== null ? (
           <ProblemLine text={buildGraph.data.reason} tone="bad" />
         ) : null}
-        {graph?.reason === undefined || graph.reason === null ? null : (
+        {/*
+          ★★ `graph.reason` **只在"要用户动手"时常驻**。
+
+          那个字段有四种来源，前三种（正在建图 ×2、还没建过图）是**进度或
+          入口的复述** —— 它们与旁边那颗按钮说的是同一件事（按钮上写着
+          「建图中…」/「开始建图」），常驻等于把同一句话说两遍，
+          而版面被挤掉一行。第四种（facts=0 抽取没成功）才有下一步动作。
+
+          判据在 `classifyGraphReason`（纯函数、按结构化事实分档，不匹配文案）。
+          进度那两档进右上角那颗 ⓘ 的 popover。
+        */}
+        {graphReasonKind === "actionable" &&
+        graph?.reason !== undefined &&
+        graph.reason !== null ? (
           <ProblemLine text={graph.reason} tone="warn" />
-        )}
-
-        {/*
-          ★ 自动构建的调度状态 —— 回答「它下次什么时候更新」。
-
-          放在图**上方**、与那两条 ProblemLine 同列：它们回答的是同一类
-          问题（"现在这张图处于什么状态"）。而放在板块外面时读者不知道
-          那句话在说哪一块（那正是上面两条被移进来的理由）。
-
-          `null` = 没接自动构建（未登录 / 未配置）→ 不占位。
-          显示一行"—"比不显示更糟：它看起来像"坏了"。
-        */}
-        {buildSchedule === null ? null : (
-          <p
-            className={cn(
-              "typography-caption-400",
-              buildSchedule.tone === "warn"
-                ? "text-[var(--status-warning)]"
-                : "text-[var(--text-base-tertiary)]",
-            )}
-          >
-            自动构建 · {buildSchedule.text}
-          </p>
-        )}
-
-        {/*
-          ★★ 「上一轮建了多少」——与上面那些绝对值是两件事。
-
-          绝对值（实体 618 / 事实 814）回答"图里有多少"，而用户问的是
-          "刚才那一轮干了什么"。增量建图下一轮可能只新增几十个实体、
-          总数几乎不变，于是**每轮看起来都像没跑** —— 而那恰恰让人以为
-          增量没生效。
-
-          `null` = 这次启动还没建过 → 不占位（显示一行"—"看起来像坏了）。
-        */}
-        {buildVolume === null ? null : (
-          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-            上一轮 · {buildVolume}
-          </p>
-        )}
+        ) : null}
 
         <EgoGraphPanel
           data={ego.data}

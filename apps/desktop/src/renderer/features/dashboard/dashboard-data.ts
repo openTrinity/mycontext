@@ -371,6 +371,60 @@ export function formatEta(ms: number): string {
 }
 
 /**
+ * `graph.reason` 那句话**要不要常驻在版面上**。
+ *
+ * ## ★★ 判据是「用户现在需要做什么吗」，不是「信息重不重要」
+ *
+ * 那个字段现在有四种来源（`kl-server.service.ts` 的 `graphOverview`）：
+ *
+ * | 形态 | 例子 | 该常驻吗 |
+ * |---|---|---|
+ * | 建图中（缺库窗口） | `正在建图 —— 这一轮完成后就会有内容` | ✗ 板块头按钮已经写着「建图中…」 |
+ * | 建图中（有库） | `正在建图 —— 数字会随进度增长` | ✗ 同上 |
+ * | 还没建过 | `还没建过图（点「重新建图」开始…）` | ✗ 那颗按钮本身就是入口 |
+ * | 半成品 / 读失败 | `事实一条都没抽出来 —— Phase B 的 LLM 抽取没成功` | **✓ 要动手**（重试或换网关） |
+ *
+ * 前三种是**进度或入口的复述** —— 它们与旁边那颗按钮说的是同一件事，
+ * 常驻等于把同一句话说两遍，而版面被挤掉一行。第四种才有下一步动作。
+ *
+ * ## ★★★ 为什么用结构化输入而不是匹配文案
+ *
+ * 最直接的写法是 `reason.includes("正在建图")`。那会在**改文案的那一天**
+ * 静默失效 —— 而失效的表现是"黄条又常驻了"，没有任何报错，
+ * 而且没人会想到去改这个判据（本仓库刚因为
+ * `formatEta`/`formatDuration` 那类文案耦合栽过）。
+ *
+ * `building` 与 `available` 是主进程给的**事实**，与措辞无关：
+ * · `building` = 我们自己的状态机（`rebuildGraph` 进出时置位）；
+ * · `available` = 图里有没有东西（`entities > 0 || facts > 0`）。
+ *
+ * 「还没建过」那一档的判据是 `available===false && building===false`
+ * —— 而"半成品"恰恰是 `available===true`（有实体但 facts=0），
+ * 两者因此可分。
+ */
+export function classifyGraphReason(input: {
+  reason: string | null
+  /** 我们的建图状态机（`klServerStatus.building`） */
+  building: boolean
+  /** 图里有没有东西（`graphOverview.available`） */
+  available: boolean
+}): "none" | "progress" | "actionable" {
+  if (input.reason === null || input.reason.trim() === "") return "none"
+  // 正在建 → 进度。板块头那颗按钮已经在说这件事。
+  if (input.building) return "progress"
+  /**
+   * 图里空着且没在建 = 「还没建过」。那是**入口**而不是问题 ——
+   * 旁边那颗「开始建图」就是下一步，再说一遍没有信息量。
+   */
+  if (!input.available) return "progress"
+  /**
+   * 有内容却仍有话说 = 半成品（facts=0 / 读失败）→ 要用户动手。
+   * ★ 这一档必须常驻：收起来等于把一个待办藏进 popover。
+   */
+  return "actionable"
+}
+
+/**
  * 最近一轮建图**产出了多少** → 一句人能读的话。`null` = 还没建过 / 没测到。
  *
  * ## ★★ 为什么需要它（绝对值回答不了这个问题）

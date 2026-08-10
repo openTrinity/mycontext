@@ -22,6 +22,7 @@ import type {
 import {
   LAG_BAD_THRESHOLD,
   LAG_WARN_THRESHOLD,
+  classifyGraphReason,
   describeBuildSchedule,
   describeBuildVolume,
   describeKl,
@@ -1046,5 +1047,114 @@ describe("★★ describeBuildVolume：这一轮建了多少（不是图里有�
     const text = describeBuildVolume({ ...base, unitsProcessed: 0, chunksCreated: 0 }) ?? ""
     expect(text).not.toContain("处理")
     expect(text).toContain("+12")
+  })
+})
+
+describe("★★★ classifyGraphReason：只有「要动手」的才常驻在版面上", () => {
+  /**
+   * ★★★ 这一组锁的是**版面上有几行常驻文字**。
+   *
+   * 我这一轮往「它认识的人与事」顶部堆了四行，把图挤下去大半屏。而
+   * `graph.reason` 的四种来源里有三种是**进度或入口的复述**——
+   * 它们与旁边那颗按钮说的是同一件事（按钮上写着「建图中…」/「开始建图」），
+   * 常驻等于把同一句话说两遍。
+   *
+   * ## ★★ 判据必须用结构化事实，不能匹配文案
+   *
+   * 最直接的写法是 `reason.includes("正在建图")` —— 那会在**改文案的那天**
+   * 静默失效，而失效的表现是"黄条又常驻了"，没有任何报错，
+   * 也没人会想到来改这个判据。所以判据是 `building` / `available`
+   * （主进程给的事实，与措辞无关）。
+   */
+  it("★ 没有 reason → none（不占位）", () => {
+    expect(classifyGraphReason({ reason: null, building: false, available: true })).toBe("none")
+    expect(classifyGraphReason({ reason: "   ", building: false, available: true })).toBe("none")
+  })
+
+  /**
+   * ★★★ 正在建图 → progress（收进 popover）。
+   *
+   * 两种文案都要判成 progress —— 缺库那个窗口与有库时上游给的话不同，
+   * 而它们是同一件事。★ 判据是 `building`，所以**换文案也不会失效**。
+   */
+  it("★★★ 正在建图 → progress（两种文案都是）", () => {
+    for (const reason of [
+      "正在建图 —— 这一轮完成后就会有内容，不用重新点",
+      "正在建图 —— 数字会随进度增长",
+    ]) {
+      expect(classifyGraphReason({ reason, building: true, available: false })).toBe("progress")
+    }
+  })
+
+  /**
+   * ★★★ **换掉措辞也不许失效** —— 这一条锁的是"判据不看文案"。
+   *
+   * 反证时验过：把判据写成 `reason.includes("正在建图")` 之后，
+   * 上面那两条仍然全绿（它们的文案里就有那四个字）。而真正的风险是
+   * **上游改了措辞**：那时 `includes` 落空 → 建图中的进度说明被判成
+   * "要动手" → 黄条又常驻，且没有任何报错。
+   *
+   * ★ 所以这一条刻意给一个**完全不含关键词**的 reason，
+   * 并把 `available` 设成 true（否则会落到"还没建过"那一档，
+   * 依然掩盖 building 判据的缺失 —— 我第一版就是这么写的，反证不红）。
+   */
+  it("★★★ building 为真时换任何措辞都是 progress（判据不看文案）", () => {
+    expect(
+      classifyGraphReason({ reason: "上游换了一句完全不同的话", building: true, available: true }),
+    ).toBe("progress")
+  })
+
+  /**
+   * ★★★ 还没建过 → progress。
+   *
+   * 那是**入口**而不是问题：旁边那颗「开始建图」就是下一步，
+   * 再说一遍没有信息量。判据是 `available===false && building===false`。
+   */
+  it("★★★ 还没建过图 → progress（那颗按钮就是入口）", () => {
+    expect(
+      classifyGraphReason({
+        reason: "还没建过图（点「重新建图」开始，它会出网）",
+        building: false,
+        available: false,
+      }),
+    ).toBe("progress")
+  })
+
+  /**
+   * ★★★ 半成品 → actionable，**必须常驻**。
+   *
+   * `facts=0` 意味着 Phase B 的 LLM 抽取没成功 —— 要用户重试或换网关。
+   * 收进 popover 等于把一个待办藏起来。
+   *
+   * ★ 与"还没建过"可分的关键：这一档 `available===true`
+   * （有实体，只是没抽出事实）。
+   */
+  it("★★★ 有内容却仍有话说（facts=0 / 读失败）→ actionable", () => {
+    expect(
+      classifyGraphReason({
+        reason: "实体已建好，但事实一条都没抽出来 —— Phase B 的 LLM 抽取没成功",
+        building: false,
+        available: true,
+      }),
+    ).toBe("actionable")
+    expect(
+      classifyGraphReason({ reason: "读图谱失败：xxx", building: false, available: true }),
+    ).toBe("actionable")
+  })
+
+  /**
+   * ★★ 建图中**优先于**其它判据。
+   *
+   * 建图跑到一半时 `available` 可能已经是 true（部分实体已落），
+   * 那时若先判 available 就会把进度说成"要动手"——而用户什么都不用做。
+   */
+  it("★★ 建图中 + 已有内容 → 仍然是 progress（building 优先）", () => {
+    expect(
+      classifyGraphReason({
+        reason: "正在建图 —— 数字会随进度增长",
+        building: true,
+        available: true,
+      }),
+    ).toBe("progress")
   })
 })

@@ -135,7 +135,7 @@
       "build": "建图",
       "building": "建图中…",
       "buildHint": "从已采集消息抽实体建图，需连网关、耗时数分钟。期间检索照常可用。首次全量，之后增量（只抽新消息）。",
-      "buildDone": "建图完成：{{entities}} 实体 / {{facts}} 事实 / {{edges}} 边",
+      "buildDone": "建图完成：新增 {{entities}} 实体 / {{facts}} 事实 / {{edges}} 关系",
       "buildFailed": "建图失败：{{reason}}",
       "rebuild": "重建",
       "rebuildHint": "删除现有图谱与抽取缓存后全量重抽，耗时与开销都高于增量建图。★ 缩小了采集范围时需要它：增量建图只增不减，取消勾选的会话，其实体与关系仍留在图里。",

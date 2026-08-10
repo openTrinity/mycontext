@@ -492,10 +492,21 @@ function KlPanel() {
           {buildResult !== undefined &&
             (buildResult.ok ? (
               <p className="typography-body-small-400 text-[var(--status-success)]">
+                {/*
+                  ★★ 报**净增**而不是绝对值 —— 与仪表盘那个「图谱详情」
+                  popover 同源（都读这一轮的 `volume`）。
+
+                  绝对值在增量建图下几乎不变（实测一轮总数从 660 涨到 695），
+                  于是每次建完都显示一个差不多的大数字，看起来像"没跑"。
+                  而净增（+35 / +75 / +1,359）才回答"这一轮干了什么"。
+
+                  `volume` 缺席（老版本主进程 / 被打断）→ 退回绝对值：
+                  少一点信息量好过显示一个空白回执。
+                */}
                 {t("status.kl.buildDone", {
-                  entities: buildResult.entities,
-                  facts: buildResult.facts,
-                  edges: buildResult.edges,
+                  entities: buildResult.volume?.entities ?? buildResult.entities,
+                  facts: buildResult.volume?.facts ?? buildResult.facts,
+                  edges: buildResult.volume?.edges ?? buildResult.edges,
                 })}
               </p>
             ) : (
