@@ -371,6 +371,53 @@ export function formatEta(ms: number): string {
 }
 
 /**
+ * 最近一轮建图**产出了多少** → 一句人能读的话。`null` = 还没建过 / 没测到。
+ *
+ * ## ★★ 为什么需要它（绝对值回答不了这个问题）
+ *
+ * 界面上「实体 618 / 事实 814」说的是"图里有多少"。而用户问的是
+ * "刚才那一轮干了什么" —— 增量建图下一轮可能只新增几十个实体，
+ * 总数几乎不变，于是**每轮看起来都像没跑**。而那恰恰让人以为增量没生效。
+ *
+ * ## ★ 三段各自回答一个问题
+ *
+ * · 新增了什么（实体/事实/关系的**净增**）；
+ * · 处理了多少语料（`unitsProcessed` / `chunksCreated`）；
+ * · 增量省了多少（`unitsSkipped` —— 那是没白烧的 LLM 抽取，也就是钱与时间）。
+ *
+ * ★ 净增允许**负数**并原样显示（带符号）：`fresh` 重建先清空、
+ * 或上游合并了重复实体都会让某项减少。夹到 0 会把"合并生效了"说成"没变化"。
+ */
+export function describeBuildVolume(volume: KlGraphOverview["lastBuild"]): string | null {
+  if (volume === null) return null
+  const { entities, facts, edges, unitsProcessed, unitsSkipped, chunksCreated } = volume
+
+  /**
+   * ★ 全 0 时说「没有新增」而不是「+0 实体 +0 事实」——
+   * 后者读起来像坏了，而它其实是个正常状态（语料都命中了缓存）。
+   */
+  const grew = entities !== 0 || facts !== 0 || edges !== 0
+  const signed = (n: number): string => (n > 0 ? `+${formatCount(n)}` : formatCount(n))
+  const gains = grew
+    ? `新增 ${signed(entities)} 实体 · ${signed(facts)} 事实 · ${signed(edges)} 关系`
+    : "本轮没有新增实体/事实"
+
+  /** 处理量：`unitsProcessed` 为 0 时整段省掉（那时上游没给或真没处理）。 */
+  const work =
+    unitsProcessed > 0
+      ? ` · 处理 ${formatCount(unitsProcessed)} 条语料（切 ${formatCount(chunksCreated)} 块）`
+      : ""
+
+  /**
+   * ★ 跳过数只在 > 0 时说，并且说清它**是好事**（省了抽取）——
+   * 光报一个"跳过 2,589"会被读成"漏了 2589 条"。
+   */
+  const saved = unitsSkipped > 0 ? ` · 增量跳过 ${formatCount(unitsSkipped)} 条（已抽过）` : ""
+
+  return `${gains}${work}${saved}`
+}
+
+/**
  * 自动建图的调度状态 → 一句人能读的话。
  *
  * ## ★ 每个 reason 都要说不同的话（这是这个函数存在的理由）

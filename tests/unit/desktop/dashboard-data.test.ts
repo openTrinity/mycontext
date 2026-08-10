@@ -23,6 +23,7 @@ import {
   LAG_BAD_THRESHOLD,
   LAG_WARN_THRESHOLD,
   describeBuildSchedule,
+  describeBuildVolume,
   describeKl,
   formatBytes,
   formatCount,
@@ -963,5 +964,87 @@ describe("formatEta", () => {
   it("非法值给 —，不给 NaN", () => {
     expect(formatEta(Number.NaN)).toBe("—")
     expect(formatEta(-1)).toBe("—")
+  })
+})
+
+describe("★★ describeBuildVolume：这一轮建了多少（不是图里有多少）", () => {
+  /**
+   * ★★ 这一组存在的理由：**绝对值回答不了"刚才那一轮干了什么"**。
+   *
+   * 界面上「实体 618 / 事实 814」说的是图里有多少。而增量建图下一轮可能
+   * 只新增几十个实体、总数几乎不变 —— 于是每轮看起来都像没跑，
+   * 而那恰恰让人以为增量没生效。
+   *
+   * 实测一轮的真实形态（上游 `/status.ingest`）：
+   * `36613 发现 / 2589 跳过 / 34024 处理 / 2949 切块`。
+   */
+  const base = {
+    entities: 12,
+    facts: 30,
+    edges: 400,
+    unitsDiscovered: 36_613,
+    unitsSkipped: 2589,
+    unitsProcessed: 34_024,
+    chunksCreated: 2949,
+  }
+
+  it("没建过 → null（不占位）", () => {
+    expect(describeBuildVolume(null)).toBeNull()
+  })
+
+  /** ★★ 三段都要有：新增了什么、处理了多少、增量省了多少。 */
+  it("★★ 同时说清新增 / 处理量 / 增量省下的", () => {
+    const text = describeBuildVolume(base) ?? ""
+    expect(text).toContain("+12")
+    expect(text).toContain("34,024")
+    expect(text).toContain("2,949")
+    expect(text).toContain("2,589")
+  })
+
+  /**
+   * ★★★ 净增**允许负数并带符号显示**。
+   *
+   * `fresh` 重建先清空、或上游合并了重复实体，都会让某项减少。
+   * 夹到 0 会把"合并生效了"显示成"没变化" —— 而那是两件完全不同的事。
+   */
+  it("★★★ 净增为负 → 原样显示（不夹到 0）", () => {
+    const text = describeBuildVolume({ ...base, entities: -5 }) ?? ""
+    expect(text).toContain("-5")
+    expect(text).not.toContain("+-5")
+  })
+
+  /**
+   * ★★ 全 0 → 说「本轮没有新增」，不许拼成「+0 实体 · +0 事实」。
+   *
+   * 后者读起来像坏了，而它其实是正常状态（语料全命中缓存）。
+   */
+  it("★★ 三项都是 0 → 说「没有新增」而不是一串 +0", () => {
+    const text = describeBuildVolume({ ...base, entities: 0, facts: 0, edges: 0 }) ?? ""
+    expect(text).toContain("没有新增")
+    expect(text).not.toContain("+0")
+  })
+
+  /**
+   * ★★ 跳过数要说清它**是好事**（已抽过 = 省了 LLM 调用）。
+   *
+   * 光报一个「跳过 2,589」会被读成"漏了 2589 条"—— 那是数据缺失的语气，
+   * 而这里恰恰相反。
+   */
+  it("★★ 跳过那句要说明原因（不能只报数字）", () => {
+    const text = describeBuildVolume(base) ?? ""
+    expect(text).toMatch(/跳过[^·]*已抽过|已抽过/)
+  })
+
+  /** ★ 没有跳过（首次全量）→ 不提那一段，别占一句废话。 */
+  it("★ unitsSkipped 为 0 → 不出现「跳过」", () => {
+    const text = describeBuildVolume({ ...base, unitsSkipped: 0 }) ?? ""
+    expect(text).not.toContain("跳过")
+  })
+
+  /** ★ 上游没给处理量（老版本 / 拿不到）→ 只说新增，不编数字。 */
+  it("★ unitsProcessed 为 0 → 不出现「处理」那一段", () => {
+    const text = describeBuildVolume({ ...base, unitsProcessed: 0, chunksCreated: 0 }) ?? ""
+    expect(text).not.toContain("处理")
+    expect(text).toContain("+12")
   })
 })

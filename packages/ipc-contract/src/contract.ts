@@ -2207,6 +2207,33 @@ export const klGraphBuildResultSchema = z.object({
   entities: z.number(),
   facts: z.number(),
   edges: z.number(),
+  /**
+   * 这一轮**产出了多少** —— 前后差值 + 处理量。`undefined` = 没测到
+   * （失败/被打断，或上游没给那几个数）。
+   *
+   * ## ★★ 为什么必须与绝对值分开
+   *
+   * `entities/facts/edges` 回答"图里现在有多少"，而用户问的是
+   * "这一轮干了什么"。增量建图下两者差别很大：一轮可能只新增几十个实体，
+   * 而总数是几百 —— 只报总数的话每轮看起来都"没动"（数字几乎不变），
+   * 而那恰恰让人以为增量没生效。
+   *
+   * `unitsSkipped` 是**增量收益的唯一证据**（实测一轮 36613 发现 /
+   * 2589 跳过 / 34024 处理）。
+   */
+  volume: z
+    .object({
+      /** 实体净增（可为负：fresh 重建或上游合并了重复实体） */
+      entities: z.number(),
+      facts: z.number(),
+      edges: z.number(),
+      unitsDiscovered: z.number(),
+      /** 命中缓存跳过的 —— 增量到底省了多少就看这个 */
+      unitsSkipped: z.number(),
+      unitsProcessed: z.number(),
+      chunksCreated: z.number(),
+    })
+    .optional(),
 })
 
 export type KlGraphBuildResult = z.infer<typeof klGraphBuildResultSchema>
@@ -2317,6 +2344,31 @@ export const klGraphOverviewSchema = z.object({
       lastBuiltAt: z.number().nullable(),
       /** 图谱同步（导出四件套）的周期，供界面解释倒计时的粒度 */
       syncIntervalMs: z.number(),
+    })
+    .nullable(),
+  /**
+   * 最近一轮建图**产出了多少**（差值 + 处理量）。`null` = 这次启动还没建过。
+   *
+   * ## ★★ 为什么与上面那些绝对值分开
+   *
+   * `entities` / `facts` / `edges` 回答"图里现在有多少"，而用户问的是
+   * "刚才那一轮干了什么"。增量建图下两者差别很大：一轮可能只新增几十个实体，
+   * 而总数是几百 —— 只报总数的话每轮看起来都"没动"，
+   * 而那恰恰让人以为增量没生效。
+   *
+   * `unitsSkipped` 是**增量收益的唯一证据**：实测一轮
+   * 36613 发现 / 2589 跳过 / 34024 处理，也就是缓存真的省下了那 2589 个单元
+   * 的 LLM 抽取（那是钱与时间）。
+   */
+  lastBuild: z
+    .object({
+      entities: z.number(),
+      facts: z.number(),
+      edges: z.number(),
+      unitsDiscovered: z.number(),
+      unitsSkipped: z.number(),
+      unitsProcessed: z.number(),
+      chunksCreated: z.number(),
     })
     .nullable(),
 })

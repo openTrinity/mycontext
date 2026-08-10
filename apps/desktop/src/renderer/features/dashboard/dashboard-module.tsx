@@ -70,6 +70,7 @@ import { PersonaCard } from "./identity.js"
 import { Distribution, Section } from "./primitives.js"
 import {
   describeBuildSchedule,
+  describeBuildVolume,
   describeKl,
   formatCount,
   readIdentityBar,
@@ -222,6 +223,7 @@ export function DashboardModule() {
    * 见契约里那段注释与 kl-panel-build-state 的门禁）。
    */
   const buildSchedule = describeBuildSchedule(graph?.buildSchedule ?? null)
+  const buildVolume = describeBuildVolume(graph?.lastBuild ?? null)
 
   /**
    * ★ 本人身份**未确认**：一条必须被看见的警示。
@@ -627,6 +629,22 @@ export function DashboardModule() {
             )}
           >
             自动构建 · {buildSchedule.text}
+          </p>
+        )}
+
+        {/*
+          ★★ 「上一轮建了多少」——与上面那些绝对值是两件事。
+
+          绝对值（实体 618 / 事实 814）回答"图里有多少"，而用户问的是
+          "刚才那一轮干了什么"。增量建图下一轮可能只新增几十个实体、
+          总数几乎不变，于是**每轮看起来都像没跑** —— 而那恰恰让人以为
+          增量没生效。
+
+          `null` = 这次启动还没建过 → 不占位（显示一行"—"看起来像坏了）。
+        */}
+        {buildVolume === null ? null : (
+          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            上一轮 · {buildVolume}
           </p>
         )}
 

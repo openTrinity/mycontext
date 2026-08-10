@@ -25,7 +25,11 @@
  * 实测那次 Phase B 是被网关打挂的（`Error 524: A timeout occurred`）。
  */
 import { describe, expect, it } from "vitest"
-import { describeGraphStage, klLogLevelFor } from "@main/services/kl-server.service.js"
+import {
+  computeBuildVolume,
+  describeGraphStage,
+  klLogLevelFor,
+} from "@main/services/kl-server.service.js"
 import { describeBuildSchedule } from "@renderer/features/dashboard/dashboard-data.js"
 
 describe("★★ facts=0 时不许说「事实已就绪」", () => {
@@ -195,5 +199,72 @@ describe("★★ 建图文案不许承诺时长", () => {
   it("★ facts=0 那句也不带时长", () => {
     const reason = describeGraphStage({ entities: 60, facts: 0, edges: undefined })
     expect(reason).not.toMatch(/分钟|小时|秒/)
+  })
+})
+
+describe("★★ computeBuildVolume：差值而不是绝对值", () => {
+  /**
+   * ★★ 这一组锁的是"这一轮建了多少"这个数**真的是差值**。
+   *
+   * 反证时验过：把差值那三行改成直接用绝对值（= 修复前的信息量），
+   * 全仓 976 条测试一条都不红。而增量建图下总数几乎不变 ——
+   * 只报绝对值等于每轮都在说"没动"，那恰恰让人以为增量没生效。
+   */
+  const WORK = {
+    unitsDiscovered: 36_613,
+    unitsSkipped: 2589,
+    unitsProcessed: 34_024,
+    chunksCreated: 2949,
+  }
+
+  it("★★ 增量一轮 → 报净增，不是总数", () => {
+    const v = computeBuildVolume(
+      { entities: 600, facts: 780, edges: 29_000 },
+      { entities: 618, facts: 814, edges: 29_863 },
+      WORK,
+    )
+    expect(v.entities).toBe(18)
+    expect(v.facts).toBe(34)
+    expect(v.edges).toBe(863)
+    // ★ 反面：绝不能是绝对值
+    expect(v.entities).not.toBe(618)
+  })
+
+  /**
+   * ★★★ 净增**可以为负**，且必须原样传出去。
+   *
+   * `fresh` 重建先清空、或上游合并了重复实体都会让某项减少 ——
+   * 夹到 0 会把"合并生效了"显示成"没变化"。
+   */
+  it("★★★ 合并/重建导致减少 → 保留负数", () => {
+    const v = computeBuildVolume(
+      { entities: 618, facts: 814, edges: 29_863 },
+      { entities: 600, facts: 814, edges: 29_863 },
+      WORK,
+    )
+    expect(v.entities).toBe(-18)
+  })
+
+  /**
+   * ★ 首次建图（建前全 0）→ 差值等于绝对值，语义正好对：
+   * 第一次"新增"的就是全部。
+   */
+  it("★ 首次建图 → 差值 = 绝对值", () => {
+    const v = computeBuildVolume(
+      { entities: 0, facts: 0, edges: 0 },
+      { entities: 618, facts: 814, edges: 29_863 },
+      WORK,
+    )
+    expect(v.entities).toBe(618)
+  })
+
+  /** ★ 处理量原样带过来（不加工、不改口径 —— 要能与 kl 的日志对照）。 */
+  it("★ 处理量四项原样透传", () => {
+    const v = computeBuildVolume(
+      { entities: 0, facts: 0, edges: 0 },
+      { entities: 1, facts: 1, edges: 1 },
+      WORK,
+    )
+    expect(v).toMatchObject(WORK)
   })
 })

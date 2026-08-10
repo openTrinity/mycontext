@@ -115,7 +115,49 @@ export interface KlIngestSnapshot {
   phase: string
   percent: number
   error: string
+  /** 图库当前的**绝对**规模（不是这一轮的增量，见 `KlBuildVolume`） */
   counts: { entities: number; facts: number; edges: number }
+  /**
+   * 这一轮**处理了多少语料** —— 上游 `/status.ingest` 直接给的四个数。
+   *
+   * ★ 这几个是「干了多少活」，与 `counts`（「现在有多少东西」）是两件事：
+   * 增量建图时 `units_skipped` 往往远大于 `units_processed`
+   * （实测 36613 发现 / 2589 跳过 / 34024 处理），而那个比例正是
+   * "增量到底省了多少"的唯一证据。
+   */
+  volume: {
+    /** 发现的语料单元总数 */
+    unitsDiscovered: number
+    /** 命中缓存跳过的（增量的收益就在这个数上） */
+    unitsSkipped: number
+    /** 真的处理了的 */
+    unitsProcessed: number
+    /** 切出的 chunk 数 */
+    chunksCreated: number
+  }
+}
+
+/**
+ * 一轮建图**产出了多少** —— 前后差值，而不是绝对值。
+ *
+ * ## ★★ 为什么要单独一个类型而不是直接报 counts
+ *
+ * 界面上「实体 618」回答的是"图里有多少"，而用户问的是"这一轮干了什么"。
+ * 增量建图下两者差别很大：一轮可能只新增几十个实体，而总数是几百 ——
+ * 只报总数的话每轮看起来都"没动"（数字几乎不变），
+ * 而那恰恰让人以为增量没生效。
+ *
+ * ★ 允许**负数**：`fresh=true` 重建会先清空，或上游合并了重复实体，
+ * 都会让某一项减少。夹到 0 会把"合并生效了"显示成"没变化"。
+ */
+export interface KlBuildVolume {
+  entities: number
+  facts: number
+  edges: number
+  unitsDiscovered: number
+  unitsSkipped: number
+  unitsProcessed: number
+  chunksCreated: number
 }
 
 /**
@@ -327,6 +369,19 @@ export class KlServerService {
    * 边数变化很慢，一个稍旧的真实值远好过一个永远为 0 的假值。
    */
   private lastKnownEdges: number | null = null
+  /**
+   * 最近一轮建图的产出（差值 + 处理量）。null = 这次启动还没建过。
+   *
+   * ## ★ 为什么留在内存而不落库
+   *
+   * 它回答的是"刚才那一轮干了什么" —— 一个**会话内**的问题。落库要建表、
+   * 要考虑 per-vault、要想清楚保留多久，而收益只是"重启后还能看到上一轮"。
+   * 而重启后真正有用的是图的**绝对规模**（那个一直有）。
+   *
+   * ★ 失败/被打断时**不覆盖**：那时没有可信的差值（可能建到一半），
+   * 保留上一次成功的那份比显示一个半截数字好。
+   */
+  private lastBuildVolume: KlGraphBuildResult["volume"] = undefined
   /** 正在进行的 start（避免并发 ensureReady 起多个进程）。 */
   private starting: Promise<boolean> | null = null
   /** 正在建图（避免并发触发；建图期间禁止 ensureReady 起 server 抢 SQLite）。 */
@@ -641,11 +696,25 @@ export class KlServerService {
       }
     }
 
+    /**
+     * ★★ 建图**之前**的图规模 —— 差值的基线。
+     *
+     * 必须在这里取（在 `setBuilding(true)` 与任何清库之前）：
+     * · `fresh=true` 会删掉整个 kl 目录，之后就再也读不到"原来有多少"；
+     * · 增量建图跑到一半时读到的是"跑了一半的中间值"，减出来是错的。
+     *
+     * 读不出来（图库还不存在 = 首次建图）→ 全 0，那时差值就等于绝对值，
+     * 语义正好对：首次建图"新增"的就是全部。
+     */
+    const before = this.readGraphCounts()
+
     this.options.logger.info("graph build started", {
       fresh,
       exportDir: this.exportDir,
       // 网关有没有 —— 只记布尔，不记 baseUrl/key（密钥不进日志是全仓规矩）
       hasGateway: this.hasGatewayEgress(),
+      // 基线进日志：出问题时"这一轮从哪儿开始的"是第一个要问的
+      before,
     })
     this.setBuilding(true)
     /**
@@ -819,6 +888,11 @@ export class KlServerService {
         entities: outcome.entities,
         facts: outcome.facts,
         edges: outcome.edges,
+        /**
+         * ★ 差值 = 建完 − 建前。允许负数（fresh 重建先清空、
+         * 或上游合并了重复实体）—— 夹到 0 会把"合并生效了"显示成"没变化"。
+         */
+        volume: this.rememberVolume(computeBuildVolume(before, outcome, outcome.volume)),
       })
     } catch (error) {
       this.setBuilding(false)
@@ -861,6 +935,12 @@ export class KlServerService {
         entities: result.entities,
         facts: result.facts,
         edges: result.edges,
+        /**
+         * ★ 差值与处理量一起记：只有绝对值的话"这一轮是不是空跑"看不出来
+         * （增量建图下总数几乎不变），而 `unitsSkipped` 是增量真的生效了
+         * 的唯一证据。
+         */
+        volume: result.volume,
       })
     } else {
       this.options.logger.warn("graph build failed", { fresh, reason: result.reason })
@@ -1002,6 +1082,52 @@ export class KlServerService {
    * 那种矛盾没有任何地方能发现。所以这里是**唯一**的实现，
    * `graphOverview()` 复用它（反向依赖：轻的不依赖重的）。
    */
+  /**
+   * 读一次图规模（entities / facts / edges）—— 建图差值的基线。
+   *
+   * ## ★ 为什么 edges 走 `lastKnownEdges` 而不是 SQL
+   *
+   * SQLite 的 `edges` 表在默认后端（ladybug）下按设计恒空
+   * （完整推理见 `lastKnownEdges` 的注释）。所以那一项只能用从 `/status`
+   * 拿到的真实值；数不出来时给 0，差值那侧会把"两端都是 0"显示成"未统计"
+   * 而不是"没新增"。
+   *
+   * 整段吞异常：这是给差值用的诊断数字，图库不存在（首次建图）时读不到
+   * 是**正常**的 —— 那时全 0，差值恰好等于绝对值。
+   */
+  private readGraphCounts(): { entities: number; facts: number; edges: number } {
+    const zero = { entities: 0, facts: 0, edges: 0 }
+    const dbPath = join(this.dataDir, "knowledge.db")
+    if (!existsSync(dbPath)) return zero
+    const open = this.options.openGraphDb ?? defaultOpenGraphDb
+    let db: GraphDbHandle | null = null
+    try {
+      db = open(dbPath)
+      const handle = db
+      const count = (table: string): number => {
+        try {
+          return handle.count(table)
+        } catch {
+          return 0
+        }
+      }
+      return {
+        entities: count("entities"),
+        facts: count("facts"),
+        // ★ 见上：edges 不从 SQL 数
+        edges: this.lastKnownEdges ?? 0,
+      }
+    } catch {
+      return zero
+    } finally {
+      try {
+        db?.close()
+      } catch {
+        // 只读连接，关不掉无需处理
+      }
+    }
+  }
+
   graphExists(): boolean {
     const dbPath = join(this.dataDir, "knowledge.db")
     if (!existsSync(dbPath)) return false
@@ -1104,6 +1230,12 @@ export class KlServerService {
       // 调度状态与图能不能读**无关**：图还没建时这一块恰恰最该显示
       // （它要回答的正是"什么时候会建"）。
       buildSchedule: schedule,
+      /**
+       * ★ 图读不出来时**仍然报**上一轮的产出：那两件事无关 ——
+       * 「刚才那轮建了多少」是已经发生的事实，不该因为此刻读不到图而消失。
+       * 而 `fresh=true` 清库那个窗口里恰恰两者同时出现。
+       */
+      lastBuild: this.lastBuildVolume ?? null,
     })
 
     const dbPath = join(this.dataDir, "knowledge.db")
@@ -1265,6 +1397,8 @@ export class KlServerService {
         recentFacts,
         // 上面取过一次（见那里：为什么不能在成功/失败两条路上各取一次）。
         buildSchedule: schedule,
+        // ★ 「这一轮建了多少」——与上面那些绝对值是两件事（见契约里的注释）
+        lastBuild: this.lastBuildVolume ?? null,
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
@@ -1323,10 +1457,25 @@ export class KlServerService {
     entities: number
     facts: number
     edges: number
+    /** 这一轮处理了多少语料（上游直接给的四个数，见 `KlIngestSnapshot.volume`） */
+    volume: KlIngestSnapshot["volume"]
   }> {
     const readStatus = this.options.readStatus ?? defaultReadStatus
     const sleep = this.options.sleep ?? defaultSleep
     let counts = { entities: 0, facts: 0, edges: 0 }
+    /**
+     * 处理量：**每轮轮询都覆盖**，所以循环结束时是最后一次看到的值。
+     *
+     * ★ 与 `counts` 同一款做法。上游在跑的过程中这几个数一直在涨
+     * （`detail: "extracting: 100/271 batches"` 那时就已经有部分值），
+     * 而我们要的是终态那一份。
+     */
+    let volume: KlIngestSnapshot["volume"] = {
+      unitsDiscovered: 0,
+      unitsSkipped: 0,
+      unitsProcessed: 0,
+      chunksCreated: 0,
+    }
     /**
      * 本轮建图的起点 —— 只进 `buildProgress` 供诊断（见契约里那个字段的注释）。
      *
@@ -1390,7 +1539,7 @@ export class KlServerService {
       if (this.stopping) {
         this.buildProgress = null
         this.options.logger.info("graph build cancelled by shutdown", {})
-        return { error: null, cancelled: true, ...counts }
+        return { error: null, cancelled: true, ...counts, volume }
       }
 
       let snapshot: KlIngestSnapshot | null
@@ -1412,18 +1561,19 @@ export class KlServerService {
        */
       if (consecutiveProbeFailures >= INGEST_PROBE_FAILURE_LIMIT && this.handle?.alive !== true) {
         this.buildProgress = null
-        return { error: "建图中断：kl-server 进程已退出", cancelled: false, ...counts }
+        return { error: "建图中断：kl-server 进程已退出", cancelled: false, ...counts, volume }
       }
 
       if (snapshot !== null) {
         counts = snapshot.counts
+        volume = snapshot.volume
         // ★ 记下 backend-aware 的真实边数（见 lastKnownEdges 的注释）
         this.lastKnownEdges = snapshot.counts.edges
         this.buildProgress = { phase: snapshot.phase, percent: snapshot.percent, startedAt }
         this.pushStatus()
         if (snapshot.state === "done") {
           this.buildProgress = null
-          return { error: null, cancelled: false, ...counts }
+          return { error: null, cancelled: false, ...counts, volume }
         }
         if (snapshot.state === "error") {
           this.buildProgress = null
@@ -1431,6 +1581,7 @@ export class KlServerService {
             error: snapshot.error === "" ? "未知错误" : snapshot.error,
             cancelled: false,
             ...counts,
+            volume,
           }
         }
       }
@@ -2199,6 +2350,14 @@ export class KlServerService {
     this.pushStatus()
   }
 
+  /** 记下这一轮的产出并原样返回（只在成功路径调，见字段注释）。 */
+  private rememberVolume(
+    volume: NonNullable<KlGraphBuildResult["volume"]>,
+  ): NonNullable<KlGraphBuildResult["volume"]> {
+    this.lastBuildVolume = volume
+    return volume
+  }
+
   /** 翻建图标志并推状态（建图与服务状态是两个维度，各自推）。 */
   private setBuilding(next: boolean): void {
     this.building = next
@@ -2230,6 +2389,34 @@ export class KlServerService {
  * ★ 提出来而不是留在 `graphOverview()` 里，也是为了让测试不必开一个真 kl 库
  * （那要 better-sqlite3 + 一个建好的图文件，而本项目为原生模块 ABI 反复踩过坑）。
  */
+/**
+ * 算这一轮建图的**产出** = 建完 − 建前，再拼上处理量。
+ *
+ * ## ★★ 为什么提成导出的纯函数
+ *
+ * 反证时发现：把差值那三行改成直接用绝对值（= 修复前的信息量），
+ * 全仓 976 条测试**一条都不红** —— 而那正是这次要修的东西
+ * （增量建图下总数几乎不变，只报绝对值等于每轮都说"没动"）。
+ *
+ * 与 `buildAutoBuildSnapshot` / `buildForecastInput` 同一款做法：
+ * 算术留在方法里就只能靠端到端撞上，提出来才锁得住。
+ *
+ * ★ 允许负数：`fresh` 重建先清空、或上游合并了重复实体，都会让某项减少。
+ * 夹到 0 会把"合并生效了"显示成"没变化"。
+ */
+export function computeBuildVolume(
+  before: { entities: number; facts: number; edges: number },
+  after: { entities: number; facts: number; edges: number },
+  work: KlIngestSnapshot["volume"],
+): NonNullable<KlGraphBuildResult["volume"]> {
+  return {
+    entities: after.entities - before.entities,
+    facts: after.facts - before.facts,
+    edges: after.edges - before.edges,
+    ...work,
+  }
+}
+
 export function describeGraphStage(input: {
   entities: number
   facts: number
@@ -2439,7 +2626,16 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
   })
   if (!response.ok) return null
   const body = (await response.json()) as {
-    ingest?: { state?: string; phase?: string; percent?: number; error?: string }
+    ingest?: {
+      state?: string
+      phase?: string
+      percent?: number
+      error?: string
+      units_discovered?: number
+      units_skipped?: number
+      units_processed?: number
+      chunks_created?: number
+    }
     sqlite?: { entities?: number; facts?: number; edges?: number }
   }
   const ingest = body.ingest ?? {}
@@ -2457,6 +2653,16 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
       entities: sqlite.entities ?? 0,
       facts: sqlite.facts ?? 0,
       edges: sqlite.edges ?? 0,
+    },
+    /**
+     * ★ 上游是 snake_case（`units_discovered`），这里转成我们的 camelCase。
+     * 字段名照抄上游的语义，不改口径 —— 改了就没法与 kl 的日志对照。
+     */
+    volume: {
+      unitsDiscovered: ingest.units_discovered ?? 0,
+      unitsSkipped: ingest.units_skipped ?? 0,
+      unitsProcessed: ingest.units_processed ?? 0,
+      chunksCreated: ingest.chunks_created ?? 0,
     },
   }
 }
