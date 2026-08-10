@@ -1168,22 +1168,36 @@ def chunk(chunk_ids: tuple[str, ...], json_out: bool, pretty: bool):
 
 
 @cli.command()
-@click.argument("name")
+@click.argument("name", required=False)
+@click.option("--id", "entity_id", default=None, help="Look up by entity id (exact or prefix) instead of name")
+@click.option("--no-similar", is_flag=True, help="Omit ENTITY_SIMILAR neighbors")
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="JSON output")
-def entity(name: str, json_out: bool):
-    """Look up entity by name (substring match)."""
-    data = _server_request("POST", "/entity", json={"name": name})
+def entity(name: str | None, entity_id: str | None, no_similar: bool, json_out: bool):
+    """Look up an entity by name (substring) or by --id (exact/prefix).
+
+    Shows id + communities + top edges + facts about it, and (unless
+    --no-similar) the ENTITY_SIMILAR neighbors that ``kl expand`` returns
+    (``kl expand`` is now a thin alias for this).
+    """
+    if bool(name) == bool(entity_id):
+        raise click.UsageError("Provide exactly one of NAME or --id.")
+    payload: dict = {"include_similar": not no_similar}
+    if entity_id:
+        payload["entity_id"] = entity_id
+    else:
+        payload["name"] = name
+    data = _server_request("POST", "/entity", json=payload)
     results = data["results"]
 
     if not results:
-        click.echo(f"No entities matching '{name}'")
+        click.echo(f"No entities matching '{entity_id or name}'")
         return
 
     if json_out:
         click.echo(json.dumps(results, ensure_ascii=False, indent=2))
         return
 
-    click.echo(f"Found {len(results)} entities matching '{name}':\n")
+    click.echo(f"Found {len(results)} entities matching '{entity_id or name}':\n")
     for r in results:
         click.echo(
             f"  {r['name']} ({r['type']}, {r['mentions']} mentions, degree={r['degree']})"
@@ -1193,25 +1207,26 @@ def entity(name: str, json_out: bool):
             f"    seen: {_ts_to_str(r['first_seen'])} -> {_ts_to_str(r['last_seen'])}"
         )
         comms = r["communities"]
-        click.echo(
-            f"    communities: L0={comms['L0']} L1={comms['L1']} L2={comms['L2']} L3={comms['L3']}"
-        )
+        if comms:
+            click.echo(
+                f"    communities: L0={comms.get('L0')} L1={comms.get('L1')} "
+                f"L2={comms.get('L2')} L3={comms.get('L3')}"
+            )
 
-        if r["edges_out"] or r["edges_in"]:
+        edges = r.get("edges", [])
+        if edges:
             click.echo("    edges:")
-            for e in r["edges_out"][:3]:
+            for e in edges[:5]:
+                arrow = "->" if e.get("direction") == "out" else "<-"
                 label = _truncate(e.get("target_label", ""), 40)
-                click.echo(f"      ->{e['type']} {e['target_type']}: {label}")
+                click.echo(f"      {arrow}{e['type']} {e['target_type']}: {label}")
                 click.echo(f"        {e['target_type']}_id: {e['target_id']}")
-            for e in r["edges_in"][:3]:
-                conf = e["properties"].get(
-                    "confidence", e["properties"].get("hybrid_score", "?")
-                )
-                label = _truncate(e.get("source_label", ""), 40)
-                click.echo(
-                    f"      <-ENTITY_SIMILAR {e['source_type']}: {label} (conf={conf})"
-                )
-                click.echo(f"        {e['source_type']}_id: {e['source_id']}")
+
+        similar = r.get("similar", [])
+        if similar:
+            click.echo("    similar (ENTITY_SIMILAR):")
+            for s in similar:
+                click.echo(f"      {s['name']} ({s['type']}) -- id: {s['id']}")
 
         facts = r.get("facts", [])
         if facts:
@@ -1223,29 +1238,39 @@ def entity(name: str, json_out: bool):
 
 
 @cli.command()
-@click.argument("entity_id")
+@click.argument("entity_id", required=False)
+@click.option("--fact-id", "fact_id", default=None, help="Look up a single fact by id (exact/prefix) instead of by entity")
 @click.option("--limit", "-n", type=int, default=20, help="Max facts to show")
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="JSON output")
-def facts(entity_id: str, limit: int, json_out: bool):
-    """List facts ABOUT an entity (id + text).
+def facts(entity_id: str | None, fact_id: str | None, limit: int, json_out: bool):
+    """List facts ABOUT an entity, or fetch one fact by --fact-id.
 
-    Takes an entity id (from ``kl entity``) and returns the facts linked to it,
+    Given an ENTITY_ID (from ``kl entity``) returns the facts linked to it,
     each with a full fact id you can pass to ``kl context`` to see the source.
+    Given ``--fact-id`` returns just that fact's text (exact or prefix match).
     """
-    data = _server_request(
-        "POST", "/facts", json={"entity_id": entity_id, "limit": limit}
-    )
+    if bool(entity_id) == bool(fact_id):
+        raise click.UsageError("Provide exactly one of ENTITY_ID or --fact-id.")
+    payload: dict = {"limit": limit}
+    if fact_id:
+        payload["fact_id"] = fact_id
+    else:
+        payload["entity_id"] = entity_id
+    data = _server_request("POST", "/facts", json=payload)
 
     if json_out:
         click.echo(json.dumps(data, ensure_ascii=False, indent=2))
         return
 
     facts_list = data.get("facts", [])
-    click.echo(
-        f"Facts about {data['entity']} ({data['type']}) -- {len(facts_list)} facts:\n"
-    )
+    if fact_id:
+        click.echo(f"Fact {data.get('fact_id', fact_id)}:\n")
+    else:
+        click.echo(
+            f"Facts about {data['entity']} ({data['type']}) -- {len(facts_list)} facts:\n"
+        )
     if not facts_list:
-        click.echo("  (no facts linked to this entity)")
+        click.echo("  (no matching facts)")
         return
     for f in facts_list:
         conf = f.get("confidence", 0.0)
@@ -1257,7 +1282,11 @@ def facts(entity_id: str, limit: int, json_out: bool):
 @click.argument("entity_id")
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="JSON output")
 def expand(entity_id: str, json_out: bool):
-    """Show ENTITY_SIMILAR neighbors for entity disambiguation."""
+    """[DEPRECATED] ENTITY_SIMILAR neighbors -- use ``kl entity --id <id>``.
+
+    Thin alias kept for backward compatibility; ``kl entity --id <id>`` returns
+    the same neighbors (as ``similar``) plus the full entity payload.
+    """
     data = _server_request("POST", "/expand", json={"entity_id": entity_id})
 
     if json_out:

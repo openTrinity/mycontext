@@ -895,8 +895,13 @@ class GlobalSearchRequest(BaseModel):
 
 
 class EntityRequest(BaseModel):
-    name: str
+    # Look up by fuzzy name (many results) OR exact/prefix id (single result);
+    # exactly one is required. include_similar folds in the ENTITY_SIMILAR
+    # neighbors that the (now deprecated) /expand endpoint used to return.
+    name: str | None = None
+    entity_id: str | None = None
     limit: int = 20
+    include_similar: bool = True
 
 
 class ExpandRequest(BaseModel):
@@ -904,7 +909,10 @@ class ExpandRequest(BaseModel):
 
 
 class FactsRequest(BaseModel):
-    entity_id: str
+    # Facts ABOUT an entity (entity_id) OR a single fact by its own id
+    # (fact_id); exactly one is required.
+    entity_id: str | None = None
+    fact_id: str | None = None
     limit: int = 20
 
 
@@ -1558,114 +1566,193 @@ def _ask_graph_walk(req: AskRequest, result) -> dict:
 
 @app.post("/entity")
 async def entity_lookup(req: EntityRequest):
-    """Entity lookup by substring match (semaphore-gated; offloaded to a thread)."""
+    """Entity lookup by id (exact/prefix) or name substring (gated; offloaded)."""
     async with _query_sema():
         return await asyncio.to_thread(_entity_lookup_impl, req)
 
 
+def _entity_similar_neighbors(entity_id: str) -> list[dict]:
+    """ENTITY_SIMILAR neighbors of an entity, as ``{id,name,type,confidence,source}``.
+
+    Shared by ``/entity`` (``include_similar``) and the deprecated ``/expand``
+    alias so both compute similarity the same way.
+    """
+    neighbors = []
+    for entry in state.adjacency.get(entity_id, []):
+        edge_type, related_id, related_type, _direction = entry
+        if edge_type == "ENTITY_SIMILAR" and related_type == "entity":
+            nrow = state.sqlite_conn.execute(
+                "SELECT name, entity_type FROM entities WHERE id = ?", (related_id,)
+            ).fetchone()
+            neighbors.append(
+                {
+                    "id": related_id,
+                    "name": nrow[0] if nrow else "?",
+                    "type": nrow[1] if nrow else "?",
+                    "confidence": None,
+                    "source": "similarity",
+                }
+            )
+    neighbors.sort(key=lambda x: x.get("confidence") or 0, reverse=True)
+    return neighbors
+
+
+def _entity_result_dict(row: tuple, has_community: bool, include_similar: bool) -> dict:
+    """Build one ``/entity`` result payload from an ``entities`` row.
+
+    ``row`` columns: id, name, entity_type, mention_count, first_seen,
+    last_seen[, community_L0..L3]. Adjacency supplies degree, top edges, the
+    facts ABOUT the entity, and (optionally) ENTITY_SIMILAR neighbors.
+    """
+    eid = row[0]
+    adj_entries = state.adjacency.get(eid, [])
+    degree = len(adj_entries)
+
+    edges_out = []
+    for entry in adj_entries[:10]:
+        edge_type, related_id, related_type, direction = entry
+        edges_out.append(
+            {
+                "type": edge_type,
+                "target_type": related_type,
+                "target_id": related_id,
+                "target_label": _label_for(related_id, related_type),
+                "direction": direction,
+            }
+        )
+
+    # Facts ABOUT this entity — from adjacency incoming ABOUT edges
+    fact_ids = []
+    for entry in adj_entries:
+        edge_type, related_id, related_type, direction = entry
+        if edge_type == "ABOUT" and related_type == "fact" and direction == "in":
+            fact_ids.append(related_id)
+            if len(fact_ids) >= 5:
+                break
+
+    about_facts = []
+    if fact_ids:
+        placeholders = ",".join("?" * len(fact_ids))
+        about_facts = state.sqlite_conn.execute(
+            f"""SELECT id, text, fact_type, timestamp, confidence
+                FROM facts WHERE id IN ({placeholders})
+                ORDER BY confidence DESC, timestamp DESC""",
+            fact_ids,
+        ).fetchall()
+
+    result = {
+        "id": eid,
+        "name": row[1],
+        "type": row[2],
+        "mentions": row[3],
+        "first_seen": row[4],
+        "last_seen": row[5],
+        "communities": {"L0": row[6], "L1": row[7], "L2": row[8], "L3": row[9]}
+        if has_community
+        else {},
+        "degree": degree,
+        "edges": edges_out[:5],
+        "facts": [
+            {
+                "id": f[0],
+                "text": f[1],
+                "type": f[2],
+                "timestamp": f[3],
+                "confidence": f[4],
+            }
+            for f in about_facts
+        ],
+    }
+    if include_similar:
+        # Merged from the deprecated /expand: entities this one may be an alias of.
+        result["similar"] = _entity_similar_neighbors(eid)
+    return result
+
+
 def _entity_lookup_impl(req: EntityRequest):
-    """Entity lookup by substring match."""
+    """Entity lookup by exact/prefix id or by name substring.
+
+    Exactly one of ``entity_id`` / ``name`` must be provided. The id path
+    returns a single-element ``results`` (exact match first, then ``id LIKE
+    '<prefix>%'`` like ``/context``); the name path returns fuzzy matches
+    ordered by mention count. When ``include_similar`` is set (default), each
+    result carries a ``similar`` list of ENTITY_SIMILAR neighbors, folding in
+    the behavior of the deprecated ``/expand`` endpoint.
+    """
     if not state.ready:
         raise HTTPException(503, "Server not ready")
 
-    # Check if community columns exist (they're added by improve.py)
+    has_id = bool(req.entity_id and req.entity_id.strip())
+    has_name = bool(req.name and req.name.strip())
+    if has_id == has_name:
+        raise HTTPException(
+            400, "Provide exactly one of 'entity_id' or 'name'."
+        )
+
+    # Community columns are added by improve.py; degrade gracefully without them.
     cols = [
         c[1]
         for c in state.sqlite_conn.execute("PRAGMA table_info(entities)").fetchall()
     ]
     has_community = "community_L0" in cols
-    if has_community:
+    base_cols = (
+        "id, name, entity_type, mention_count, first_seen, last_seen,"
+        " community_L0, community_L1, community_L2, community_L3"
+        if has_community
+        else "id, name, entity_type, mention_count, first_seen, last_seen"
+    )
+
+    if has_id:
+        eid = req.entity_id.strip()
         rows = state.sqlite_conn.execute(
-            """SELECT id, name, entity_type, mention_count, first_seen, last_seen,
-                      community_L0, community_L1, community_L2, community_L3
-               FROM entities WHERE name LIKE ? ORDER BY mention_count DESC LIMIT ?""",
-            (f"%{req.name}%", req.limit),
+            f"SELECT {base_cols} FROM entities WHERE id = ?", (eid,)
         ).fetchall()
+        if not rows:
+            rows = state.sqlite_conn.execute(
+                f"SELECT {base_cols} FROM entities WHERE id LIKE ? "
+                f"ORDER BY mention_count DESC LIMIT ?",
+                (f"{eid}%", req.limit),
+            ).fetchall()
+        if not rows:
+            raise HTTPException(404, f"Entity not found: {eid}")
     else:
         rows = state.sqlite_conn.execute(
-            """SELECT id, name, entity_type, mention_count, first_seen, last_seen
-               FROM entities WHERE name LIKE ? ORDER BY mention_count DESC LIMIT ?""",
+            f"SELECT {base_cols} FROM entities WHERE name LIKE ? "
+            f"ORDER BY mention_count DESC LIMIT ?",
             (f"%{req.name}%", req.limit),
         ).fetchall()
 
-    results = []
-    for r in rows:
-        eid = r[0]
-        # Get edge counts and details from adjacency index
-        adj_entries = state.adjacency.get(eid, [])
-        degree = len(adj_entries)
-
-        # Top edges from adjacency: tuples are (edge_type, related_id, related_type, direction)
-        edges_out = []
-        for entry in adj_entries[:10]:
-            edge_type, related_id, related_type, direction = entry
-            edges_out.append(
-                {
-                    "type": edge_type,
-                    "target_type": related_type,
-                    "target_id": related_id,
-                    "target_label": _label_for(related_id, related_type),
-                    "direction": direction,
-                }
-            )
-
-        # Facts ABOUT this entity — from adjacency incoming ABOUT edges
-        fact_ids = []
-        for entry in adj_entries:
-            edge_type, related_id, related_type, direction = entry
-            if edge_type == "ABOUT" and related_type == "fact" and direction == "in":
-                fact_ids.append(related_id)
-                if len(fact_ids) >= 5:
-                    break
-
-        about_facts = []
-        if fact_ids:
-            placeholders = ",".join("?" * len(fact_ids))
-            about_facts = state.sqlite_conn.execute(
-                f"""SELECT id, text, fact_type, timestamp, confidence
-                    FROM facts WHERE id IN ({placeholders})
-                    ORDER BY confidence DESC, timestamp DESC""",
-                fact_ids,
-            ).fetchall()
-
-        results.append(
-            {
-                "id": eid,
-                "name": r[1],
-                "type": r[2],
-                "mentions": r[3],
-                "first_seen": r[4],
-                "last_seen": r[5],
-                "communities": {"L0": r[6], "L1": r[7], "L2": r[8], "L3": r[9]}
-                if has_community
-                else {},
-                "degree": degree,
-                "edges": edges_out[:5],
-                "facts": [
-                    {
-                        "id": f[0],
-                        "text": f[1],
-                        "type": f[2],
-                        "timestamp": f[3],
-                        "confidence": f[4],
-                    }
-                    for f in about_facts
-                ],
-            }
+    # Pad non-community rows to a stable 10-wide shape for _entity_result_dict.
+    results = [
+        _entity_result_dict(
+            tuple(r) if has_community else (tuple(r) + (None, None, None, None)),
+            has_community,
+            req.include_similar,
         )
-
+        for r in rows
+    ]
     return {"results": results, "count": len(results)}
 
 
 @app.post("/expand")
 async def expand_entity(req: ExpandRequest):
-    """Show ENTITY_SIMILAR neighbors (semaphore-gated; offloaded to a thread)."""
+    """DEPRECATED: use ``POST /entity`` with ``entity_id`` (+ ``include_similar``).
+
+    Retained as a thin backward-compatible alias returning the legacy shape
+    ``{entity, type, neighbors}``; semaphore-gated + offloaded to a thread.
+    """
     async with _query_sema():
         return await asyncio.to_thread(_expand_entity_impl, req)
 
 
 def _expand_entity_impl(req: ExpandRequest):
-    """Show ENTITY_SIMILAR neighbors for entity."""
+    """DEPRECATED alias for the ENTITY_SIMILAR view of ``/entity``.
+
+    Reuses the shared :func:`_entity_similar_neighbors` helper so ``/expand``
+    and ``/entity``'s ``similar`` block never drift apart. Prefer
+    ``POST /entity {"entity_id": ...}`` which returns the full entity payload
+    (facts, edges, communities) with ``similar`` folded in.
+    """
     if not state.ready:
         raise HTTPException(503, "Server not ready")
 
@@ -1675,31 +1762,11 @@ def _expand_entity_impl(req: ExpandRequest):
     if not row:
         raise HTTPException(404, f"Entity not found: {req.entity_id}")
 
-    # Use the backend-agnostic adjacency index rather than reading an edge table.
-    adj_entries = state.adjacency.get(req.entity_id, [])
-    sim_neighbors = []
-    for entry in adj_entries:
-        edge_type, related_id, related_type, _direction = entry
-        if edge_type == "ENTITY_SIMILAR" and related_type == "entity":
-            sim_neighbors.append(related_id)
-
-    results = []
-    for nid in sim_neighbors:
-        nrow = state.sqlite_conn.execute(
-            "SELECT name, entity_type FROM entities WHERE id = ?", (nid,)
-        ).fetchone()
-        results.append(
-            {
-                "id": nid,
-                "name": nrow[0] if nrow else "?",
-                "type": nrow[1] if nrow else "?",
-                "confidence": None,
-                "source": "similarity",
-            }
-        )
-
-    results.sort(key=lambda x: x.get("confidence") or 0, reverse=True)
-    return {"entity": row[0], "type": row[1], "neighbors": results}
+    return {
+        "entity": row[0],
+        "type": row[1],
+        "neighbors": _entity_similar_neighbors(req.entity_id),
+    }
 
 
 @app.post("/facts")
@@ -1710,13 +1777,57 @@ async def entity_facts(req: FactsRequest):
 
 
 def _entity_facts_impl(req: FactsRequest):
-    """Facts ABOUT an entity (id + text), most confident first.
+    """Facts ABOUT an entity, or a single fact by its own id (id + text).
 
-    Closes the trace-back loop: an entity id from ``/entity`` maps to the exact
-    facts, each with a full fact id usable with ``/context``.
+    Exactly one of ``entity_id`` / ``fact_id`` must be provided.
+
+    - ``entity_id``: facts ABOUT the entity, most confident first — closes the
+      trace-back loop (an entity id from ``/entity`` maps to the exact facts,
+      each with a full fact id usable with ``/context``).
+    - ``fact_id``: the single fact row (exact match, then ``id LIKE '<prefix>%'``
+      like ``/context``). Minimal by design — use ``/context`` for full
+      provenance (source chunk/message/thread/entities).
     """
     if not state.ready:
         raise HTTPException(503, "Server not ready")
+
+    has_entity = bool(req.entity_id and req.entity_id.strip())
+    has_fact = bool(req.fact_id and req.fact_id.strip())
+    if has_entity == has_fact:
+        raise HTTPException(
+            400, "Provide exactly one of 'entity_id' or 'fact_id'."
+        )
+
+    # Single fact by its own id (exact, then prefix) — minimal payload.
+    if has_fact:
+        fid = req.fact_id.strip()
+        frow = state.sqlite_conn.execute(
+            "SELECT id, text, fact_type, timestamp, confidence FROM facts WHERE id = ?",
+            (fid,),
+        ).fetchone()
+        if not frow:
+            frow = state.sqlite_conn.execute(
+                "SELECT id, text, fact_type, timestamp, confidence "
+                "FROM facts WHERE id LIKE ? ORDER BY confidence DESC LIMIT 1",
+                (f"{fid}%",),
+            ).fetchone()
+        if not frow:
+            raise HTTPException(404, f"Fact not found: {fid}")
+        return {
+            "entity": None,
+            "type": None,
+            "entity_id": None,
+            "fact_id": frow[0],
+            "facts": [
+                {
+                    "id": frow[0],
+                    "text": frow[1],
+                    "type": frow[2],
+                    "timestamp": frow[3],
+                    "confidence": frow[4],
+                }
+            ],
+        }
 
     row = state.sqlite_conn.execute(
         "SELECT name, entity_type FROM entities WHERE id = ?", (req.entity_id,)

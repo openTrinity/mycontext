@@ -265,11 +265,16 @@ kl stop embedding      # Stop only the embedding server
 kl ingest [-c N] [-d PATH] [--no-improve]  # in-server background ingest (Phase A + B)
 
 # All commands require kl-server running (kl start)
-kl entity "<name>"     # Entity lookup (substring match); shows id +
-                       #   ENTITY_SIMILAR edges (with names) + top facts
-                       #   about it (id + text)
+kl entity "<name>"     # Entity lookup by name (substring); shows id +
+                       #   communities + top edges + facts about it (id + text)
+                       #   + ENTITY_SIMILAR neighbors ("similar", with names)
+kl entity --id <id>    # Same, but look up by entity id (exact or prefix).
+                       #   Add --no-similar to skip the ENTITY_SIMILAR block.
 kl facts <entity_id>   # Facts ABOUT an entity (id + text), confidence-sorted
-kl expand <entity_id>  # ENTITY_SIMILAR neighbors (alias resolution)
+kl facts --fact-id <id>  # A single fact by its id (exact/prefix); minimal —
+                       #   use `kl context` for full source provenance
+kl expand <entity_id>  # [DEPRECATED] ENTITY_SIMILAR neighbors — same as the
+                       #   "similar" block of `kl entity --id <id>`
 kl community [-l L0|L1|L2|L3] [-t entity|fact] [--id N]
 kl members <id> [-l L1] [-t entity]
 kl context <fact_id>   # Source message + context + entities
@@ -489,7 +494,7 @@ kl context <best_fact_id>                          # ground the answer in source
 ### 2. Entity Deep-Dive (about a person/project/system)
 
 ```bash
-kl entity "周强"                    # id + ENTITY_SIMILAR edges + top facts (with fact_ids)
+kl entity "周强"                    # id + "similar" (ENTITY_SIMILAR) + top facts (with fact_ids)
 kl facts <entity_id>                 # all facts ABOUT it (fact_id + text)
 kl context <fact_id>                 # ground a fact in its source message
 kl community -l L2 --id <community_id>
@@ -499,10 +504,12 @@ kl timeline "周强" --from 2026-06-01
 
 **Id-driven trace-back (no name round-trip):** every id `kl` prints is
 traceable. `kl entity` returns an `entity_id` plus the facts about it; feed the
-`entity_id` to `kl facts` for the full list, then any `fact_id` to `kl context`
-for the exact source message. ENTITY_SIMILAR edges also show the neighbor's
-name + full `entity_id`, so you can `kl expand`/`kl facts` on those too. Prefer
-ids over names when chaining — names aren't unique (e.g. two `周强` entities).
+`entity_id` back with `kl entity --id <id>` (or `kl facts <entity_id>` for the
+full list), then any `fact_id` to `kl context` for the exact source message
+(or `kl facts --fact-id <id>` for just the fact text). The `similar` block also
+shows each ENTITY_SIMILAR neighbor's name + full `entity_id`, so you can
+`kl entity --id`/`kl facts` on those too. Prefer ids over names when chaining
+— names aren't unique (e.g. two `周强` entities).
 
 (To find a person/system when unsure of the exact surface form, use
 `kl search "<term>" -c entities` for a semantic entity lookup.)
@@ -527,7 +534,7 @@ kl members 8 -l L2 -t entity    # Who's in it?
 
 ```bash
 kl entity "张伟"
-kl expand <entity_id>            # See ENTITY_SIMILAR links
+kl entity --id <entity_id>       # the "similar" block lists ENTITY_SIMILAR links
 ```
 
 ### 5. Timeline
