@@ -2,6 +2,7 @@
 import type { ChannelPlugin } from "../../types.js"
 import { FeishuAuth, type FeishuPluginOptions } from "./auth.js"
 import { LarkCli } from "./cli.js"
+import { createFeishuConversations } from "./conversations.js"
 import { createFeishuDocuments } from "./documents.js"
 import { createFeishuIdentity, createFeishuIngest } from "./ingest.js"
 
@@ -25,6 +26,16 @@ export function createFeishuPlugin(options: FeishuPluginOptions): ChannelPlugin 
     auth: new FeishuAuth(options, cli),
     ingest: createFeishuIngest(cli),
     identity: createFeishuIdentity(cli),
+    /**
+     * ★★ 会话列举（`im +chat-list`）。这个能力曾经**整个缺失** ——
+     * 于是引导「学习范围」那一步走 `DistillSourceService` 里
+     * `list === undefined` 的降级分支（只给本地已采的部分），
+     * 新装的机器上本地是空的 → 列表恒空，且当时连日志都没有。
+     *
+     * 当时判成"飞书设计上不支持列会话"，核实后不成立：CLI 有这条命令
+     * 且自报 `Risk: read`，只是白名单里没放行。详见 conversations.ts 文件头。
+     */
+    conversations: createFeishuConversations(cli),
     /**
      * ★ 云文档走 `documents` 契约，**不再**伪装成聊天消息。
      *
@@ -54,10 +65,12 @@ export { FeishuAuth } from "./auth.js"
 export type { FeishuPluginOptions } from "./auth.js"
 export { LarkCli, assertAllowedLarkCommand, describeLarkError, extractLarkJson } from "./cli.js"
 export { createFeishuIngest, createFeishuIdentity } from "./ingest.js"
+export { createFeishuConversations } from "./conversations.js"
 export { createFeishuDocuments } from "./documents.js"
 export {
   LARK_AUTH_SCOPES,
   parseLarkAuthStatus,
+  parseLarkChatList,
   parseLarkDeviceGrant,
   parseLarkDriveDocuments,
   parseLarkMessagePage,

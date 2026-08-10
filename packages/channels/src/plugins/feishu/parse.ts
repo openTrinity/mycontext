@@ -1,5 +1,6 @@
 import type {
   AuthStatus,
+  ChannelConversationItem,
   ChannelPullPage,
   ParsedConversationLike,
   ParsedDocumentLike,
@@ -463,4 +464,92 @@ export function parseLarkDriveDocuments(payload: unknown): ParsedDocumentLike[] 
     void index
   }
   return out
+}
+
+/**
+ * `im +chat-list` 一页 → 渠道无关的会话项 + 下一页游标。
+ *
+ * ## 实测的响应形状（2026-08，随包 CLI，值已换成假的）
+ *
+ * ```json
+ * { "ok": true, "identity": "user", "data": {
+ *     "chats": [{
+ *       "chat_id": "oc_FAKE00000000000000000000000000",
+ *       "chat_mode": "p2p",            // p2p | group | topic
+ *       "chat_status": "normal",
+ *       "external": false,
+ *       "name": "张三",
+ *       "p2p_target_id": "ou_FAKE0000000000000000000000000",
+ *       "p2p_target_type": "bot",      // bot | user
+ *       "tenant_key": "FAKE000000000000"
+ *     }],
+ *     "has_more": false, "page_token": null } }
+ * ```
+ *
+ * ## ★★★ `chats` 可能是 `null`（不是空数组）
+ *
+ * 实测：账号里没有群时 `--types=group` 返回的 `chats` 就是 `null`。
+ * 不挡住的话下游 `.map` 直接抛，而那会让整个会话列表变成"读取失败"
+ * —— 一个"你没有群"的正常状态被显示成故障。
+ *
+ * ## ★★ 机器人会话**照常列出**
+ *
+ * 实测这个账号 4 个 p2p 里 3 个是 `p2p_target_type: "bot"`（应用通知）。
+ * 不过滤：它们是真会话、库里也真有它们的消息（采集已在采），
+ * 藏掉等于"4 个会话只显示 1 个"且无从解释。选不选由用户定。
+ *
+ * ## `kind` 的映射
+ *
+ * `p2p` → `direct`，其余（`group` / `topic`）→ `group`。
+ * topic（话题群）归 group 而不是单独一档：上层只有这两种，
+ * 而话题群在"要不要采它"这件事上与普通群没区别。
+ */
+export function parseLarkChatList(payload: unknown): {
+  items: ChannelConversationItem[]
+  nextToken: string | null
+  hasMore: boolean
+} {
+  const data = record(record(payload)["data"] ?? payload)
+  // ★ `chats` 为 null 时 `array()` 给空数组 —— 见上面那段
+  const rows = array(data["chats"])
+  const items: ChannelConversationItem[] = []
+  for (const raw of rows) {
+    const item = record(raw)
+    const externalId = str(item["chat_id"], item["id"])
+    // 没有 id 的条目跳过：白名单里没有能反查它的命令，留着也选不动
+    if (externalId === null) continue
+    const mode = str(item["chat_mode"], item["mode"])
+    const name = str(item["name"], item["title"])
+    items.push({
+      externalId,
+      title: name,
+      kind: mode === "p2p" ? "direct" : "group",
+      /**
+       * ★ 这条命令**不返回成员数**（实测字段只有上面那 8 个）。
+       * 给 null 而不是猜 —— 合并层会用本地表里的值补（那是真数的）。
+       */
+      memberCount: null,
+      /**
+       * ★ 同样不返回最后消息时间。
+       *
+       * 注意 `--sort=active_time` 只影响**排序**，不会多给一个时间字段。
+       * 猜一个 now 的后果是列表按"刚刚"排序、且下游按时间窗过滤时全部命中，
+       * 那比没有时间更糟。合并层会用本地表的 `last_message_at` 补。
+       */
+      lastMessageAt: null,
+    })
+  }
+  /**
+   * ★ `hasMore` 与游标**都要给**，且以 `hasMore` 为准。
+   *
+   * 钉钉那边实测过 277 页里 276 页 `hasMore:false` 却仍返回非空游标
+   * （见 `ChannelPullPage.nextCursor` 的注释）—— 只看游标会永不终止。
+   * 飞书这条命令目前没观察到那个毛病（单页 has_more:false + page_token:null），
+   * 但判据照同一条走，不给它机会。
+   */
+  return {
+    items,
+    nextToken: str(data["page_token"], data["pageToken"]),
+    hasMore: data["has_more"] === true,
+  }
 }
