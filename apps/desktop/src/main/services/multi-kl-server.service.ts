@@ -244,7 +244,13 @@ export class MultiKlServerService {
       },
       // ★★ 没挂管线 → 什么都不做。`fresh=true` 落回主渠道会**删掉它的图**
       (id) =>
-        Promise.resolve({ ok: false, reason: `渠道未就绪：${id}`, entities: 0, facts: 0, edges: 0 }),
+        Promise.resolve({
+          ok: false,
+          reason: `渠道未就绪：${id}`,
+          entities: 0,
+          facts: 0,
+          edges: 0,
+        }),
     )
   }
 

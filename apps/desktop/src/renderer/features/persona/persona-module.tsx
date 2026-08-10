@@ -269,10 +269,7 @@ export function PersonaModule() {
    * 这里一行都不用改。取不到（都没授权 / 列表还没加载）时退回主渠道：
    * 那时整页会显示"未连接"那一支，与改动前一致。
    */
-  const personaHosts = useMemo(
-    () => personaCapableChannels(channels.data ?? []),
-    [channels.data],
-  )
+  const personaHosts = useMemo(() => personaCapableChannels(channels.data ?? []), [channels.data])
   const personaChannel = pickedChannel ?? personaHosts[0]?.id ?? PRIMARY_CHANNEL_ID
   /**
    * 选中的这个渠道不支持分身吗（支持 → null）。

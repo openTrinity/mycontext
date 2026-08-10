@@ -202,9 +202,7 @@ export function SourcesStep({
     const items =
       channelFilter === undefined
         ? all
-        : all.filter(
-            (item) => item.channelId === undefined || channelFilter.has(item.channelId),
-          )
+        : all.filter((item) => item.channelId === undefined || channelFilter.has(item.channelId))
     return {
       direct: items.filter((item) => item.kind === "direct"),
       group: items.filter((item) => item.kind === "group"),

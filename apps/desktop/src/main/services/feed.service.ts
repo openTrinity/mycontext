@@ -587,9 +587,7 @@ export class FeedService {
        * 字段名）。不给就是钉钉那一套 —— 而第二个渠道不给的话，它的语料会被
        * 打上钉钉的 workspace id，两个渠道的会话挂在同一个 workspace 下。
        */
-      ...(this.options.exportProfile === undefined
-        ? {}
-        : { profile: this.options.exportProfile }),
+      ...(this.options.exportProfile === undefined ? {} : { profile: this.options.exportProfile }),
     }).run()
   }
 

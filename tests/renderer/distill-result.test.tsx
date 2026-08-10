@@ -207,11 +207,7 @@ function wrap(
           「需要先连上钉钉」的说明（蒸馏链只认主渠道），下面这些断言的东西
           一个都不渲染。这一组验的是蒸馏结果的层次，不是那个前置状态。
         */}
-        <DistillStep
-          rangeDays={options.rangeDays ?? null}
-          modelConfigured
-          corpusChannelConnected
-        />
+        <DistillStep rangeDays={options.rangeDays ?? null} modelConfigured corpusChannelConnected />
       </QueryClientProvider>
     </I18nextProvider>,
   )

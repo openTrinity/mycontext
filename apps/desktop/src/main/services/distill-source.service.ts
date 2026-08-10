@@ -134,7 +134,10 @@ export class DistillSourceService {
    * `sources` 每次 attach 都整个替换而不是累加：管线是按 vault 挂的，
    * 留着上一个 vault 的句柄就是往已关闭的连接上写。
    */
-  attach(db: SqliteDatabase, sources: readonly { channelId: string; db: SqliteDatabase }[] = []): void {
+  attach(
+    db: SqliteDatabase,
+    sources: readonly { channelId: string; db: SqliteDatabase }[] = [],
+  ): void {
     this.db = db
     this.sourceDbs.clear()
     for (const source of sources) this.sourceDbs.set(source.channelId, source.db)
@@ -187,9 +190,10 @@ export class DistillSourceService {
          */
         const exists =
           sourceDb
-            .prepare<[], { n: number }>(
-              "SELECT count(*) AS n FROM distill_sources WHERE kind = 'chat'",
-            )
+            .prepare<
+              [],
+              { n: number }
+            >("SELECT count(*) AS n FROM distill_sources WHERE kind = 'chat'")
             .get()?.n ?? 0
         if (exists > 0) continue
         const repo = new DistillSourceRepository(sourceDb)

@@ -217,7 +217,10 @@ describe("ChannelHost：已授权渠道列表", () => {
   it("★ 不短路：第一个已授权之后仍继续查（否则永远只挂一条管线）", async () => {
     const second = vi.fn(() => Promise.resolve(AUTHORIZED))
     const host = new ChannelHost(
-      createRegistry([fakePlugin({ id: "dingtalk" }), fakePlugin({ id: "feishu", status: second })]),
+      createRegistry([
+        fakePlugin({ id: "dingtalk" }),
+        fakePlugin({ id: "feishu", status: second }),
+      ]),
     )
     await expect(host.authorizedChannels()).resolves.toEqual(["dingtalk", "feishu"])
     expect(second).toHaveBeenCalledTimes(1)

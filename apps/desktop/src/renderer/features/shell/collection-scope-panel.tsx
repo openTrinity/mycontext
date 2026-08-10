@@ -258,12 +258,7 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
             感知不到点击生效了"。保存要走一次 IPC + 写库，虽然快但不是零延迟，
             而一个只变灰的按钮读起来像"没反应"。
           */}
-          <Button
-            size="sm"
-            disabled={effective === null}
-            loading={save.isPending}
-            onClick={submit}
-          >
+          <Button size="sm" disabled={effective === null} loading={save.isPending} onClick={submit}>
             {t("status.scope.save", { defaultValue: "保存范围" })}
           </Button>
           {/*
@@ -315,10 +310,7 @@ function ScopeEditor({
    * 用户会在飞书面板里勾到钉钉的会话，而那批 id 存进飞书库就是按不存在的
    * id 过滤，结果恒为零且不报错。
    */
-  const channelScope = useMemo(
-    () => new Set([channelId ?? PRIMARY_CHANNEL_ID]),
-    [channelId],
-  )
+  const channelScope = useMemo(() => new Set([channelId ?? PRIMARY_CHANNEL_ID]), [channelId])
   return (
     <SourcesStep
       value={draft}

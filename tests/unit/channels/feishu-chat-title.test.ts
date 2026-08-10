@@ -18,13 +18,24 @@ import { parseLarkMessagePage } from "@mycontext/channels"
 const END = 1_786_200_000_000
 
 /** 一条单聊消息（形状照实测响应，值是编的）。 */
-function p2p(opts: { chatId: string; partnerOpenId: string; senderOpenId: string; senderName: string; messageId: string }) {
+function p2p(opts: {
+  chatId: string
+  partnerOpenId: string
+  senderOpenId: string
+  senderName: string
+  messageId: string
+}) {
   return {
     message_id: opts.messageId,
     chat_id: opts.chatId,
     chat_type: "p2p",
     chat_partner: { open_id: opts.partnerOpenId },
-    sender: { id: opts.senderOpenId, open_id: opts.senderOpenId, id_type: "user_id", name: opts.senderName },
+    sender: {
+      id: opts.senderOpenId,
+      open_id: opts.senderOpenId,
+      id_type: "user_id",
+      name: opts.senderName,
+    },
     create_time: String(END - 1000),
     body: { content: '{"text":"hi"}' },
   }
@@ -33,7 +44,17 @@ function p2p(opts: { chatId: string; partnerOpenId: string; senderOpenId: string
 describe("飞书单聊的会话名", () => {
   it("★★ 对端发的消息 → 用它的 sender 名当会话名", () => {
     const page = parseLarkMessagePage(
-      { items: [p2p({ chatId: "oc_1", partnerOpenId: "ou_peer", senderOpenId: "ou_peer", senderName: "张三" , messageId: "om_1" })] },
+      {
+        items: [
+          p2p({
+            chatId: "oc_1",
+            partnerOpenId: "ou_peer",
+            senderOpenId: "ou_peer",
+            senderName: "张三",
+            messageId: "om_1",
+          }),
+        ],
+      },
       END,
     )
     expect(page.conversations[0]?.title).toBe("张三")
@@ -56,7 +77,17 @@ describe("飞书单聊的会话名", () => {
    */
   it("★★ 只有我自己发的消息 → 给 null（不是占位串，也不能是我的名字）", () => {
     const page = parseLarkMessagePage(
-      { items: [p2p({ chatId: "oc_2", partnerOpenId: "ou_peer", senderOpenId: "ou_me", senderName: "我自己", messageId: "om_2" })] },
+      {
+        items: [
+          p2p({
+            chatId: "oc_2",
+            partnerOpenId: "ou_peer",
+            senderOpenId: "ou_me",
+            senderName: "我自己",
+            messageId: "om_2",
+          }),
+        ],
+      },
       END,
     )
     expect(page.conversations[0]?.title).toBeNull()
@@ -73,8 +104,20 @@ describe("飞书单聊的会话名", () => {
     const page = parseLarkMessagePage(
       {
         items: [
-          p2p({ chatId: "oc_3", partnerOpenId: "ou_peer", senderOpenId: "ou_peer", senderName: "李四", messageId: "om_3" }),
-          p2p({ chatId: "oc_3", partnerOpenId: "ou_peer", senderOpenId: "ou_me", senderName: "我自己", messageId: "om_4" }),
+          p2p({
+            chatId: "oc_3",
+            partnerOpenId: "ou_peer",
+            senderOpenId: "ou_peer",
+            senderName: "李四",
+            messageId: "om_3",
+          }),
+          p2p({
+            chatId: "oc_3",
+            partnerOpenId: "ou_peer",
+            senderOpenId: "ou_me",
+            senderName: "我自己",
+            messageId: "om_4",
+          }),
         ],
       },
       END,

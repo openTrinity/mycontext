@@ -463,9 +463,7 @@ describe("★★★ 第 5 步：主渠道没连时整块换成说明", () => {
       expect(screen.getAllByRole("button").length).toBeGreaterThan(0)
     })
     expect(screen.queryByText(HINT_STEP_UNSUPPORTED)).toBeNull()
-    const start = screen
-      .getAllByRole("button")
-      .find((b) => /开始|学习/.test(b.textContent ?? ""))
+    const start = screen.getAllByRole("button").find((b) => /开始|学习/.test(b.textContent ?? ""))
     expect(start, "连上了却没有开始按钮").toBeDefined()
     expect(start?.hasAttribute("disabled")).toBe(false)
   })

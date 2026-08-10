@@ -50,9 +50,10 @@ function insert(externalId: string, title: string | null): void {
 function titleOf(externalId: string): string | null {
   return (
     store.db
-      .prepare<[string], { title: string | null }>(
-        "SELECT title FROM conversations WHERE external_id = ?",
-      )
+      .prepare<
+        [string],
+        { title: string | null }
+      >("SELECT title FROM conversations WHERE external_id = ?")
       .get(externalId)?.title ?? null
   )
 }

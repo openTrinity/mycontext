@@ -196,9 +196,10 @@ export function describeLarkError(payload: unknown): {
   if (typeof payload !== "object" || payload === null) return null
   const row = payload as Record<string, unknown>
   if (row["ok"] !== false) return null
-  const err = typeof row["error"] === "object" && row["error"] !== null
-    ? (row["error"] as Record<string, unknown>)
-    : {}
+  const err =
+    typeof row["error"] === "object" && row["error"] !== null
+      ? (row["error"] as Record<string, unknown>)
+      : {}
   const code = typeof err["code"] === "number" ? err["code"] : null
   const raw = typeof err["message"] === "string" ? err["message"] : null
 

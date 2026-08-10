@@ -78,9 +78,9 @@ async function captureBody(channelId: string): Promise<Record<string, unknown>> 
   })
 
   // postIngest 是 private —— 这一条门禁的判据就在它身上，所以显式取用
-  await (
-    service as unknown as { postIngest(dir: string): Promise<string | null> }
-  ).postIngest("/tmp/exports/whatever")
+  await (service as unknown as { postIngest(dir: string): Promise<string | null> }).postIngest(
+    "/tmp/exports/whatever",
+  )
 
   expect(captured, "fetch 没被调用 —— postIngest 的实现变了？").not.toBeNull()
   return captured as unknown as Record<string, unknown>

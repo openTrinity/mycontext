@@ -174,7 +174,11 @@ describe("★★ personaSupported：数字人/蒸馏的判据只有一处", () =
   })
 
   it("★ personaHosts() 只给支持的那些", () => {
-    expect(bothMounted().personaHosts().map((item) => item.channelId)).toEqual([PRIMARY])
+    expect(
+      bothMounted()
+        .personaHosts()
+        .map((item) => item.channelId),
+    ).toEqual([PRIMARY])
   })
 
   /**

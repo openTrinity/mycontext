@@ -477,10 +477,7 @@ export interface MyContextApi {
      * 不给 = 主渠道 —— 见 `createSearchSessionInputSchema` 里为什么缺省
      * 不能是 `all`。
      */
-    sessionCreate(input: {
-      query: string
-      scope?: string
-    }): Promise<Result<SearchSessionSummary>>
+    sessionCreate(input: { query: string; scope?: string }): Promise<Result<SearchSessionSummary>>
     sessionRename(input: { sessionId: string; title: string }): Promise<Result<true>>
     sessionPin(input: { sessionId: string; pinned: boolean }): Promise<Result<true>>
     sessionDelete(input: { sessionId: string }): Promise<Result<true>>

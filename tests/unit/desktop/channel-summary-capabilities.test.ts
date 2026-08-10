@@ -60,9 +60,7 @@ function service(plugins: readonly ChannelPlugin[]) {
 
 describe("list() 透传插件的 capabilities", () => {
   it("★★★ id 是 dingtalk 但 sendAs 为空 → 回空（按 id 推导的实现会返回 self）", async () => {
-    const [row] = await service([
-      fakePlugin("dingtalk", { sendAs: [], domains: ["chat"] }),
-    ]).list()
+    const [row] = await service([fakePlugin("dingtalk", { sendAs: [], domains: ["chat"] })]).list()
 
     expect(row?.capabilities.sendAs, "这个值被按 id 推导了，不是透传的").toEqual([])
   })

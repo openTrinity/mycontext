@@ -137,8 +137,7 @@ function readIngestIntervals(db: SqliteDatabase): IngestIntervals | undefined {
     if (minutesMs !== undefined) iv.minutesMs = minutesMs
     if (documentsMs !== undefined) iv.documentsMs = documentsMs
     if (activeScanMs !== undefined) iv.activeScanMs = activeScanMs
-    if (graphBuildMinIntervalMs !== undefined)
-      iv.graphBuildMinIntervalMs = graphBuildMinIntervalMs
+    if (graphBuildMinIntervalMs !== undefined) iv.graphBuildMinIntervalMs = graphBuildMinIntervalMs
     return Object.keys(iv).length === 0 ? undefined : iv
   } catch {
     // 表还不存在（迁移没跑完）/ JSON 坏了 → 用默认，不让它挡住采集启动。

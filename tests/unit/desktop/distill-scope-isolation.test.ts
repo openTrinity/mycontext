@@ -75,7 +75,11 @@ describe("★★★ 采集范围按渠道隔离", () => {
       channelId: PRIMARY,
       kind: "chat",
       enabled: true,
-      scope: { since: NOW - 86_400_000, chatKinds: ["direct", "group"], conversationIds: PRIMARY_CONVS },
+      scope: {
+        since: NOW - 86_400_000,
+        chatKinds: ["direct", "group"],
+        conversationIds: PRIMARY_CONVS,
+      },
     })
     const before = scopeOf(primaryVault)
     expect(before?.conversationIds).toEqual(PRIMARY_CONVS)
@@ -161,7 +165,11 @@ describe("★★★ 采集范围按渠道隔离", () => {
    * 而引导页每点一次「下一步」都会把九个源各存一遍。
    */
   it("★ 范围没变不触发回调（否则每点一次下一步就重建一轮图）", () => {
-    const scope = { since: NOW - 100, chatKinds: ["direct" as const], conversationIds: SOURCE_CONVS }
+    const scope = {
+      since: NOW - 100,
+      chatKinds: ["direct" as const],
+      conversationIds: SOURCE_CONVS,
+    }
     service.save({ channelId: SOURCE, kind: "chat", enabled: true, scope })
     expect(scopeChangedFor).toEqual([SOURCE])
     service.save({ channelId: SOURCE, kind: "chat", enabled: true, scope })

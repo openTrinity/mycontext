@@ -26,11 +26,7 @@ import type {
   ChannelPullSpec,
 } from "../../types.js"
 import type { LarkCli } from "./cli.js"
-import {
-  parseLarkAuthStatus,
-  parseLarkIdentity,
-  parseLarkMessagePage,
-} from "./parse.js"
+import { parseLarkAuthStatus, parseLarkIdentity, parseLarkMessagePage } from "./parse.js"
 
 function localIso(ms: number): string {
   const date = new Date(ms)
@@ -141,7 +137,6 @@ function parseCursor(value: string | null): FeishuCursor | null {
     return null
   }
 }
-
 
 /** 一路的采集结果：这一页的内容 + 下一页位置（null = 抽干）+ 是否撞了上限。 */
 interface BranchResult {

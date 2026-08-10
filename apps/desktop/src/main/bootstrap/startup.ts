@@ -1522,26 +1522,28 @@ export function bootstrapApp(mainDir: string): AppContext {
     },
   })
 
-  const appKlServer = new MultiKlServerService(klServer, () =>
-    pipelines.all().map((item) => ({
-      channelId: item.channelId,
-      service: item.parts.klServer,
-      /**
-       * 没采到任何消息的渠道不起 Python/Qdrant（一个 kl 冷启 ~90s + 几百 MB）。
-       * 授权了但还没采到第一批时这是对的降级：图谱本来就是空的。
-       */
-      enabled: () => {
-        try {
-          return (
-            (item.parts.db
-              .prepare<[], { count: number }>("SELECT count(*) AS count FROM messages")
-              .get()?.count ?? 0) > 0
-          )
-        } catch {
-          return false
-        }
-      },
-    })),
+  const appKlServer = new MultiKlServerService(
+    klServer,
+    () =>
+      pipelines.all().map((item) => ({
+        channelId: item.channelId,
+        service: item.parts.klServer,
+        /**
+         * 没采到任何消息的渠道不起 Python/Qdrant（一个 kl 冷启 ~90s + 几百 MB）。
+         * 授权了但还没采到第一批时这是对的降级：图谱本来就是空的。
+         */
+        enabled: () => {
+          try {
+            return (
+              (item.parts.db
+                .prepare<[], { count: number }>("SELECT count(*) AS count FROM messages")
+                .get()?.count ?? 0) > 0
+            )
+          } catch {
+            return false
+          }
+        },
+      })),
     dingtalk.meta.id,
     logger.child("MultiKl"),
   )

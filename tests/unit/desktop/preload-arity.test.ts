@@ -43,9 +43,7 @@ const preload = readFileSync(
 
 /** 去掉注释 —— 注释里的示例代码不该参与比对。 */
 function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "")
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")
 }
 
 /**
@@ -147,7 +145,9 @@ describe("★★ preload 转发不许漏参数", () => {
       // preload 没有这个通道 = 渲染层用不到它（比如只在主进程内部转发），跳过
       if (actual === undefined) continue
       if (actual !== expected) {
-        mismatched.push(`${channel}: handler 收 ${String(expected)} 个，preload 转发 ${String(actual)} 个`)
+        mismatched.push(
+          `${channel}: handler 收 ${String(expected)} 个，preload 转发 ${String(actual)} 个`,
+        )
       }
     }
     expect(mismatched).toEqual([])

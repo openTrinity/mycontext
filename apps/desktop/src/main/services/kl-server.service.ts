@@ -24,14 +24,7 @@
  * 只借它"长驻 + 可主动关 + onExit 回调"这三件事。
  */
 import { join } from "node:path"
-import {
-  mkdirSync,
-  existsSync,
-  rmSync,
-  writeFileSync,
-  readFileSync,
-  readdirSync,
-} from "node:fs"
+import { mkdirSync, existsSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs"
 import Database from "better-sqlite3"
 import type { BrowserWindow } from "electron"
 import { type Clock, type Logger } from "@mycontext/kernel"
@@ -1938,10 +1931,7 @@ export class KlServerService {
      * source_id 的取值，比如从 `dws` 改成渠道 id）。留一个不认识的下来
      * 就是留一颗同样的雷 —— 而这个目录本来就只归这一个渠道。
      */
-    for (const name of (existsSync(dir)
-      ? readdirSync(dir, { withFileTypes: true })
-      : []
-    )
+    for (const name of (existsSync(dir) ? readdirSync(dir, { withFileTypes: true }) : [])
       .filter((entry) => entry.isFile() && entry.name.startsWith("ingest_checkpoint."))
       .map((entry) => entry.name)) {
       rmSync(join(dir, name), { force: true })
@@ -3079,9 +3069,9 @@ function defaultOpenGraphDb(path: string): GraphDbHandle {
     },
     columns: (table) => {
       if (!INSPECTABLE.has(table)) throw new Error(`未知的表：${table}`)
-      const rows = db
-        .prepare("SELECT name FROM pragma_table_info(?)")
-        .all(table) as Array<{ name: string }>
+      const rows = db.prepare("SELECT name FROM pragma_table_info(?)").all(table) as Array<{
+        name: string
+      }>
       return rows.map((r) => r.name)
     },
     groupBy: (table, column) => {

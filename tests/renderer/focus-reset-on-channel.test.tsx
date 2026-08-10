@@ -98,17 +98,13 @@ describe("换渠道时清掉被筛实体", () => {
      * vitest 的 cwd 恒为仓库根。
      */
     const source = readFileSync(
-      join(
-        process.cwd(),
-        "apps/desktop/src/renderer/features/dashboard/dashboard-module.tsx",
-      ),
+      join(process.cwd(), "apps/desktop/src/renderer/features/dashboard/dashboard-module.tsx"),
       "utf8",
     )
     // 剥注释 —— 注释里写了不等于代码里做了
     const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")
-    expect(
-      code,
-      "换渠道时必须清 entityFocus/focusCount —— 那个 useEffect 不见了",
-    ).toMatch(/setEntityFocus\(null\)[\s\S]{0,120}setFocusCount\(null\)[\s\S]{0,80}scope\.channelId/)
+    expect(code, "换渠道时必须清 entityFocus/focusCount —— 那个 useEffect 不见了").toMatch(
+      /setEntityFocus\(null\)[\s\S]{0,120}setFocusCount\(null\)[\s\S]{0,80}scope\.channelId/,
+    )
   })
 })

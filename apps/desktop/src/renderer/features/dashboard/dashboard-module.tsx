@@ -149,7 +149,6 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
     setFocusCount(null)
   }, [scope.channelId])
 
-
   /**
    * 「刷新状态」按钮的加载态 + 失效入口。
    *
@@ -563,7 +562,9 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           一条恒亮、且照着做也没有结果的红色告警比不显示糟得多 ——
           用户会学会忽略它，而主渠道真的没确认时也一起忽略了。
         */}
-        {scope.personaSupported && identity.selfState === "unconfirmed" && identityProblem !== null ? (
+        {scope.personaSupported &&
+        identity.selfState === "unconfirmed" &&
+        identityProblem !== null ? (
           <div className="col-span-12">
             <ProblemLine
               text={

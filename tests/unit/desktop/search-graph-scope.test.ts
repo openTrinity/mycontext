@@ -82,7 +82,13 @@ describe("★★ isolateData：默认关，且关掉时 env 与改动前逐字�
   it("显式 false 与不给完全一致（默认值不是一个偶然）", () => {
     const withFlag = spawn({ agentHome: BASE, isolateData: false })
     const without = spawn({ agentHome: BASE })
-    for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) {
+    for (const key of [
+      "HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "XDG_CACHE_HOME",
+    ]) {
       expect(withFlag[key], key).toBe(without[key])
     }
   })

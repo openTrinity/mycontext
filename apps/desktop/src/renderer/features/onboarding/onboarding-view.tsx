@@ -259,9 +259,7 @@ export function OnboardingView() {
    */
   const authorizedChannelIds = useMemo(
     () =>
-      new Set(
-        list.filter((c) => c.available && c.status.state === "authorized").map((c) => c.id),
-      ),
+      new Set(list.filter((c) => c.available && c.status.state === "authorized").map((c) => c.id)),
     [list],
   )
   /**

@@ -338,7 +338,7 @@ describe("Feishu auth and ingest parsing", () => {
    */
   it("★★ 云文档进 documents 契约，且不产出任何会话/消息", async () => {
     const documents = createFeishuDocuments({
-      json: <T,>(): Promise<T> =>
+      json: <T>(): Promise<T> =>
         Promise.resolve({
           results: [
             {
@@ -367,14 +367,14 @@ describe("Feishu auth and ingest parsing", () => {
 
   it("★ 没有稳定 id 的条目跳过（下标兜底会让同一篇文档反复入库）", async () => {
     const documents = createFeishuDocuments({
-      json: <T,>(): Promise<T> =>
+      json: <T>(): Promise<T> =>
         Promise.resolve({ results: [{ title: "没有 token 的东西", summary: "x" }] } as T),
     })
     await expect(documents.list({})).resolves.toMatchObject({ items: [] })
   })
 
   it("★ body() 恒返回 null 且不抛（某一篇取不到是常态而非错误）", async () => {
-    const documents = createFeishuDocuments({ json: <T,>(): Promise<T> => Promise.resolve({} as T) })
+    const documents = createFeishuDocuments({ json: <T>(): Promise<T> => Promise.resolve({} as T) })
     await expect(documents.body({ externalId: "doc_1", extension: null })).resolves.toEqual({
       contentText: null,
       rawPayload: null,
@@ -386,7 +386,7 @@ describe("Feishu auth and ingest parsing", () => {
   it("撞分页上限时报 truncated（否则下游把「只列了 20 页」当成「一共这么多」）", async () => {
     const documents = createFeishuDocuments({
       // 恒返回 next token → 一定会撞上限
-      json: <T,>(): Promise<T> =>
+      json: <T>(): Promise<T> =>
         Promise.resolve({ results: [{ token: "d" }], next_page_token: "more" } as T),
     })
     let last = await documents.list({})

@@ -175,8 +175,7 @@ export function useDashboardScope(pickedChannelId: string | null): DashboardScop
    * 还没决定展示哪个渠道，给 false 会让分身那一块先闪一下"暂未开通"。
    */
   const personaSupported =
-    channelId === undefined ||
-    canRunPersona(channels.data?.find((item) => item.id === channelId))
+    channelId === undefined || canRunPersona(channels.data?.find((item) => item.id === channelId))
   /**
    * ★ 判据是**主渠道**的授权态，而不是"当前选中的渠道连没连"。
    *

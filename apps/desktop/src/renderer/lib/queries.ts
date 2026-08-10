@@ -324,9 +324,7 @@ export function useDistillSources(enabled = true, channelId?: string) {
     queryKey: [...QUERY_KEYS.distillSources, channelId ?? "primary"] as const,
     queryFn: async () =>
       unwrap(
-        await window.mycontext.distill.sources(
-          channelId === undefined ? undefined : { channelId },
-        ),
+        await window.mycontext.distill.sources(channelId === undefined ? undefined : { channelId }),
       ),
     enabled,
   })

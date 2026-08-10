@@ -99,11 +99,7 @@ export function StatusPanel() {
         ★ 数据面与 kl 摊开，后面四块折叠 —— 见文件头。
         数据面放最上面：这是本阶段最常被查看的一屏（"采到了多少 / 卡在哪"）。
       */}
-      <DataPlanePanel
-        enabled
-        channelId={statusChannel}
-        onChannelChange={setStatusChannel}
-      />
+      <DataPlanePanel enabled channelId={statusChannel} onChannelChange={setStatusChannel} />
 
       {/*
         采集频率：紧跟数据面 —— 用户看到"探针周期 10s"这个数字之后，

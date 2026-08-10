@@ -116,8 +116,7 @@ export function createFeishuDocuments(cli: Pick<LarkCli, "json">): ChannelDocume
       const truncated = token !== null && page >= PAGE_LIMIT
       return {
         items: parseLarkDriveDocuments(payload),
-        nextToken:
-          token === null || truncated ? null : JSON.stringify({ page: page + 1, token }),
+        nextToken: token === null || truncated ? null : JSON.stringify({ page: page + 1, token }),
         hasMore: token !== null && !truncated,
         truncated,
         rawPayload: JSON.stringify(payload),

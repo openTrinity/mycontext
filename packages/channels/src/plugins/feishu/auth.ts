@@ -141,13 +141,10 @@ export class FeishuAuth implements ChannelAuth {
        *
        * 带 `--json` 之后 stdout 就是干净的一份 JSON（同一条命令对比过）。
        */
-      await this.cli.json<unknown>(
-        ["auth", "login", "--device-code", grant.deviceCode, "--json"],
-        {
-          signal: ctx.signal,
-          timeoutMs: LOGIN_TIMEOUT_MS,
-        },
-      )
+      await this.cli.json<unknown>(["auth", "login", "--device-code", grant.deviceCode, "--json"], {
+        signal: ctx.signal,
+        timeoutMs: LOGIN_TIMEOUT_MS,
+      })
       const status = await this.status()
       if (status.state !== "authorized") {
         throw new AppError("CHANNEL_AUTH_FAILED", "授权完成，但没有检测到所需的飞书只读权限")

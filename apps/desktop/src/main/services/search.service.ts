@@ -216,7 +216,7 @@ export class SearchService {
    * 懒启动的 opencode 句柄。null = 还没起（或已 dispose）。
    * 起失败时保持 null（下次 prompt 再试），并让本轮落回 recallOnly。
    */
-/**
+  /**
    * 懒启动的 opencode 句柄，**按档位一个**。
    *
    * ## ★★ 为什么必须按档位分进程，而不是一个进程查多个图
