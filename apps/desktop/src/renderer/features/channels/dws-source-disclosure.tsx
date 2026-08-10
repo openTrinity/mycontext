@@ -164,55 +164,73 @@ export function DwsSourceDisclosure() {
           ) : null}
 
           {/*
-            ★ 渠道号是**自有 dws 的附属项**，只在设了路径时才出现。
-            它与那份二进制内置的 OAuth 身份配套（见 service 文件头），
-            用在随包的开源版上是错的配对 —— 所以没设路径时连入口都不给。
+            渠道号是**自有 dws 的附属项**（与那份二进制内置的 OAuth 身份配套，
+            见 service 文件头），所以缩进 + 更淡的说明：它比路径更少人需要填
+            （只有组织限定了渠道范围才要），不该看起来和路径一样重要。
 
-            缩进 + 更淡的说明：它比路径更少人需要填（只有组织限定了
-            渠道范围才要），不该看起来和路径一样重要。
+            ## ★★ 但**不能**用 `configured !== null` 把它整块藏掉
+
+            原来这里是 `configured !== null ? … : null`，理由写的是"用在随包的
+            开源版上是错的配对，所以没设路径时连入口都不给"。那条推理有个
+            **顺序错误**：`configured` 是 `storedPath()`，也就是"用户在这个
+            输入框里成功存过路径"。而一台新装的机器上它恒为 null ——
+            于是渠道号框压根不渲染，用户没有任何地方能填它。
+
+            实测（打包态 `~/Library/Application Support/MyContext` 的
+            `app_settings` 里 `dws_source_path` / `dws_channel_code` 都不存在）：
+            新装的包里这一块完全不出现，而**填渠道号本来就是内部同学装完包
+            要做的第一件事**。这不是"少一个高级选项"，是那条路整个不通。
+
+            更糟的是它让 `channelInactive` 那句文案**恒不可达**：能看到框时
+            路径已经存过且验证过（`savePath` 会 spawn `--version`），
+            `channelActive` 基本恒 true。也就是说"填了但不生效"这个真实状态
+            唯一的出口被这个条件挡住了。
+
+            所以现在**始终显示**，生不生效由 `channelActive` 说出来
+            —— 那正是那个字段存在的理由（见 service 里它的注释）。
           */}
-          {configured !== null ? (
-            <div className="mt-1 flex flex-col gap-2 border-l-2 border-[var(--border-divider-light)] pl-3">
-              <p className="typography-body-small-400 text-[var(--text-base-tertiary)]">
-                {t("dwsSource.channelDescription")}
-              </p>
-              <div className="flex items-center gap-2">
-                <Input
-                  value={channelDraft}
-                  onChange={(event) => setChannelDraft(event.target.value)}
-                  placeholder={t("dwsSource.channelPlaceholder")}
-                  spellCheck={false}
-                  data-testid="dws-channel-input"
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") submitChannel()
-                  }}
-                />
-                <Button
-                  variant="secondary"
-                  onClick={submitChannel}
-                  disabled={save.isPending}
-                  data-testid="dws-channel-save"
-                >
-                  {t("dwsSource.save")}
-                </Button>
-              </div>
-              {/*
-                ★ 填了但没生效（路径失效时）要说出来 —— 否则用户填完
-                看不出任何变化，会以为保存失败了。
-              */}
-              {view?.channelCode != null && view.channelActive === false ? (
-                <p className="typography-body-small-400 text-[var(--status-warning)]">
-                  {t("dwsSource.channelInactive")}
-                </p>
-              ) : null}
-              {/* 默认层（.env / 环境变量）来的值：与"我填的"区分开 */}
-              {view?.channelCode == null && view?.channelFromDefaults != null ? (
-                <p className="typography-body-small-400 text-[var(--text-base-tertiary)]">
-                  {t("dwsSource.channelFromEnv")}
-                </p>
-              ) : null}
+          <div className="mt-1 flex flex-col gap-2 border-l-2 border-[var(--border-divider-light)] pl-3">
+            <p className="typography-body-small-400 text-[var(--text-base-tertiary)]">
+              {t("dwsSource.channelDescription")}
+            </p>
+            <div className="flex items-center gap-2">
+              <Input
+                value={channelDraft}
+                onChange={(event) => setChannelDraft(event.target.value)}
+                placeholder={t("dwsSource.channelPlaceholder")}
+                spellCheck={false}
+                data-testid="dws-channel-input"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") submitChannel()
+                }}
+              />
+              <Button
+                variant="secondary"
+                onClick={submitChannel}
+                disabled={save.isPending}
+                data-testid="dws-channel-save"
+              >
+                {t("dwsSource.save")}
+              </Button>
             </div>
-          ) : null}
+            {/*
+              ★ 填了但没生效要说出来 —— 否则用户填完看不出任何变化，
+              会以为保存失败了。两种成因（没设自有 dws / 设了但路径失效）
+              都落在这一句上：文案说的是"当前用的是自带的 dws"，
+              而那正是 `channelActive:false` 的充要条件（见 `channel()`）。
+            */}
+            {view?.channelCode != null && view.channelActive === false ? (
+              <p className="typography-body-small-400 text-[var(--status-warning)]">
+                {t("dwsSource.channelInactive")}
+              </p>
+            ) : null}
+            {/* 默认层（.env / 环境变量）来的值：与"我填的"区分开 */}
+            {view?.channelCode == null && view?.channelFromDefaults != null ? (
+              <p className="typography-body-small-400 text-[var(--text-base-tertiary)]">
+                {t("dwsSource.channelFromEnv")}
+              </p>
+            ) : null}
+          </div>
 
           {configured !== null ? (
             <button
