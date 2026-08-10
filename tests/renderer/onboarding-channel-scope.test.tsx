@@ -290,10 +290,10 @@ describe("★★ 第 3 步：没有能跑分身的渠道时说清楚", () => {
 })
 
 describe("★★ 第 5 步：语料渠道没连时说清楚 + 主按钮灰", () => {
-  it("★★ 显示「什么都学不到」", async () => {
+  it("★★ 显示「学不到新的」", async () => {
     wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
     await waitFor(() => {
-      expect(screen.getByText(/什么都学不到/)).toBeTruthy()
+      expect(screen.getByText(/学不到新的/)).toBeTruthy()
     })
   })
 
@@ -302,38 +302,46 @@ describe("★★ 第 5 步：语料渠道没连时说清楚 + 主按钮灰", () 
     await waitFor(() => {
       expect(screen.getAllByRole("button").length).toBeGreaterThan(0)
     })
-    expect(screen.queryByText(/什么都学不到/)).toBeNull()
+    expect(screen.queryByText(/学不到新的/)).toBeNull()
   })
 
   /**
-   * ★★★ 主按钮 disabled —— 否则点了会跑完并什么都学不到（静默）。
+   * ★★★ 渠道没连**也不禁用**「开始学习」。
    *
-   * ★ 判据落在**那个按钮**上而不是"页面上有 disabled 的按钮"：
-   * 这一步还有别的按钮（重来），而它的禁用条件不同。
+   * ## 这一条锁的是我第一版的判断错误
+   *
+   * 我先禁用了它，理由写的是"跑了也是 0 条"。那是错的：蒸馏只读**本地库**
+   * （`DistillService` 全程不碰渠道 CLI），已入库的照样能学。
+   *
+   * 真机上那一刻库里有 **1,724 条**，而按钮灰着、旁边写着"什么都学不到"
+   * —— 两句都不成立，用户看到一个自相矛盾的界面。
+   *
+   * ★ 判据落在**那个按钮**上而不是"页面上有没有 disabled 的按钮"：
+   * 这一页还有别的按钮（重来），它的禁用条件不同。
    */
-  it("★★★ 语料渠道没连 → 开始学习的按钮是灰的", async () => {
+  it("★★★ 渠道没连也不禁用「开始学习」（已入库的还能学）", async () => {
     wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
     await waitFor(() => {
-      expect(screen.getByText(/什么都学不到/)).toBeTruthy()
-    })
-    const buttons = screen.getAllByRole("button")
-    /**
-     * 找"开始学习"那个：它是这一页唯一会去调 `distill.start` 的按钮。
-     * 用文案定位而不是下标 —— 下标会随布局调整而错位。
-     */
-    const start = buttons.find((b) => /开始|学习/.test(b.textContent ?? ""))
-    expect(start, "找不到开始学习按钮 —— 文案变了？").toBeDefined()
-    expect(start?.hasAttribute("disabled")).toBe(true)
-  })
-
-  it("★ 连上了那个按钮就是可点的（反证上面那条不是永真）", async () => {
-    wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected />)
-    await waitFor(() => {
-      expect(screen.getAllByRole("button").length).toBeGreaterThan(0)
+      expect(screen.getByText(/学不到新的/)).toBeTruthy()
     })
     const start = screen
       .getAllByRole("button")
       .find((b) => /开始|学习/.test(b.textContent ?? ""))
-    expect(start?.hasAttribute("disabled")).toBe(false)
+    expect(start, "找不到开始学习按钮 —— 文案变了？").toBeDefined()
+    expect(start?.hasAttribute("disabled"), "禁用它就等于说「已入库的也学不了」").toBe(false)
+  })
+
+  /**
+   * ★★ 文案不许说"什么都学不到"这类**与库里有数据矛盾**的话。
+   *
+   * 这条盯的是同一个错误的另一半：即使按钮改回可点，文案若还说"学不到"，
+   * 用户仍然会读到矛盾（旁边就写着"共入库 1,724 条"）。
+   */
+  it("★★ 文案说的是「学不到新的」，不是「什么都学不到」", async () => {
+    wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
+    await waitFor(() => {
+      expect(screen.getByText(/学不到新的/)).toBeTruthy()
+    })
+    expect(screen.queryByText(/什么都学不到/)).toBeNull()
   })
 })

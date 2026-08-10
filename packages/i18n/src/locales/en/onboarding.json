@@ -211,7 +211,7 @@
     "graphEdges": "links between them",
     "graphBuilding": "Organizing — needs a model, takes minutes. You can close this page",
     "graphAbsent": "Not organized yet: {{reason}}. It runs automatically on next launch once a model is set.",
-    "corpusChannelMissing": "The chat history to learn from comes from DingTalk, which isn't connected — starting now would finish having learned nothing. Go back to step 1 to connect it, or skip this step."
+    "corpusChannelMissing": "DingTalk isn't connected — what's already in the library can still be learned from, but nothing new will come in. Go back to step 1 to reconnect."
   },
   "sourceKinds": {
     "chat": "Chat messages",

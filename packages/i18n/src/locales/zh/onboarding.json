@@ -211,7 +211,7 @@
     "graphEdges": "它们之间的联系",
     "graphBuilding": "正在整理 —— 要调模型，分钟级。可以关掉页面",
     "graphAbsent": "还没整理：{{reason}}。配好模型后下次启动会自动整理。",
-    "corpusChannelMissing": "要学的聊天记录来自钉钉，而它还没连接 —— 现在开始会跑完但什么都学不到。回第 1 步连上钉钉，或先跳过这步。"
+    "corpusChannelMissing": "钉钉现在没连上 —— 已入库的聊天记录还能学，但学不到新的。要继续攒，回第 1 步重新连上钉钉。"
   },
   "sourceKinds": {
     "chat": "聊天消息",

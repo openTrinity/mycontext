@@ -61,14 +61,15 @@ export interface DistillStepProps {
   /**
    * 语料所在的那个渠道连上了吗。
    *
-   * ## ★★ 为什么这一步要知道渠道
+   * ## ★★ 它影响的是「还能不能攒到新语料」，不是「现在能不能学」
    *
    * 学习的语料来自**主渠道**的库：`DistillService` 只有一个 `this.db`，
    * 非主渠道（只读接入）的语料在 `sources/<channelId>/core.sqlite` 里，
-   * 蒸馏压根不读。
+   * 蒸馏压根不读。所以只连了只读渠道时，**新的**聊天记录不会进来。
    *
-   * 所以「只连了飞书」时点开始学习会**跑完并得到 0 条结论，且不报错** ——
-   * 正是这个仓库最贵的那类静默降级。要提前说清。
+   * ★ 但已入库的照样能学 —— 蒸馏全程不碰渠道 CLI。我第一版据此禁用了
+   * 「开始学习」按钮并写"什么都学不到"，真机上那一刻库里有 1,724 条：
+   * 按钮灰着、文案说学不到，而两句都不成立。**现在只给说明，不禁用。**
    */
   corpusChannelConnected: boolean
 }
@@ -296,13 +297,17 @@ export function DistillStep({
            * 缺 Python 返回），而按钮看起来是好的 —— 用户会反复点。
            * 原因已经在上面写着了，所以这里只需要拦住动作。
            */
-          disabled={
-            start.isPending ||
-            running ||
-            forge?.available === false ||
-            // ★ 语料渠道没连 → 跑了也是 0 条（软门：底部「跳过这步」仍可用）
-            !corpusChannelConnected
-          }
+          /**
+           * ★★ 渠道没连**不禁用**这个按钮 —— 我第一版禁了，那是错的。
+           *
+           * 蒸馏只读**本地库**（`DistillService` 全程不碰渠道 CLI，
+           * 见它的 `start()`），所以已入库的聊天记录照样能学。真机实测那一刻
+           * 库里有 1,724 条，而按钮是灰的、旁边写着"什么都学不到"——
+           * 两句都不成立，用户看到的是一个自相矛盾的界面。
+           *
+           * 现在只给说明（"学不到新的"），要不要跑由用户定。
+           */
+          disabled={start.isPending || running || forge?.available === false}
           onClick={() => {
             setRunBaseline(forge?.lastRunAt ?? null)
             start.mutate({ days: rangeDays })
