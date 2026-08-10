@@ -10,6 +10,9 @@ omegaconf>=2.3
 # Graph storage (default backend)
 ladybug>=0.18.0      # Native Cypher traversal + hybrid SQLite content store
 
+# Graph improvement: heterogeneous hierarchical Leiden
+graspologic-native==1.3.1
+
 # Utilities
 tqdm>=4.60
 nltk>=3.9

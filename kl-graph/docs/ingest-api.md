@@ -1,8 +1,9 @@
 # Ingest API and Cost Guide
 
-`POST /ingest` is the single server-side ingestion entry point. It is
+`POST /ingest` is the server-side source-ingestion entry point. It is
 asynchronous: the request validates and queues a server-local export directory,
-then returns immediately. Use `GET /status` to follow the run.
+then returns immediately. `POST /improve` queues graph-wide periodic
+maintenance without source data. Use `GET /status` to follow either job.
 
 ## Request
 
@@ -48,6 +49,32 @@ improvement targets, improvement resolves to `off` and no baseline check runs.
 `auto` is based on persisted community state. There are no timestamp watermarks,
 incremental run counters, or “full every N runs” rules.
 
+## Periodic full improvement
+
+Use the dedicated endpoint to rebuild derived graph relationships without
+scanning a source directory or running extraction:
+
+```http
+POST /improve
+Content-Type: application/json
+
+{
+  "mode": "full"
+}
+```
+
+`mode` is optional and currently accepts only `full`. The job rebuilds
+graph-wide fact/entity similarity, runs entity disambiguation, reconstructs the
+hierarchical communities and their summaries, then refreshes the server's
+in-memory adjacency index. It does not create chunks, entities, or facts from
+source data.
+
+`POST /improve` and `POST /ingest` use the same single-writer queue, so a full
+maintenance pass cannot overlap an ingestion write. Use this endpoint for
+periodic maintenance in an incremental-first deployment. Use
+`POST /ingest` with `improve_mode: "full"` only when new source ingestion and a
+full rebuild intentionally belong to the same job.
+
 ## Responses and queueing
 
 When no ingestion is active:
@@ -79,8 +106,10 @@ When another run is active, the new request is persisted and queued:
 }
 ```
 
-Only one ingestion job writes at a time. Queued jobs run serially while query
-traffic continues.
+Only one ingestion or improvement job writes at a time. Queued jobs run
+serially while query traffic continues. `/improve` returns the same response
+shape; a queued response uses `"queued_job": "improve"` instead of
+`queued_source`.
 
 ### Errors
 
@@ -104,6 +133,11 @@ Poll `GET /status` and read its `ingest` object. Important fields are:
 - `percent` and `detail`;
 - `units_discovered`, `units_skipped`, `units_processed`, and `chunks_created`;
 - `run_id`, `source_id`, `improve_mode`, and `error`.
+
+The object also includes `job_type`, either `ingest` or `improve`. For an
+improvement-only job, `source_id` is null, `improve_mode` is `full`, and all
+unit/chunk counters remain zero. The containing field is still named `ingest`
+for response compatibility.
 
 Phase A completion makes chunk vector/BM25 retrieval usable. Phase B adds the
 extracted graph. Finalization reconciles affected in-memory adjacency buckets

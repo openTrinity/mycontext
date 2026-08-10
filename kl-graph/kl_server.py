@@ -143,7 +143,8 @@ class ServerState:
         self._sqlite_path: str | None = None
         self._sqlite_shared: sqlite3.Connection | None = None
         self._sqlite_conns: list[sqlite3.Connection] = []
-        self.ingest_queue: list[tuple[str, IngestRequest]] = []
+        # Ingestion and graph-wide improvement share one writer queue.
+        self.ingest_queue: list[tuple[str, object]] = []
 
     def _open_sqlite(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._sqlite_path, check_same_thread=False)
@@ -515,6 +516,7 @@ def _set_progress(
         "run_id": state.current_run_id,
         "source_id": previous.get("source_id"),
         "improve_mode": previous.get("improve_mode"),
+        "job_type": previous.get("job_type", "ingest"),
         "state": state_str,  # idle | running | done | error
         "phase": phase,  # phase_a | phase_b | improve | finalize | ""
         "percent": round(percent, 3),
@@ -597,19 +599,53 @@ async def _run_single_ingest_job(req: IngestRequest):
         _set_progress("error", "", 0.0, "", str(e))
 
 
-async def _run_ingest_queue(first: tuple[str, IngestRequest]) -> None:
-    """Serially drain locally referenced ingest requests."""
-    pending: tuple[str, IngestRequest] | None = first
+async def _run_single_improve_job(req: ImproveRequest) -> None:
+    """Run graph-wide maintenance without scanning any source directory."""
+
+    try:
+        from kl_graph.ingest.improvement import ImprovementTargets, run_improvement
+        from kl_graph.ingest.runner import ServingIndexUpdate
+
+        shared_store, qdrant = _shared_stores()
+        _set_progress("running", "improve", 0.0, "full graph improvement")
+        await asyncio.to_thread(
+            run_improvement,
+            req.mode,
+            store=shared_store,
+            qdrant=qdrant,
+            targets=ImprovementTargets(),
+        )
+        _set_progress("running", "finalize", 0.95, "refreshing indexes")
+        await asyncio.to_thread(
+            _hot_swap_graph,
+            ServingIndexUpdate(full_adjacency=True),
+        )
+        _set_progress("done", "", 1.0, "full improvement complete")
+        logger.info("Background full improvement complete.")
+    except Exception as e:
+        logger.exception("Background full improvement failed")
+        _set_progress("error", "", 0.0, "", str(e))
+
+
+async def _run_ingest_queue(first: tuple[str, object]) -> None:
+    """Serially drain ingestion and graph-maintenance requests."""
+    pending: tuple[str, object] | None = first
     try:
         while pending is not None:
             run_id, req = pending
             state.current_run_id = run_id
+            is_improve = isinstance(req, ImproveRequest)
             state.ingest_progress = {
-                "source_id": req.source_id,
-                "improve_mode": req.improve_mode,
+                "source_id": None if is_improve else req.source_id,
+                "improve_mode": req.mode if is_improve else req.improve_mode,
+                "job_type": "improve" if is_improve else "ingest",
             }
-            _set_progress("running", "phase_a", 0.0, "queued")
-            await _run_single_ingest_job(req)
+            initial_phase = "improve" if is_improve else "phase_a"
+            _set_progress("running", initial_phase, 0.0, "queued")
+            if is_improve:
+                await _run_single_improve_job(req)
+            else:
+                await _run_single_ingest_job(req)
             pending = state.ingest_queue.pop(0) if state.ingest_queue else None
     finally:
         state.ingest_task = None
@@ -788,6 +824,14 @@ class IngestRequest(BaseModel):
     improve_mode: Literal["off", "auto", "incremental", "full"] = "auto"
 
 
+class ImproveRequest(BaseModel):
+    """Graph-wide maintenance request with no source ingestion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["full"] = "full"
+
+
 class AskRequest(BaseModel):
     query: str
     top_k: int = 10
@@ -947,6 +991,11 @@ async def get_status():
         ).fetchone()
         if row:
             ingest_status = dict(row)
+            improve_only = ingest_status.get("source_id") == "__improve__"
+            ingest_status["job_type"] = "improve" if improve_only else "ingest"
+            if improve_only:
+                ingest_status["source_id"] = None
+                ingest_status["improve_mode"] = "full"
 
     return {
         "status": "ready",
@@ -993,8 +1042,47 @@ async def ingest(req: IngestRequest):
     state.ingest_progress = {
         "source_id": req.source_id,
         "improve_mode": req.improve_mode,
+        "job_type": "ingest",
     }
     _set_progress("running", "phase_a", 0.0, "queued")
+    state.ingest_task = asyncio.create_task(_run_ingest_queue(item))
+    return {"status": "started", "run_id": run_id, "ingest": state.ingest_progress}
+
+
+@app.post("/improve")
+async def improve(req: ImproveRequest):
+    """Queue graph-wide improvement without scanning source data."""
+
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+
+    run_id = str(uuid.uuid4())
+    now = int(time.time())
+    state.sqlite_conn.execute(
+        """INSERT INTO ingest_runs
+           (run_id, source_id, input_dir, state, phase, started_at, updated_at)
+           VALUES (?, '__improve__', '', 'queued', 'improve', ?, ?)""",
+        (run_id, now, now),
+    )
+    state.sqlite_conn.commit()
+
+    item = (run_id, req)
+    if state.ingest_task is not None and not state.ingest_task.done():
+        state.ingest_queue.append(item)
+        return {
+            "status": "continued",
+            "run_id": state.current_run_id,
+            "queued_run_id": run_id,
+            "queued_job": "improve",
+        }
+
+    state.current_run_id = run_id
+    state.ingest_progress = {
+        "source_id": None,
+        "improve_mode": req.mode,
+        "job_type": "improve",
+    }
+    _set_progress("running", "improve", 0.0, "queued")
     state.ingest_task = asyncio.create_task(_run_ingest_queue(item))
     return {"status": "started", "run_id": run_id, "ingest": state.ingest_progress}
 

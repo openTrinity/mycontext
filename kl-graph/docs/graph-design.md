@@ -267,6 +267,15 @@ does not imply deletion.
 > Callers may choose `off`, force `incremental` (baseline required), or force
 > `full`. Improvement remains separate from unit delta detection.
 
+> **Periodic full improvement.** `POST /improve` runs the graph-wide Improve
+> phase without scanning or ingesting source data. It is serialized with
+> ingestion jobs, rebuilds the derived similarity/community layer from the
+> current authoritative graph, and refreshes the server's adjacency index after
+> committing. This is the normal periodic maintenance path for an
+> incremental-first deployment; `POST /ingest` with `improve_mode=full` remains
+> available when a source batch and a full rebuild intentionally belong to the
+> same job.
+
 > **No watermark.** Timestamps are ordering metadata only. Re-running ingestion
 > is idempotent because committed composite unit ids are skipped. A late message
 > with an old timestamp but an unseen id is therefore processed normally.
