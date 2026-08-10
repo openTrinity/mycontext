@@ -626,26 +626,28 @@ def test_store_and_list_community_summaries(tmp_path: pathlib.Path) -> None:
     store = _make_store(tmp_path)
     summaries = [
         {
-            "level": "L0",
+            "level": 0,
             "community_id": 0,
-            "node_type": "entity",
             "member_count": 5,
+            "entity_count": 3,
+            "fact_count": 2,
             "summary": "test",
             "tags": "[]",
             "top_members": "[]",
         },
         {
-            "level": "L0",
+            "level": 0,
             "community_id": 1,
-            "node_type": "entity",
             "member_count": 3,
+            "entity_count": 2,
+            "fact_count": 1,
             "summary": "other",
             "tags": "[]",
             "top_members": "[]",
         },
     ]
     store.store_community_summaries(summaries)
-    listed = store.list_community_summaries("L0", "entity")
+    listed = store.list_community_summaries(0)
     assert len(listed) == 2
     store.close()
 
@@ -655,7 +657,7 @@ def test_get_community_summary_returns_none_when_missing(
 ) -> None:
     """get_community_summary returns None when not found."""
     store = _make_store(tmp_path)
-    result = store.get_community_summary("L0", 99, "entity")
+    result = store.get_community_summary(0, 99)
     assert result is None
     store.close()
 
@@ -666,17 +668,18 @@ def test_get_community_summary_returns_correct(tmp_path: pathlib.Path) -> None:
     store.store_community_summaries(
         [
             {
-                "level": "L1",
+                "level": 1,
                 "community_id": 42,
-                "node_type": "fact",
                 "member_count": 7,
+                "entity_count": 4,
+                "fact_count": 3,
                 "summary": "hello world",
                 "tags": "[]",
                 "top_members": "[]",
             },
         ]
     )
-    result = store.get_community_summary("L1", 42, "fact")
+    result = store.get_community_summary(1, 42)
     assert result is not None
     assert result["summary"] == "hello world"
     assert result["member_count"] == 7
@@ -775,13 +778,13 @@ def test_part_of_edge_stored_to_scope(tmp_path: pathlib.Path) -> None:
 def test_insert_and_get_community(tmp_path: pathlib.Path) -> None:
     """insert_communities and get_community round-trip through the ABC methods."""
     store = _make_store(tmp_path)
-    cid = community_id_from("entity", "L1", 7)
+    cid = community_id_from("L1", 7)
     store.insert_communities(
         [
             Community(
                 id=cid,
                 level="L1",
-                node_type="entity",
+                node_type="mixed",
                 summary="s",
                 tags=["a"],
                 member_count=3,
@@ -791,7 +794,7 @@ def test_insert_and_get_community(tmp_path: pathlib.Path) -> None:
     fetched = store.get_community(cid)
     assert fetched is not None
     assert fetched.level == "L1"
-    assert fetched.node_type == "entity"
+    assert fetched.node_type == "mixed"
     assert fetched.tags == ["a"]
     assert fetched.member_count == 3
     store.close()
@@ -800,8 +803,8 @@ def test_insert_and_get_community(tmp_path: pathlib.Path) -> None:
 def test_comm_member_edge_stored_to_community(tmp_path: pathlib.Path) -> None:
     """An entity→community COMM_MEMBER edge round-trips with its level."""
     store = _make_store(tmp_path)
-    cid = community_id_from("entity", "L0", 0)
-    store.insert_communities([Community(id=cid, level="L0", node_type="entity")])
+    cid = community_id_from("L0", 0)
+    store.insert_communities([Community(id=cid, level="L0", node_type="mixed")])
     store.insert_edges(
         [
             Edge(

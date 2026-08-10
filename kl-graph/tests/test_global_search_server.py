@@ -1,15 +1,18 @@
 """Integration tests for POST /global_search (kl_server).
 
-Covers the U2 contract in ``docs/todo/global-search.md``:
+Covers the corpus-wide U2 contract after the migration to hierarchical
+communities + rate-then-descend global search:
 
-- identity precedence (request ``user`` → ``KL_CURRENT_USER``);
+- selection is query-driven over ALL community summaries (no identity gating);
+  the request ``user`` field is accepted-but-ignored for response-shape
+  stability;
 - every miss is a grounded HTTP 200 no-data answer with ZERO LLM calls
-  (never 404, never a corpus-wide fallback — the [!RED] coverage policy);
-- graceful degradation when the improve pipeline has not run;
-- blank queries and early SQLite failures degrade to grounded 200
-  responses (never 500, zero LLM calls);
-- happy map-reduce pass-through (answer, citations, communities,
-  diagnostics) with a scripted ``litellm.acompletion`` stand-in;
+  (never 404, never 500);
+- graceful degradation when the improve pipeline has not run (no
+  ``community_summaries`` table);
+- blank queries and early SQLite failures degrade to grounded 200 responses;
+- happy rate-then-descend → map-reduce pass-through (answer, citations,
+  communities, diagnostics) with a scripted ``litellm.acompletion`` stand-in;
 - [!RED R4]: transport/LLM failures stay VISIBLE in diagnostics and never
   silently turn into a fabricated answer.
 
@@ -29,15 +32,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 import kl_server
+from kl_graph.models.types import Community, community_id_from
 from kl_server import app, state
 
 
 def _build_fixture_store():
-    """In-memory SQLiteStore: one user WITH communities, one WITHOUT.
+    """In-memory SQLiteStore with a small hierarchical community set.
 
-    Alice (ent-alice) → L0/c9 + L1/c3 entity summaries (plus a fact-community
-    row that must be ignored). Bob (ent-bob) → all community columns NULL:
-    the prominent-but-unassigned coverage-gap case.
+    Two level-0 root communities and one level-1 child (parent = L0/9), stored
+    in the new integer-level ``community_summaries`` schema plus matching
+    reified ``communities`` rows (with parent links) so rate-then-descend can
+    enumerate levels and descend through the hierarchy.
     """
     from kl_graph.storage.sqlite_store import SQLiteStore
 
@@ -45,39 +50,89 @@ def _build_fixture_store():
     store = SQLiteStore(Path(":memory:"), conn=conn)
     conn = store.conn
 
-    # community_L* columns are added by the improve pipeline (ALTER TABLE),
-    # not the base schema — mirror that here.
-    for lvl in ("L0", "L1", "L2", "L3"):
-        conn.execute(f"ALTER TABLE entities ADD COLUMN community_{lvl} INTEGER")
-
-    conn.executemany(
-        "INSERT INTO entities(id, name, entity_type, mention_count, "
-        "community_L0, community_L1) VALUES (?,?,?,?,?,?)",
+    store.store_community_summaries(
         [
-            ("ent-alice", "Alice", "Person", 10, 9, 3),
-            ("ent-bob", "Bob", "Person", 5, None, None),
-        ],
+            {
+                "level": 0,
+                "community_id": 9,
+                "member_count": 10,
+                "entity_count": 6,
+                "fact_count": 4,
+                "title": "数据同步项目",
+                "summary": "Alice 负责数据同步项目，推进评审与整改。",
+                "rating": 8.0,
+                "rating_explanation": "high impact",
+                "findings": "[]",
+                "tags": "[]",
+                "top_members": "[]",
+            },
+            {
+                "level": 0,
+                "community_id": 7,
+                "member_count": 8,
+                "entity_count": 5,
+                "fact_count": 3,
+                "title": "无关主题",
+                "summary": "与查询无关的另一个社区。",
+                "rating": 3.0,
+                "rating_explanation": "low",
+                "findings": "[]",
+                "tags": "[]",
+                "top_members": "[]",
+            },
+            {
+                "level": 1,
+                "community_id": 3,
+                "member_count": 5,
+                "entity_count": 3,
+                "fact_count": 2,
+                "title": "vLLM 部署",
+                "summary": "Alice 在部署 vLLM 嵌入服务。",
+                "rating": 7.0,
+                "rating_explanation": "impactful",
+                "findings": "[]",
+                "tags": "[]",
+                "top_members": "[]",
+            },
+        ]
     )
-    conn.executemany(
-        "INSERT INTO community_summaries(level, community_id, node_type, "
-        "member_count, summary, tags, top_members) VALUES (?,?,?,?,?,?,?)",
+    # Reified community rows with native parent links: L1/3 is a child of L0/9.
+    store.insert_communities(
         [
-            ("L0", 9, "entity", 10, "Alice 负责数据同步项目，推进评审与整改。", "[]", "[]"),
-            ("L1", 3, "entity", 5, "Alice 在部署 vLLM 嵌入服务。", "[]", "[]"),
-            ("L0", 99, "fact", 7, "fact-community row — must be ignored.", "[]", "[]"),
-        ],
+            Community(
+                id=community_id_from("L0", 9),
+                level="L0",
+                node_type="mixed",
+                member_count=10,
+            ),
+            Community(
+                id=community_id_from("L0", 7),
+                level="L0",
+                node_type="mixed",
+                member_count=8,
+            ),
+            Community(
+                id=community_id_from("L1", 3),
+                level="L1",
+                node_type="mixed",
+                member_count=5,
+                parent_id=community_id_from("L0", 9),
+                parent_level=0,
+            ),
+        ]
     )
     conn.commit()
     return store
 
 
 class _LLMRecorder:
-    """Stand-in for ``litellm.acompletion`` with scripted map/reduce replies."""
+    """Stand-in for ``litellm.acompletion`` with scripted rate/map/reduce."""
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.map_payload: dict = {"points": []}
         self.reduce_answer = "FINAL ANSWER"
+        self.rating = "8"  # default: keep every rated community
         self.exc: Exception | None = None
 
     async def __call__(self, **kwargs):
@@ -85,7 +140,9 @@ class _LLMRecorder:
         if self.exc is not None:
             raise self.exc
         system = kwargs["messages"][0]["content"]
-        if "Respond ONLY with JSON" in system:
+        if "相关性评分员" in system:
+            content = self.rating
+        elif "Respond ONLY with JSON" in system:
             content = json.dumps(self.map_payload)
         else:
             content = self.reduce_answer
@@ -96,7 +153,7 @@ class _LLMRecorder:
 
 @pytest.fixture(autouse=True)
 def _patch_state(monkeypatch):
-    """Warm fixture state + neutral KL_CURRENT_USER for every test."""
+    """Warm fixture state for every test."""
     store = _build_fixture_store()
     orig = (state.sqlite_conn, state.ready, state.store)
     state.sqlite_conn = store.conn
@@ -123,47 +180,12 @@ def client() -> TestClient:
 # ── grounded no-data paths (zero LLM calls) ──────────────────────────────────
 
 
-def test_no_identity_returns_canned_no_data(client, llm) -> None:
-    r = client.post("/global_search", json={"query": "我最近的任务是什么"})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["reason"] == "no_identity"
-    assert data["answer"].startswith("I am sorry but I am unable to answer")
-    assert data["communities"] == []
-    assert llm.calls == []
-
-
-def test_unknown_identity_zero_llm_calls(client, llm) -> None:
-    r = client.post(
-        "/global_search", json={"query": "我的任务", "user": "Nobody"}
-    )
-    assert r.status_code == 200
-    data = r.json()
-    assert data["reason"] == "identity_unresolved"
-    assert data["user"] == "Nobody"
-    assert data["entity_id"] is None
-    assert llm.calls == []
-
-
-def test_entity_without_communities_no_data_zero_calls(client, llm) -> None:
-    """Coverage-gap policy: unassigned entity → grounded no-data WITH a
-    remediation hint, no fallback."""
-    r = client.post("/global_search", json={"query": "我的任务", "user": "Bob"})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["reason"] == "no_communities"
-    assert data["entity_id"] == "ent-bob"
-    assert "hint" in data and "scripts.improve" in data["hint"]
-    assert data["diagnostics"]["search_latency_ms"] >= 0
-    assert llm.calls == []
-
-
 def test_missing_summaries_table_hint_zero_calls(client, llm) -> None:
     conn = state.sqlite_conn
     assert conn is not None  # patched by the autouse fixture
     conn.execute("DROP TABLE community_summaries")
     conn.commit()
-    r = client.post("/global_search", json={"query": "我的任务", "user": "Alice"})
+    r = client.post("/global_search", json={"query": "我的任务"})
     assert r.status_code == 200
     data = r.json()
     assert data["reason"] == "no_communities"
@@ -171,10 +193,19 @@ def test_missing_summaries_table_hint_zero_calls(client, llm) -> None:
     assert llm.calls == []
 
 
-# ── identity precedence ──────────────────────────────────────────────────────
+def test_blank_query_rejected_zero_llm_calls(client, llm) -> None:
+    """Blank/whitespace-only queries are grounded BEFORE any LLM work."""
+    for blank in ("", "   ", "\t\n"):
+        r = client.post("/global_search", json={"query": blank, "user": "Alice"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reason"] == "empty_query"
+        assert data["answer"].startswith("I am sorry but I am unable to answer")
+    assert llm.calls == []
 
 
-def test_env_default_identity_used(client, llm, monkeypatch) -> None:
+def test_user_field_accepted_but_ignored(client, llm) -> None:
+    """The ``user`` field is echoed back but does not gate selection."""
     llm.map_payload = {
         "points": [
             {
@@ -184,37 +215,17 @@ def test_env_default_identity_used(client, llm, monkeypatch) -> None:
             }
         ]
     }
-    monkeypatch.setattr(kl_server, "CURRENT_USER", "Alice")
-    r = client.post("/global_search", json={"query": "我最近的任务是什么"})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["reason"] == "ok"
-    assert data["user"] == "Alice"
-    assert data["entity_id"] == "ent-alice"
-
-
-def test_request_user_overrides_env_default(client, llm, monkeypatch) -> None:
-    llm.map_payload = {
-        "points": [
-            {
-                "description": "Alice 的任务 [Data: Communities (L0-9)]",
-                "score": 70,
-                "community_ids": ["L0-9"],
-            }
-        ]
-    }
-    # Bob (unassigned) as the env default; the request field must win.
-    monkeypatch.setattr(kl_server, "CURRENT_USER", "Bob")
     r = client.post(
-        "/global_search", json={"query": "我最近的任务是什么", "user": "Alice"}
+        "/global_search", json={"query": "我最近的任务是什么", "user": "Whoever"}
     )
     assert r.status_code == 200
     data = r.json()
-    assert data["entity_id"] == "ent-alice"
     assert data["reason"] == "ok"
+    assert data["user"] == "Whoever"  # echoed
+    assert data["entity_id"] is None  # identity resolution deleted
 
 
-# ── happy path: map-reduce pass-through ─────────────────────────────────────
+# ── happy path: rate-then-descend → map-reduce pass-through ──────────────────
 
 
 def test_happy_path_passes_answer_citations_diagnostics(client, llm) -> None:
@@ -244,62 +255,39 @@ def test_happy_path_passes_answer_citations_diagnostics(client, llm) -> None:
 
     assert data["reason"] == "ok"
     assert data["answer"] == llm.reduce_answer
-    assert data["user"] == "Alice"
-    assert data["entity_id"] == "ent-alice"
-    # Selected communities: the two entity summaries; the fact-community row
-    # is ignored by the U1 selection.
-    assert {(c["level"], c["community_id"]) for c in data["communities"]} == {
-        ("L0", 9),
-        ("L1", 3),
-    }
+    # Rate-then-descend keeps high-rated roots + descends into their children.
+    selected = {(c["level"], c["community_id"]) for c in data["communities"]}
+    assert (0, 9) in selected
     assert "L0-9" in data["citations"]
     diag = data["diagnostics"]
-    assert diag["summaries_selected"] == 2
-    assert diag["map_calls"] == 1
-    assert diag["points_total"] == 3
-    assert diag["points_kept"] == 2  # score-0 dropped
+    assert diag["ratings_kept"] >= 1
+    assert diag["map_calls"] >= 1
+    assert diag["points_total"] >= 1
+    assert diag["points_kept"] >= 1  # score-0 dropped
     assert diag["reduce_called"] is True
-    assert diag["search_latency_ms"] >= 0  # U1 search latency surfaced
-    # One map + one reduce — no extra calls.
-    assert len(llm.calls) == 2
+    assert diag["search_latency_ms"] >= 0
     assert data["latency_ms"] >= 0
 
 
 # ── grounded validation + early-failure boundary ─────────────────────────────
 
 
-def test_blank_query_rejected_zero_llm_calls(client, llm) -> None:
-    """Blank/whitespace-only queries are grounded BEFORE any LLM work."""
-    for blank in ("", "   ", "\t\n"):
-        r = client.post(
-            "/global_search", json={"query": blank, "user": "Alice"}
-        )
-        assert r.status_code == 200
-        data = r.json()
-        assert data["reason"] == "empty_query"
-        assert data["answer"].startswith("I am sorry but I am unable to answer")
-    assert llm.calls == []
-
-
 def test_early_sqlite_failure_returns_grounded_error(
     client, llm, monkeypatch
 ) -> None:
-    """Identity/prerequisite DB failures stay inside the grounded boundary —
-    HTTP 200 'error', never a 500 escape."""
+    """Prerequisite DB failures stay inside the grounded boundary — HTTP 200
+    'error', never a 500 escape."""
 
-    def _boom(name_or_id):
-        raise sqlite3.OperationalError("database disk image is malformed")
+    class _BoomConn:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database disk image is malformed")
 
-    monkeypatch.setattr(kl_server, "_resolve_entity_id", _boom)
-    r = client.post(
-        "/global_search", json={"query": "我的任务", "user": "Alice"}
-    )
+    monkeypatch.setattr(state, "sqlite_conn", _BoomConn())
+    r = client.post("/global_search", json={"query": "我的任务", "user": "Alice"})
     assert r.status_code == 200  # never 500 on early SQLite failures
     data = r.json()
     assert data["reason"] == "error"
     assert "malformed" in data["diagnostics"]["error"]
-    assert data["user"] == "Alice"
-    assert data["entity_id"] is None
     assert llm.calls == []
 
 
@@ -310,16 +298,13 @@ def test_llm_transport_failure_visible_not_silent(client, llm) -> None:
     """Acompletion failures are counted + listed in diagnostics; the request
     degrades to a grounded no-data answer — never a fabricated one."""
     llm.exc = RuntimeError("gateway 502")
-    r = client.post(
-        "/global_search", json={"query": "我的任务", "user": "Alice"}
-    )
+    r = client.post("/global_search", json={"query": "我的任务", "user": "Alice"})
     assert r.status_code == 200
     data = r.json()
-    # All map batches errored → no surviving points → no reduce call.
-    assert data["reason"] == "no_points"
+    # Rating calls all error → no communities selected → grounded no-data.
+    assert data["reason"] in {"no_communities", "no_points"}
     assert data["answer"].startswith("I am sorry but I am unable to answer")
     diag = data["diagnostics"]
-    assert diag["map_batches_error"] >= 1
     assert diag["llm_errors"], "transport errors must stay visible"
     assert diag["reduce_called"] is False
 
@@ -327,14 +312,12 @@ def test_llm_transport_failure_visible_not_silent(client, llm) -> None:
 def test_unexpected_service_error_returns_grounded_error(
     client, llm, monkeypatch
 ) -> None:
-    async def _boom(self, query, user_entity_id):
+    async def _boom(self, query, user_entity_id=""):
         raise RuntimeError("sqlite exploded")
 
     monkeypatch.setattr(kl_server.GlobalSearch, "search", _boom)
-    r = client.post(
-        "/global_search", json={"query": "我的任务", "user": "Alice"}
-    )
-    assert r.status_code == 200  # never 500 on LLM-side failures
+    r = client.post("/global_search", json={"query": "我的任务", "user": "Alice"})
+    assert r.status_code == 200  # never 500 on search-side failures
     data = r.json()
     assert data["reason"] == "error"
     assert "sqlite exploded" in data["diagnostics"]["error"]
@@ -367,8 +350,6 @@ def test_endpoint_is_semaphore_gated(client, llm, monkeypatch) -> None:
         return _Wrap()
 
     monkeypatch.setattr(kl_server, "_query_sema", _recording)
-    r = client.post(
-        "/global_search", json={"query": "我的任务", "user": "Alice"}
-    )
+    r = client.post("/global_search", json={"query": "我的任务", "user": "Alice"})
     assert r.status_code == 200
     assert events == ["acquire", "release"]

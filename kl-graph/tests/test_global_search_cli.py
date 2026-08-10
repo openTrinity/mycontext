@@ -25,12 +25,12 @@ import kl_cli
 # Real DWS `contact user get-self --format json` payload (verified against
 # the live binary): an outer {"result": [...], "success": true} envelope.
 DWS_OK_STDOUT = json.dumps(
-    {"result": [{"orgEmployeeModel": {"orgUserName": "孙亮"}}], "success": True},
+    {"result": [{"orgEmployeeModel": {"orgUserName": "孟允之"}}], "success": True},
     ensure_ascii=False,
 )
 # Legacy bare-list shape: what an older/inaccurate parser+fixture assumed.
 DWS_LEGACY_BARE_LIST_STDOUT = json.dumps(
-    [{"orgEmployeeModel": {"orgUserName": "孙亮"}}], ensure_ascii=False
+    [{"orgEmployeeModel": {"orgUserName": "孟允之"}}], ensure_ascii=False
 )
 
 NO_DATA_ANSWER = (
@@ -41,8 +41,8 @@ NO_DATA_ANSWER = (
 def _ok_response(**overrides) -> dict:
     """Happy-path response matching the frozen POST /global_search contract."""
     resp = {
-        "answer": "最近你主要在做数据同步评审 [Data: Communities (L1-12, L2-3)]",
-        "user": "孙亮",
+        "answer": "最近你主要在做沙箱安全评审 [Data: Communities (L1-12, L2-3)]",
+        "user": "孟允之",
         "entity_id": "ent-abc",
         "reason": "ok",
         "communities": [
@@ -114,13 +114,13 @@ def test_explicit_user_wins_and_dws_not_called(
     monkeypatch.setattr(kl_cli.subprocess, "run", _boom)
 
     result = runner.invoke(
-        kl_cli.cli, ["global-search", "我最近的任务是什么", "--user", "张伟"]
+        kl_cli.cli, ["global-search", "我最近的任务是什么", "--user", "傅书言"]
     )
     assert result.exit_code == 0, result.output
     method, endpoint, _ = capture.calls[0]
     assert method == "POST"
     assert endpoint == "/global_search"
-    assert capture.body == {"query": "我最近的任务是什么", "user": "张伟"}
+    assert capture.body == {"query": "我最近的任务是什么", "user": "傅书言"}
 
 
 def test_dws_success_sends_org_username(
@@ -134,7 +134,7 @@ def test_dws_success_sends_org_username(
 
     result = runner.invoke(kl_cli.cli, ["global-search", "我最近的任务是什么"])
     assert result.exit_code == 0, result.output
-    assert capture.body == {"query": "我最近的任务是什么", "user": "孙亮"}
+    assert capture.body == {"query": "我最近的任务是什么", "user": "孟允之"}
     # Subprocess contract: exact DWS argv and the 30s timeout.
     args, kwargs = dws_run.calls[0]
     assert args[0] == ["dws", "contact", "user", "get-self", "--format", "json"]
@@ -244,10 +244,10 @@ def test_happy_path_rendering(
 
     result = runner.invoke(kl_cli.cli, ["global-search", "我最近的任务是什么"])
     assert result.exit_code == 0, result.output
-    assert result.output.index("最近你主要在做数据同步评审") < result.output.index(
+    assert result.output.index("最近你主要在做沙箱安全评审") < result.output.index(
         "[ok]"
     ), "answer must render before the metadata block"
-    assert "user: 孙亮 (entity: ent-abc)" in result.output
+    assert "user: 孟允之 (entity: ent-abc)" in result.output
     assert "communities: 2 selected" in result.output
     assert "L1-12 (41 members)" in result.output
     assert "citations: L1-12, L2-3" in result.output

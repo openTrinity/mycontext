@@ -361,17 +361,18 @@ def test_community_summaries_use_sqlite(tmp_path: pathlib.Path) -> None:
     )
     summaries = [
         {
-            "level": "L0",
+            "level": 0,
             "community_id": 0,
-            "node_type": "entity",
             "member_count": 5,
+            "entity_count": 3,
+            "fact_count": 2,
             "summary": "test",
             "tags": "[]",
             "top_members": "[]",
         },
     ]
     store.store_community_summaries(summaries)
-    listed = store.list_community_summaries("L0", "entity")
+    listed = store.list_community_summaries(0)
     assert len(listed) == 1
     assert listed[0]["summary"] == "test"
     store.close()

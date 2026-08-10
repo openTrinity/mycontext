@@ -13,7 +13,6 @@ from kl_graph.ingest.improvement import (
     resolve_improve_mode,
     run_improvement,
 )
-from kl_graph.ingest.strategies.community import CommunityChanges
 from kl_graph.storage.sqlite_store import SQLiteStore
 
 
@@ -76,7 +75,6 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
             "kl_graph.ingest.improvement.get_community_strategy",
             return_value=communities,
         ),
-        patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj_mock,
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
     ):
         result = run_improvement(
@@ -89,21 +87,27 @@ def test_incremental_improvement_calls_batch_strategies(tmp_path) -> None:
 
     assert result.applied_mode == "incremental"
     similarity.compute_similarity_edges.assert_called_once()
+    # Incremental community assignment is a guarded no-op after the migration to
+    # hierarchical Leiden; the batch strategy is still invoked (and returns an
+    # empty change set), but it must NOT receive the removed ``structural_cache``
+    # keyword.
     communities.assign_communities.assert_called_once()
-    # No community changes means no projection work, not a full rebuild.
-    proj_mock.assert_not_called()
+    _args, kwargs = communities.assign_communities.call_args
+    assert "structural_cache" not in kwargs
     store.close()
 
 
-def test_incremental_projection_receives_reversible_community_keys(tmp_path) -> None:
+def test_incremental_invalidates_current_community_summaries(tmp_path) -> None:
+    """Even with a no-op community strategy, the touched nodes' current
+    communities are collected so their summaries can be invalidated (a member
+    changed) — the scoped COMM_MEMBER projection itself is deferred to the next
+    full improve/hierarchical rebuild."""
     store = SQLiteStore(tmp_path / "graph.db")
     _add_community_columns(store)
     similarity = MagicMock()
     similarity.compute_similarity_edges.return_value = []
-    changes = CommunityChanges()
-    changes.record("entity", "L0", 7)
     communities = MagicMock()
-    communities.assign_communities.return_value = changes
+    communities.assign_communities.return_value = set()
 
     with (
         patch(
@@ -114,7 +118,14 @@ def test_incremental_projection_receives_reversible_community_keys(tmp_path) -> 
             "kl_graph.ingest.improvement.get_community_strategy",
             return_value=communities,
         ),
-        patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj,
+        patch(
+            "kl_graph.ingest.improvement._current_community_ids",
+            return_value={"comm-uuid-1"},
+        ),
+        patch(
+            "kl_graph.ingest.improvement._invalidate_summaries",
+            return_value=1,
+        ) as inval,
         patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
     ):
         result = run_improvement(
@@ -125,55 +136,9 @@ def test_incremental_projection_receives_reversible_community_keys(tmp_path) -> 
             batch_id="batch-1",
         )
 
-    proj.assert_called_once_with(
-        store,
-        community_ids=set(changes),
-        community_keys={("entity", "L0", 7)},
-    )
-    assert result.changed_community_ids == tuple(sorted(changes))
-    store.close()
-
-
-def test_incremental_projection_recovers_keys_from_checkpoint(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "graph.db")
-    _add_community_columns(store)
-    changes = CommunityChanges()
-    changes.record("entity", "L0", 7)
-    checkpoint = MagicMock()
-    checkpoint.is_done.side_effect = lambda step, params=None: step in {
-        "improve.incremental_similarity",
-        "improve.incremental_leiden",
-    }
-    checkpoint._data = {
-        "steps": {
-            "improve.incremental_leiden": {
-                "changed_communities": ",".join(changes),
-                "changed_community_keys": [["entity", "L0", 7]],
-            }
-        }
-    }
-
-    with (
-        patch("kl_graph.ingest.improvement.get_similarity_strategy"),
-        patch("kl_graph.ingest.improvement.get_community_strategy"),
-        patch("kl_graph.ingest.improvement.project_community_membership_edges") as proj,
-        patch.dict(sys.modules, {"igraph": MagicMock(), "leidenalg": MagicMock()}),
-    ):
-        result = run_improvement(
-            "incremental",
-            store=store,
-            qdrant=MagicMock(),
-            targets=ImprovementTargets(entity_ids=("e1",)),
-            checkpoint=checkpoint,
-            batch_id="batch-1",
-        )
-
-    proj.assert_called_once_with(
-        store,
-        community_ids=set(changes),
-        community_keys={("entity", "L0", 7)},
-    )
-    assert result.changed_community_ids == tuple(sorted(changes))
+    inval.assert_called_once()
+    assert result.applied_mode == "incremental"
+    assert result.stale_summaries == 1
     store.close()
 
 

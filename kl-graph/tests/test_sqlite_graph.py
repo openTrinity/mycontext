@@ -533,11 +533,21 @@ def test_communities_table_and_comm_member_edge_in_real_schema() -> None:
     conn = sqlite3.connect(":memory:")
     store = SQLiteStore(db_path=None, conn=conn)  # type: ignore[arg-type]
     cols = {r[1] for r in conn.execute("PRAGMA table_info(communities)").fetchall()}
-    assert cols == {"id", "level", "node_type", "summary", "tags", "member_count", "summary_stale"}
+    assert cols == {
+        "id",
+        "level",
+        "node_type",
+        "summary",
+        "tags",
+        "member_count",
+        "summary_stale",
+        "parent_id",
+        "parent_level",
+    }
 
-    cid = community_id_from("fact", "L2", 5)
+    cid = community_id_from("L2", 5)
     store.insert_communities(
-        [Community(id=cid, level="L2", node_type="fact", member_count=4)]
+        [Community(id=cid, level="L2", node_type="mixed", member_count=4)]
     )
     store.insert_edges(
         [
