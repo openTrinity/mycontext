@@ -67,6 +67,7 @@ CURRENT_USER = str(cfg.pipelines.query.global_search.current_user or "")
 from kl_graph.query import graph_walk as gw
 from kl_graph.query.adjacency import AdjacencyEntry, AdjacencyIndex
 from kl_graph.query.global_search import NO_DATA_ANSWER, GlobalSearch
+from kl_graph.query.local_search import build_local_context
 from kl_graph.query.pagerank import compute_entity_pagerank
 from kl_graph.storage.base import KnowledgeStore, create_store
 
@@ -1171,6 +1172,9 @@ async def ask(req: AskRequest):
        second LLM/embed call). Produces the depth-1 hoppable frontier
        (``seeds``/``nodes``/``edges``/``expandable``) + a ``cursor`` for
        ``/graph_hop``.
+    3. **Local search** — builds GraphRAG-style local context from recall
+       outputs (community reports + relationships + text units). When
+       ``force_phase2=True``, synthesis uses this enriched context.
 
     When the graph is not built the walk fields come back empty
     (``mode="chunks_only"``) and only the flat ``items`` are returned.
@@ -1187,28 +1191,44 @@ async def ask(req: AskRequest):
 
     t0 = time.time()
     async with _query_sema():
+        # Run Phase-1 only (no synthesis yet) to get recall outputs
         try:
-            result = await state.engine.aquery(req.query, force_phase2=req.force_phase2)
+            result = await state.engine.aquery(req.query, force_phase2=False)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"Query failed: {e}")
 
-        base = {
-            "answer": result.answer,
-            "items": result.items[: req.top_k],
-            "phase": result.phase,
-            "entities_found": result.entities_found,
-        }
-
         # Graph not built: flat vector-RAG only, graph fields empty.
         if not _graph_built():
-            base.update(
-                mode="chunks_only",
-                graph={"components": [], "seeds": [], "expandable": []},
-                recalled_chunks=[],
-                graph_mermaids=[],
-                cursor={"visited": {}, "lambda": req.lambda_},
-                latency_ms=round((time.time() - t0) * 1000),
-            )
+            # Still build local context if synthesis requested
+            if req.force_phase2:
+                local_ctx = await asyncio.to_thread(
+                    build_local_context,
+                    state.store,
+                    result.matched_entities,
+                    result.chunk_hits,
+                    result.fact_hits,
+                )
+                answer = await state.engine.synthesize(
+                    req.query, result, local_context=local_ctx.context_text
+                )
+                community_context = local_ctx.community_context
+            else:
+                answer = None
+                community_context = []
+
+            base = {
+                "answer": answer,
+                "items": result.items[: req.top_k],
+                "phase": 2 if req.force_phase2 else 1,
+                "entities_found": result.entities_found,
+                "community_context": community_context,
+                "mode": "chunks_only",
+                "graph": {"components": [], "seeds": [], "expandable": []},
+                "recalled_chunks": [],
+                "graph_mermaids": [],
+                "cursor": {"visited": {}, "lambda": req.lambda_},
+                "latency_ms": round((time.time() - t0) * 1000),
+            }
             return base
 
         # Phase 2: walk the graph from the query's entities/facts. Reuse
@@ -1216,6 +1236,34 @@ async def ask(req: AskRequest):
         # LLM/embed call. The walk + node resolution is pure CPU + local-store
         # reads, so offload it to keep the loop free.
         walk = await asyncio.to_thread(_ask_graph_walk, req, result)
+
+        # Build local context from recall outputs (includes community reports)
+        # Offload to thread: blocking store/tokenizer work.
+        local_ctx = await asyncio.to_thread(
+            build_local_context,
+            state.store,
+            result.matched_entities,
+            result.chunk_hits,
+            result.fact_hits,
+        )
+
+        # Run Phase-2 synthesis with local context if requested
+        if req.force_phase2:
+            answer = await state.engine.synthesize(
+                req.query, result, local_context=local_ctx.context_text
+            )
+            phase = 2
+        else:
+            answer = None
+            phase = 1
+
+        base = {
+            "answer": answer,
+            "items": result.items[: req.top_k],
+            "phase": phase,
+            "entities_found": result.entities_found,
+            "community_context": local_ctx.community_context,
+        }
         base.update(walk)
         base["latency_ms"] = round((time.time() - t0) * 1000)
         return base
@@ -1223,20 +1271,20 @@ async def ask(req: AskRequest):
 
 @app.post("/global_search")
 async def global_search(req: GlobalSearchRequest):
-    """GraphRAG-style global search over the current user's community summaries.
+    """GraphRAG-style global search over all community summaries.
 
-    Answers conceptual questions (e.g. ``我最近的任务是什么``) by map-reducing
-    the LLM summaries of the resolved user's communities (GraphRAG global
+    Answers conceptual questions (e.g. ``我最近的任务是什么``) by corpus-wide
+    rate-then-descend selection across all community summaries (GraphRAG global
     search shape: strict-JSON map points scored 0–100 → score-filter →
     importance-sorted, budget-capped reduce → grounded markdown with
     ``[Data: Communities (...)]`` citations).
 
-    Identity precedence: request ``user`` → ``KL_CURRENT_USER`` env default,
-    resolved via ``_resolve_entity_id``. Every miss — blank queries, unknown
-    identities, missing community data, or unexpected SQLite/LLM failures —
-    is grounded: HTTP 200 with a canned no-data answer and ZERO LLM calls —
-    never 404/500, never a corpus-wide fallback ([!RED] answering "我的任务"
-    for the wrong person is worse than no answer).
+    Selection is query-driven: every community summary is rated for relevance
+    to the query, and high-scoring summaries descend through the hierarchy.
+    The ``user`` field is accepted-but-ignored for response-shape stability.
+    Every miss — blank queries, missing community data, or unexpected
+    SQLite/LLM failures — is grounded: HTTP 200 with a canned no-data answer
+    and ZERO LLM calls — never 404/500.
 
     Concurrency: admitted through the shared ``_query_sema()`` like /ask.
     """
@@ -1263,45 +1311,21 @@ async def global_search(req: GlobalSearchRequest):
 
     async with _query_sema():
         # One grounded-error boundary for the whole post-admission flow: any
-        # validation/identity/prerequisite/search failure degrades to a
-        # grounded 200 instead of escaping as 500.
-        name: str | None = None
+        # validation/prerequisite/search failure degrades to a grounded 200
+        # instead of escaping as 500.
+        # NOTE: identity resolution is deleted; selection is query-driven.
+        # The user field is accepted-but-ignored for response-shape stability.
+        name: str | None = req.user
         entity_id: str | None = None
         try:
             # Validation first: a blank query can never be grounded — reject
-            # with zero LLM calls before any identity/summary work.
+            # with zero LLM calls before any summary work.
             query = req.query.strip()
             if not query:
                 return _no_data("empty_query")
 
-            # Identity: request field first, then the KL_CURRENT_USER default.
-            name = (req.user or "").strip() or CURRENT_USER.strip()
-            if not name:
-                return _no_data("no_identity")
-            entity_id = _resolve_entity_id(name)
-            if entity_id is None:
-                return _no_data("identity_unresolved", {"user": name})
-
-            # Community prerequisites are created by the improve pipeline, not
-            # the base schema — degrade gracefully (like /community).
-            entity_cols = {
-                c[1]
-                for c in state.sqlite_conn.execute(
-                    "PRAGMA table_info(entities)"
-                ).fetchall()
-            }
-            if "community_L0" not in entity_cols:
-                return _no_data(
-                    "no_communities",
-                    {
-                        "user": name,
-                        "entity_id": entity_id,
-                        "hint": (
-                            "No community memberships yet — run `python -m "
-                            "scripts.improve` (community detection + summaries)."
-                        ),
-                    },
-                )
+            # Community summaries table must exist (created by improve pipeline,
+            # not the base schema). Degrade gracefully when absent.
             has_summaries = state.sqlite_conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='community_summaries'"
@@ -1342,21 +1366,19 @@ async def global_search(req: GlobalSearchRequest):
                 )
                 return resp.choices[0].message.content
 
-            # Cheap per-request construction; reuses the warm server connection
-            # ([REMARK]: no second pool). SQLite summaries are authoritative —
-            # qdrant_communities is not required here.
+            # Cheap per-request construction; reuses the warm server connection.
+            # SQLite summaries are authoritative; qdrant_communities not required.
+            # Corpus-wide search (no user/entity gating).
             search = GlobalSearch(conn=state.sqlite_conn, acomplete=_acomplete)
-            result = await search.search(query, entity_id)
+            result = await search.search(query)  # user_entity_id ignored
         except Exception as e:  # noqa: BLE001 - any failure → grounded 200
             extra: dict = {"diagnostics": {"error": str(e)}}
             if name:
                 extra["user"] = name
-            if entity_id:
-                extra["entity_id"] = entity_id
             return _no_data("error", extra)
 
         # Diagnostics carry U1's own search latency next to the endpoint-wide
-        # total ``latency_ms`` below (design snippet 5).
+        # total ``latency_ms`` below.
         diagnostics = {
             **result.diagnostics,
             "search_latency_ms": round(result.latency_ms),
@@ -1371,14 +1393,6 @@ async def global_search(req: GlobalSearchRequest):
             "diagnostics": diagnostics,
             "latency_ms": round((time.time() - t0) * 1000),
         }
-        if result.reason == "no_communities":
-            # Coverage gap ([A human] policy (a)): the entity resolved but
-            # carries no memberships — same grounded no-data shape plus a
-            # remediation hint; no 1-hop fallback.
-            response["hint"] = (
-                "No community memberships for this entity — run `python -m "
-                "scripts.improve` (community detection + summaries)."
-            )
         return response
 
 
@@ -1754,6 +1768,20 @@ async def community_browse(req: CommunityRequest):
         return await asyncio.to_thread(_community_browse_impl, req)
 
 
+def _level_int(level: str | int) -> int:
+    """Normalize a level to the integer used by ``community_summaries``.
+
+    Accepts an ``"L1"``-style label or a bare int/str. The summaries table keys
+    levels as integers (0..N); the graph columns use ``community_L{int}`` names.
+    """
+    if isinstance(level, int):
+        return level
+    s = str(level).strip()
+    if s[:1].upper() == "L":
+        s = s[1:]
+    return int(s)
+
+
 def _community_browse_impl(req: CommunityRequest):
     """Browse communities with summaries."""
     if not state.ready:
@@ -1777,36 +1805,40 @@ def _community_browse_impl(req: CommunityRequest):
     if req.community_id is not None:
         row = state.sqlite_conn.execute(
             """
-            SELECT summary, tags, top_members, member_count
+            SELECT title, summary, tags, top_members, member_count,
+                   entity_count, fact_count, rating
             FROM community_summaries
-            WHERE level = ? AND community_id = ? AND node_type = ?
+            WHERE level = ? AND community_id = ?
         """,
-            (req.level, req.community_id, req.node_type),
+            (_level_int(req.level), req.community_id),
         ).fetchone()
 
         if not row:
             return {
-                "error": f"No summary for {req.level}/{req.node_type}/{req.community_id}"
+                "error": f"No summary for L{_level_int(req.level)}/{req.community_id}"
             }
 
         return {
             "level": req.level,
             "community_id": req.community_id,
-            "node_type": req.node_type,
-            "member_count": row[3],
-            "summary": row[0],
-            "tags": json.loads(row[1]),
-            "top_members": json.loads(row[2]),
+            "member_count": row[4],
+            "entity_count": row[5],
+            "fact_count": row[6],
+            "rating": row[7],
+            "title": row[0],
+            "summary": row[1],
+            "tags": json.loads(row[2]),
+            "top_members": json.loads(row[3]),
         }
 
     rows = state.sqlite_conn.execute(
         """
-        SELECT community_id, member_count, summary, tags
+        SELECT community_id, member_count, title, summary, tags, rating
         FROM community_summaries
-        WHERE level = ? AND node_type = ?
+        WHERE level = ?
         ORDER BY member_count DESC LIMIT ?
     """,
-        (req.level, req.node_type, req.top_k),
+        (_level_int(req.level), req.top_k),
     ).fetchall()
 
     return {
@@ -1814,8 +1846,10 @@ def _community_browse_impl(req: CommunityRequest):
             {
                 "community_id": r[0],
                 "member_count": r[1],
-                "summary": r[2],
-                "tags": json.loads(r[3]),
+                "title": r[2],
+                "summary": r[3],
+                "tags": json.loads(r[4]),
+                "rating": r[5],
             }
             for r in rows
         ]
