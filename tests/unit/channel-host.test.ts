@@ -241,3 +241,76 @@ describe("RuntimeEnv：二进制解析", () => {
     expect(env["DWS_CHANNEL"]).toBe("override")
   })
 })
+
+describe("★★★ 带来源作用域的 channelId 也要能查到插件", () => {
+  /**
+   * ★★★ 这一组锁的是「清空渠道数据不退授权」那个 bug 的根因。
+   *
+   * ## 现场（CDP 端到端跑那颗按钮，2026-08-10）
+   *
+   * ```
+   * channel logout failed {"channelId":"dingtalk@src-…","detail":"未知渠道：dingtalk@src-…"}
+   * channel data wipe done {"rows":44008,"identityUnbound":true,"authRevoked":false}
+   * ```
+   *
+   * 数据删了（44008 行）、身份解绑了、vault 目录也删了，而**授权没退** ——
+   * token 在系统钥匙串里，于是清空之后 `auth status` 仍返回 authorized。
+   * 那正是用户报的"清了还是已授权状态"。
+   *
+   * ## 根因：库里的 channelId 带作用域，注册表里的不带
+   *
+   * 隔离键的第一段是「哪个 dws 二进制」（`source-key.ts`），所以身份行里存的是
+   * `dingtalk@src-<hash>`。而**插件是按渠道注册的** —— 一个钉钉插件服务所有
+   * 来源，注册表里只有裸 `dingtalk`。
+   *
+   * ★ 修在注册表的 `get()` 而不是各调用点：`logout` / `status` / `startLogin`
+   * / `cancelLogin` 全都走它，逐个调用点去剥必然漏（这次就漏了 logout），
+   * 而漏掉的那条**不报错**，只在某个具体动作上静默失效。
+   */
+  it("★★★ get(带作用域) 能查到那个渠道的插件", () => {
+    const registry = createRegistry([fakePlugin({ id: "dingtalk" })])
+    expect(registry.get("dingtalk@src-3f2a1b8c").meta.id).toBe("dingtalk")
+  })
+
+  /** ★ 不带作用域仍然照旧（这一行对存量调用必须零影响）。 */
+  it("★ get(裸 channelId) 不受影响", () => {
+    const registry = createRegistry([fakePlugin({ id: "dingtalk" })])
+    expect(registry.get("dingtalk").meta.id).toBe("dingtalk")
+  })
+
+  /**
+   * ★★ 真正不存在的渠道**仍要抛** —— 剥作用域不等于放宽校验。
+   *
+   * 剥完还是查不到就是真的没这个插件（打错了 / 没注册），
+   * 那时静默返回一个别的插件会比报错糟得多。
+   */
+  it("★★ 剥完仍查不到 → 照旧抛 CHANNEL_UNKNOWN", () => {
+    const registry = createRegistry([fakePlugin({ id: "dingtalk" })])
+    expect(() => registry.get("feishu@src-3f2a1b8c")).toThrow(/未知渠道/)
+    expect(() => registry.get("nope")).toThrow(/未知渠道/)
+  })
+
+  /**
+   * ★★ `logout` 这条**实测失效的那条路**要通。
+   *
+   * 判据是"插件的 logout 真的被调到了" —— 而不只是 `get()` 不抛。
+   */
+  it("★★ host.logout(带作用域) 真的调到插件的 logout", async () => {
+    let logoutCalled = 0
+    const plugin = fakePlugin({ id: "dingtalk" })
+    const withLogout: ChannelPlugin = {
+      ...plugin,
+      auth: {
+        ...plugin.auth,
+        logout: () => {
+          logoutCalled += 1
+          return Promise.resolve(true)
+        },
+      },
+    }
+    const host = new ChannelHost(createRegistry([withLogout]))
+    const ok = await host.logout("dingtalk@src-3f2a1b8c")
+    expect(ok).toBe(true)
+    expect(logoutCalled).toBe(1)
+  })
+})

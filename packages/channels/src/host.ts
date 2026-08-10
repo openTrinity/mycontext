@@ -6,6 +6,7 @@
  */
 import { AppError } from "@mycontext/kernel"
 import type { AuthMode, AuthProgress, AuthStatus, ChannelId, ChannelPlugin } from "./types.js"
+import { parseScopedChannelId } from "./source-key.js"
 
 export interface ChannelRegistry {
   list(): ChannelPlugin[]
@@ -17,7 +18,33 @@ export function createRegistry(plugins: ChannelPlugin[]): ChannelRegistry {
   return {
     list: () => [...plugins],
     get: (id) => {
-      const plugin = byId.get(id)
+      /**
+       * ★★★ 查表前**剥掉来源段**（`dingtalk@src-…` → `dingtalk`）。
+       *
+       * 隔离键的第一段是「哪个 dws 二进制」（见 `source-key.ts`），所以库里
+       * 存的 `channel_id` 可能带作用域。而**插件是按渠道注册的** ——
+       * 一个钉钉插件服务所有来源，注册表里只有裸 `dingtalk`。
+       *
+       * 不剥的后果实测抓到过（CDP 端到端跑「清空当前渠道的数据」）：
+       *
+       * ```
+       * channel logout failed {"channelId":"dingtalk@src-…","detail":"未知渠道：dingtalk@src-…"}
+       * channel data wipe done {"rows":44008,"identityUnbound":true,"authRevoked":false}
+       * ```
+       *
+       * 数据删了、身份解绑了，而**授权没退** —— 钥匙串里的 token 还在，
+       * 于是清空之后 `auth status` 仍返回 authorized。那正是用户报的
+       * "清了还是已授权状态"。
+       *
+       * ★ 为什么修在注册表而不是各个调用点：`logout` / `status` /
+       * `startLogin` / `cancelLogin` 全都走 `get()`，逐个调用点去剥必然漏
+       * （这次就漏了 logout 这一条），而且漏掉的那条**不会报错**，
+       * 只会在某个具体动作上静默失效。
+       *
+       * ★ `parseScopedChannelId` 对不带作用域的值是恒等的
+       * （`"dingtalk"` → `"dingtalk"`），所以这一行对存量调用零影响。
+       */
+      const plugin = byId.get(parseScopedChannelId(id).channelId)
       if (plugin === undefined) {
         throw new AppError("CHANNEL_UNKNOWN", `未知渠道：${id}`, {
           messageKey: "errors:channel.unknown",
