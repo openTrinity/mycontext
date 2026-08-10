@@ -16,6 +16,8 @@ from kl_graph.models.types import (
     Community,
     Edge,
     Entity,
+    ExtractionItem,
+    ExtractionProjection,
     Fact,
     Scope,
     SourceUnit,
@@ -64,6 +66,8 @@ class KnowledgeStore(ABC):
         chunks: list[Chunk],
         units: list[SourceUnit],
         memberships: list[ChunkUnit],
+        extraction_items: list[ExtractionItem] | None = None,
+        projections: list[ExtractionProjection] | None = None,
         *,
         batch_id: str | None = None,
         batch_source_id: str | None = None,
@@ -251,6 +255,13 @@ class KnowledgeStore(ABC):
         Args:
             entities: Entity instances to upsert.
         """
+        raise NotImplementedError
+
+    def get_ingest_batch_extraction_plan(
+        self, batch_id: str
+    ) -> tuple[list[ExtractionItem], list[ExtractionProjection]]:
+        """Hydrate the durable Phase-B work plan for one active batch."""
+
         raise NotImplementedError
 
     def apply_entity_cleanup(self, entities: list[Entity]) -> None:

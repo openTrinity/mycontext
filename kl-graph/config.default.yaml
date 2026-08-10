@@ -126,6 +126,11 @@ pipelines:
       threshold: 0.85  # retained from the former thresholds.similar_to setting
 
   query:
+    ask:
+      # Callers can override this per /ask request with force_phase2. Agent
+      # callers normally synthesize from returned evidence themselves.
+      synthesize: ${oc.env:KL_ASK_SYNTHESIZE,0}
+
     embedding:
       max_retries: ${oc.env:KL_QUERY_EMBED_MAX_RETRIES,2}
       timeout: ${oc.env:KL_QUERY_EMBED_TIMEOUT,30}

@@ -25,6 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kl_graph.query.engine import QueryResult
+from kl_graph.query.query_rewrite import QueryRewrite
 from kl_server import app, state
 
 
@@ -157,3 +158,47 @@ def test_semaphore_serializes_beyond_limit(monkeypatch) -> None:
     peak, codes = asyncio.run(run())
     assert peak <= 2, f"semaphore breached: {peak} concurrent asks (limit 2)"
     assert all(c == 200 for c in codes), f"all asks must succeed, got {codes}"
+
+
+def test_ask_passes_caller_intent_to_engine_without_server_rewrite() -> None:
+    class _IntentEngine:
+        received: QueryRewrite | None = None
+
+        async def aquery(
+            self,
+            _text: str,
+            force_phase2: bool = False,
+            query_rewrite: QueryRewrite | None = None,
+        ) -> QueryResult:
+            assert force_phase2 is False
+            self.received = query_rewrite
+            return QueryResult(items=[], phase=1, entities_found=[])
+
+    engine = _IntentEngine()
+    state.engine = engine
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            return await ac.post(
+                "/ask",
+                json={
+                    "query": "谁负责部署平台",
+                    "force_phase2": False,
+                    "intent": {
+                        "entities": ["部署平台"],
+                        "entity_types": ["SYSTEM"],
+                        "fact_types": ["DELEGATE"],
+                    },
+                },
+            )
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    assert response.json()["query_intent_source"] == "caller"
+    assert engine.received == QueryRewrite(
+        entities_from_query=["部署平台"],
+        entity_type_keywords=["SYSTEM"],
+        fact_type_keywords=["DELEGATE"],
+    )

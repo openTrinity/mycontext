@@ -133,7 +133,10 @@ Poll `GET /status` and read its `ingest` object. Important fields are:
 - `phase`: `phase_a`, `phase_b`, `improve`, `finalize`, or empty when finished;
 - `percent` and `detail`;
 - `units_discovered`, `units_skipped`, `units_processed`, and `chunks_created`;
-- `run_id`, `source_id`, `improve_mode`, and `error`.
+- `run_id`, `source_id`, `improve_mode`, and `error`;
+- `outcome`: `success` or `partial`, plus `extraction_total`,
+  `extraction_succeeded`, and `extraction_failed`;
+- `warning` and `failures_url` when in-step extraction retries were exhausted.
 
 The object also includes `job_type`, either `ingest` or `improve`. For an
 improvement-only job, `source_id` is null, `improve_mode` is `full`, and all
@@ -161,6 +164,29 @@ unit is processed normally.
 A same-ID/different-content source unit is currently warned about and skipped;
 replacement/deletion semantics remain a separate feature.
 
+### Extraction retries and partial completion
+
+Extraction owns its retry loop; the provider SDK is called with nested retries
+disabled. Rate limits, timeouts, transient service errors, malformed responses,
+and missing batch slots are retried inside the current extraction step with
+exponential backoff and jitter. Successful slots are cached immediately and
+are not sent again when another slot from their batch fails. Permanent errors
+such as authentication, quota exhaustion, or invalid requests still abort the
+job.
+
+After the configured attempts are exhausted, failed items are excluded from
+the graph and the job completes with `outcome: partial`. They are never cached
+as valid empty extractions. Retrieve the compact, paginated manifest from:
+
+```http
+GET /ingest/{run_id}/failures?limit=100&cursor=...
+```
+
+Each record contains `extraction_item_id`, `source_unit_id`, `target_chunk_id`,
+`error_type`, a bounded `message`, and `attempts`. Storage is bounded to
+the latest started ingestion for each `source_id`; starting another ingestion
+for that source implicitly acknowledges and removes its previous manifest.
+
 ### Crash recovery
 
 If the server process is killed mid-ingestion (OOM, kill -9, power loss):
@@ -170,7 +196,9 @@ If the server process is killed mid-ingestion (OOM, kill -9, power loss):
   twice. Chunks that had not reached the cache before the crash remain misses
   and still require LLM extraction.
 - **Checkpoint**: persists which steps completed. On retry, completed steps are
-  skipped. The checkpoint JSON is written atomically (write-tmp + rename).
+  skipped. Extraction failure metadata and the final partial outcome are also
+  restored, so a resumed graph build cannot be misreported as a full success.
+  The checkpoint JSON is written atomically (write-tmp + rename).
 - **Workset** (`ingest_batches` / `ingest_batch_chunks` tables): if the chunk
   count is inconsistent (e.g. due to external deletion or disk corruption), the
   server raises a RuntimeError with an actionable message. The workset is NOT

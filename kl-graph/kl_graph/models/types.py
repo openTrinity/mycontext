@@ -106,7 +106,7 @@ class ChunkUnit:
 
 @dataclass(kw_only=True)
 class ExtractionItem:
-    """Ephemeral source-aware LLM target projected onto a stored chunk."""
+    """Ephemeral source-aware LLM target projected by an ingestion plan."""
 
     id: str
     source_type: str
@@ -119,6 +119,63 @@ class ExtractionItem:
     strategy_version: str = "stored-chunk-v1"
     prompt_version: str = "zh-v1"
     metadata: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExtractionProjection:
+    """How one extraction result is attached to a persistent retrieval chunk."""
+
+    extraction_item_id: str
+    chunk_id: str
+    role: str = "supporting"  # exactly one projection per item is ``primary``
+    project_mentions: bool = True
+    project_facts: bool = True
+    start_offset: int | None = None
+    end_offset: int | None = None
+
+
+@dataclass
+class IngestionPlan:
+    """Source-strategy output consumed by the generic ingestion pipeline."""
+
+    chunks: list[Chunk] = field(default_factory=list)
+    extraction_items: list[ExtractionItem] = field(default_factory=list)
+    chunk_units: list[ChunkUnit] = field(default_factory=list)
+    projections: list[ExtractionProjection] = field(default_factory=list)
+    strategy_version: str = "source-processing-v1"
+    schema_version: int = 1
+
+    def validate(self) -> None:
+        """Reject dangling or ambiguous projection plans before persistence."""
+
+        chunk_ids = {chunk.id for chunk in self.chunks}
+        item_ids = {item.id for item in self.extraction_items}
+        if len(chunk_ids) != len(self.chunks):
+            raise ValueError("ingestion plan contains duplicate chunk ids")
+        if len(item_ids) != len(self.extraction_items):
+            raise ValueError("ingestion plan contains duplicate extraction item ids")
+        by_item: dict[str, list[ExtractionProjection]] = {}
+        for projection in self.projections:
+            if projection.extraction_item_id not in item_ids:
+                raise ValueError(
+                    f"projection references unknown item {projection.extraction_item_id!r}"
+                )
+            if projection.chunk_id not in chunk_ids:
+                raise ValueError(
+                    f"projection references unknown chunk {projection.chunk_id!r}"
+                )
+            by_item.setdefault(projection.extraction_item_id, []).append(projection)
+        for item in self.extraction_items:
+            projections = by_item.get(item.id, [])
+            primaries = [p for p in projections if p.role == "primary"]
+            if len(primaries) != 1:
+                raise ValueError(
+                    f"extraction item {item.id!r} must have exactly one primary projection"
+                )
+            if item.target_chunk_id != primaries[0].chunk_id:
+                raise ValueError(
+                    f"extraction item {item.id!r} target does not match its primary projection"
+                )
 
 
 @dataclass(kw_only=True)

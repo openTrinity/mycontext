@@ -21,6 +21,8 @@ from kl_graph.models.types import (
     Edge,
     Entity,
     EntityType,
+    ExtractionItem,
+    ExtractionProjection,
     Fact,
     FactType,
     Scope,
@@ -284,6 +286,32 @@ class SQLiteStore(KnowledgeStore):
                 FOREIGN KEY (chunk_id) REFERENCES chunks(id)
             );
 
+            CREATE TABLE IF NOT EXISTS ingest_batch_extraction_items (
+                batch_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                item_ordinal INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (batch_id, item_id),
+                UNIQUE (batch_id, item_ordinal),
+                FOREIGN KEY (batch_id) REFERENCES ingest_batches(batch_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ingest_batch_extraction_projections (
+                batch_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
+                projection_ordinal INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                project_mentions INTEGER NOT NULL,
+                project_facts INTEGER NOT NULL,
+                start_offset INTEGER,
+                end_offset INTEGER,
+                PRIMARY KEY (batch_id, item_id, chunk_id),
+                UNIQUE (batch_id, projection_ordinal),
+                FOREIGN KEY (batch_id) REFERENCES ingest_batches(batch_id),
+                FOREIGN KEY (chunk_id) REFERENCES chunks(id)
+            );
+
             CREATE TABLE IF NOT EXISTS ingest_runs (
                 run_id TEXT PRIMARY KEY,
                 source_id TEXT NOT NULL,
@@ -302,6 +330,20 @@ class SQLiteStore(KnowledgeStore):
                 completed_at INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS ingest_extraction_failures (
+                source_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                extraction_item_id TEXT NOT NULL,
+                source_unit_id TEXT,
+                target_chunk_id TEXT NOT NULL,
+                error_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (run_id, extraction_item_id),
+                FOREIGN KEY (run_id) REFERENCES ingest_runs(run_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_chunks_source_type ON chunks(source_type, timestamp);
             CREATE INDEX IF NOT EXISTS idx_chunks_ts ON chunks(timestamp);
             CREATE INDEX IF NOT EXISTS idx_scopes_type ON scopes(scope_type);
@@ -316,6 +358,8 @@ class SQLiteStore(KnowledgeStore):
             CREATE INDEX IF NOT EXISTS idx_chunk_units_unit
                 ON chunk_units(source_id, source_type, unit_id);
             CREATE INDEX IF NOT EXISTS idx_ingest_runs_updated ON ingest_runs(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_ingest_failures_source
+                ON ingest_extraction_failures(source_id, extraction_item_id);
         """)
         self._ensure_entity_columns()
         self._ensure_fact_columns()
@@ -560,12 +604,34 @@ class SQLiteStore(KnowledgeStore):
             self.conn.execute(
                 "ALTER TABLE ingest_runs ADD COLUMN detail TEXT NOT NULL DEFAULT ''"
             )
+        if "outcome" not in cols:
+            self.conn.execute(
+                "ALTER TABLE ingest_runs ADD COLUMN outcome TEXT NOT NULL DEFAULT ''"
+            )
+        if "extraction_total" not in cols:
+            self.conn.execute(
+                "ALTER TABLE ingest_runs ADD COLUMN extraction_total INTEGER NOT NULL DEFAULT 0"
+            )
+        if "extraction_succeeded" not in cols:
+            self.conn.execute(
+                "ALTER TABLE ingest_runs ADD COLUMN extraction_succeeded INTEGER NOT NULL DEFAULT 0"
+            )
+        if "extraction_failed" not in cols:
+            self.conn.execute(
+                "ALTER TABLE ingest_runs ADD COLUMN extraction_failed INTEGER NOT NULL DEFAULT 0"
+            )
+        if "warning" not in cols:
+            self.conn.execute(
+                "ALTER TABLE ingest_runs ADD COLUMN warning TEXT NOT NULL DEFAULT ''"
+            )
 
     def insert_chunks_with_units(
         self,
         chunks: list[Chunk],
         units: list[SourceUnit],
         memberships: list[ChunkUnit],
+        extraction_items: list[ExtractionItem] | None = None,
+        projections: list[ExtractionProjection] | None = None,
         *,
         batch_id: str | None = None,
         batch_source_id: str | None = None,
@@ -691,6 +757,61 @@ class SQLiteStore(KnowledgeStore):
                     [(batch_id, chunk.id, i) for i, chunk in enumerate(chunks)],
                 )
                 self.conn.execute(
+                    "DELETE FROM ingest_batch_extraction_projections WHERE batch_id=?",
+                    (batch_id,),
+                )
+                self.conn.execute(
+                    "DELETE FROM ingest_batch_extraction_items WHERE batch_id=?",
+                    (batch_id,),
+                )
+                self.conn.executemany(
+                    """INSERT INTO ingest_batch_extraction_items
+                       (batch_id, item_id, item_ordinal, payload) VALUES (?, ?, ?, ?)""",
+                    [
+                        (
+                            batch_id,
+                            item.id,
+                            ordinal,
+                            json.dumps(
+                                {
+                                    "source_type": item.source_type,
+                                    "content": item.content,
+                                    "target_chunk_id": item.target_chunk_id,
+                                    "context": item.context,
+                                    "source_unit_id": item.source_unit_id,
+                                    "timestamp": item.timestamp,
+                                    "source_ref": item.source_ref,
+                                    "strategy_version": item.strategy_version,
+                                    "prompt_version": item.prompt_version,
+                                    "metadata": item.metadata,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                        for ordinal, item in enumerate(extraction_items or [])
+                    ],
+                )
+                self.conn.executemany(
+                    """INSERT INTO ingest_batch_extraction_projections
+                       (batch_id, item_id, chunk_id, projection_ordinal, role,
+                        project_mentions, project_facts, start_offset, end_offset)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            batch_id,
+                            row.extraction_item_id,
+                            row.chunk_id,
+                            ordinal,
+                            row.role,
+                            int(row.project_mentions),
+                            int(row.project_facts),
+                            row.start_offset,
+                            row.end_offset,
+                        )
+                        for ordinal, row in enumerate(projections or [])
+                    ],
+                )
+                self.conn.execute(
                     """UPDATE ingest_batches
                        SET state='ready', unit_count=?, chunk_count=?, updated_at=?
                        WHERE batch_id=?""",
@@ -712,6 +833,37 @@ class SQLiteStore(KnowledgeStore):
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
+    def get_ingest_batch_extraction_plan(
+        self, batch_id: str
+    ) -> tuple[list[ExtractionItem], list[ExtractionProjection]]:
+        item_rows = self.conn.execute(
+            """SELECT item_id, payload FROM ingest_batch_extraction_items
+               WHERE batch_id=? ORDER BY item_ordinal""",
+            (batch_id,),
+        ).fetchall()
+        items: list[ExtractionItem] = []
+        for row in item_rows:
+            payload = json.loads(row["payload"])
+            items.append(ExtractionItem(id=row["item_id"], **payload))
+        projection_rows = self.conn.execute(
+            """SELECT * FROM ingest_batch_extraction_projections
+               WHERE batch_id=? ORDER BY projection_ordinal""",
+            (batch_id,),
+        ).fetchall()
+        projections = [
+            ExtractionProjection(
+                extraction_item_id=row["item_id"],
+                chunk_id=row["chunk_id"],
+                role=row["role"],
+                project_mentions=bool(row["project_mentions"]),
+                project_facts=bool(row["project_facts"]),
+                start_offset=row["start_offset"],
+                end_offset=row["end_offset"],
+            )
+            for row in projection_rows
+        ]
+        return items, projections
+
     def complete_ingest_batch(self, batch_id: str) -> None:
         """Keep a summary row while deleting the completed batch's workset."""
 
@@ -724,6 +876,14 @@ class SQLiteStore(KnowledgeStore):
                 raise RuntimeError(f"unknown ingestion batch {batch_id!r}")
             self.conn.execute(
                 "DELETE FROM ingest_batch_chunks WHERE batch_id=?", (batch_id,)
+            )
+            self.conn.execute(
+                "DELETE FROM ingest_batch_extraction_projections WHERE batch_id=?",
+                (batch_id,),
+            )
+            self.conn.execute(
+                "DELETE FROM ingest_batch_extraction_items WHERE batch_id=?",
+                (batch_id,),
             )
             self.conn.execute(
                 "UPDATE ingest_batches SET state='complete', updated_at=? WHERE batch_id=?",

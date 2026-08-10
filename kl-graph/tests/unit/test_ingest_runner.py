@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kl_graph.ingest.improvement import ImprovementResult, ImprovementTargets
+from kl_graph.ingest.llm_extractor import ExtractionFailure
 from kl_graph.ingest.runner import IngestOptions, IngestResult, run_ingestion
 
 
@@ -55,8 +56,57 @@ def test_runner_constructs_unit_incremental_pipeline(tmp_path) -> None:
     checkpoint.mark_done.assert_called_once_with(
         "ingest.complete",
         params={"workset_schema": 1, "batch_id": "batch-1"},
+        result={
+            "units_discovered": 2,
+            "units_skipped": 1,
+            "units_processed": 1,
+            "chunks_created": 1,
+            "extraction_total": 0,
+            "extraction_succeeded": 0,
+            "extraction_failed": 0,
+            "failures": [],
+        },
     )
     pipeline.close.assert_called_once()
+
+
+def test_runner_reports_partial_extraction_outcome(tmp_path) -> None:
+    failure = ExtractionFailure(
+        extraction_item_id="item-2",
+        source_unit_id="unit-2",
+        target_chunk_id="chunk-1",
+        error_type="rate_limit",
+        message="throttled",
+        attempts=3,
+    )
+    pipeline = MagicMock()
+    pipeline._phase_a_complete.return_value = False
+    pipeline.units_discovered = 2
+    pipeline.units_skipped = 0
+    pipeline.workset_unit_count = 2
+    pipeline.workset_chunk_count = 1
+    pipeline.extraction_items = [SimpleNamespace(id="item-1"), SimpleNamespace(id="item-2")]
+    pipeline.run_extraction = AsyncMock(return_value=(failure,))
+    pipeline.run_graph_build = AsyncMock()
+    checkpoint = MagicMock(batch_id="batch-partial")
+    checkpoint.is_done.return_value = False
+    seen = []
+
+    with patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline):
+        result = asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod", improve_mode="off"),
+                checkpoint=checkpoint,
+                counts_callback=seen.append,
+            )
+        )
+
+    assert result.outcome == "partial"
+    assert result.extraction_total == 2
+    assert result.extraction_succeeded == 1
+    assert result.extraction_failed == 1
+    assert result.failures == (failure,)
+    assert seen[-1] == result
 
 
 def test_runner_retains_workset_when_graph_build_fails(tmp_path) -> None:
@@ -102,6 +152,45 @@ def test_completed_checkpoint_only_retries_workset_cleanup(tmp_path) -> None:
     pipeline.run_phase_a.assert_not_called()
     pipeline.run_extraction.assert_not_called()
     pipeline.run_graph_build.assert_not_called()
+
+
+def test_completed_checkpoint_restores_partial_outcome(tmp_path) -> None:
+    pipeline = MagicMock()
+    checkpoint = MagicMock(batch_id="batch-complete")
+    checkpoint.is_done.side_effect = lambda step, **_: step == "ingest.complete"
+    failure = ExtractionFailure(
+        extraction_item_id="item-2",
+        source_unit_id="unit-2",
+        target_chunk_id="chunk-1",
+        error_type="timeout",
+        message="timed out",
+        attempts=3,
+    )
+    expected = IngestResult(
+        2,
+        0,
+        2,
+        1,
+        extraction_total=2,
+        extraction_succeeded=1,
+        extraction_failed=1,
+        failures=(failure,),
+    )
+    checkpoint.step_metadata.return_value = {
+        "result": expected.as_checkpoint_dict()
+    }
+
+    with patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline):
+        result = asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod", improve_mode="off"),
+                checkpoint=checkpoint,
+            )
+        )
+
+    assert result == expected
+    assert result.outcome == "partial"
+    pipeline.complete_workset.assert_called_once()
 
 
 def test_completed_auto_run_can_seed_missing_improvement_baseline(tmp_path) -> None:

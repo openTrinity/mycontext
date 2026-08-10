@@ -6,9 +6,9 @@ The two bugs a real full-corpus run exposed:
      cache hit and never retried — silently dropping 68% of extractions;
   2. no retry at all around the extraction call.
 
-These tests pin the classification, that ``_write_cache`` refuses to persist a
-``_transient`` result, and that the retry budget + timeout are delegated
-straight to ``litellm.acompletion`` (no hand-rolled wrapper). No network I/O.
+These tests pin classification, success-only cache writes, extractor-owned
+in-step retries, and disabled nested retries in ``litellm.acompletion``. No
+network I/O.
 
 Run: ``.venv/bin/python -m pytest tests/test_extractor_retry.py -q``
 """
@@ -19,6 +19,9 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -114,7 +117,9 @@ def test_typed_ratelimit_without_keywords_is_transient() -> None:
 
 
 def _extractor(tmp_path) -> LLMExtractor:
-    return LLMExtractor(cache_db=tmp_path / "knowledge.db")
+    # Most tests exercise one-attempt parsing/cache behavior. Dedicated tests
+    # below opt into retry attempts explicitly.
+    return LLMExtractor(cache_db=tmp_path / "knowledge.db", max_retries=0)
 
 
 def _chunk(cid="c1") -> Chunk:
@@ -125,7 +130,7 @@ def test_write_cache_skips_transient_result(tmp_path) -> None:
     ex = _extractor(tmp_path)
     msg = _chunk()
     ex._write_cache(msg, {"entities": [], "facts": [], "_error": "429", "_transient": True})
-    # nothing written -> next run re-extracts
+    # A failed attempt cannot poison the durable cache.
     assert ex._read_cache(msg) is None
 
 
@@ -163,7 +168,7 @@ def test_write_cache_persists_nontransient_empty(tmp_path) -> None:
     assert ex._read_cache(msg) is not None
 
 
-# ── retry budget + timeout are delegated to litellm ─────────────────────
+# ── SDK timeout and disabled nested retries ─────────────────────────────────
 
 
 class _FakeMessage:
@@ -182,8 +187,8 @@ class _FakeResp:
         self.usage = None
 
 
-def test_call_llm_delegates_retry_and_timeout_to_litellm(monkeypatch, tmp_path) -> None:
-    """The single-message path passes num_retries/timeout to litellm directly."""
+def test_call_llm_disables_sdk_retry_and_sets_timeout(monkeypatch, tmp_path) -> None:
+    """The single-message path owns retries and keeps a request timeout."""
     seen = {}
 
     async def capture(**kwargs):
@@ -193,13 +198,12 @@ def test_call_llm_delegates_retry_and_timeout_to_litellm(monkeypatch, tmp_path) 
     monkeypatch.setattr(lx.litellm, "acompletion", capture)
     ex = _extractor(tmp_path)
     asyncio.run(ex._call_llm(_chunk(), "(no context)"))
-    assert seen["num_retries"] == lx.LLM_MAX_RETRIES
+    assert seen["num_retries"] == 0
     assert seen["timeout"] == 240
 
 
-def test_call_llm_batch_delegates_retry_and_timeout_to_litellm(monkeypatch, tmp_path) -> None:
-    """The batch path passes num_retries/timeout to litellm directly (no
-    hand-rolled ``asyncio.wait_for`` wrapper)."""
+def test_call_llm_batch_disables_sdk_retry_and_sets_timeout(monkeypatch, tmp_path) -> None:
+    """The batch path owns retries and keeps a request timeout."""
     seen = {}
 
     async def capture(**kwargs):
@@ -209,13 +213,12 @@ def test_call_llm_batch_delegates_retry_and_timeout_to_litellm(monkeypatch, tmp_
     monkeypatch.setattr(lx.litellm, "acompletion", capture)
     ex = _extractor(tmp_path)
     asyncio.run(ex._call_llm_batch([_chunk()]))
-    assert seen["num_retries"] == lx.LLM_MAX_RETRIES
+    assert seen["num_retries"] == 0
     assert seen["timeout"] == lx.LLM_BATCH_TIMEOUT
 
 
 def test_call_llm_batch_marks_transient_failure(monkeypatch, tmp_path) -> None:
-    """When litellm's own retries are exhausted on a transient error, the batch
-    result is flagged ``_transient`` so ``_write_cache`` skips it."""
+    """A transient SDK error produces retryable, non-cacheable batch slots."""
 
     async def rate_limited(**kwargs):
         raise RateLimitError("Error code: 429 - too many requests")
@@ -226,6 +229,80 @@ def test_call_llm_batch_marks_transient_failure(monkeypatch, tmp_path) -> None:
     assert len(results) == 2
     assert all(r["_transient"] is True for r in results)
     assert ex.stats["llm_errors"] == 1
+
+
+def test_process_batch_retries_only_failed_slots(monkeypatch, tmp_path) -> None:
+    calls = []
+
+    async def partial_then_ok(**kwargs):
+        calls.append(kwargs["messages"][-1]["content"])
+        if len(calls) == 1:
+            return _resp(
+                '{"results": ['
+                '{"msg_index": 0, "entities": [{"name": "A"}], "facts": []}'
+                ']}'
+            )
+        return _resp(
+            '{"results": ['
+            '{"msg_index": 0, "entities": [{"name": "B"}], "facts": []}'
+            ']}'
+        )
+
+    monkeypatch.setattr(lx.litellm, "acompletion", partial_then_ok)
+    ex = LLMExtractor(cache_db=tmp_path / "cache.db", max_retries=1)
+    ex._wait_before_retry = AsyncMock()
+    c0, c1 = _chunk("c0"), _chunk("c1")
+
+    asyncio.run(ex._process_batch([c0, c1]))
+
+    assert len(calls) == 2
+    assert "[Message 1]" in calls[0]
+    assert "[Message 1]" not in calls[1]
+    assert ex._read_cache(c0)["entities"] == [{"name": "A"}]
+    assert ex._read_cache(c1)["entities"] == [{"name": "B"}]
+    assert ex.failures == []
+
+
+def test_process_batch_records_exhausted_failure(monkeypatch, tmp_path) -> None:
+    calls = 0
+
+    async def rate_limited(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise RateLimitError("Error code: 429 - too many requests")
+
+    monkeypatch.setattr(lx.litellm, "acompletion", rate_limited)
+    ex = LLMExtractor(cache_db=tmp_path / "cache.db", max_retries=1)
+    ex._wait_before_retry = AsyncMock()
+    c = _chunk("failed")
+
+    asyncio.run(ex._process_batch([c]))
+
+    assert calls == 2
+    assert ex._read_cache(c) is None
+    assert len(ex.failures) == 1
+    failure = ex.failures[0]
+    assert failure.extraction_item_id == "failed"
+    assert failure.error_type == "rate_limit"
+    assert failure.attempts == 2
+
+
+def test_process_batch_does_not_retry_local_cache_failure(monkeypatch, tmp_path) -> None:
+    calls = 0
+
+    async def successful_response(**kwargs):
+        nonlocal calls
+        calls += 1
+        return _resp('{"results": [{"entities": [], "facts": []}]}')
+
+    monkeypatch.setattr(lx.litellm, "acompletion", successful_response)
+    ex = LLMExtractor(cache_db=tmp_path / "cache.db", max_retries=2)
+    ex._write_cache = MagicMock(side_effect=RuntimeError("disk unavailable"))
+
+    with pytest.raises(RuntimeError, match="disk unavailable"):
+        asyncio.run(ex._process_batch([_chunk()]))
+
+    assert calls == 1
 
 
 # ── poison-path guards: no failure outcome is ever cached ──────────────────

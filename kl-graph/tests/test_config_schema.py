@@ -76,6 +76,7 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.incremental.similarity_strategy",
     "pipelines.ingestion.incremental.community_strategy",
     "pipelines.ingestion.similarity.threshold",
+    "pipelines.query.ask.synthesize",
     "pipelines.query.embedding.max_retries",
     "pipelines.query.embedding.timeout",
     "pipelines.query.phase1_message_limit",

@@ -162,7 +162,7 @@ wins if both are given.**
 ```bash
 kl ask "谁负责 InkFlow 项目？" -k 8              # JSON by default
 kl ask "周强的 OKR 是怎么安排的？" -k 10 --pretty
-kl ask "Super Agent 的 502 报错根因是什么？" --phase2   # force LLM synthesis
+kl ask "线上服务 502 报错根因是什么？" --phase2   # force LLM synthesis
 ```
 
 Options: `-k/--top-k N`, `--phase2` (force synthesis), `--pretty`, `--json`.
@@ -331,7 +331,7 @@ kl context <fact_id>
 
 **Relationship / multi-hop →** `ask` (walks the graph automatically):
 ```bash
-kl ask "Super Agent 502 部署" --seed-k 8 --pretty
+kl ask "线上服务 502 部署" --seed-k 8 --pretty
 ```
 
 **Stop when:** you have ≥3 grounded facts answering the question, you reach L3,
@@ -394,5 +394,5 @@ Example (force Phase-2 with a long timeout):
 ```bash
 curl -s --max-time 120 -X POST localhost:8200/ask \
   -H 'content-type: application/json' \
-  -d '{"query":"Super Agent 502 报错根因？","top_k":8,"force_phase2":true}'
+  -d '{"query":"线上服务 502 报错根因？","top_k":8,"force_phase2":true}'
 ```

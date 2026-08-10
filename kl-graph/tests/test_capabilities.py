@@ -20,6 +20,23 @@ def test_server_capabilities_hide_experimental_communities(monkeypatch) -> None:
     result = asyncio.run(kl_server.get_capabilities())
 
     assert result["commands"]["ask"]["enabled"] is True
+    assert result["commands"]["ask"]["caller_intent"] is True
+    assert result["commands"]["ask"]["entity_types"] == [
+        "PERSON",
+        "SYSTEM",
+        "PROJECT",
+        "ORGANIZATION",
+        "LOCATION",
+        "DOCUMENT",
+        "UNKNOWN",
+    ]
+    assert result["commands"]["ask"]["fact_types"] == [
+        "DECISION",
+        "DELEGATE",
+        "STATUS",
+        "CAUSAL",
+        "GENERAL",
+    ]
     assert result["commands"]["global-search"] == {
         "enabled": False,
         "experimental": True,
@@ -52,3 +69,35 @@ def test_cli_capabilities_json_is_machine_readable(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert json.loads(result.output) == payload
+
+
+def test_cli_ask_sends_caller_intent_and_synthesis_override(monkeypatch) -> None:
+    captured = {}
+
+    def fake_request(method, path, **kwargs):
+        captured.update(method=method, path=path, **kwargs)
+        return {"items": [], "phase": 1}
+
+    monkeypatch.setattr(kl_cli, "_server_request", fake_request)
+    result = CliRunner().invoke(
+        kl_cli.cli,
+        [
+            "ask",
+            "谁负责部署平台",
+            "--entity",
+            "部署平台",
+            "--entity-type",
+            "SYSTEM",
+            "--fact-type",
+            "DELEGATE",
+            "--no-phase2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["json"]["force_phase2"] is False
+    assert captured["json"]["intent"] == {
+        "entities": ["部署平台"],
+        "entity_types": ["SYSTEM"],
+        "fact_types": ["DELEGATE"],
+    }

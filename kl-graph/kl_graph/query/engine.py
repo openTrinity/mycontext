@@ -34,6 +34,7 @@ from kl_graph.query import fts
 from kl_graph.query.local_search import build_local_context
 from kl_graph.query.pagerank import compute_entity_pagerank
 from kl_graph.query.query_rewrite import (
+    QueryRewrite,
     arewrite_query,
     build_type_pool,
     normalize_query,
@@ -125,9 +126,7 @@ def _suppress_same_type_duplicates(
         items, and ``merged`` is ``[{"survivor": id, "dropped": id}, ...]``.
     """
     norms = [_normalize_for_dedup(it.get("content", "")) for it in items]
-    hashes = [
-        hashlib.md5(n.encode("utf-8")).hexdigest() if n else "" for n in norms
-    ]
+    hashes = [hashlib.md5(n.encode("utf-8")).hexdigest() if n else "" for n in norms]
 
     kept: list[dict] = []
     kept_idx: list[int] = []  # indices (into items) of surviving reps
@@ -254,11 +253,15 @@ class QueryEngine:
             )
         self.sqlite = self.store  # back-compat alias (content reads + stats)
         vector_backend = str(cfg.storage.vector.backend)
-        self.qdrant = qdrant if qdrant is not None else create_vector_store(
-            vector_backend,
-            data_dir=DATA_DIR,
-            embedding_dim=int(cfg.services.embedding.dim),
-            path=qdrant_path if vector_backend == "qdrant" else None,
+        self.qdrant = (
+            qdrant
+            if qdrant is not None
+            else create_vector_store(
+                vector_backend,
+                data_dir=DATA_DIR,
+                embedding_dim=int(cfg.services.embedding.dim),
+                path=qdrant_path if vector_backend == "qdrant" else None,
+            )
         )
         qemb_cfg = cfg.pipelines.query.embedding
         self.embedder = Embedder(
@@ -302,7 +305,12 @@ class QueryEngine:
         self.llm_base_url = LLM_BASE_URL
         self.llm_model = provider_model(LLM_PROVIDER, LLM_MODEL)
 
-    def query(self, text: str, force_phase2: bool = False) -> QueryResult:
+    def query(
+        self,
+        text: str,
+        force_phase2: bool = False,
+        query_rewrite: QueryRewrite | None = None,
+    ) -> QueryResult:
         """Run a query through Phase 1, optionally escalating to Phase 2.
 
         Synchronous entry point (used by ``scripts/query.py`` and tests). The
@@ -312,11 +320,13 @@ class QueryEngine:
         Args:
             text: Natural language query
             force_phase2: If True, always run Phase 2 synthesis
+            query_rewrite: Caller-supplied retrieval intent. When present, skip
+                the rewrite LLM and only vector-resolve its entity mentions.
         """
         t0 = time.time()
 
         # Phase 1: instant retrieval
-        phase1 = self._phase1(text)
+        phase1 = self._phase1(text, query_rewrite=query_rewrite)
 
         # Phase 2 (LLM synthesis) runs only when explicitly requested.
         needs_phase2 = force_phase2
@@ -357,7 +367,12 @@ class QueryEngine:
                 dedup_stats=phase1.dedup_stats,
             )
 
-    async def aquery(self, text: str, force_phase2: bool = False) -> QueryResult:
+    async def aquery(
+        self,
+        text: str,
+        force_phase2: bool = False,
+        query_rewrite: QueryRewrite | None = None,
+    ) -> QueryResult:
         """Async twin of :meth:`query` (server path).
 
         Awaits the async Phase 1 (network layers freed, local work offloaded)
@@ -368,7 +383,7 @@ class QueryEngine:
         """
         t0 = time.time()
 
-        phase1 = await self._aphase1(text)
+        phase1 = await self._aphase1(text, query_rewrite=query_rewrite)
 
         needs_phase2 = force_phase2
 
@@ -382,7 +397,9 @@ class QueryEngine:
                 phase1.chunk_hits,
                 phase1.fact_hits,
             )
-            answer = await self._aphase2(text, phase1, local_context=local_ctx.context_text)
+            answer = await self._aphase2(
+                text, phase1, local_context=local_ctx.context_text
+            )
             latency = (time.time() - t0) * 1000
             return QueryResult(
                 answer=answer,
@@ -443,28 +460,7 @@ class QueryEngine:
                 api_base=self.llm_base_url,
                 api_key=self.api_key,
             )
-
-            matched: dict[str, dict] = {}
-            for kw in rw.entities_from_query:
-                kw_vec = self.embedder.embed_one(kw)
-                hits = self.qdrant.search(
-                    "entities", kw_vec, limit=3, score_threshold=0.3
-                )
-                for h in hits:
-                    p = h["payload"]
-                    eid = p["entity_id"]
-                    # Keep the best sim if an entity matches multiple keywords.
-                    if eid not in matched or h["score"] > matched[eid]["sim"]:
-                        matched[eid] = {
-                            "id": eid,
-                            "name": p.get("name", ""),
-                            "type": p.get("entity_type", ""),
-                            "sim": h["score"],
-                        }
-            if matched:
-                return list(matched.values()), rw
-            # LLM ran but found no vector matches: fall through to substring.
-            return self._substring_entities(query), rw
+            return self._match_rewrite_entities(query, rw), rw
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Query rewrite failed, falling back to substring: {e}")
 
@@ -480,6 +476,35 @@ class QueryEngine:
             {"id": e.id, "name": e.name, "type": e.entity_type.value, "sim": 1.0}
             for e in self.store.search_entities_by_name(query, limit=5)
         ]
+
+    def _match_rewrite_entities(self, query: str, rewrite: QueryRewrite) -> list[dict]:
+        """Vector-resolve a supplied intent without invoking the rewrite LLM."""
+        try:
+            matched: dict[str, dict] = {}
+            for keyword in rewrite.entities_from_query:
+                keyword_vec = self.embedder.embed_one(keyword)
+                hits = self.qdrant.search(
+                    "entities", keyword_vec, limit=3, score_threshold=0.3
+                )
+                for hit in hits:
+                    payload = hit["payload"]
+                    entity_id = payload["entity_id"]
+                    if (
+                        entity_id not in matched
+                        or hit["score"] > matched[entity_id]["sim"]
+                    ):
+                        matched[entity_id] = {
+                            "id": entity_id,
+                            "name": payload.get("name", ""),
+                            "type": payload.get("entity_type", ""),
+                            "sim": hit["score"],
+                        }
+            return list(matched.values()) or self._substring_entities(query)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Supplied query intent could not be resolved; using substring: %s", e
+            )
+            return self._substring_entities(query)
 
     async def _amatch_entities(self, query: str) -> tuple[list[dict], object | None]:
         """Async twin of :meth:`_match_entities`.
@@ -505,34 +530,49 @@ class QueryEngine:
                 api_base=self.llm_base_url,
                 api_key=self.api_key,
             )
-
-            matched: dict[str, dict] = {}
-            for kw in rw.entities_from_query:
-                kw_vec = await self.embedder.aembed_one(kw)
-                hits = await asyncio.to_thread(
-                    lambda v=kw_vec: self.qdrant.search(
-                        "entities", v, limit=3, score_threshold=0.3
-                    )
-                )
-                for h in hits:
-                    p = h["payload"]
-                    eid = p["entity_id"]
-                    if eid not in matched or h["score"] > matched[eid]["sim"]:
-                        matched[eid] = {
-                            "id": eid,
-                            "name": p.get("name", ""),
-                            "type": p.get("entity_type", ""),
-                            "sim": h["score"],
-                        }
-            if matched:
-                return list(matched.values()), rw
-            return await asyncio.to_thread(self._substring_entities, query), rw
+            return await self._amatch_rewrite_entities(query, rw), rw
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Query rewrite failed, falling back to substring: {e}")
 
         return await asyncio.to_thread(self._substring_entities, query), None
 
-    def _phase1(self, query: str) -> RetrievalResult:
+    async def _amatch_rewrite_entities(
+        self, query: str, rewrite: QueryRewrite
+    ) -> list[dict]:
+        """Async vector resolution for caller-supplied retrieval intent."""
+        try:
+            matched: dict[str, dict] = {}
+            for keyword in rewrite.entities_from_query:
+                keyword_vec = await self.embedder.aembed_one(keyword)
+                hits = await asyncio.to_thread(
+                    lambda v=keyword_vec: self.qdrant.search(
+                        "entities", v, limit=3, score_threshold=0.3
+                    )
+                )
+                for hit in hits:
+                    payload = hit["payload"]
+                    entity_id = payload["entity_id"]
+                    if (
+                        entity_id not in matched
+                        or hit["score"] > matched[entity_id]["sim"]
+                    ):
+                        matched[entity_id] = {
+                            "id": entity_id,
+                            "name": payload.get("name", ""),
+                            "type": payload.get("entity_type", ""),
+                            "sim": hit["score"],
+                        }
+            if matched:
+                return list(matched.values())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Supplied query intent could not be resolved; using substring: %s", e
+            )
+        return await asyncio.to_thread(self._substring_entities, query)
+
+    def _phase1(
+        self, query: str, query_rewrite: QueryRewrite | None = None
+    ) -> RetrievalResult:
         """Phase 1 (sync): vector ANN + structural expansion + RRF fusion.
 
         Gathers the I/O (embed, entity match, two Qdrant ANN searches) then hands
@@ -552,7 +592,11 @@ class QueryEngine:
         # 2. Entity matching (LLM rewrite -> vector match; substring fallback).
         #    Returns the rewrite as a value (not on self) so the engine is
         #    reentrant under concurrency.
-        matched, rw = self._match_entities(query)
+        if query_rewrite is None:
+            matched, rw = self._match_entities(query)
+        else:
+            matched = self._match_rewrite_entities(query, query_rewrite)
+            rw = query_rewrite
 
         # 3a/3b. Vector ANN on chunks + facts.
         msg_results = self.qdrant.search("chunks", q_vec, limit=PHASE1_MESSAGE_LIMIT)
@@ -562,7 +606,9 @@ class QueryEngine:
             query, q_vec, matched, rw, msg_results, fact_results, t0
         )
 
-    async def _aphase1(self, query: str) -> RetrievalResult:
+    async def _aphase1(
+        self, query: str, query_rewrite: QueryRewrite | None = None
+    ) -> RetrievalResult:
         """Phase 1 (async): same as :meth:`_phase1` but frees the event loop.
 
         The two network layers are ``await``ed (query embed + the LLM entity
@@ -578,7 +624,11 @@ class QueryEngine:
         q_vec = await self.embedder.aembed_one(query)
 
         # 2. Entity matching (network LLM rewrite awaited; Qdrant offloaded).
-        matched, rw = await self._amatch_entities(query)
+        if query_rewrite is None:
+            matched, rw = await self._amatch_entities(query)
+        else:
+            matched = await self._amatch_rewrite_entities(query, query_rewrite)
+            rw = query_rewrite
 
         # 3a/3b. Vector ANN on chunks + facts (local Qdrant -> offload).
         msg_results = await asyncio.to_thread(
@@ -841,7 +891,11 @@ class QueryEngine:
         )
 
     def _phase2_prompt(
-        self, query: str, phase1: RetrievalResult, *, local_context: str | None = None,
+        self,
+        query: str,
+        phase1: RetrievalResult,
+        *,
+        local_context: str | None = None,
     ) -> tuple[str, str]:
         """Build (system_prompt, user_prompt) for Phase-2 synthesis.
 
@@ -899,11 +953,17 @@ class QueryEngine:
         return system_prompt, user_prompt
 
     def _phase2(
-        self, query: str, phase1: RetrievalResult, *, local_context: str | None = None,
+        self,
+        query: str,
+        phase1: RetrievalResult,
+        *,
+        local_context: str | None = None,
     ) -> str:
         """Phase 2 (sync): LLM synthesis from retrieved context."""
         system_prompt, user_prompt = self._phase2_prompt(
-            query, phase1, local_context=local_context,
+            query,
+            phase1,
+            local_context=local_context,
         )
         try:
             resp = litellm.completion(
@@ -922,11 +982,17 @@ class QueryEngine:
             return f"[Phase 2 synthesis failed: {e}]"
 
     async def _aphase2(
-        self, query: str, phase1: RetrievalResult, *, local_context: str | None = None,
+        self,
+        query: str,
+        phase1: RetrievalResult,
+        *,
+        local_context: str | None = None,
     ) -> str:
         """Phase 2 (async): same synthesis via ``litellm.acompletion``."""
         system_prompt, user_prompt = self._phase2_prompt(
-            query, phase1, local_context=local_context,
+            query,
+            phase1,
+            local_context=local_context,
         )
         try:
             resp = await litellm.acompletion(

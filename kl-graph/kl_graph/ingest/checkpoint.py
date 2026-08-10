@@ -205,6 +205,11 @@ class IngestCheckpoint:
                 return False
         return True
 
+    def step_metadata(self, step: str) -> dict[str, Any]:
+        """Return a copy of one recorded step entry, or an empty mapping."""
+        entry = self._data["steps"].get(step)
+        return dict(entry) if isinstance(entry, dict) else {}
+
     def mark_done(self, step: str, *, params: dict | None = None, **meta) -> None:
         """Mark step complete. Flushes to disk atomically.
 

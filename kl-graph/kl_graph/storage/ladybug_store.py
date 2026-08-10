@@ -16,6 +16,8 @@ from kl_graph.models.types import (
     Community,
     Edge,
     Entity,
+    ExtractionItem,
+    ExtractionProjection,
     Fact,
     Scope,
     SourceUnit,
@@ -154,6 +156,8 @@ class LadybugStore(KnowledgeStore):
         chunks: list[Chunk],
         units: list[SourceUnit],
         memberships: list[ChunkUnit],
+        extraction_items: list[ExtractionItem] | None = None,
+        projections: list[ExtractionProjection] | None = None,
         *,
         batch_id: str | None = None,
         batch_source_id: str | None = None,
@@ -164,6 +168,8 @@ class LadybugStore(KnowledgeStore):
             chunks,
             units,
             memberships,
+            extraction_items,
+            projections,
             batch_id=batch_id,
             batch_source_id=batch_source_id,
             source_hash=source_hash,
@@ -181,6 +187,11 @@ class LadybugStore(KnowledgeStore):
 
     def get_ingest_batch_chunks(self, batch_id: str) -> list[Chunk]:
         return self._sqlite.get_ingest_batch_chunks(batch_id)
+
+    def get_ingest_batch_extraction_plan(
+        self, batch_id: str
+    ) -> tuple[list[ExtractionItem], list[ExtractionProjection]]:
+        return self._sqlite.get_ingest_batch_extraction_plan(batch_id)
 
     def complete_ingest_batch(self, batch_id: str) -> None:
         self._sqlite.complete_ingest_batch(batch_id)

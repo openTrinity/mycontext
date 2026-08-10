@@ -55,12 +55,18 @@ used by the running process:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "features": {
     "communities": {"enabled": false, "experimental": true}
   },
   "commands": {
-    "ask": {"enabled": true},
+    "ask": {
+      "enabled": true,
+      "caller_intent": true,
+      "synthesize_default": false,
+      "entity_types": ["PERSON", "SYSTEM", "PROJECT", "ORGANIZATION", "LOCATION", "DOCUMENT", "UNKNOWN"],
+      "fact_types": ["DECISION", "DELEGATE", "STATUS", "CAUSAL", "GENERAL"]
+    },
     "global-search": {
       "enabled": false,
       "experimental": true,
@@ -105,6 +111,11 @@ when the graph is available, returns the first interactive graph frontier.
   "query": "谁负责网络白名单？",
   "top_k": 10,
   "force_phase2": false,
+  "intent": {
+    "entities": ["网络白名单"],
+    "entity_types": ["SYSTEM"],
+    "fact_types": ["DELEGATE"]
+  },
   "radius": 1,
   "max_fanout": 10,
   "max_nodes": 50,
@@ -113,9 +124,20 @@ when the graph is available, returns the first interactive graph frontier.
 }
 ```
 
+`intent` is optional. Agent callers should derive it from the question and use
+the type values advertised by `/capabilities`; supplying it skips the server's
+query-rewrite LLM call while the server still vector-resolves entity names.
+Without `intent`, the server performs its own rewrite for compatibility with
+plain clients.
+
+`force_phase2` is also optional. When omitted it follows
+`pipelines.query.ask.synthesize` (`KL_ASK_SYNTHESIZE`, false by default). An
+explicit boolean overrides that default. Agent callers normally send `false`
+and synthesize their answer from the returned evidence themselves.
+
 Important response fields are:
 
-- `answer`, `items`, `phase`, and `entities_found` for retrieval;
+- `answer`, `items`, `phase`, `entities_found`, and `query_intent_source` for retrieval;
 - `mode`, either `graph` or `chunks_only`;
 - `graph.components`, `graph.seeds`, and `graph.expandable` for traversal;
 - `recalled_chunks` and `graph_mermaids` for display; and

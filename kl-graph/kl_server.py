@@ -64,12 +64,15 @@ QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 QUERY_MAX_CONCURRENCY = int(cfg.pipelines.query.max_concurrency)
 CURRENT_USER = str(cfg.pipelines.query.global_search.current_user or "")
 COMMUNITIES_ENABLED = bool(cfg.pipelines.experimental.communities.enabled)
+ASK_SYNTHESIZE_DEFAULT = bool(cfg.pipelines.query.ask.synthesize)
 
+from kl_graph.models.types import EntityType, FactType
 from kl_graph.query import graph_walk as gw
 from kl_graph.query.adjacency import AdjacencyEntry, AdjacencyIndex
 from kl_graph.query.global_search import NO_DATA_ANSWER, GlobalSearch
 from kl_graph.query.local_search import build_local_context
 from kl_graph.query.pagerank import compute_entity_pagerank
+from kl_graph.query.query_rewrite import QueryRewrite
 from kl_graph.storage.base import KnowledgeStore, create_store
 from kl_graph.storage.vector_store import (
     VectorStore,
@@ -489,11 +492,11 @@ def _hot_swap_graph(update: ServingIndexUpdate | None = None):
         if state.engine is not None and hasattr(state.engine, "pagerank"):
             state.engine.pagerank = new_pagerank
     # Re-open the community store if this ingest created it.
-    remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(
-        cfg.storage.vector.qdrant.host
-    )
-    if COMMUNITIES_ENABLED and state.qdrant_communities is None and (
-        remote_qdrant or COMMUNITY_VECTOR_PATH.exists()
+    remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(cfg.storage.vector.qdrant.host)
+    if (
+        COMMUNITIES_ENABLED
+        and state.qdrant_communities is None
+        and (remote_qdrant or COMMUNITY_VECTOR_PATH.exists())
     ):
         try:
             state.qdrant_communities = create_vector_store(
@@ -532,6 +535,12 @@ def _set_progress(
         "units_skipped": previous.get("units_skipped", 0),
         "units_processed": previous.get("units_processed", 0),
         "chunks_created": previous.get("chunks_created", 0),
+        "outcome": previous.get("outcome", ""),
+        "extraction_total": previous.get("extraction_total", 0),
+        "extraction_succeeded": previous.get("extraction_succeeded", 0),
+        "extraction_failed": previous.get("extraction_failed", 0),
+        "warning": previous.get("warning", ""),
+        "failures_url": previous.get("failures_url"),
     }
     if state.current_run_id and state.sqlite_conn is not None:
         completed_at = int(time.time()) if state_str in {"done", "error"} else None
@@ -540,7 +549,9 @@ def _set_progress(
                SET state=?, phase=?, percent=?, detail=?, error=?,
                    updated_at=?, completed_at=?,
                    units_discovered=?, units_skipped=?, units_processed=?,
-                   chunks_created=? WHERE run_id=?""",
+                   chunks_created=?, outcome=?, extraction_total=?,
+                   extraction_succeeded=?, extraction_failed=?, warning=?
+               WHERE run_id=?""",
             (
                 state_str,
                 phase,
@@ -553,6 +564,11 @@ def _set_progress(
                 state.ingest_progress["units_skipped"],
                 state.ingest_progress["units_processed"],
                 state.ingest_progress["chunks_created"],
+                state.ingest_progress["outcome"],
+                state.ingest_progress["extraction_total"],
+                state.ingest_progress["extraction_succeeded"],
+                state.ingest_progress["extraction_failed"],
+                state.ingest_progress["warning"],
                 state.current_run_id,
             ),
         )
@@ -567,7 +583,60 @@ def _set_ingest_counts(result) -> None:
         units_skipped=result.units_skipped,
         units_processed=result.units_processed,
         chunks_created=result.chunks_created,
+        outcome=result.outcome,
+        extraction_total=result.extraction_total,
+        extraction_succeeded=result.extraction_succeeded,
+        extraction_failed=result.extraction_failed,
+        warning=result.warning,
+        failures_url=(
+            f"/ingest/{state.current_run_id}/failures"
+            if result.extraction_failed and state.current_run_id
+            else None
+        ),
     )
+    # Make exhausted-item details observable as soon as extraction finishes,
+    # even if a later graph-build/finalization step fails. The final write is
+    # idempotent and keeps this helper usable as the runner's counts callback.
+    if result.failures and state.current_run_id:
+        source_id = state.ingest_progress.get("source_id")
+        if source_id:
+            _persist_ingest_failures(source_id, state.current_run_id, result.failures)
+
+
+def _clear_ingest_failures(source_id: str) -> None:
+    """Bound failure storage to the latest started run for one source."""
+    state.sqlite_conn.execute(
+        "DELETE FROM ingest_extraction_failures WHERE source_id = ?",
+        (source_id,),
+    )
+    state.sqlite_conn.commit()
+
+
+def _persist_ingest_failures(source_id: str, run_id: str, failures) -> None:
+    if not failures:
+        return
+    now = int(time.time())
+    state.sqlite_conn.executemany(
+        """INSERT OR REPLACE INTO ingest_extraction_failures
+           (source_id, run_id, extraction_item_id, source_unit_id,
+            target_chunk_id, error_type, message, attempts, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            (
+                source_id,
+                run_id,
+                failure.extraction_item_id,
+                failure.source_unit_id,
+                failure.target_chunk_id,
+                failure.error_type,
+                failure.message,
+                failure.attempts,
+                now,
+            )
+            for failure in failures
+        ],
+    )
+    state.sqlite_conn.commit()
 
 
 async def _run_single_ingest_job(req: IngestRequest):
@@ -581,7 +650,7 @@ async def _run_single_ingest_job(req: IngestRequest):
         from kl_graph.ingest.runner import IngestOptions, run_ingestion
 
         shared_store, qdrant = _shared_stores()
-        await run_ingestion(
+        result = await run_ingestion(
             IngestOptions(
                 input_dir=Path(req.input_dir),
                 source_id=req.source_id,
@@ -597,7 +666,13 @@ async def _run_single_ingest_job(req: IngestRequest):
             finalize_callback=_hot_swap_graph,
             structural_cache=state.structural_cache,
         )
-        _set_progress("done", "", 1.0, "ingest complete")
+        # Counts and any failure manifest were already persisted by
+        # counts_callback (_set_ingest_counts) the moment extraction finished, so
+        # only the terminal progress state needs writing here.
+        detail = "ingest complete"
+        if result.extraction_failed:
+            detail = f"ingest complete with warning: {result.warning}"
+        _set_progress("done", "", 1.0, detail)
         logger.info("Background ingest complete.")
     except Exception as e:
         logger.exception("Background ingest failed")
@@ -645,6 +720,8 @@ async def _run_ingest_queue(first: tuple[str, object]) -> None:
                 "improve_mode": req.mode if is_improve else req.improve_mode,
                 "job_type": "improve" if is_improve else "ingest",
             }
+            if not is_improve:
+                _clear_ingest_failures(req.source_id)
             initial_phase = "improve" if is_improve else "phase_a"
             _set_progress("running", initial_phase, 0.0, "queued")
             if is_improve:
@@ -746,9 +823,7 @@ async def lifespan(app: FastAPI):
     logger.info("Vector store main: ready")
 
     # 4. Community vectors (a separate small local store).
-    remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(
-        cfg.storage.vector.qdrant.host
-    )
+    remote_qdrant = VECTOR_BACKEND == "qdrant" and bool(cfg.storage.vector.qdrant.host)
     if COMMUNITIES_ENABLED and (remote_qdrant or COMMUNITY_VECTOR_PATH.exists()):
         logger.info("Opening community vector store: %s", COMMUNITY_VECTOR_PATH)
         state.qdrant_communities = create_vector_store(
@@ -837,20 +912,31 @@ class ImproveRequest(BaseModel):
     mode: Literal["full"] = "full"
 
 
+class AskQueryIntent(BaseModel):
+    """Caller-produced retrieval intent that bypasses the rewrite LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entities: list[str] = Field(default_factory=list, max_length=20)
+    entity_types: list[str] = Field(default_factory=list, max_length=3)
+    fact_types: list[str] = Field(default_factory=list, max_length=3)
+
+
 class AskRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     query: str
     top_k: int = 10
-    force_phase2: bool = False
+    # None follows pipelines.query.ask.synthesize; an explicit bool overrides it.
+    force_phase2: bool | None = None
+    intent: AskQueryIntent | None = None
     # Graph-walk params (Phase 2 = the depth-1 walk over the entities/facts the
     # query function extracted). The walk always runs when the graph is built.
     radius: int = 1
     max_fanout: int = 10
     max_nodes: int = 50
-    lambda_: float = 0.6  # alias "lambda" in JSON
+    lambda_: float = Field(default=0.6, alias="lambda")
     seed_k: int = 6
-
-    class Config:
-        fields = {"lambda_": "lambda"}  # noqa: RUF012
 
 
 class GlobalSearchRequest(BaseModel):
@@ -891,9 +977,9 @@ class NeighborsRequest(BaseModel):
     nodes: list[NeighborNodeRequest] = Field(max_length=2000)
     edge_types: list[str] | None = None
     direction: Literal["in", "out", "both"] = "both"
-    target_types: list[
-        Literal["entity", "fact", "chunk", "scope", "community"]
-    ] | None = None
+    target_types: (
+        list[Literal["entity", "fact", "chunk", "scope", "community"]] | None
+    ) = None
     limit_per_node: int = Field(default=100, ge=1, le=2000)
     cursor: dict[str, int] = Field(default_factory=dict)
     hydrate: bool = True
@@ -980,9 +1066,7 @@ async def get_status():
 
     if state.qdrant_communities:
         try:
-            vector_stats["communities"] = state.qdrant_communities.count(
-                "communities"
-            )
+            vector_stats["communities"] = state.qdrant_communities.count("communities")
         except Exception:  # noqa: BLE001
             vector_stats["communities"] = 0
 
@@ -992,11 +1076,16 @@ async def get_status():
             """SELECT run_id, source_id, state, phase, percent, detail,
                       units_discovered,
                       units_skipped, units_processed, chunks_created, error,
-                      updated_at
+                      updated_at, outcome, extraction_total,
+                      extraction_succeeded, extraction_failed, warning
                FROM ingest_runs ORDER BY updated_at DESC LIMIT 1"""
         ).fetchone()
         if row:
             ingest_status = dict(row)
+            if ingest_status.get("extraction_failed"):
+                ingest_status["failures_url"] = (
+                    f"/ingest/{ingest_status['run_id']}/failures"
+                )
             improve_only = ingest_status.get("source_id") == "__improve__"
             ingest_status["job_type"] = "improve" if improve_only else "ingest"
             if improve_only:
@@ -1012,6 +1101,44 @@ async def get_status():
         "knowledge": stats,
         "vectors": vector_stats,
         "ingest": ingest_status or {"state": "idle", "percent": 0.0},
+    }
+
+
+@app.get("/ingest/{run_id}/failures")
+async def get_ingest_failures(run_id: str, limit: int = 100, cursor: str | None = None):
+    """Return the bounded failure manifest for one ingestion run."""
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+    if limit < 1 or limit > 1000:
+        raise HTTPException(422, "limit must be between 1 and 1000")
+    run = state.sqlite_conn.execute(
+        "SELECT source_id FROM ingest_runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if run is None:
+        raise HTTPException(404, "ingestion run not found")
+    params: list[object] = [run_id]
+    where = "run_id = ?"
+    if cursor:
+        where += " AND extraction_item_id > ?"
+        params.append(cursor)
+    params.append(limit + 1)
+    rows = state.sqlite_conn.execute(
+        f"""SELECT extraction_item_id, source_unit_id, target_chunk_id,
+                   error_type, message, attempts
+              FROM ingest_extraction_failures
+             WHERE {where}
+             ORDER BY extraction_item_id
+             LIMIT ?""",  # noqa: S608 - fixed clauses; values are bound
+        params,
+    ).fetchall()
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    failures = [dict(row) for row in page]
+    return {
+        "run_id": run_id,
+        "source_id": run["source_id"] if isinstance(run, sqlite3.Row) else run[0],
+        "failures": failures,
+        "next_cursor": failures[-1]["extraction_item_id"] if has_more else None,
     }
 
 
@@ -1039,6 +1166,14 @@ async def get_capabilities():
         )
     }
     commands["expand"]["deprecated"] = True
+    commands["ask"].update(
+        {
+            "caller_intent": True,
+            "synthesize_default": ASK_SYNTHESIZE_DEFAULT,
+            "entity_types": [entity_type.name for entity_type in EntityType],
+            "fact_types": [fact_type.name for fact_type in FactType],
+        }
+    )
     search_collections = [
         "chunks",
         "messages",
@@ -1056,7 +1191,7 @@ async def get_capabilities():
         }
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "features": {
             "communities": {
                 "enabled": COMMUNITIES_ENABLED,
@@ -1242,19 +1377,20 @@ def _search_qdrant(req: EmbedSearchRequest, vec: list[float]):
 async def ask(req: AskRequest):
     """Hybrid question-answering + interactive graph walk in one call.
 
-    Two phases sharing a single query embedding + entity match (one LLM call):
+    Two phases sharing a single query embedding + entity match:
 
     1. **Query** — ``engine.aquery()``: dense + sparse + RRF (+ optional rerank)
-       over chunks and facts, optionally escalating to Phase-2 LLM synthesis
-       (``force_phase2``, off by default). Produces ``items`` + ``answer``.
+       over chunks and facts. Caller-supplied ``intent`` bypasses the query
+       rewrite LLM; otherwise the server derives it. Optional Phase-2 synthesis
+       follows config unless ``force_phase2`` overrides it.
     2. **Graph walk** — ``gw.graph_walk()`` seeded from the entities/facts the
        query already extracted (reuses ``q_vec`` + ``matched_entities``, so no
        second LLM/embed call). Produces the depth-1 hoppable frontier
        (``seeds``/``nodes``/``edges``/``expandable``) + a ``cursor`` for
        ``/graph_hop``.
     3. **Local search** — builds GraphRAG-style local context from recall
-       outputs (community reports + relationships + text units). When
-       ``force_phase2=True``, synthesis uses this enriched context.
+       outputs (community reports + relationships + text units). When synthesis
+       is enabled, it uses this enriched context.
 
     When the graph is not built the walk fields come back empty
     (``mode="chunks_only"``) and only the flat ``items`` are returned.
@@ -1270,17 +1406,30 @@ async def ask(req: AskRequest):
         raise HTTPException(503, "Query engine not available")
 
     t0 = time.time()
+    synthesize = (
+        ASK_SYNTHESIZE_DEFAULT if req.force_phase2 is None else req.force_phase2
+    )
+    query_rewrite = None
+    if req.intent is not None:
+        query_rewrite = QueryRewrite(
+            entities_from_query=req.intent.entities,
+            entity_type_keywords=req.intent.entity_types,
+            fact_type_keywords=req.intent.fact_types,
+        )
     async with _query_sema():
         # Run Phase-1 only (no synthesis yet) to get recall outputs
         try:
-            result = await state.engine.aquery(req.query, force_phase2=False)
+            query_kwargs = {"force_phase2": False}
+            if query_rewrite is not None:
+                query_kwargs["query_rewrite"] = query_rewrite
+            result = await state.engine.aquery(req.query, **query_kwargs)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(502, f"Query failed: {e}")
 
         # Graph not built: flat vector-RAG only, graph fields empty.
         if not _graph_built():
             # Still build local context if synthesis requested
-            if req.force_phase2:
+            if synthesize:
                 local_ctx = await asyncio.to_thread(
                     build_local_context,
                     state.store,
@@ -1300,8 +1449,11 @@ async def ask(req: AskRequest):
             base = {
                 "answer": answer,
                 "items": result.items[: req.top_k],
-                "phase": 2 if req.force_phase2 else 1,
+                "phase": 2 if synthesize else 1,
                 "entities_found": result.entities_found,
+                "query_intent_source": (
+                    "caller" if query_rewrite is not None else "server"
+                ),
                 "community_context": community_context,
                 "mode": "chunks_only",
                 "graph": {"components": [], "seeds": [], "expandable": []},
@@ -1330,7 +1482,7 @@ async def ask(req: AskRequest):
         )
 
         # Run Phase-2 synthesis with local context if requested
-        if req.force_phase2:
+        if synthesize:
             answer = await state.engine.synthesize(
                 req.query, result, local_context=local_ctx.context_text
             )
@@ -1345,6 +1497,9 @@ async def ask(req: AskRequest):
             "phase": phase,
             "entities_found": result.entities_found,
             "community_context": local_ctx.community_context,
+            "query_intent_source": (
+                "caller" if query_rewrite is not None else "server"
+            ),
         }
         base.update(walk)
         base["latency_ms"] = round((time.time() - t0) * 1000)
@@ -1762,9 +1917,7 @@ def _entity_lookup_impl(req: EntityRequest):
     has_id = bool(req.entity_id and req.entity_id.strip())
     has_name = bool(req.name and req.name.strip())
     if has_id == has_name:
-        raise HTTPException(
-            400, "Provide exactly one of 'entity_id' or 'name'."
-        )
+        raise HTTPException(400, "Provide exactly one of 'entity_id' or 'name'.")
 
     # Community columns are added by improve.py; degrade gracefully without them.
     cols = [
@@ -1871,9 +2024,7 @@ def _entity_facts_impl(req: FactsRequest):
     has_entity = bool(req.entity_id and req.entity_id.strip())
     has_fact = bool(req.fact_id and req.fact_id.strip())
     if has_entity == has_fact:
-        raise HTTPException(
-            400, "Provide exactly one of 'entity_id' or 'fact_id'."
-        )
+        raise HTTPException(400, "Provide exactly one of 'entity_id' or 'fact_id'.")
 
     # Single fact by its own id (exact, then prefix) — minimal payload.
     if has_fact:
@@ -2011,9 +2162,7 @@ def _hydrate_neighbor_nodes(
             for row in rows:
                 base = {"type": node_type, "id": row[0]}
                 if node_type == "entity":
-                    base.update(
-                        name=row[1], entity_type=row[2], mention_count=row[3]
-                    )
+                    base.update(name=row[1], entity_type=row[2], mention_count=row[3])
                 elif node_type == "fact":
                     base.update(
                         text=row[1],
@@ -2022,9 +2171,7 @@ def _hydrate_neighbor_nodes(
                         confidence=row[4],
                     )
                 elif node_type == "chunk":
-                    base.update(
-                        source_type=row[1], timestamp=row[2], source_ref=row[3]
-                    )
+                    base.update(source_type=row[1], timestamp=row[2], source_ref=row[3])
                 elif node_type == "scope":
                     base.update(scope_type=row[1], title=row[2])
                 elif node_type == "community":
@@ -2081,17 +2228,14 @@ def _neighbors_impl(req: NeighborsRequest):
         target_refs.update((edge[1], edge[2]) for edge in filtered)
 
     hydrated = _hydrate_neighbor_nodes(
-        {(node_type, node_id) for node_type, node_id, _key in source_refs}
-        | target_refs
+        {(node_type, node_id) for node_type, node_id, _key in source_refs} | target_refs
     )
     next_cursor: dict[str, int] = {}
     results = []
     for node_type, node_id, cursor_key, candidate_edges in candidates:
         source = hydrated.get((node_type, node_id))
         visible_edges = [
-            edge
-            for edge in candidate_edges
-            if (edge[1], edge[2]) in hydrated
+            edge for edge in candidate_edges if (edge[1], edge[2]) in hydrated
         ]
         offset = max(0, int(req.cursor.get(cursor_key, 0)))
         page = visible_edges[offset : offset + req.limit_per_node]

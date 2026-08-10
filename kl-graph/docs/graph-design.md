@@ -35,12 +35,33 @@ hash is detected and warned about; replacement processing is intentionally a
 TODO in the current version. Timestamps remain ordering metadata and are never
 used as ingestion watermarks.
 
-### Extraction Items
+### Source-processing plans and Extraction Items
+
+Chunking and extraction are coordinated by a source-processing strategy. Given
+the normalized, deduplicated source units for one source type, the strategy
+produces an **Ingestion Plan** containing:
+
+- persistent retrieval Chunks;
+- ordered `chunk_units` lineage, including source-relative spans when a unit is
+  split;
+- ephemeral Extraction Items used as LLM targets; and
+- explicit Extraction Projections from each item to one or more stored Chunks.
+
+This plan is the contract between source-specific policy and the generic
+pipeline. A strategy owns storage boundaries, extraction boundaries, context,
+lineage, and projection policy. It does not own LLM batching/concurrency,
+retries, embeddings, entity merging, cleanup, or storage backend mechanics.
+The complete plan is persisted with an active ingestion workset, so a resumed
+Phase B never has to reconstruct a complete extraction target from possibly
+fragmented stored chunks. Strategy and plan-schema versions are part of the
+durable contract.
 
 An **Extraction Item** is an ephemeral LLM work unit, not a graph node. It is
-derived from a source unit or stored chunk and records its target stored chunk,
-optional source-unit identity, source-specific strategy version, and read-only
-context. Extraction granularity is independent from retrieval granularity:
+derived from a source unit or stored chunk and records source-unit identity,
+source-specific strategy version, and read-only context. Its stable identity is
+based on source/unit identity and extraction policy, not accidentally on the
+retrieval chunk containing it. Extraction granularity is independent from
+retrieval granularity:
 
 - chat session slices remain stored/retrieval Chunks, while each member message
   is an extraction target and nearby messages are context only; an inlined
@@ -50,10 +71,22 @@ context. Extraction granularity is independent from retrieval granularity:
   Chunk at a time with source-appropriate context and rules;
 - unknown source types extract the stored Chunk itself.
 
-Entities and facts produced from an Extraction Item are projected onto its
-target Chunk. Facts retain extraction-item/source-unit provenance, and fact
-identity is derived from extraction-item identity plus fact text. Extraction
-items never appear as edge endpoints.
+An **Extraction Projection** identifies a primary Chunk and any supporting
+Chunks covered by an item. It also declares whether each Chunk receives
+`MENTIONS` and/or `STATES` evidence. A fact is created once, retains the primary
+Chunk in `source_chunk_id`, and has one `STATES` edge to every projected
+evidence Chunk. Thus a complete message split across two retrieval chunks is
+extracted once and remains reachable from both chunks without double-counting
+the fact. `MENTIONS` should target chunks whose own text contains the evidence;
+source strategies may refine this with name/span matching. Extraction items
+never appear as graph edge endpoints.
+
+The built-in session-chat strategy extracts each complete message once while
+storing session slices. A future fixed-size strategy can inherit the common
+planning base and override storage-chunk construction, item construction,
+lineage spans, and projection selection; generic pipeline and graph modules do
+not change. Extracting isolated halves is reserved for an explicit
+over-context-limit fallback and must use distinct extraction-item identities.
 
 Extraction strategy selection is explicit configuration keyed by `source_type`.
 The current strategy vocabulary is `chat_message`, `document_chunk`, and
@@ -76,7 +109,7 @@ the containing extraction item.
 |------|-------------|------------|
 | **Chunk** | The framework-owned retrieval unit. It can contain several small source units or one ordered segment of a large unit. | `id`, `content`, `content_hash`, `source_type`, `timestamp`, `source_ref`, `metadata` |
 | **Entity** | A named thing extracted from chunks. Typed by `entity_type` (open vocabulary). Carries a short accumulated `description` and reversible cleanup state. Quarantined entities retain provenance but are excluded from retrieval, embedding, new edges, and improvement. | `id`, `name`, `entity_type`, `first_seen`, `last_seen`, `mention_count`, `description`, `quality_status` |
-| **Fact** | A reified claim/event extracted from an extraction item and projected onto its target chunk. Typed by `fact_type` (open vocabulary). Carries confidence and fine-grained provenance. | `id`, `text`, `fact_type`, `timestamp`, `confidence`, `source_chunk_id`, `source_unit_id`, `extraction_item_id` |
+| **Fact** | A reified claim/event extracted once from an extraction item and projected onto one or more evidence chunks. `source_chunk_id` is the primary chunk; additional provenance is represented by `STATES`. Typed by `fact_type` (open vocabulary). | `id`, `text`, `fact_type`, `timestamp`, `confidence`, `source_chunk_id`, `source_unit_id`, `extraction_item_id` |
 | **Scope** | A container that groups related chunks: a conversation, a document, a meeting, a mail thread. Typed by `scope_type` (open vocabulary). | `id`, `scope_type`, `title`, `metadata` |
 | **Community** | A cluster of entities or facts at a given resolution level. Generated by periodic detection. | `id`, `level`, `node_type`, `summary`, `tags`, `member_count` |
 
@@ -147,7 +180,7 @@ remaining delta. The same workflow handles the initial build and later updates.
 |------|-----------|----------|
 | 1.1 | **Load and deduplicate units** — parse local artifacts, identify `(source_id, source_type, unit_id)`, and filter previously processed units | New source-unit list |
 | 1.2 | **Create scopes** — one Scope node per conversation / document / meeting | Scope nodes |
-| 1.3 | **Chunk + persist workset** — create retrieval chunks and atomically write `chunks`, `units`, ordered `chunk_units`, and the batch's `ingest_batch_chunks` manifest | Chunk nodes + resumable unit lineage |
+| 1.3 | **Plan + persist workset** — apply source strategies and atomically write retrieval chunks, units, ordered/spanned `chunk_units`, extraction items/projections, and the batch manifest | Chunk nodes + resumable ingestion plan |
 | 1.4 | **Embed chunks** — batch embed all chunks into vector store | Chunk vectors |
 | 1.5 | **PART_OF edges** — link each chunk to its scope | PART_OF edges |
 | 1.6 | **TEMPORAL edges** — link consecutive chunks within each scope | TEMPORAL edges |
@@ -166,14 +199,14 @@ remaining delta. The same workflow handles the initial build and later updates.
 
 | Step | Operation | Produces |
 |------|-----------|----------|
-| 1.8 | **Source-aware LLM extraction** — strategy-selected extraction items (one target message with context for chat; semantic chunks for document sources), cached in separate bounded `extraction_cache.db` | Extraction cache |
+| 1.8 | **Source-aware LLM extraction** — execute the persisted strategy-selected extraction items (one complete target message with context for chat; semantic chunks for document sources), cached in separate bounded `extraction_cache.db` | Extraction cache |
 | 1.9 | **Build entities** — merge by normalized name, create Person entities from chunk authors | Entity nodes |
 | 1.10 | **Build facts** — create Fact nodes from extraction results | Fact nodes |
 | 1.10a | **Optional entity cleanup** — rank suspicious entities and spend a configured LLM budget on KEEP/RETYPE/QUARANTINE decisions; disabled by default | Quality decisions / reversible quarantine |
 | 1.11 | **Embed entities + facts** — into vector store | Entity/Fact vectors |
 | 1.12 | **MENTIONS edges** — chunk → entity from extraction results | MENTIONS edges |
 | 1.13 | **AUTHORED_BY edges** — chunk → Person entity from sender/author metadata | AUTHORED_BY edges |
-| 1.14 | **STATES edges** — fact → source chunk | STATES edges |
+| 1.14 | **STATES edges** — project each singular fact onto every evidence chunk selected by its ingestion plan | STATES edges |
 | 1.15 | **ABOUT edges** — fact → subject/object entity | ABOUT edges |
 
 ##### Improve (requires full graph)
@@ -203,6 +236,15 @@ not automatically alter it for RPM limits. Values greater than one must retain
 strict per-slot alignment and validation. Cache identity includes extraction
 item ID, model, prompt version, strategy version, and schema version so results
 from incompatible extraction contracts cannot be replayed silently.
+
+Provider/response retries occur inside the extraction step, not by re-ingesting
+source units. Nested SDK retries are disabled so attempt counts stay observable.
+Successful batch slots are cached immediately; only failed slots are retried
+with bounded backoff. Items that exhaust the attempt budget are excluded from
+graph projection and recorded in a compact per-run failure manifest. The run
+finishes with a visible `partial` outcome rather than treating those items as
+valid empty extractions. Failure storage is bounded to the latest started run
+per `source_id` and is exposed through the ingestion API.
 
 #### Optional budgeted LLM entity cleanup
 

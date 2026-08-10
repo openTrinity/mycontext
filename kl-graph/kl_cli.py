@@ -425,6 +425,10 @@ def status():
             click.echo(line)
             if ing.get("error"):
                 click.echo(f"    error: {ing['error']}")
+            if ing.get("outcome") == "partial" or ing.get("extraction_failed"):
+                click.echo(f"    warning: {ing.get('warning') or 'partial extraction'}")
+                if ing.get("failures_url"):
+                    click.echo(f"    failures: {ing['failures_url']}")
     else:
         click.echo(f"kl-server: not running (port {KL_SERVER_PORT})")
 
@@ -788,10 +792,17 @@ def search(query: str, collection: str, top_k: int, json_out: bool, pretty: bool
 @click.argument("query")
 @click.option("--top-k", "-k", type=int, default=10, help="Number of items")
 @click.option(
-    "--phase2",
-    is_flag=True,
-    help="Force LLM synthesis (Phase 2), set to False by default",
+    "--phase2/--no-phase2",
+    default=None,
+    help="Override the server's default answer-synthesis setting",
 )
+@click.option(
+    "--entity", "entities", multiple=True, help="Caller-identified entity mention"
+)
+@click.option(
+    "--entity-type", "entity_types", multiple=True, help="Expected entity type"
+)
+@click.option("--fact-type", "fact_types", multiple=True, help="Expected fact type")
 @click.option("--seed-k", type=int, default=6, help="Number of graph seeds")
 @click.option("--radius", "-r", type=int, default=1, help="Graph hops to expand")
 @click.option("--max-nodes", type=int, default=50, help="Total graph node cap")
@@ -806,7 +817,10 @@ def search(query: str, collection: str, top_k: int, json_out: bool, pretty: bool
 def ask(
     query: str,
     top_k: int,
-    phase2: bool,
+    phase2: bool | None,
+    entities: tuple[str, ...],
+    entity_types: tuple[str, ...],
+    fact_types: tuple[str, ...],
     seed_k: int,
     radius: int,
     max_nodes: int,
@@ -815,24 +829,34 @@ def ask(
 ):
     """Hybrid retrieval + interactive graph walk (one call).
 
-    Runs the query engine (dense + sparse + RRF, optional Phase-2 synthesis via
-    --phase2) and, when the graph is built, walks the depth-1 frontier from the
-    entities/facts the query extracted — returning ``items`` plus a hoppable
+    Runs the query engine (dense + sparse + RRF, configurable Phase-2 synthesis)
+    and, when the graph is built, walks the depth-1 frontier from the
+    entities/facts in caller-supplied intent or the server rewrite — returning
+    ``items`` plus a hoppable
     ``seeds``/``nodes``/``edges``/``expandable`` graph view (feed an expandable
     id + the ``cursor`` to ``kl hop`` to go deeper). Output is JSON by default;
     --pretty for a human view.
     """
+    payload = {
+        "query": query,
+        "top_k": top_k,
+        "seed_k": seed_k,
+        "radius": radius,
+        "max_nodes": max_nodes,
+    }
+    if phase2 is not None:
+        payload["force_phase2"] = phase2
+    if entities or entity_types or fact_types:
+        payload["intent"] = {
+            "entities": list(entities),
+            "entity_types": list(entity_types),
+            "fact_types": list(fact_types),
+        }
+
     data = _server_request(
         "POST",
         "/ask",
-        json={
-            "query": query,
-            "top_k": top_k,
-            "force_phase2": phase2,
-            "seed_k": seed_k,
-            "radius": radius,
-            "max_nodes": max_nodes,
-        },
+        json=payload,
     )
 
     # JSON is the default; --pretty opts into the human view, but an explicit
@@ -1198,7 +1222,12 @@ def chunk(chunk_ids: tuple[str, ...], json_out: bool, pretty: bool):
 
 @cli.command()
 @click.argument("name", required=False)
-@click.option("--id", "entity_id", default=None, help="Look up by entity id (exact or prefix) instead of name")
+@click.option(
+    "--id",
+    "entity_id",
+    default=None,
+    help="Look up by entity id (exact or prefix) instead of name",
+)
 @click.option("--no-similar", is_flag=True, help="Omit ENTITY_SIMILAR neighbors")
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="JSON output")
 def entity(name: str | None, entity_id: str | None, no_similar: bool, json_out: bool):
@@ -1268,7 +1297,12 @@ def entity(name: str | None, entity_id: str | None, no_similar: bool, json_out: 
 
 @cli.command()
 @click.argument("entity_id", required=False)
-@click.option("--fact-id", "fact_id", default=None, help="Look up a single fact by id (exact/prefix) instead of by entity")
+@click.option(
+    "--fact-id",
+    "fact_id",
+    default=None,
+    help="Look up a single fact by id (exact/prefix) instead of by entity",
+)
 @click.option("--limit", "-n", type=int, default=20, help="Max facts to show")
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="JSON output")
 def facts(entity_id: str | None, fact_id: str | None, limit: int, json_out: bool):

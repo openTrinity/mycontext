@@ -88,25 +88,58 @@ class _FakeQdrant:
     def search(self, collection, vector, limit=20, score_threshold=None):
         if collection == "facts":
             return [
-                {"score": 0.9, "payload": {"fact_id": "f1", "text": "悟空负责部署平台",
-                                           "fact_type": "DECISION", "timestamp": 100,
-                                           "confidence": 0.9}},
-                {"score": 0.5, "payload": {"fact_id": "f2", "text": "八戒待定",
-                                           "fact_type": "STATUS", "timestamp": 90,
-                                           "confidence": 0.5}},
+                {
+                    "score": 0.9,
+                    "payload": {
+                        "fact_id": "f1",
+                        "text": "悟空负责部署平台",
+                        "fact_type": "DECISION",
+                        "timestamp": 100,
+                        "confidence": 0.9,
+                    },
+                },
+                {
+                    "score": 0.5,
+                    "payload": {
+                        "fact_id": "f2",
+                        "text": "八戒待定",
+                        "fact_type": "STATUS",
+                        "timestamp": 90,
+                        "confidence": 0.5,
+                    },
+                },
             ]
         if collection == "chunks":
             return [
-                {"score": 0.8, "payload": {"chunk_id": "c1", "content": "关于悟空",
-                                           "source_type": "message", "sender": "唐僧",
-                                           "timestamp": 100}},
+                {
+                    "score": 0.8,
+                    "payload": {
+                        "chunk_id": "c1",
+                        "content": "关于悟空",
+                        "source_type": "message",
+                        "sender": "唐僧",
+                        "timestamp": 100,
+                    },
+                },
             ]
         if collection == "entities":
             return [
-                {"score": 0.95, "payload": {"entity_id": "e1", "name": "悟空",
-                                            "entity_type": "Project"}},
-                {"score": 0.85, "payload": {"entity_id": "e2", "name": "八戒",
-                                            "entity_type": "Person"}},
+                {
+                    "score": 0.95,
+                    "payload": {
+                        "entity_id": "e1",
+                        "name": "悟空",
+                        "entity_type": "Project",
+                    },
+                },
+                {
+                    "score": 0.85,
+                    "payload": {
+                        "entity_id": "e2",
+                        "name": "八戒",
+                        "entity_type": "Person",
+                    },
+                },
             ]
         return []
 
@@ -196,6 +229,27 @@ def test_aquery_matches_query_substring_path(monkeypatch) -> None:
     assert sync_out == async_out
 
 
+def test_caller_rewrite_skips_llm_and_still_resolves_entities(monkeypatch) -> None:
+    import kl_graph.query.engine as emod
+
+    async def unexpected_rewrite(*_args, **_kwargs):
+        raise AssertionError("caller intent must bypass the rewrite LLM")
+
+    monkeypatch.setattr(emod, "arewrite_query", unexpected_rewrite)
+    supplied = QueryRewrite(
+        entities_from_query=["悟空"],
+        entity_type_keywords=["PROJECT"],
+        fact_type_keywords=["DECISION"],
+    )
+
+    result = asyncio.run(
+        _make_engine().aquery("谁负责部署平台", query_rewrite=supplied)
+    )
+
+    assert result.entities_found == ["悟空", "八戒"]
+    assert result.items
+
+
 # ── 2. Reentrancy: concurrent aquery() must not cross-contaminate ──────────────
 
 
@@ -209,10 +263,12 @@ def test_concurrent_aqueries_do_not_crosstalk(monkeypatch) -> None:
     """
     import kl_graph.query.engine as emod
 
-    rw_a = QueryRewrite(entities_from_query=["悟空"], entity_type_keywords=[],
-                        fact_type_keywords=[])
-    rw_b = QueryRewrite(entities_from_query=["八戒"], entity_type_keywords=[],
-                        fact_type_keywords=[])
+    rw_a = QueryRewrite(
+        entities_from_query=["悟空"], entity_type_keywords=[], fact_type_keywords=[]
+    )
+    rw_b = QueryRewrite(
+        entities_from_query=["八戒"], entity_type_keywords=[], fact_type_keywords=[]
+    )
 
     async def fake_arewrite_query(model, question, type_pool, **k):
         await asyncio.sleep(0)  # force A and B to interleave mid-flight
@@ -246,11 +302,27 @@ def test_concurrent_aqueries_do_not_crosstalk(monkeypatch) -> None:
         def search(self, collection, vector, limit=20, score_threshold=None):
             if collection == "entities":
                 if vector and vector[0] == 1.0:
-                    return [{"score": 0.95, "payload": {"entity_id": "e1",
-                             "name": "悟空", "entity_type": "Project"}}]
+                    return [
+                        {
+                            "score": 0.95,
+                            "payload": {
+                                "entity_id": "e1",
+                                "name": "悟空",
+                                "entity_type": "Project",
+                            },
+                        }
+                    ]
                 if len(vector) > 1 and vector[1] == 1.0:
-                    return [{"score": 0.9, "payload": {"entity_id": "e2",
-                             "name": "八戒", "entity_type": "Person"}}]
+                    return [
+                        {
+                            "score": 0.9,
+                            "payload": {
+                                "entity_id": "e2",
+                                "name": "八戒",
+                                "entity_type": "Person",
+                            },
+                        }
+                    ]
                 return []
             return super().search(collection, vector, limit, score_threshold)
 

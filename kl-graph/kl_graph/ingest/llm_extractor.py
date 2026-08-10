@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -44,6 +46,44 @@ EXTRACTION_SCHEMA_VERSION = "extraction-v2"
 Extractable = Chunk | ExtractionItem
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ExtractionFailure:
+    """One extraction item that exhausted all in-step attempts."""
+
+    extraction_item_id: str
+    source_unit_id: str | None
+    target_chunk_id: str
+    error_type: str
+    message: str
+    attempts: int
+
+    def as_dict(self) -> dict:
+        return {
+            "extraction_item_id": self.extraction_item_id,
+            "source_unit_id": self.source_unit_id,
+            "target_chunk_id": self.target_chunk_id,
+            "error_type": self.error_type,
+            "message": self.message,
+            "attempts": self.attempts,
+        }
+
+
+def _failure_type(result: dict) -> str:
+    explicit = result.get("_error_type")
+    if explicit:
+        return str(explicit)
+    message = str(result.get("_error", "")).lower()
+    if "rate" in message or "429" in message or "throttl" in message:
+        return "rate_limit"
+    if "timeout" in message:
+        return "timeout"
+    if "missing" in message:
+        return "missing_slot"
+    if "json" in message or "shape" in message or "response" in message:
+        return "invalid_response"
+    return "transient_error"
 
 
 def _sender_of(chunk: Extractable) -> str:
@@ -314,7 +354,10 @@ class ExtractedEntity(BaseModel):
         description="Canonical name. Use full proper nouns, never pronouns."
     )
     entity_type: str = Field(
-        description="One of: Person, System, Project, Team, Concept, Event"
+        description=(
+            "One of: Person, System, Project, Organization, Location, Document, "
+            "Unknown"
+        )
     )
     description: str = Field(
         default="",
@@ -351,7 +394,7 @@ class ExtractedFact(BaseModel):
         description="Natural language statement preserving all specifics"
     )
     fact_type: str = Field(
-        description="One of: DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"
+        description="One of: DECISION, DELEGATE, STATUS, CAUSAL, GENERAL"
     )
     confidence: float = Field(
         default=0.9,
@@ -421,8 +464,8 @@ If the message is trivial (greetings, emoji, simple acknowledgments), return emp
 Example output:
 {"实体":[{"名称":"张三","类型":"Person","描述":"负责排查线上问题"},{"名称":"SystemA","类型":"System"}],"事实":[{"主体":"张三","客体":"SystemA","内容":"张三负责SystemA的线上问题排查","事类":"STATUS","置信":0.9}]}
 
-类型: Person, System, Project, Team, Concept, Event
-事类: DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"""
+类型: Person, System, Project, Organization, Location, Document, Unknown
+事类: DECISION, DELEGATE, STATUS, CAUSAL, GENERAL"""
 
 SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 
@@ -463,8 +506,8 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 示例输出：
 {"实体":[{"名称":"张三","类型":"Person","描述":"负责排查线上问题"},{"名称":"SystemA","类型":"System"}],"事实":[{"主体":"张三","客体":"SystemA","内容":"张三负责SystemA的线上问题排查","事类":"STATUS","置信":0.9}]}
 
-类型取值：Person, System, Project, Team, Concept, Event
-事类取值：DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"""
+类型取值：Person, System, Project, Organization, Location, Document, Unknown
+事类取值：DECISION, DELEGATE, STATUS, CAUSAL, GENERAL"""
 
 SYSTEM_PROMPT = {
     "zh": SYSTEM_PROMPT_CN,
@@ -741,19 +784,42 @@ def _validated_result_or_none(raw: dict) -> dict | None:
     return result
 
 
-def _failure_result(error: str, *, transient: bool) -> dict:
+def _failure_result(
+    error: str, *, transient: bool, retry_after: float | None = None
+) -> dict:
     """Build a non-cacheable, retry-eligible failure outcome.
 
-    ``transient=True`` marks it retryable so a later run re-extracts the chunk
-    instead of the cache being poisoned with an empty extraction. The
+    ``transient=True`` marks it retryable by the current extraction step instead
+    of poisoning the cache with an empty extraction. The
     ``entities``/``facts`` keys are present (empty) so downstream code that
     reads them before the ``_error`` check does not KeyError.
     """
-    return {"entities": [], "facts": [], "_error": error, "_transient": transient}
+    result = {
+        "entities": [],
+        "facts": [],
+        "_error": error,
+        "_transient": transient,
+    }
+    if retry_after is not None:
+        result["_retry_after"] = retry_after
+    return result
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    for attr in ("retry_after", "retry_after_seconds"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    headers = getattr(exc, "headers", None) or {}
+    try:
+        value = headers.get("retry-after") or headers.get("Retry-After")
+        return float(value) if value is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 class _RetryableResponseError(Exception):
-    """A response-level problem worth retrying next run (never cached).
+    """A response-level problem worth retrying in-step (never cached).
 
     Raised by response validation for empty/null content, truncation, or
     malformed JSON — the caller turns it into a ``_transient`` failure result.
@@ -855,6 +921,7 @@ class LLMExtractor:
         provider: str = LLM_PROVIDER,
         api_key: str | None = None,
         max_concurrent: int = 50,
+        max_retries: int = LLM_MAX_RETRIES,
         cache_max_entries: int = EXTRACTION_CACHE_MAX_ENTRIES,
         legacy_cache_db: Path | None = None,
     ):
@@ -872,6 +939,8 @@ class LLMExtractor:
         self.base_url = base_url
         self.api_key = provider_api_key(provider, api_key)
         self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.max_retries = max(0, int(max_retries))
+        self.failures: list[ExtractionFailure] = []
 
         # Stats
         self.stats = {
@@ -955,8 +1024,8 @@ class LLMExtractor:
         """Persist a result IFF it is a validated success (no ``_error`` marker).
 
         Success-only writes are the cache-poisoning guard: a failed, truncated,
-        malformed, or dropped outcome carries ``_error`` and is never stored, so
-        a later run re-extracts the chunk instead of replaying an empty result.
+        malformed, or dropped outcome carries ``_error`` and is never stored;
+        the current extraction step retries it before reporting exhaustion.
         A genuinely empty success (``{"entities": [], "facts": []}`` with no
         ``_error``) IS cached. Hard stops never reach here — they raise upstream.
         """
@@ -1008,7 +1077,7 @@ class LLMExtractor:
         never be cached:
 
         - empty ``choices`` or null content → ``_RetryableResponseError``
-          (server misbehaviour, retry next run);
+          (server misbehaviour, retry in-step);
         - truncation — ``finish_reason == "length"`` OR a provider-specific
           ``stop_reason`` of ``max_tokens``/``length`` — →
           ``_RetryableResponseError`` (the JSON is necessarily incomplete);
@@ -1060,7 +1129,7 @@ class LLMExtractor:
 
         Raises:
             _RetryableResponseError: malformed JSON or a non-object top level
-                (retry next run rather than caching a bad outcome).
+                (retry in-step rather than caching a bad outcome).
         """
         try:
             parsed = json.loads(self._strip_code_blocks(content))
@@ -1098,7 +1167,9 @@ class LLMExtractor:
                     temperature=0.1,
                     max_tokens=8192,
                     timeout=240,  # per-request timeout (seconds)
-                    num_retries=LLM_MAX_RETRIES,  # litellm's own retry/backoff
+                    # Retrying is owned by this extractor so failed slots and
+                    # attempt counts remain visible to ingestion status.
+                    num_retries=0,
                 )
             except _HardStopResponseError:
                 raise
@@ -1111,7 +1182,9 @@ class LLMExtractor:
                     )
                     raise
                 self.stats["llm_errors"] += 1
-                return _failure_result(str(e), transient=True)
+                return _failure_result(
+                    str(e), transient=True, retry_after=_retry_after_seconds(e)
+                )
 
             self._track_usage(resp)
             try:
@@ -1164,12 +1237,42 @@ class LLMExtractor:
             msg.context if isinstance(msg, ExtractionItem)
             else self._format_context(conversation_messages, target_idx)
         )
-        result = await self._call_llm(msg, context)
+        result: dict = _failure_result("not attempted", transient=True)
+        attempts = self.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            result = await self._call_llm(msg, context)
+            if not _is_failure_result(result):
+                break
+            if attempt < attempts:
+                await self._wait_before_retry(
+                    attempt, 1, result.get("_retry_after")
+                )
 
-        # Scrub entity names + fact involved_entities before caching.
+        self._prepare_result(msg, result)
+        if _is_failure_result(result):
+            self._record_failure(msg, result, attempts)
+        return result
+
+    async def _wait_before_retry(
+        self, attempt: int, item_count: int, retry_after: float | None = None
+    ) -> None:
+        delay = (
+            min(float(retry_after), 30.0)
+            if retry_after is not None and retry_after > 0
+            else min(2.0 * (2 ** (attempt - 1)), 30.0) + random.uniform(0, 1)
+        )
+        logger.warning(
+            "Retrying %d failed extraction item(s), attempt %d/%d after %.1fs",
+            item_count,
+            attempt + 1,
+            self.max_retries + 1,
+            delay,
+        )
+        await asyncio.sleep(delay)
+
+    def _prepare_result(self, msg: Extractable, result: dict) -> bool:
+        """Normalize, annotate, and cache one successful extraction result."""
         _normalize_result(result)
-
-        # Annotate with metadata for traceability
         result["_msg_id"] = msg.id
         result["_target_chunk_id"] = getattr(msg, "target_chunk_id", msg.id)
         result["_source_unit_id"] = getattr(msg, "source_unit_id", None)
@@ -1178,13 +1281,26 @@ class LLMExtractor:
         result["_msg_sender"] = _sender_of(msg)
         result["_msg_timestamp"] = msg.timestamp
         result["_msg_content_preview"] = msg.content[:200]
-
-        if not result["entities"] and not result["facts"]:
+        if _is_failure_result(result):
+            return False
+        if not result.get("entities") and not result.get("facts"):
             self.stats["empty_results"] += 1
-
-        # Cache the result
         self._write_cache(msg, result)
-        return result
+        return True
+
+    def _record_failure(
+        self, msg: Extractable, result: dict, attempts: int
+    ) -> ExtractionFailure:
+        failure = ExtractionFailure(
+            extraction_item_id=msg.id,
+            source_unit_id=getattr(msg, "source_unit_id", None),
+            target_chunk_id=getattr(msg, "target_chunk_id", msg.id),
+            error_type=_failure_type(result),
+            message=str(result.get("_error", "extraction failed"))[:500],
+            attempts=attempts,
+        )
+        self.failures.append(failure)
+        return failure
 
     async def _call_llm_batch(self, messages: list[Extractable]) -> list[dict]:
         """Make one LLM call to extract from multiple messages at once."""
@@ -1223,7 +1339,9 @@ class LLMExtractor:
                     temperature=0.1,
                     max_tokens=16384,
                     timeout=LLM_BATCH_TIMEOUT,  # per-request timeout (seconds)
-                    num_retries=LLM_MAX_RETRIES,  # litellm's own retry/backoff
+                    # Avoid nested/opaque SDK retries; _process_batch retries
+                    # only the slots that failed this attempt.
+                    num_retries=0,
                 )
             except _HardStopResponseError:
                 raise
@@ -1246,7 +1364,12 @@ class LLMExtractor:
                     "Batch LLM error (%d msgs, first=%s, transient): %s: %s",
                     len(messages), first_id, type(e).__name__, str(e)[:300],
                 )
-                return self._batch_failure(messages, str(e), transient=True)
+                failures = self._batch_failure(messages, str(e), transient=True)
+                retry_after = _retry_after_seconds(e)
+                if retry_after is not None:
+                    for failure in failures:
+                        failure["_retry_after"] = retry_after
+                return failures
 
             self._track_usage(resp)
             try:
@@ -1329,6 +1452,10 @@ class LLMExtractor:
             all_messages: All chunks (any order)
             progress_callback: optional callable(done, total)
         """
+        # One extractor can be reused, but the public failure manifest always
+        # describes this invocation only.
+        self.failures.clear()
+
         # Separate into messages needing extraction and trivial ones
         to_extract = []
         for msg in all_messages:
@@ -1347,7 +1474,10 @@ class LLMExtractor:
             f"  Batches of {BATCH_SIZE}: "
             f"{(len(to_extract) + BATCH_SIZE - 1) // BATCH_SIZE} LLM calls"
         )
-        print(f"  Timeout per batch: {LLM_BATCH_TIMEOUT}s | Max retries: {LLM_MAX_RETRIES}")
+        print(
+            f"  Timeout per batch: {LLM_BATCH_TIMEOUT}s | "
+            f"In-step retries: {self.max_retries}"
+        )
 
         # Create all batch tasks. Each is wrapped so the progress callback fires
         # as every batch completes (not once per gather-chunk), giving smooth
@@ -1379,10 +1509,11 @@ class LLMExtractor:
 
     @staticmethod
     def _missing_slot() -> dict:
-        """Marker for a batch slot the model dropped (retry-eligible, uncached).
+        """Marker for a batch slot the model dropped (retryable, uncached).
 
         Returned instead of a bare empty result so a message the LLM omitted is
-        NOT persisted as a valid empty extraction; the next run re-extracts it.
+        NOT persisted as a valid empty extraction; _process_batch retries it in
+        the current extraction step.
         """
         return _failure_result("missing from batch response", transient=True)
 
@@ -1432,52 +1563,67 @@ class LLMExtractor:
         return by_index
 
     async def _process_batch(self, messages: list[Extractable]) -> None:
-        """Process a single batch: call LLM and cache results.
+        """Process a batch, retrying only failed slots inside this step.
 
         The per-batch timeout is applied INSIDE _call_llm_batch (around the
         actual LLM call, not the semaphore wait), so queued batches waiting
-        for a concurrency slot don't spuriously time out.
+        for a concurrency slot don't spuriously time out. Successful slots are
+        cached immediately and never sent again. Exhausted slots become
+        structured failures for the run's bounded warning manifest.
         """
-        batch_results = await self._call_llm_batch(messages)
-        by_index = self._index_by_msg_index(batch_results)
+        pending = list(messages)
+        last_failures: dict[str, dict] = {}
+        max_attempts = self.max_retries + 1
 
-        for i, msg in enumerate(messages):
-            try:
+        for attempt in range(1, max_attempts + 1):
+            batch_results = await self._call_llm_batch(pending)
+            by_index = self._index_by_msg_index(batch_results)
+            retry_items: list[Extractable] = []
+
+            for i, msg in enumerate(pending):
                 result = self._result_for_slot(i, batch_results, by_index)
                 if not isinstance(result, dict):
-                    # Defensive: a non-dict slipped through slot resolution.
                     result = _failure_result(
                         "non-dict result entry", transient=True
                     )
+                # Validation/response failures are explicit result markers.
+                # Local normalization or cache-write failures must propagate;
+                # retrying the remote model cannot repair local persistence.
+                if self._prepare_result(msg, result):
+                    last_failures.pop(msg.id, None)
+                    continue
 
-                # Scrub entity names + fact involved_entities before caching.
-                _normalize_result(result)
+                last_failures[msg.id] = result
+                retry_items.append(msg)
 
-                # Annotate with metadata
-                result["_msg_id"] = msg.id
-                result["_target_chunk_id"] = getattr(msg, "target_chunk_id", msg.id)
-                result["_source_unit_id"] = getattr(msg, "source_unit_id", None)
-                result["_strategy_version"] = getattr(msg, "strategy_version", None)
-                result["_prompt_version"] = getattr(msg, "prompt_version", None)
-                result["_msg_sender"] = _sender_of(msg)
-                result["_msg_timestamp"] = msg.timestamp
-                result["_msg_content_preview"] = msg.content[:200]
-            except Exception as e:  # noqa: BLE001 - one bad slot must not abort the batch
-                logger.error(
-                    "Skipping malformed batch slot %d (chunk %s): %s: %s",
-                    i, msg.id[:20], type(e).__name__, str(e)[:200],
+            if not retry_items:
+                return
+            pending = retry_items
+            if attempt < max_attempts:
+                retry_after = max(
+                    (
+                        float(failure.get("_retry_after"))
+                        for failure in last_failures.values()
+                        if failure.get("_retry_after") is not None
+                    ),
+                    default=None,
                 )
-                self.stats["llm_errors"] += 1
-                continue
+                await self._wait_before_retry(
+                    attempt, len(pending), retry_after
+                )
 
-            if _is_failure_result(result):
-                # Retry-eligible failure (dropped slot, malformed entry): don't
-                # cache; the next run re-extracts this chunk.
-                continue
-            if not result.get("entities") and not result.get("facts"):
-                self.stats["empty_results"] += 1
-
-            self._write_cache(msg, result)
+        for msg in pending:
+            self._record_failure(
+                msg,
+                last_failures.get(msg.id)
+                or _failure_result("extraction attempts exhausted", transient=True),
+                max_attempts,
+            )
+        logger.warning(
+            "%d extraction item(s) exhausted %d in-step attempt(s)",
+            len(pending),
+            max_attempts,
+        )
 
     def print_stats(self):
         """Print extraction statistics."""

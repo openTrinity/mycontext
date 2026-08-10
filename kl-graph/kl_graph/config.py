@@ -217,7 +217,14 @@ class QueryEmbeddingConfig(_ConfigModel):
     timeout: float
 
 
+class AskConfig(_ConfigModel):
+    """Defaults for the combined retrieval and graph-walk endpoint."""
+
+    synthesize: bool = False
+
+
 class QueryPipelineConfig(_ConfigModel):
+    ask: AskConfig = AskConfig()
     embedding: QueryEmbeddingConfig
     phase1_message_limit: int
     phase1_fact_limit: int

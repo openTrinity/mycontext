@@ -39,8 +39,8 @@ def _resp(content: str):
     return type("R", (), {"choices": [choice], "usage": None})()
 
 
-def test_extract_then_pipeline_replay_loads_only_successes(monkeypatch, tmp_path):
-    """extract_all_flat over a mixed batch → only the success is replayable."""
+def test_extract_then_pipeline_replay_retries_dropped_slot(monkeypatch, tmp_path):
+    """A dropped slot is retried alone and becomes replayable on success."""
     knowledge_db = tmp_path / "knowledge.db"
     cache_db = tmp_path / "extraction_cache.db"
 
@@ -64,14 +64,14 @@ def test_extract_then_pipeline_replay_loads_only_successes(monkeypatch, tmp_path
         sqlite_path=knowledge_db, cache_db=cache_db, store=object()
     )
     pipe._load_extraction_cache()
-    assert "c0" in pipe.extraction_results  # success replayed
-    assert "c1" not in pipe.extraction_results  # dropped slot never stored
+    assert "c0" in pipe.extraction_results
+    assert "c1" in pipe.extraction_results  # retried alone, then stored
     assert pipe.extraction_results["c0"]["entities"] == [{"name": "X"}]
 
     # Cross-check the raw store agrees.
     store = ExtractionCacheStore(cache_db)
-    assert store.count() == 1
-    assert store.all_results(model).keys() == {"c0"}
+    assert store.count() == 2
+    assert store.all_results(model).keys() == {"c0", "c1"}
     store.close()
     pipe.close()
 

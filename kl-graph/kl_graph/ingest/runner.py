@@ -23,6 +23,7 @@ from kl_graph.ingest.improvement import (
     validate_improve_mode,
 )
 from kl_graph.ingest.pipeline import KEEP_EXTRACTION_CACHE, IngestionPipeline
+from kl_graph.ingest.llm_extractor import ExtractionFailure
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,55 @@ class IngestResult:
     units_skipped: int
     units_processed: int
     chunks_created: int
+    extraction_total: int = 0
+    extraction_succeeded: int = 0
+    extraction_failed: int = 0
+    failures: tuple[ExtractionFailure, ...] = ()
+
+    @property
+    def outcome(self) -> str:
+        return "partial" if self.extraction_failed else "success"
+
+    @property
+    def warning(self) -> str:
+        if not self.extraction_failed:
+            return ""
+        return (
+            f"{self.extraction_failed} extraction item(s) failed after "
+            "in-step retries"
+        )
+
+    def as_checkpoint_dict(self) -> dict:
+        """Serialize the public run outcome into JSON-compatible metadata."""
+        return {
+            "units_discovered": self.units_discovered,
+            "units_skipped": self.units_skipped,
+            "units_processed": self.units_processed,
+            "chunks_created": self.chunks_created,
+            "extraction_total": self.extraction_total,
+            "extraction_succeeded": self.extraction_succeeded,
+            "extraction_failed": self.extraction_failed,
+            "failures": [failure.as_dict() for failure in self.failures],
+        }
+
+    @classmethod
+    def from_checkpoint_dict(cls, raw: dict) -> "IngestResult":
+        """Restore an outcome saved with :meth:`as_checkpoint_dict`."""
+        failures = tuple(
+            ExtractionFailure(**failure)
+            for failure in raw.get("failures", [])
+            if isinstance(failure, dict)
+        )
+        return cls(
+            units_discovered=int(raw.get("units_discovered", 0)),
+            units_skipped=int(raw.get("units_skipped", 0)),
+            units_processed=int(raw.get("units_processed", 0)),
+            chunks_created=int(raw.get("chunks_created", 0)),
+            extraction_total=int(raw.get("extraction_total", 0)),
+            extraction_succeeded=int(raw.get("extraction_succeeded", 0)),
+            extraction_failed=int(raw.get("extraction_failed", len(failures))),
+            failures=failures,
+        )
 
 
 @dataclass(frozen=True)
@@ -199,6 +249,9 @@ async def run_ingestion(
                     logger.warning("Automatic improvement skipped: %s", exc)
             await asyncio.to_thread(pipeline.complete_workset)
             report("done", 1.0, "ingest already complete")
+            saved_result = checkpoint.step_metadata("ingest.complete").get("result")
+            if isinstance(saved_result, dict):
+                return IngestResult.from_checkpoint_dict(saved_result)
             return IngestResult(0, 0, 0, 0)
 
         report("phase_a", 0.0, "starting")
@@ -231,7 +284,23 @@ async def run_ingestion(
             fraction = done / total if total else 1.0
             report("phase_b", 0.4 + 0.3 * fraction, f"extracting: {done}/{total} batches")
 
-        await pipeline.run_extraction(progress_callback=extraction_progress)
+        failures = await pipeline.run_extraction(
+            progress_callback=extraction_progress
+        )
+        failures = tuple(failures or ())
+        extraction_total = len(pipeline.extraction_items)
+        result = IngestResult(
+            units_discovered=result.units_discovered,
+            units_skipped=result.units_skipped,
+            units_processed=result.units_processed,
+            chunks_created=result.chunks_created,
+            extraction_total=extraction_total,
+            extraction_succeeded=max(0, extraction_total - len(failures)),
+            extraction_failed=len(failures),
+            failures=failures,
+        )
+        if counts_callback is not None:
+            counts_callback(result)
         report("phase_b", 0.7, "building graph")
 
         def graph_progress(fraction: float) -> None:
@@ -318,9 +387,16 @@ async def run_ingestion(
         # Safe ordering: a crash before this point retains the workset; a crash
         # after the checkpoint but before cleanup is handled by the idempotent
         # early-completion branch above.
-        checkpoint.mark_done("ingest.complete", params=completion_params)
+        checkpoint.mark_done(
+            "ingest.complete",
+            params=completion_params,
+            result=result.as_checkpoint_dict(),
+        )
         await asyncio.to_thread(pipeline.complete_workset)
-        report("done", 1.0, "ingest complete")
+        detail = "ingest complete"
+        if result.extraction_failed:
+            detail = f"ingest complete with warning: {result.warning}"
+        report("done", 1.0, detail)
         return result
     finally:
         pipeline.close()

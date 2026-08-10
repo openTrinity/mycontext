@@ -49,6 +49,7 @@ from kl_graph.ingest.checkpoint import IngestCheckpoint
 from kl_graph.ingest.embedder import Embedder
 from kl_graph.ingest.extraction_strategy import build_extraction_items
 from kl_graph.ingest.llm_extractor import (
+    ExtractionFailure,
     LLMExtractor,
     summarize_entity_descriptions,
 )
@@ -59,7 +60,7 @@ from kl_graph.ingest.loaders import (
     load_minutes,
     load_wiki,
 )
-from kl_graph.ingest.session_chunker import slice_chat_sessions
+from kl_graph.ingest.source_strategy import combine_plans, source_strategy_for
 from kl_graph.models.types import (
     Chunk,
     ChunkUnit,
@@ -68,6 +69,7 @@ from kl_graph.models.types import (
     Entity,
     EntityType,
     ExtractionItem,
+    ExtractionProjection,
     Fact,
     FactType,
     Scope,
@@ -716,6 +718,9 @@ class IngestionPipeline:
         self.all_facts: list[Fact] = []
         self.extraction_results: dict[str, dict] = {}  # extraction_item_id -> result
         self.extraction_items: list[ExtractionItem] = []
+        self.extraction_failures: list[ExtractionFailure] = []
+        self.extraction_projections: list[ExtractionProjection] = []
+        self._projection_chunks_by_id: dict[str, Chunk] | None = None
         self.source_units: list[SourceUnit] = []
         self.chunk_units: list[ChunkUnit] = []
         self.units_discovered = 0
@@ -906,6 +911,21 @@ class IngestionPipeline:
             return
         self._load_extraction_cache()
 
+    def _restore_extraction_checkpoint(self) -> None:
+        """Restore extraction item counts and failures needed by run status."""
+        self._init_stores()
+        self._load_workset()
+        self.extraction_items = build_extraction_items(self.all_chunks())
+        if self.checkpoint is None:
+            return
+        metadata = self.checkpoint.step_metadata("phase_b.extraction")
+        failures = metadata.get("failures", [])
+        self.extraction_failures = [
+            ExtractionFailure(**failure)
+            for failure in failures
+            if isinstance(failure, dict)
+        ]
+
     def _maybe_clear_extraction_cache(self):
         """Clear the extraction cache table if configured and build succeeded.
 
@@ -1013,7 +1033,9 @@ class IngestionPipeline:
     # PHASE B: Extraction + graph build (LLM; replayable from cache)
     # ═══════════════════════════════════════════════════════════════════════
 
-    async def run_extraction(self, progress_callback=None):
+    async def run_extraction(
+        self, progress_callback=None
+    ) -> tuple[ExtractionFailure, ...]:
         """Run LLM extraction on all chunks (chat + non-chat). Results cached.
 
         A Phase-B sub-step: loads chunks if Phase A didn't already, then fires
@@ -1024,9 +1046,11 @@ class IngestionPipeline:
                 batches complete, forwarded straight to
                 :meth:`LLMExtractor.extract_all_flat`.
         """
-        with self.step("phase_b.extraction") as ckpt:
+        with self.step(
+            "phase_b.extraction", on_skip=self._restore_extraction_checkpoint
+        ) as ckpt:
             if ckpt.skip:
-                return
+                return tuple(self.extraction_failures)
 
             t0 = time.time()
             print("=" * 60)
@@ -1038,7 +1062,7 @@ class IngestionPipeline:
             print("\n[B.1] Loading chunks (chat + sources)...")
             self._load_workset()
             chunks = self.all_chunks()
-            self.extraction_items = build_extraction_items(chunks)
+            self._prepare_extraction_items(chunks)
             print(
                 f"  Loaded {len(self.messages)} chat slices + "
                 f"{len(self.extra_chunks)} source chunks = {len(chunks)} total"
@@ -1065,10 +1089,16 @@ class IngestionPipeline:
             await self.extractor.extract_all_flat(
                 self.extraction_items, progress_callback=progress_callback
             )
+            self.extraction_failures = list(self.extractor.failures)
 
             elapsed = time.time() - t0
             print(f"\n  Extraction complete in {elapsed:.1f}s ({elapsed / 60:.1f} min)")
             self.extractor.print_stats()
+            if self.extraction_failures:
+                print(
+                    f"  WARNING: {len(self.extraction_failures)} extraction item(s) "
+                    "failed after in-step retries; graph output will be partial."
+                )
             # Step-level summary
             st = self.extractor.stats
             print("\n  ┌─ Phase B.1 (LLM Extraction) Cost Summary ─┐")
@@ -1080,7 +1110,11 @@ class IngestionPipeline:
             print(f"  │  Time:               {elapsed:.1f}s ({elapsed / 60:.1f} min)")
             print("  └────────────────────────────────────────────┘")
 
-            ckpt.done(count=len(self.extraction_items))
+            ckpt.done(
+                count=len(self.extraction_items),
+                failures=[failure.as_dict() for failure in self.extraction_failures],
+            )
+            return tuple(self.extraction_failures)
 
     async def run_graph_build(self, progress_callback=None):
         """Build the graph (entities/facts/edges) from cached extraction results.
@@ -1284,6 +1318,15 @@ class IngestionPipeline:
         consumers use the same extraction-item record path.
         """
         if getattr(self, "extraction_items", None):
+            if not self.extraction_projections:
+                self.extraction_projections = [
+                    ExtractionProjection(
+                        extraction_item_id=item.id,
+                        chunk_id=item.target_chunk_id,
+                        role="primary",
+                    )
+                    for item in self.extraction_items
+                ]
             return
         legacy_chunk_ids = {
             chunk.id for chunk in chunks if chunk.id in self.extraction_results
@@ -1303,8 +1346,68 @@ class IngestionPipeline:
                 for chunk in chunks
                 if chunk.id in legacy_chunk_ids
             ]
+            self.extraction_projections = [
+                ExtractionProjection(
+                    extraction_item_id=item.id,
+                    chunk_id=item.target_chunk_id,
+                    role="primary",
+                )
+                for item in self.extraction_items
+            ]
             return
         self.extraction_items = build_extraction_items(chunks)
+        self.extraction_projections = [
+            ExtractionProjection(
+                extraction_item_id=item.id,
+                chunk_id=item.target_chunk_id,
+                role="primary",
+            )
+            for item in self.extraction_items
+        ]
+
+    def _projections_for(
+        self,
+        item_id: str,
+        *,
+        project_mentions: bool = False,
+        project_facts: bool = False,
+    ) -> list[ExtractionProjection]:
+        """Return ordered projections selected for one graph relation."""
+
+        projections = [
+            projection
+            for projection in self.extraction_projections
+            if projection.extraction_item_id == item_id
+            and (not project_mentions or projection.project_mentions)
+            and (not project_facts or projection.project_facts)
+        ]
+        return sorted(projections, key=lambda row: row.role != "primary")
+
+    def _mention_projections_for(
+        self, item_id: str, entity_name: str
+    ) -> list[ExtractionProjection]:
+        """Prefer projected chunks that contain the extracted entity evidence."""
+
+        candidates = self._projections_for(item_id, project_mentions=True)
+        if getattr(self, "_projection_chunks_by_id", None) is None:
+            self._projection_chunks_by_id = {
+                chunk.id: chunk for chunk in self.all_chunks()
+            }
+        chunks = self._projection_chunks_by_id
+        needle = entity_name.strip().lstrip("@").casefold()
+        matched = [
+            projection
+            for projection in candidates
+            if needle
+            and (chunk := chunks.get(projection.chunk_id)) is not None
+            and needle in getattr(chunk, "content", "").casefold()
+        ]
+        if matched:
+            return matched
+        primary = [
+            projection for projection in candidates if projection.role == "primary"
+        ]
+        return primary or candidates[:1]
 
     def _extraction_records(self):
         """Yield extraction items with their persistent target chunks/results."""
@@ -1809,6 +1912,21 @@ class IngestionPipeline:
             )
         self.messages = [c for c in chunks if c.source_type == "message"]
         self.extra_chunks = [c for c in chunks if c.source_type != "message"]
+        items, projections = self.store.get_ingest_batch_extraction_plan(self.batch_id)
+        self.extraction_items = items
+        self.extraction_projections = projections
+        if not items and chunks:
+            # Compatibility for active worksets created before plan schema v1.
+            # This is only safe for the old complete-target chunking policies.
+            self.extraction_items = build_extraction_items(chunks)
+            self.extraction_projections = [
+                ExtractionProjection(
+                    extraction_item_id=item.id,
+                    chunk_id=item.target_chunk_id,
+                    role="primary",
+                )
+                for item in self.extraction_items
+            ]
         self._workset_unit_count = int(batch["unit_count"])
         self._workset_chunk_count = expected
         self.units_discovered = self._workset_unit_count
@@ -1827,7 +1945,7 @@ class IngestionPipeline:
                 self._load_workset()
                 return
         if self.checkpoint is not None and self.checkpoint.is_done(
-            "phase_a.persist_chunks", params={"unit_lineage_schema": 1}
+            "phase_a.persist_chunks", params={"ingestion_plan_schema": 1}
         ):
             self._load_workset()
         else:
@@ -1846,6 +1964,7 @@ class IngestionPipeline:
         """
         if self._sources_loaded:
             return
+        plans = []
         # Chat first (it feeds the chat-only edges), then the rest. The loader
         # returns one rendered Chunk per message, grouped by conversation with
         # session-break markers; the session chunker collapses that into the
@@ -1866,8 +1985,14 @@ class IngestionPipeline:
             if message.id
         ]
         self.units_discovered += len(chat_units)
+        before = len(self.source_units)
         raw_messages = self._filter_unseen_chunks(raw_messages, chat_units)
-        self.messages = slice_chat_sessions(raw_messages)
+        selected_chat_units = self.source_units[before:]
+        chat_plan = source_strategy_for("message").plan(
+            raw_messages, selected_chat_units, source_id=self.source_id
+        )
+        plans.append(chat_plan)
+        self.messages = chat_plan.chunks
         if self.messages:
             print(f"  chat: {len(self.messages)} session slices")
 
@@ -1905,11 +2030,37 @@ class IngestionPipeline:
                 )
             )
         self.units_discovered += len(document_units)
+        before = len(self.source_units)
         self.extra_chunks = self._filter_unseen_chunks(
             self.extra_chunks, document_units
         )
-        self._namespace_chunk_ids()
-        self._build_chunk_unit_memberships()
+        selected_document_units = self.source_units[before:]
+        for source_type in dict.fromkeys(
+            chunk.source_type for chunk in self.extra_chunks
+        ):
+            records = [
+                chunk for chunk in self.extra_chunks if chunk.source_type == source_type
+            ]
+            units = [
+                unit
+                for unit in selected_document_units
+                if unit.source_type == source_type
+            ]
+            plans.append(
+                source_strategy_for(source_type).plan(
+                    records, units, source_id=self.source_id
+                )
+            )
+        combined = combine_plans(plans)
+        self.messages = [
+            chunk for chunk in combined.chunks if chunk.source_type == "message"
+        ]
+        self.extra_chunks = [
+            chunk for chunk in combined.chunks if chunk.source_type != "message"
+        ]
+        self.chunk_units = combined.chunk_units
+        self.extraction_items = combined.extraction_items
+        self.extraction_projections = combined.projections
         self._workset_unit_count = len(self.source_units)
         self._workset_chunk_count = len(self.all_chunks())
         self._sources_loaded = True
@@ -2008,7 +2159,7 @@ class IngestionPipeline:
         missing scope (the LadybugDB backend ``MATCH``es both endpoints).
         """
         with self.step(
-            "phase_a.persist_chunks", params={"unit_lineage_schema": 1}
+            "phase_a.persist_chunks", params={"ingestion_plan_schema": 1}
         ) as s:
             if s.skip:
                 return
@@ -2018,6 +2169,8 @@ class IngestionPipeline:
                 chunks,
                 self.source_units,
                 self.chunk_units,
+                self.extraction_items,
+                self.extraction_projections,
                 batch_id=self.batch_id,
                 batch_source_id=self.source_id if self.batch_id else None,
                 source_hash=(
@@ -2059,6 +2212,7 @@ class IngestionPipeline:
         all_entities: dict[str, Entity],
         chunk_ts: int = 0,
         extraction_item_id: str | None = None,
+        state_chunk_ids: list[str] | None = None,
     ) -> list[Edge]:
         """Build the STATES + ABOUT edges for one raw fact (pure, no I/O).
 
@@ -2098,15 +2252,16 @@ class IngestionPipeline:
         edges: list[Edge] = []
 
         # STATES: fact → source chunk
-        edges.append(
-            Edge(
-                source_type="fact",
-                source_id=fact_id,
-                target_type="chunk",
-                target_id=msg_id,
-                edge_type=EdgeType.STATES,
+        for state_chunk_id in state_chunk_ids or [msg_id]:
+            edges.append(
+                Edge(
+                    source_type="fact",
+                    source_id=fact_id,
+                    target_type="chunk",
+                    target_id=state_chunk_id,
+                    edge_type=EdgeType.STATES,
+                )
             )
-        )
 
         # ABOUT: fact → subject entity. Normalize identically everywhere in this
         # helper (strip whitespace + leading '@') so the subject/object lookup,
@@ -2197,15 +2352,16 @@ class IngestionPipeline:
                         continue
                     eid = entity_id_from_name(name)
                     if eid in self.all_entities:
-                        edges.append(
-                            Edge(
-                                source_type="chunk",
-                                source_id=msg.id,
-                                target_type="entity",
-                                target_id=eid,
-                                edge_type=EdgeType.MENTIONS,
+                        for projection in self._mention_projections_for(item.id, name):
+                            edges.append(
+                                Edge(
+                                    source_type="chunk",
+                                    source_id=projection.chunk_id,
+                                    target_type="entity",
+                                    target_id=eid,
+                                    edge_type=EdgeType.MENTIONS,
+                                )
                             )
-                        )
 
             # AUTHORED_BY edges (chunk → author/participant Person entity)
             print("  Creating AUTHORED_BY edges...")
@@ -2250,6 +2406,12 @@ class IngestionPipeline:
                             self.all_entities,
                             msg.timestamp,
                             item.id,
+                            [
+                                projection.chunk_id
+                                for projection in self._projections_for(
+                                    item.id, project_facts=True
+                                )
+                            ],
                         )
                     )
 
@@ -2351,7 +2513,7 @@ class IngestionPipeline:
         # embedding step is incomplete: that would poison the in-memory workset
         # with an empty post-dedup source load.
         if self.checkpoint and self.checkpoint.is_done(
-            "phase_a.persist_chunks", params={"unit_lineage_schema": 1}
+            "phase_a.persist_chunks", params={"ingestion_plan_schema": 1}
         ):
             return self.checkpoint.is_done("phase_a.embed_chunks")
 
