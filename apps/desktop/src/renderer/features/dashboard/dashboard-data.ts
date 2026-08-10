@@ -879,7 +879,7 @@ export function readGraphLag(trends: DashboardTrends | null): GraphLagView | nul
       ratio,
       behind,
       tone: "neutral",
-      text: `图谱已消化 ${pct}，还差 ${formatCount(behind)} 条`,
+      text: `已学习 ${pct}，还差 ${formatCount(behind)} 条`,
     }
   }
   if (ratio >= GRAPH_LAG_WARN) {
@@ -887,7 +887,7 @@ export function readGraphLag(trends: DashboardTrends | null): GraphLagView | nul
       ratio,
       behind,
       tone: "warn",
-      text: `图谱只消化了 ${pct}（还差 ${formatCount(behind)} 条）—— 建议跑一次建图`,
+      text: `已学习 ${pct}（还差 ${formatCount(behind)} 条）—— 点「同步」补上`,
     }
   }
   return {
@@ -895,13 +895,13 @@ export function readGraphLag(trends: DashboardTrends | null): GraphLagView | nul
     behind,
     tone: "bad",
     /**
-     * ★ 这句话**必须指出"图里的数字是局部的"**。
+     * ★ 这句话**必须指出"上面的数字是局部的"**。
      *
      * 实测本机 8.4%：仪表盘显示 602 个实体、975 条事实，而那是从 2,871 条
-     * （共 34,142 条）里抽出来的。用户会把那些数字当成"它了解我的全部"，
-     * 于是搜不到东西时以为是检索不行 —— 而真正的原因是大部分聊天还没进图。
+     * （共 34,142 条）里学到的。用户会把那些数字当成"它了解我的全部"，
+     * 于是搜不到东西时以为是检索不行 —— 而真正的原因是大部分聊天还没学。
      */
-    text: `图谱只消化了 ${pct} 的数据（还差 ${formatCount(behind)} 条）—— 下面的实体与事实只覆盖这一小部分`,
+    text: `才学了 ${pct}（还差 ${formatCount(behind)} 条）—— 上面「认识的人和事」只覆盖这一小部分，点「同步」补上`,
   }
 }
 

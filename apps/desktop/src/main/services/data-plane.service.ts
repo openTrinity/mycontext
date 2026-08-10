@@ -776,6 +776,15 @@ export class DataPlaneService {
     return this.options.feed.export()
   }
 
+  /**
+   * 手动建图成功后把建图水位推到已导出水位（见
+   * `FeedService.markGraphBuiltToExport`）。IPC 层在手动「同步」成功后调，
+   * 否则 `graph-build` 游标停在 0、界面误报"消化了 0.0%"。
+   */
+  markGraphBuiltToExport(): boolean {
+    return this.options.feed.markGraphBuiltToExport()
+  }
+
   /** 按候选 ID 数一下语料里有多少条本人消息：给用户一个可核对的数字。 */
   private countSelfCandidates(db: SqliteDatabase, externalIds: readonly string[]): number {
     if (externalIds.length === 0) return 0

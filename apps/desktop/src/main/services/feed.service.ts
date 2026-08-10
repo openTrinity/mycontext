@@ -628,6 +628,24 @@ export class FeedService {
   }
 
   /**
+   * **手动**建图成功后把建图水位推到当前导出水位
+   * （见 `GraphSyncService.markBuiltToExport`）。
+   *
+   * ## 为什么手动路要单独调它
+   *
+   * 自动建图在 `tickGraphSync` 里 `markBuilt`，而手动点「同步」走
+   * `klServer.rebuildGraph()` 直接返回 UI，从不推 `graph-build` 游标 ——
+   * 于是图明明建好了，`readGraphLag` 却按停在 0 的游标算出"消化了 0.0%"
+   * 这句假话。由 IPC 层在手动建图**成功后**调它，把游标对齐到已导出的水位。
+   *
+   * 与 `resetGraphBuildWatermark` 一样是**单向**调用（不回调注入 klServer，
+   * 避免 `feed↔klServer` 闭环，见那条的注释）。未挂载 vault → false。
+   */
+  markGraphBuiltToExport(): boolean {
+    return this.graphSync?.markBuiltToExport() ?? false
+  }
+
+  /**
    * 自动建图的**调度快照** —— 界面上「下次多久后构建」那一块的数据源。
    *
    * ## ★ 与真实触发判据同源（这是重点）

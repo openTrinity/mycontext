@@ -712,3 +712,44 @@ describe("★★ 「这一轮什么都没做」必须留痕", () => {
     }
   })
 })
+
+describe("★★ markBuiltToExport：手动建图后把建图水位对齐导出水位", () => {
+  /**
+   * 手动点「同步」走 `klServer.rebuildGraph`，从不经过 `runOnce` 的 `markBuilt`。
+   * 于是图建好了、`graph-build` 游标却停在 0，仪表盘 `readGraphLag` 据此
+   * 误报"消化了 0.0%"。这一组锁的是那条补救入口。
+   */
+  it("★★ 把 graph-build 游标推到 graph-export 游标（导出到哪就算建到哪）", async () => {
+    const vault = openTestVault()
+    try {
+      const head = appendChanges(vault, 5)
+      const { sync } = makeSync(vault)
+      // 先导出一轮 → graph-export 游标推到 head，graph-build 仍是 0
+      await sync.runOnce()
+      const cursors = new ConsumerCursorRepository(vault.db, new ManualClock(START))
+      expect(cursors.get(GRAPH_SYNC_CONSUMER_ID)?.ackedSeq).toBe(head)
+      expect(cursors.get(GRAPH_BUILD_CONSUMER_ID)?.ackedSeq ?? 0).toBe(0)
+
+      // 手动建图成功 → 对齐
+      expect(sync.markBuiltToExport()).toBe(true)
+      expect(sync.buildWatermark().seq).toBe(head)
+      // ★ 反面：不再是 0（那正是"消化 0.0%"的来源）
+      expect(sync.buildWatermark().seq).not.toBe(0)
+    } finally {
+      vault.close()
+    }
+  })
+
+  it("★ 还没导出过（导出游标为 0）→ 不推、返回 false（没有可对齐的水位）", async () => {
+    const vault = openTestVault()
+    try {
+      appendChanges(vault, 3)
+      const { sync } = makeSync(vault)
+      // 没跑 runOnce，graph-export 仍是 0
+      expect(sync.markBuiltToExport()).toBe(false)
+      expect(sync.buildWatermark().seq).toBe(0)
+    } finally {
+      vault.close()
+    }
+  })
+})

@@ -711,7 +711,20 @@ export function registerIpc(deps: IpcDependencies): void {
     }),
   )
   ipcMain.handle(IPC_CHANNELS.klGraphBuild, (_event, fresh: unknown) =>
-    attempt(() => klServer.rebuildGraph(fresh === true)),
+    attempt(async () => {
+      const result = await klServer.rebuildGraph(fresh === true)
+      /**
+       * ★ 手动建图成功后把建图水位推到已导出水位。
+       *
+       * 自动建图在 `feed.tickGraphSync` 里 `markBuilt`，而手动这条走
+       * `rebuildGraph` 直接返回、从不推 `graph-build` 游标 —— 于是图建好了
+       * 但游标停在 0，仪表盘红字误报"图谱只消化了 0.0%"（见
+       * `GraphSyncService.markBuiltToExport` 的实测）。只在**真的建成**后推
+       * （`ok` 且非 `cancelled`）：失败/被打断时推等于宣称建到这了。
+       */
+      if (result.ok && result.cancelled !== true) dataPlane.markGraphBuiltToExport()
+      return result
+    }),
   )
   ipcMain.handle(IPC_CHANNELS.klGraphOptimize, () => attempt(() => klServer.optimizeGraph()))
 

@@ -192,6 +192,35 @@ export class GraphSyncService {
   }
 
   /**
+   * 把建图水位推到**当前导出水位**（`graph-export` 游标）——
+   * 给**手动**建图那条路用。
+   *
+   * ## 为什么需要它（一条独立于 `markBuilt` 的入口）
+   *
+   * 自动建图走 `runOnce()`，那里 `markBuilt(result.ackedSeq)` 用的是"这一轮
+   * 导出看到的水位"。而**手动**点「同步」走的是 `klServer.rebuildGraph()`
+   * → 直接返回 UI，**不经过** `runOnce`、也就从不推 `graph-build` 游标。
+   *
+   * 后果（实测本机）：图库里已经有 2653 条 fact、1118 个实体，而
+   * `graph-build` 游标停在 0，于是 `readGraphLag` 算出 `0/head = 0.0%`，
+   * 界面红字说"图谱只消化了 0.0% 的数据（还差 32,083 条）"——
+   * 一句和真实状态**完全相反**的话（图明明建了一大半）。
+   *
+   * 手动建图拿不到"这次建图看了哪份导出的水位"（那是 kl 子进程内部的事），
+   * 但建图读的就是**已导出**的四件套，所以推到 `graph-export` 游标是对的：
+   * 它正是"输入已经导出到哪"。比 `head` 保守（head 含尚未导出的新消息），
+   * 宁可少算也不虚报（虚报会让"还差 N 条"变负数那种）。
+   *
+   * @returns 是否真的推进了（未挂载 / 导出游标为 0 时返回 false）
+   */
+  markBuiltToExport(): boolean {
+    const exportedSeq = this.cursors.get(GRAPH_SYNC_CONSUMER_ID)?.ackedSeq ?? 0
+    if (exportedSeq <= 0) return false
+    this.cursors.ack(GRAPH_BUILD_CONSUMER_ID, exportedSeq)
+    return true
+  }
+
+  /**
    * 把建图水位清零 —— 图库**被清空**之后必须调。
    *
    * ## ★ 为什么不能只删文件
