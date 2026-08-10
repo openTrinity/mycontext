@@ -42,6 +42,26 @@ MAX_REPORT_LENGTH = 2000
 # Reserve a few tokens so the final hard assertion never trips by 1-2 tokens.
 TOKENIZATION_MARGIN = 8
 
+#: Fallback when the config key is absent (mirrors the historical hardcoded value).
+_DEFAULT_SUMMARY_CONCURRENCY_FALLBACK = 8
+
+
+def _default_summary_concurrency() -> int:
+    """Resolve the default community-summarization LLM concurrency from config.
+
+    Reads ``cfg.pipelines.ingestion.community_summarization.max_concurrent``
+    (env-overridable via ``KL_COMMUNITY_SUMMARY_CONCURRENCY``), falling back to
+    :data:`_DEFAULT_SUMMARY_CONCURRENCY_FALLBACK` if the key is missing so older
+    configs keep working.
+    """
+    try:
+        value = int(
+            cfg.pipelines.ingestion.community_summarization.max_concurrent
+        )
+    except Exception:  # noqa: BLE001
+        return _DEFAULT_SUMMARY_CONCURRENCY_FALLBACK
+    return value if value > 0 else _DEFAULT_SUMMARY_CONCURRENCY_FALLBACK
+
 
 @dataclass
 class CommunityReport:
@@ -449,7 +469,7 @@ async def generate_community_reports(
     sqlite: SQLiteStore,
     levels: list[int] | None = None,
     min_members: int = 10,
-    max_concurrent: int = 8,
+    max_concurrent: int | None = None,
 ) -> tuple[list[CommunityReport], dict]:
     """Generate LLM reports for all communities at specified levels.
 
@@ -457,11 +477,14 @@ async def generate_community_reports(
         sqlite: SQLite store with community assignments
         levels: Which levels to summarize (None = all present)
         min_members: Minimum mixed member count to summarize
-        max_concurrent: Max concurrent LLM calls
+        max_concurrent: Max concurrent LLM calls. When ``None``, falls back to
+            ``cfg.pipelines.ingestion.community_summarization.max_concurrent``.
 
     Returns:
         (reports, llm_stats) tuple
     """
+    if max_concurrent is None:
+        max_concurrent = _default_summary_concurrency()
     api_key = provider_api_key(cfg.services.llm_flash.provider)
     semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -652,7 +675,7 @@ def run_community_summarization(
     *,
     levels: list[int] | None = None,
     min_members: int = 10,
-    max_concurrent: int = 8,
+    max_concurrent: int | None = None,
 ) -> int:
     """Main entry point for community summarization (sync wrapper).
 
@@ -663,7 +686,8 @@ def run_community_summarization(
         sqlite: SQLite store with community assignments
         levels: Which levels to summarize (None = all present)
         min_members: Minimum mixed member count to summarize
-        max_concurrent: Max concurrent LLM calls
+        max_concurrent: Max concurrent LLM calls. When ``None``, falls back to
+            ``cfg.pipelines.ingestion.community_summarization.max_concurrent``.
 
     Returns:
         Count of reports stored

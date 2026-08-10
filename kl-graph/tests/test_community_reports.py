@@ -713,7 +713,9 @@ def test_run_community_summarization_signature():
     # Check default values
     assert sig.parameters["levels"].default is None
     assert sig.parameters["min_members"].default == 10
-    assert sig.parameters["max_concurrent"].default == 8
+    # max_concurrent defaults to None, resolved at call time from
+    # cfg.pipelines.ingestion.community_summarization.max_concurrent.
+    assert sig.parameters["max_concurrent"].default is None
     
     # Check return type annotation (it's a string 'int', not the int type)
     assert sig.return_annotation == 'int' or sig.return_annotation == int

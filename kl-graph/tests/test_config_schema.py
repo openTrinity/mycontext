@@ -50,6 +50,7 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.extraction.cache_max_entries",
     "pipelines.ingestion.entity_description.summarize",
     "pipelines.ingestion.entity_description.concurrency",
+    "pipelines.ingestion.community_summarization.max_concurrent",
     "pipelines.ingestion.incremental.community_summary_threshold",
     "pipelines.ingestion.incremental.similarity_strategy",
     "pipelines.ingestion.incremental.community_strategy",

@@ -18,7 +18,11 @@ def main() -> int:
         "-c", "--config", metavar="PATH",
         help="Path to a YAML config file (merged on top of config.default.yaml)",
     )
-    parser.add_argument("--max-concurrent", type=int, default=8)
+    parser.add_argument(
+        "--max-concurrent", type=int, default=None,
+        help="Max concurrent summarization LLM calls "
+             "(default: pipelines.ingestion.community_summarization.max_concurrent)",
+    )
     parser.add_argument("--min-members", type=int, default=10)
     args = parser.parse_args()
 

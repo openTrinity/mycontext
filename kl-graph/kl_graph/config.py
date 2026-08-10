@@ -143,6 +143,10 @@ class ExtractionConfig(_ConfigModel):
     cache_max_entries: int = Field(gt=0)
 
 
+class CommunitySummarizationConfig(_ConfigModel):
+    max_concurrent: int = Field(gt=0)
+
+
 class IncrementalConfig(_ConfigModel):
     community_summary_threshold: float
     similarity_strategy: str
@@ -160,6 +164,7 @@ class IngestionPipelineConfig(_ConfigModel):
     embedding: IngestionEmbeddingConfig
     extraction: ExtractionConfig
     entity_description: EntityDescriptionConfig
+    community_summarization: CommunitySummarizationConfig
     incremental: IncrementalConfig
     similarity: SimilarityConfig
 

@@ -80,6 +80,12 @@ pipelines:
       summarize: ${oc.env:KL_ENTITY_DESCRIPTION_SUMMARIZE,1}
       concurrency: ${oc.env:KL_ENTITY_DESCRIPTION_CONCURRENCY,8}
 
+    community_summarization:
+      # Max concurrent LLM calls when generating community reports (one call per
+      # community). Higher values finish the summarization stage faster at the
+      # cost of more in-flight requests against the LLM endpoint.
+      max_concurrent: ${oc.env:KL_COMMUNITY_SUMMARY_CONCURRENCY,50}
+
     incremental:
       community_summary_threshold: ${oc.env:KL_INCR_COMMUNITY_SUMMARY_THRESHOLD,0.1}
       similarity_strategy: ${oc.env:KL_INCR_SIMILARITY_STRATEGY,ann_intra_batch}
