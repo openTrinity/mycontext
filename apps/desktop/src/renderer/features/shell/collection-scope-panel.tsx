@@ -304,17 +304,26 @@ function ScopeEditor({
   onDraftChange: (next: SourcesDraft) => void
   sources: readonly { kind: DistillSourceId; status: "ready" | "planned" }[]
 }) {
+  /**
+   * 这一页一次只管**一个**渠道 → 单元素集合。
+   *
+   * ★ `useMemo` 而不是每次渲染 `new Set([...])`：`channelFilter` 进了
+   * `SourcesStep` 里那个 `useMemo` 的依赖数组，每帧新对象会让它每帧重算
+   * （那里面要过滤上百条会话）。
+   *
+   * ★★ `null`（还没选过）时落到**主渠道**，而不是"不过滤"：不过滤的话
+   * 用户会在飞书面板里勾到钉钉的会话，而那批 id 存进飞书库就是按不存在的
+   * id 过滤，结果恒为零且不报错。
+   */
+  const channelScope = useMemo(
+    () => new Set([channelId ?? PRIMARY_CHANNEL_ID]),
+    [channelId],
+  )
   return (
     <SourcesStep
       value={draft}
       onChange={onDraftChange}
       sources={sources}
-      /**
-       * ★ 只列这个渠道的会话。`undefined` = 不过滤（引导页那条路）。
-       *
-       * 不过滤的话用户会在飞书面板里勾到钉钉的会话 —— 那批 id 存进飞书库
-       * 就是按不存在的 id 过滤，结果恒为零。
-       */
       /**
        * ★★ `null`（还没选过）时落到**主渠道**，而不是"不过滤"。
        *
@@ -324,7 +333,7 @@ function ScopeEditor({
        * 勾了飞书的会话却存进主渠道的白名单，那批 id 在钉钉库里不存在，
        * 于是**那些会话永远不会被采**，且不报错。
        */
-      channelFilter={channelId ?? PRIMARY_CHANNEL_ID}
+      channelFilter={channelScope}
     />
   )
 }

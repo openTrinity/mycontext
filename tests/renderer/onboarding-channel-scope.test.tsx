@@ -164,57 +164,190 @@ const SOURCES_DRAFT = {
   enabledSources: [],
 }
 
-describe("★★★ 第 4 步只列主渠道的会话", () => {
-  it("主渠道的会话出现", async () => {
+describe("★★★ 第 4 步列的是「已连渠道」的会话", () => {
+  /**
+   * ★★★ 只连飞书 → 列表里是**飞书**的会话，钉钉的不出现。
+   *
+   * ## 这一条与上一版恰好相反，值得记下来
+   *
+   * 上一版我传的是写死的主渠道 id，理由是"这一步喂给蒸馏、而蒸馏只读主库"。
+   * 那个前提是错的：`conversationIds` 是**采集白名单**（决定采哪些会话），
+   * 而采集按渠道各自跑 —— 每个渠道的 `IngestService` 读自己库里的白名单。
+   *
+   * 真机表现（用户报的）：只连了飞书时，列表里是**已退登渠道**的 55 个
+   * 历史会话，而真正连着的飞书 4 个反倒看不见。
+   */
+  it("★★★ 只连飞书 → 有飞书的、没有钉钉的", async () => {
     wrap(
       <SourcesStep
         value={SOURCES_DRAFT}
         onChange={() => undefined}
         sources={[]}
-        channelFilter={PRIMARY_CHANNEL_ID}
+        channelFilter={new Set([SOURCE_CHANNEL_ID])}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
+    })
+    expect(screen.queryByText(PRIMARY_TITLE)).toBeNull()
+  })
+
+  it("★★ 两个都连 → 两边的会话都在", async () => {
+    wrap(
+      <SourcesStep
+        value={SOURCES_DRAFT}
+        onChange={() => undefined}
+        sources={[]}
+        channelFilter={new Set([PRIMARY_CHANNEL_ID, SOURCE_CHANNEL_ID])}
       />,
     )
     await waitFor(() => {
       expect(screen.getByText(PRIMARY_TITLE)).toBeTruthy()
     })
+    expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
   })
 
   /**
-   * ★★★ 核心判据，**否定式**：非主渠道的会话不许出现。
+   * ★★ 一个渠道都没连 → 列表空。
    *
-   * 先等主渠道那条渲染出来 —— 否则"找不到"可能只是列表还没加载完，
-   * 那种绿是假的（判据永真）。
+   * 空集**不是**"不过滤"（那是 `undefined`）—— 它是一个有意义的真实状态。
+   * 判成不过滤会让退登之后仍列出全部历史会话。
    */
-  it("★★★ 非主渠道的会话不出现（勾了也不会被学习）", async () => {
+  it("★★ 空集 = 一个都没连 → 两边都不出现", async () => {
     wrap(
       <SourcesStep
         value={SOURCES_DRAFT}
         onChange={() => undefined}
         sources={[]}
-        channelFilter={PRIMARY_CHANNEL_ID}
+        channelFilter={new Set()}
       />,
     )
+    // 等组件把列表渲染完（会话区的标题一定在）
     await waitFor(() => {
-      expect(screen.getByText(PRIMARY_TITLE)).toBeTruthy()
+      expect(screen.getAllByText(/会话|单聊|群聊/).length).toBeGreaterThan(0)
     })
+    expect(screen.queryByText(PRIMARY_TITLE)).toBeNull()
     expect(screen.queryByText(SOURCE_TITLE)).toBeNull()
   })
 
   /**
-   * ★★★ 引导页**真的传了** `channelFilter`。
-   *
-   * ## 为什么必须有这一条
-   *
-   * 上面那两条直接渲染 `SourcesStep` 并自己传 filter —— 它们验的是"组件收到
-   * filter 时会过滤"，**验不到"引导页有没有传"**。实测过：把
-   * `onboarding-view.tsx` 里那一行删掉，上面 9 条全绿，而 bug 完整复现。
-   *
-   * 而整页渲染那条路要装十几个 IPC 通道（见文件头），代价远高于收益。
-   * 所以这里直接读源码判那一行 —— 判据很窄：**那次调用带没带 channelFilter**。
-   *
-   * ★ 先剥注释：注释里写了不等于代码里做了（这个仓库最贵的 bug 就是那种）。
+   * ★ 反证 fixture 真的含两个渠道 —— 不然上面那些"没出现"可能永真。
    */
-  it("★★★ onboarding-view 给 SourcesStep 传了 channelFilter", async () => {
+  it("★ 不过滤（undefined）时两条都在", async () => {
+    wrap(<SourcesStep value={SOURCES_DRAFT} onChange={() => undefined} sources={[]} />)
+    await waitFor(() => {
+      expect(screen.getByText(PRIMARY_TITLE)).toBeTruthy()
+    })
+    expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
+  })
+
+  /**
+   * ★★★ 顶部计数只算**可见的**，而「清空」**只清可见的**。
+   *
+   * ## 这一条锁的是一次真实的数据丢失路径
+   *
+   * `conversationIds` 是**跨渠道**的一份（保存时才按渠道分桶），所以按渠道
+   * 过滤之后它里面有一批看不见的 id。实测（真机截图）：只连飞书时顶部写着
+   * 「已选 13 个」而列表里是 4/4 —— 那 9 个是钉钉的旧勾选。
+   *
+   * 计数错只是误导；**「清空」清掉整个数组才是数据丢失** —— 用户在飞书这一屏
+   * 点清空，钉钉的白名单跟着没了，而屏幕上没有任何痕迹。那与这一轮修过的
+   * 「保存飞书范围清空了钉钉白名单」是同一形状。
+   */
+  it("★★★ 顶部计数只算可见的（跨渠道的旧勾选不该算进来）", async () => {
+    wrap(
+      <SourcesStep
+        value={{ ...SOURCES_DRAFT, conversationIds: ["ocFAKE0001", "cidFAKE0001==", "cid-旧的"] }}
+        onChange={() => undefined}
+        sources={[]}
+        channelFilter={new Set([SOURCE_CHANNEL_ID])}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
+    })
+    // 三个勾选里只有 ocFAKE0001 属于飞书 → 顶部应当是 1，不是 3
+    expect(screen.getByText(/已选\s*1\s*个/)).toBeTruthy()
+  })
+
+  it("★★★ 「清空」只清可见的 —— 别渠道的勾选必须留着", async () => {
+    let next: { conversationIds: string[] } | null = null
+    wrap(
+      <SourcesStep
+        value={{ ...SOURCES_DRAFT, conversationIds: ["ocFAKE0001", "cidFAKE0001=="] }}
+        onChange={(v) => {
+          next = v
+        }}
+        sources={[]}
+        channelFilter={new Set([SOURCE_CHANNEL_ID])}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
+    })
+    const clear = screen.getAllByRole("button").find((b) => /清空/.test(b.textContent ?? ""))
+    expect(clear, "找不到清空按钮").toBeDefined()
+    clear?.click()
+
+    await waitFor(() => {
+      expect(next).not.toBeNull()
+    })
+    // ★ 核心：飞书那个被清掉，钉钉那个**还在**
+    expect(next?.conversationIds).toEqual(["cidFAKE0001=="])
+  })
+
+  /**
+   * ★★ 只读渠道的会话选了不会进自动回复 —— 那句话必须在。
+   *
+   * 这一步叫「学习范围」，而"学习"在用户心里等于"分身会学会这些话怎么说"。
+   * 只读渠道上那件事不会发生（数据只进图谱与搜索）—— 不说清的话用户以为
+   * 自己在给分身喂料，而分身永远用不到它。
+   */
+  it("★★ 只读渠道的会话在列表里 → 显示「不会用来替你回复」", async () => {
+    wrap(
+      <SourcesStep
+        value={SOURCES_DRAFT}
+        onChange={() => undefined}
+        sources={[]}
+        channelFilter={new Set([SOURCE_CHANNEL_ID])}
+        readOnlyChannelIds={new Set([SOURCE_CHANNEL_ID])}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
+    })
+    expect(screen.getByText(/不会用来替你回复/)).toBeTruthy()
+  })
+
+  /**
+   * ★★ 列表里**没有**只读渠道的会话时不显示那句。
+   *
+   * 判据是"列出来的东西里有"，不是"集合非空" —— 只连了只读渠道但它一条
+   * 会话都没采到时，那句说明是多余的（空列表旁边写着"选中的会话只用于…"）。
+   */
+  it("★★ 只列主渠道时不显示那句（判据是列表内容，不是集合非空）", async () => {
+    wrap(
+      <SourcesStep
+        value={SOURCES_DRAFT}
+        onChange={() => undefined}
+        sources={[]}
+        channelFilter={new Set([PRIMARY_CHANNEL_ID])}
+        readOnlyChannelIds={new Set([SOURCE_CHANNEL_ID])}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByText(PRIMARY_TITLE)).toBeTruthy()
+    })
+    expect(screen.queryByText(/不会用来替你回复/)).toBeNull()
+  })
+
+  /**
+   * ★★★ 引导页传的是**已授权渠道集合**，不是写死的单个 id。
+   *
+   * 上面那些直接渲染组件、自己传 filter —— 验不到"调用方传了什么"。
+   * 而这次的 bug 恰恰在调用方（我写死了主渠道）。所以这条读源码。
+   */
+  it("★★★ onboarding-view 传的是 authorizedChannelIds，不是写死的 id", async () => {
     const { readFileSync } = await import("node:fs")
     const { join } = await import("node:path")
     const source = readFileSync(
@@ -224,23 +357,12 @@ describe("★★★ 第 4 步只列主渠道的会话", () => {
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
     const start = source.indexOf("<SourcesStep")
-    expect(start, "找不到 SourcesStep 的调用 —— 结构变了就把这条判据跟着改").toBeGreaterThan(-1)
+    expect(start, "找不到 SourcesStep 的调用").toBeGreaterThan(-1)
     const call = source.slice(start, source.indexOf("/>", start))
-    expect(call, "引导第 4 步必须传 channelFilter，否则会列出别的渠道的会话").toContain(
-      "channelFilter",
+    expect(call, "第 4 步必须按渠道过滤").toContain("channelFilter")
+    expect(call, "不许写死主渠道 —— 只连飞书时会列出已退登渠道的历史会话").not.toContain(
+      "PRIMARY_CHANNEL_ID",
     )
-  })
-
-  /**
-   * ★ 反证这个 fixture 真的**含**两个渠道 —— 不然上面那条可能只是
-   * "fixture 里压根没有飞书那条"，判据永真。
-   */
-  it("★ 不过滤时两条都在（证明 fixture 确实混渠道）", async () => {
-    wrap(<SourcesStep value={SOURCES_DRAFT} onChange={() => undefined} sources={[]} />)
-    await waitFor(() => {
-      expect(screen.getByText(PRIMARY_TITLE)).toBeTruthy()
-    })
-    expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
   })
 })
 
@@ -289,59 +411,64 @@ describe("★★ 第 3 步：没有能跑分身的渠道时说清楚", () => {
   })
 })
 
-describe("★★ 第 5 步：语料渠道没连时说清楚 + 主按钮灰", () => {
-  it("★★ 显示「学不到新的」", async () => {
+describe("★★★ 第 5 步：主渠道没连时整块换成说明", () => {
+  /**
+   * ## 为什么是「整块换掉」而不是加一条横幅
+   *
+   * 整条蒸馏链只认主渠道，不是漏了个参数：`distill.attach(handle.db, …)` 传
+   * 主库、`forge.run({ db: handle.db })` 同样，而 `forge.service.ts:249` 更直接
+   * —— `SelfIdentityRepository(input.db).get("dingtalk")`，**渠道 id 写死**。
+   *
+   * 所以主渠道没连时这一步**不适用**。我上一版加的是一条横幅，真机截图里
+   * 同屏三句话互相打架：横幅说做不了、下面说"已入库 1,724 条"、按钮还能点。
+   *
+   * ★ 不自动 skip：那会写库（替用户做决定），而这是唯一产出画像的一步。
+   * 底部的「跳过这步」在 `onboarding-view` 的 footer 里，不受这个 early-return
+   * 影响 —— 软门保住了。
+   */
+  it("★★★ 没连 → 显示说明，且**不渲染**进度与开始按钮", async () => {
     wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
     await waitFor(() => {
-      expect(screen.getByText(/学不到新的/)).toBeTruthy()
+      expect(screen.getByText(/需要先连上/)).toBeTruthy()
     })
+    // ★ 核心：那套会误导人的东西一个都不在
+    expect(
+      screen.queryByRole("button", { name: /开始学习/ }),
+      "还渲染着开始按钮 —— 点了会跑一个只认主渠道的流程",
+    ).toBeNull()
+    expect(screen.queryByText(/学习进度/)).toBeNull()
+    expect(screen.queryByText(/已扫描选定的/)).toBeNull()
   })
 
-  it("★ 连上了就不显示", async () => {
+  it("★★ 连上了 → 正常渲染（别修成「永远不可用」）", async () => {
     wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected />)
     await waitFor(() => {
       expect(screen.getAllByRole("button").length).toBeGreaterThan(0)
     })
-    expect(screen.queryByText(/学不到新的/)).toBeNull()
-  })
-
-  /**
-   * ★★★ 渠道没连**也不禁用**「开始学习」。
-   *
-   * ## 这一条锁的是我第一版的判断错误
-   *
-   * 我先禁用了它，理由写的是"跑了也是 0 条"。那是错的：蒸馏只读**本地库**
-   * （`DistillService` 全程不碰渠道 CLI），已入库的照样能学。
-   *
-   * 真机上那一刻库里有 **1,724 条**，而按钮灰着、旁边写着"什么都学不到"
-   * —— 两句都不成立，用户看到一个自相矛盾的界面。
-   *
-   * ★ 判据落在**那个按钮**上而不是"页面上有没有 disabled 的按钮"：
-   * 这一页还有别的按钮（重来），它的禁用条件不同。
-   */
-  it("★★★ 渠道没连也不禁用「开始学习」（已入库的还能学）", async () => {
-    wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
-    await waitFor(() => {
-      expect(screen.getByText(/学不到新的/)).toBeTruthy()
-    })
+    expect(screen.queryByText(/需要先连上/)).toBeNull()
     const start = screen
       .getAllByRole("button")
       .find((b) => /开始|学习/.test(b.textContent ?? ""))
-    expect(start, "找不到开始学习按钮 —— 文案变了？").toBeDefined()
-    expect(start?.hasAttribute("disabled"), "禁用它就等于说「已入库的也学不了」").toBe(false)
+    expect(start, "连上了却没有开始按钮").toBeDefined()
+    expect(start?.hasAttribute("disabled")).toBe(false)
   })
 
   /**
-   * ★★ 文案不许说"什么都学不到"这类**与库里有数据矛盾**的话。
+   * ★★ 说明里要给**下一步动作**，不能只说"不可用"。
    *
-   * 这条盯的是同一个错误的另一半：即使按钮改回可点，文案若还说"学不到"，
-   * 用户仍然会读到矛盾（旁边就写着"共入库 1,724 条"）。
+   * 判据是"提到第 1 步或钉钉" —— 用户要知道去哪做什么。
+   * 只说"这一步需要先连上"而不说去哪连，等于把人留在原地。
    */
-  it("★★ 文案说的是「学不到新的」，不是「什么都学不到」", async () => {
+  it("★★ 说明里给了可照做的下一步", async () => {
     wrap(<DistillStep rangeDays={30} modelConfigured corpusChannelConnected={false} />)
     await waitFor(() => {
-      expect(screen.getByText(/学不到新的/)).toBeTruthy()
+      expect(screen.getByText(/需要先连上/)).toBeTruthy()
     })
-    expect(screen.queryByText(/什么都学不到/)).toBeNull()
+    /**
+     * ★ `getAllByText` 而不是 `getByText`：标题与正文里**都**提到了
+     * （标题「需要先连上钉钉」+ 正文「回第 1 步连上钉钉」），
+     * 而 `getByText` 遇到多个匹配会抛。这里要的判据是"至少说了一处"。
+     */
+    expect(screen.getAllByText(/第 1 步|钉钉/).length).toBeGreaterThan(0)
   })
 })

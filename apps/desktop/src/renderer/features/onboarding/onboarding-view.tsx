@@ -54,7 +54,7 @@ import { DistillStep } from "./distill-step.js"
 import { PersonaStep, type PersonaDraft } from "./persona-step.js"
 import { SourcesStep, type SourcesDraft } from "./sources-step.js"
 import { ModelConfigForm } from "../settings/model-config-form.js"
-import { personaCapableChannels } from "../../lib/channel-capability.js"
+import { canRunPersona, personaCapableChannels } from "../../lib/channel-capability.js"
 
 const STEP_ORDER: readonly OnboardingStepId[] = [
   "channel",
@@ -251,6 +251,31 @@ export function OnboardingView() {
    * 发送能力时这里一行都不用改。
    */
   const personaHost = personaCapableChannels(list)[0]
+  /**
+   * 已授权的渠道 id 集合 —— 第 4 步的会话列表按它过滤。
+   *
+   * ★ 判据与 `persona-module.tsx` 那份一致（`available && authorized`）：
+   * 未开放的渠道不该出现在任何列表里，而未授权的渠道采集不会跑。
+   */
+  const authorizedChannelIds = useMemo(
+    () =>
+      new Set(
+        list.filter((c) => c.available && c.status.state === "authorized").map((c) => c.id),
+      ),
+    [list],
+  )
+  /**
+   * 已授权的渠道里，哪些是**只读接入**（不能以本人身份发消息）。
+   *
+   * 第 4 步据此说清"选中的会话只进图谱与搜索，不会用来替你回复" ——
+   * 那一步叫「学习范围」，而只读渠道上"分身学会怎么说话"这件事不会发生。
+   *
+   * ★ 判据走 `canRunPersona`（读 `capabilities.sendAs`），不是比渠道 id。
+   */
+  const readOnlyChannelIds = useMemo(
+    () => new Set(list.filter((c) => !canRunPersona(c)).map((c) => c.id)),
+    [list],
+  )
 
   /**
    * 本人身份是否已确认——授权后才有意义，所以只在 authorized 时订阅快照。
@@ -628,19 +653,22 @@ export function OnboardingView() {
                 onChange={setSources}
                 sources={distillSources.data ?? []}
                 /**
-                 * ★★ 只列**主渠道**的会话。
+                 * ★★ 只列**已连渠道**的会话。
                  *
-                 * 这一步喂给的是第 5 步「开始学习」（蒸馏），而 `DistillService`
-                 * 只有一个 `this.db`（主库）、**没有渠道概念** —— 非主渠道的语料
-                 * 在 `sources/<channelId>/core.sqlite` 里，蒸馏压根不读。
+                 * 这一步存的是**采集白名单**（决定采哪些会话），而采集按渠道
+                 * 各自跑 —— 所以该列的是"现在连着的那些渠道"的会话。
+                 * 保存端本来就按渠道分桶（见上面 `buckets`），多渠道一直支持。
                  *
-                 * 不过滤的表现（用户截图）：列表里混着飞书的会话，勾上它们是一个
-                 * **不会兑现的动作** —— 界面上有勾、学习时不算，且不报错。
+                 * ★ 上一版我写死了主渠道，理由是"这一步喂给蒸馏、而蒸馏只读
+                 * 主库"。那个前提是错的（`conversationIds` 是采集白名单，不是
+                 * 蒸馏语料清单），真机表现：只连飞书时列表里是**已退登渠道**的
+                 * 55 个历史会话，而连着的飞书 4 个反倒看不见。
                  *
-                 * ★ 飞书的采集范围在运行状态页单独设（那里一次只管一个渠道，
-                 * 见 `collection-scope-panel.tsx` 传同一个 `channelFilter`）。
+                 * ★ 用已授权而不是"全部渠道"：退登的渠道采集不会跑，把它的
+                 * 历史会话混进"接下来采哪些"里会让人以为它还在采。
                  */
-                channelFilter={PRIMARY_CHANNEL_ID}
+                channelFilter={authorizedChannelIds}
+                readOnlyChannelIds={readOnlyChannelIds}
               />
             ) : null}
 

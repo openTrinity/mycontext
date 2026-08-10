@@ -165,7 +165,8 @@
     "expandAll": "展开其余 {{count}} 个",
     "collapseList": "收起",
     "sourcesReady": "现在可用",
-    "sourcesPlanned": "排期中"
+    "sourcesPlanned": "排期中",
+    "readOnlyChannelHint": "其中只读接入的渠道（比如飞书）：选中的会话只用来回答你的提问，不会用来替你回复。"
   },
   "distillStep": {
     "phasesTitle": "学习进度",
@@ -211,7 +212,8 @@
     "graphEdges": "它们之间的联系",
     "graphBuilding": "正在整理 —— 要调模型，分钟级。可以关掉页面",
     "graphAbsent": "还没整理：{{reason}}。配好模型后下次启动会自动整理。",
-    "corpusChannelMissing": "钉钉现在没连上 —— 已入库的聊天记录还能学，但学不到新的。要继续攒，回第 1 步重新连上钉钉。"
+    "needPrimaryTitle": "这一步需要先连上钉钉",
+    "needPrimaryHint": "学习读的是钉钉的聊天记录 —— 现在它没连上，所以这一步暂时做不了。回第 1 步连上钉钉，或先跳过：之后在设置里可以重新走这一步。"
   },
   "sourceKinds": {
     "chat": "聊天消息",

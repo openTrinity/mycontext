@@ -202,7 +202,16 @@ function wrap(
   return render(
     <I18nextProvider i18n={createI18n("zh")}>
       <QueryClientProvider client={client}>
-        <DistillStep rangeDays={options.rangeDays ?? null} modelConfigured />
+        {/*
+          ★ `corpusChannelConnected` 必须给 true：为 false 时这一步整块换成
+          「需要先连上钉钉」的说明（蒸馏链只认主渠道），下面这些断言的东西
+          一个都不渲染。这一组验的是蒸馏结果的层次，不是那个前置状态。
+        */}
+        <DistillStep
+          rangeDays={options.rangeDays ?? null}
+          modelConfigured
+          corpusChannelConnected
+        />
       </QueryClientProvider>
     </I18nextProvider>,
   )

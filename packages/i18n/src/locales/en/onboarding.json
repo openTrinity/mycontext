@@ -165,7 +165,8 @@
     "expandAll": "Show {{count}} more",
     "collapseList": "Show less",
     "sourcesReady": "Available now",
-    "sourcesPlanned": "Planned"
+    "sourcesPlanned": "Planned",
+    "readOnlyChannelHint": "For read-only channels (e.g. Feishu): the conversations you pick only power your questions — they are never used to reply on your behalf."
   },
   "distillStep": {
     "phasesTitle": "Learning progress",
@@ -211,7 +212,8 @@
     "graphEdges": "links between them",
     "graphBuilding": "Organizing — needs a model, takes minutes. You can close this page",
     "graphAbsent": "Not organized yet: {{reason}}. It runs automatically on next launch once a model is set.",
-    "corpusChannelMissing": "DingTalk isn't connected — what's already in the library can still be learned from, but nothing new will come in. Go back to step 1 to reconnect."
+    "needPrimaryTitle": "This step needs DingTalk connected",
+    "needPrimaryHint": "Learning reads your DingTalk chat history, and it isn't connected — so this step can't run yet. Go back to step 1 to connect it, or skip for now; you can come back to this step from Settings."
   },
   "sourceKinds": {
     "chat": "Chat messages",

@@ -108,25 +108,53 @@ export interface SourcesStepProps {
   /** 全部资料源（含采集器状态），由主进程给 */
   sources: readonly { kind: DistillSourceId; status: "ready" | "planned" }[]
   /**
-   * 只列这个渠道的会话。`undefined` = 不过滤。
+   * 只列这些渠道的会话。`undefined` = 不过滤。
    *
-   * ## ★★ 两个调用方**都**要传，`undefined` 现在没有正当用途
+   * ## ★★ 是集合，因为两个调用方要的范围不同
    *
-   * · 运行状态页的采集范围面板一次只管一个渠道；
-   * · 引导流程第 4 步喂给的是蒸馏，而蒸馏只读主库。
+   * · 运行状态页的采集范围面板一次只管一个渠道 → 单元素集合；
+   * · 引导第 4 步要列**全部已连渠道** → 多元素集合。
    *
-   * 这里原来写着「`undefined` = 不过滤（引导流程走这条）」—— 那句话本身就是
-   * 那个 bug：引导页于是把两个渠道的会话混在一起列出来（用户截图），
-   * 而勾上非主渠道的会话是一个**不会兑现的动作**（`DistillService` 只有一个
-   * `this.db`，非主渠道的语料在另一个库里，压根不读）。
+   * ## ★★ 这个字段被我改错过一次，值得记下来
    *
-   * 留着 `undefined` 这一支只是为了不让缺省值变成一个必填参数的破坏性改动；
-   * 新的调用方**应当显式传**。
+   * 上一版我把它当单个 id、并在引导页写死主渠道，理由是"这一步喂给蒸馏，
+   * 而蒸馏只读主库"。那个推理**错在前提**：`conversationIds` 是**采集白名单**
+   * （决定采哪些会话），而采集按渠道各自跑 —— 每个渠道的 `IngestService`
+   * 读自己库里的白名单（见 `distill-source.service.ts` 里
+   * 「`conversationIds` 里装的是**这个渠道的** external_id」那句）。
+   *
+   * 真机表现：只连了飞书时，列表里是**已退登渠道**的 55 个历史会话，
+   * 而真正连着的飞书 4 个会话反倒看不见。
+   *
+   * ★ 空集 ≠ 不过滤：空集表示"一个渠道都没连"，那时列表本该是空的。
    */
-  channelFilter?: string
+  channelFilter?: ReadonlySet<string>
+  /**
+   * 其中**只读接入**的那些（`sendAs` 为空 —— 见 `canRunPersona`）。
+   *
+   * 给了且当前范围里真的有这类渠道时，会话区顶部多一句说明：选中的会话
+   * 只进建图与搜索，不会进自动回复。
+   *
+   * ## ★ 为什么这句话必须有
+   *
+   * 这一步的标题是「学习范围」，而"学习"在用户心里等于"数字分身会学会
+   * 这些话怎么说"。只读渠道上那件事**不会发生**（它的数据只进图谱与搜索）
+   * —— 不说清的话用户会以为自己在给分身喂料，而分身永远不会用到它。
+   *
+   * ★ 传 id 集合而不是让这个组件自己查渠道列表：它现在只依赖
+   * `useChannelConversations`，加一个 `useChannels()` 会让一个展示组件
+   * 多一条数据依赖，而调用方本来就有那份数据。
+   */
+  readOnlyChannelIds?: ReadonlySet<string>
 }
 
-export function SourcesStep({ value, onChange, sources, channelFilter }: SourcesStepProps) {
+export function SourcesStep({
+  value,
+  onChange,
+  sources,
+  channelFilter,
+  readOnlyChannelIds,
+}: SourcesStepProps) {
   const { t } = useDynamicTranslation("onboarding")
   const errorText = useErrorText()
   /**
@@ -174,12 +202,48 @@ export function SourcesStep({ value, onChange, sources, channelFilter }: Sources
     const items =
       channelFilter === undefined
         ? all
-        : all.filter((item) => item.channelId === undefined || item.channelId === channelFilter)
+        : all.filter(
+            (item) => item.channelId === undefined || channelFilter.has(item.channelId),
+          )
     return {
       direct: items.filter((item) => item.kind === "direct"),
       group: items.filter((item) => item.kind === "group"),
     }
   }, [conversations.data, channelFilter])
+
+  /**
+   * 当前列表里**真的有**只读渠道的会话吗。
+   *
+   * ★ 判据是"列出来的东西里有"，不是"传进来的集合非空"：只连了只读渠道
+   * 但它一条会话都没采到时，那句说明是多余的（用户面对一个空列表，
+   * 而旁边写着"选中的会话只用于…"）。
+   */
+  const hasReadOnlyItems = useMemo(() => {
+    if (readOnlyChannelIds === undefined || readOnlyChannelIds.size === 0) return false
+    return [...groups.direct, ...groups.group].some(
+      (item) => item.channelId !== undefined && readOnlyChannelIds.has(item.channelId),
+    )
+  }, [groups, readOnlyChannelIds])
+
+  /**
+   * 当前**列表里可见**的那些 externalId。
+   *
+   * ## ★★ 顶部计数与「清空」都要按这个来，不能用整个 `conversationIds`
+   *
+   * `conversationIds` 是**跨渠道**的一份（保存时才按渠道分桶），所以按渠道
+   * 过滤之后它里面有一批**看不见**的 id。实测（真机截图）：只连飞书时
+   * 顶部写着「已选 13 个」而列表里是 4/4 —— 那 9 个是钉钉的旧勾选，
+   * 用户会以为自己选了 13 个飞书会话。
+   *
+   * 「清空」更严重：它原来清掉整个数组，也就是**连看不见的那 9 个一起清** ——
+   * 用户在飞书这一屏点"清空"，钉钉的白名单跟着没了，而屏幕上没有任何痕迹。
+   * 那与这一轮修过的那次数据丢失是同一形状。
+   */
+  const visibleIds = useMemo(
+    () => new Set([...groups.direct, ...groups.group].map((item) => item.externalId)),
+    [groups],
+  )
+  const visibleChosen = value.conversationIds.filter((id) => visibleIds.has(id))
 
   /** 一组的全选/全不选。已经全选了就变成全不选（同一个按钮两个方向）。 */
   const toggleAll = (items: readonly ChannelConversationView[]) => {
@@ -273,15 +337,26 @@ export function SourcesStep({ value, onChange, sources, channelFilter }: Sources
         title={t("sourcesStep.sectionConversations")}
         hint={t("sourcesStep.conversationHint")}
         action={
-          value.conversationIds.length > 0 ? (
+          visibleChosen.length > 0 ? (
             <span className="flex items-center gap-2">
               <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-                {t("sourcesStep.selectedCount", { count: value.conversationIds.length })}
+                {t("sourcesStep.selectedCount", { count: visibleChosen.length })}
               </span>
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => onChange({ ...value, conversationIds: [] })}
+                /**
+                 * ★★ 只清**可见**的那些 —— 见 `visibleChosen` 的注释。
+                 *
+                 * 清整个数组会把别的渠道的白名单一起清掉，而屏幕上没有任何
+                 * 痕迹说那件事发生了。
+                 */
+                onClick={() =>
+                  onChange({
+                    ...value,
+                    conversationIds: value.conversationIds.filter((id) => !visibleIds.has(id)),
+                  })
+                }
               >
                 {t("sourcesStep.clearSelection")}
               </Button>
@@ -301,6 +376,19 @@ export function SourcesStep({ value, onChange, sources, channelFilter }: Sources
             {conversations.data?.truncated === true ? (
               <p className="typography-caption-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--text-base-tertiary)]">
                 {t("sourcesStep.truncatedWarning")}
+              </p>
+            ) : null}
+
+            {/*
+              ★★ 只读渠道的会话选了**不会**进自动回复 —— 必须说出来。
+
+              这一步叫「学习范围」，而"学习"在用户心里等于"分身会学会这些话
+              怎么说"。只读渠道上那件事不会发生（数据只进图谱与搜索），
+              不说清的话用户以为自己在给分身喂料，而分身永远用不到它。
+            */}
+            {hasReadOnlyItems ? (
+              <p className="typography-caption-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--text-base-tertiary)]">
+                {t("sourcesStep.readOnlyChannelHint")}
               </p>
             ) : null}
 

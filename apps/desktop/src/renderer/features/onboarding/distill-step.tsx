@@ -59,17 +59,27 @@ export interface DistillStepProps {
   /** 是否配了模型。没配时抽取型任务会失败 —— 要提前说 */
   modelConfigured: boolean
   /**
-   * 语料所在的那个渠道连上了吗。
+   * 主渠道连上了吗 —— 这一步**只对主渠道成立**。
    *
-   * ## ★★ 它影响的是「还能不能攒到新语料」，不是「现在能不能学」
+   * ## ★★ 为什么是"只对主渠道"而不是"哪个渠道都行"
    *
-   * 学习的语料来自**主渠道**的库：`DistillService` 只有一个 `this.db`，
-   * 非主渠道（只读接入）的语料在 `sources/<channelId>/core.sqlite` 里，
-   * 蒸馏压根不读。所以只连了只读渠道时，**新的**聊天记录不会进来。
+   * 整条蒸馏链从上到下都只认主渠道，不是漏了个参数：
    *
-   * ★ 但已入库的照样能学 —— 蒸馏全程不碰渠道 CLI。我第一版据此禁用了
-   * 「开始学习」按钮并写"什么都学不到"，真机上那一刻库里有 1,724 条：
-   * 按钮灰着、文案说学不到，而两句都不成立。**现在只给说明，不禁用。**
+   * · `startup.ts` 的 `distill.attach(handle.db, …)` 传的是主库；
+   * · `forge.run({ db: handle.db })` 同样；
+   * · `forge.service.ts:249` 更直接：
+   *   `new SelfIdentityRepository(input.db).get("dingtalk")` —— **渠道 id
+   *   写死在里面**。
+   *
+   * 所以主渠道没连时这一步**不适用**（而不是"能跑但结果少"）。
+   * 那时整块换成一句说明 —— 与 `persona-module` 选到只读渠道时的做法一致。
+   *
+   * ## ★ 为什么不自动跳过这一步
+   *
+   * 自动 skip 会**写库**（`onboarding_progress` 那一行），而那是替用户做决定；
+   * 更要紧的是这是**唯一产出画像的一步**，静默跳过意味着用户可能永远不知道
+   * 自己缺了画像。所以停在这里、说清原因、把「跳过这步」留给他自己点
+   * （引导页的软门原则）。
    */
   corpusChannelConnected: boolean
 }
@@ -118,23 +128,44 @@ export function DistillStep({
     forge?.lastRunAt !== undefined &&
     forge.lastRunAt !== runBaseline
 
+  /**
+   * ★★★ 主渠道没连 → 整块换成一句说明，**不渲染下面那套进度与按钮**。
+   *
+   * ## 为什么是整块换掉，而不是加一条横幅
+   *
+   * 加横幅的话下面那些仍在（进度条、"已入库 1,724 条"、知识库计数、
+   * 一个能点的「开始学习」）—— 我上一版就是那样，真机截图里同屏三句话
+   * 互相打架：横幅说做不了、下面说有 1,724 条、按钮还能点。
+   *
+   * 这一步**不适用**于"主渠道没连"这个状态（整条蒸馏链只认主渠道，
+   * 见 props 注释里那三处证据），所以正确的表达是"这一步现在不适用"，
+   * 而不是"这一步能做但会差一点"。
+   *
+   * 与 `persona-module` 选到只读渠道时的做法一致（那里也是 early-return
+   * 一整块居中说明）。
+   *
+   * ★ 底部的「跳过这步 / 上一步」不在这个组件里（在 `onboarding-view` 的
+   * footer），所以这个 early-return **不影响**用户往下走 —— 软门保住了。
+   */
+  if (!corpusChannelConnected) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 px-8 py-12">
+        <p className="typography-title-small-500 text-center text-[var(--text-base-primary)]">
+          {t("distillStep.needPrimaryTitle")}
+        </p>
+        <p className="typography-body-small-400 max-w-md text-center text-[var(--text-base-tertiary)]">
+          {t("distillStep.needPrimaryHint")}
+        </p>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-[var(--gap-section-md)]">
       {/* 没配模型要提前说：不然用户会看到一堆 failed 才知道 */}
       {modelConfigured ? null : (
         <p className="typography-body-small-400 rounded-[var(--radius-md)] bg-[var(--bg-card-z0)] px-3 py-2 text-[var(--text-base-tertiary)]">
           {t("distillStep.noModel")}
-        </p>
-      )}
-
-      {/*
-        ★★ 语料所在的渠道没连 → 现在开始学习会得到 0 条结论（见 props 注释）。
-
-        用 warning 色而不是 tertiary：这不是"顺便一提"，而是"这一步现在做不了"。
-      */}
-      {corpusChannelConnected ? null : (
-        <p className="typography-body-small-400 rounded-[var(--radius-md)] bg-[var(--status-fill-warning-container)] px-3 py-2 text-[var(--status-warning)]">
-          {t("distillStep.corpusChannelMissing")}
         </p>
       )}
 
