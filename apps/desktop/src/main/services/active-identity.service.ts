@@ -129,14 +129,57 @@ export class ActiveIdentityService {
   }
 
   /**
-   * 钉给渠道命令的 profile 值；null = 不钉（退回 CLI 全局 profile）。
+   * 钉给**某个渠道**的命令的 profile 值；undefined = 不钉。
    *
    * ★ `RuntimeEnv` 拿的是包着这个方法的 getter —— 每条命令现读，
    * 所以切完身份**下一条命令**就用新身份，不必重启。
+   *
+   * ## ★★★ 必须按渠道查，不能给"当前身份"那一个全局值
+   *
+   * 这个方法原来返回 `toChannelProfile(this.current)` —— 也就是**全局唯一**的
+   * 「当前身份」。在"一个 vault 只有一个渠道身份"的年代那是对的：当前身份
+   * 与"这条命令属于哪个渠道"永远一致。
+   *
+   * 而多渠道并存之后（一个 vault 挂飞书 + 钉钉，见
+   * `CONTROL_0005_VAULT_MULTI_CHANNEL`）这个前提不成立了。实测的后果：
+   *
+   *     身份表里当前是飞书 → currentProfile() 返回飞书的 corpId（字面 "feishu"）
+   *     → 钉钉的命令被拼上 `--profile feishu`
+   *     → dws 里没有叫 feishu 的 profile → 每条命令报「未登录」
+   *
+   * 逐条实测（同一目录、只改 profile 值）：
+   *     --profile dingd8e11…  → authenticated: true
+   *     --profile feishu      → authenticated: false「未登录」
+   *
+   * 表现是"钉钉授权成功、几十秒后变未连接"，而凭据其实一直是好的 ——
+   * 我们只是拿另一个渠道的身份去问 dws。
+   *
+   * ## 判据：这一行身份的 `channelId` 属于要调的那个渠道
+   *
+   * `startsWith` 而不是全等：`channelId` 会带「来源应用」后缀
+   * （`dingtalk@src-…`，用户自备 CLI 那种），全等会把自备那份漏掉、
+   * 于是它永远不钉身份 —— 那正是本文件 `dwsProfile` 那段注释里
+   * 「跟着 CLI 全局 currentProfile 走」的越权读取面。
+   *
+   * @param channelId 要调的渠道（不传 = 保持旧行为，只给当前身份的值）
    */
-  currentProfile(): string | undefined {
+  currentProfile(channelId?: string): string | undefined {
     const identity = this.current
-    return identity === null ? undefined : toChannelProfile(identity)
+    if (identity === null) return undefined
+    if (channelId !== undefined && !identity.channelId.startsWith(channelId)) {
+      /**
+       * 当前身份不是这个渠道的 → 从身份表里找**这个渠道**在当前 vault 上的那一行。
+       *
+       * 找不到就返回 undefined（不钉）。★ 这比"退回当前身份"安全得多：
+       * 不钉时 dws 跟着它自己的全局 profile 走（那至少是同一个渠道的身份），
+       * 而钉错渠道必然失败且看起来像"登录过期"。
+       */
+      const match = this.options.identities
+        .listByVaultId(identity.vaultId)
+        .find((row) => row.channelId.startsWith(channelId))
+      return match === undefined ? undefined : toChannelProfile(match)
+    }
+    return toChannelProfile(identity)
   }
 
   /** 某账号下的全部身份（最近用过的在前）。 */

@@ -358,10 +358,16 @@ export function bootstrapApp(mainDir: string): AppContext {
       return vaultPaths?.dwsHome ?? paths.legacyDwsHome
     },
     /**
-     * ★ 把渠道命令钉在当前身份上（`--profile <corpId>:<userId>`）。
+     * ★ 把渠道命令钉在当前身份上（`--profile <corpId>`）。
      * 每条命令现读 —— 切完身份**下一条命令**就用新身份，不必重启。
+     *
+     * ★★ 显式传 `"dingtalk"`：这个 `RuntimeEnv` 服务的是 **dws**（钉钉的 CLI），
+     * 而多渠道并存之后「当前身份」可能是**飞书**的 —— 那时不带渠道会把
+     * 飞书的 corpId（字面就是 `"feishu"`）拼进 dws 的命令行，dws 里没有这个
+     * profile，于是每条命令报「未登录」（实测：钉钉授权成功、几十秒后变
+     * 未连接，而凭据一直是好的）。完整推理见 `currentProfile` 的注释。
      */
-    dwsProfile: () => activeIdentity.currentProfile(),
+    dwsProfile: () => activeIdentity.currentProfile("dingtalk"),
   })
   const processes = new ProcessRunner(logger.child("Process"))
   const dingtalk = createDingTalkPlugin({
