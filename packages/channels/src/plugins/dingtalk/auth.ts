@@ -301,12 +301,28 @@ export class DingTalkAuth implements ChannelAuth {
      * 唯一可信的判据（见下一段），比 exit code 准。
      */
     const loginOutput = `${login.stderr}\n${login.stdout}`
-    if (login.exitCode !== 0 && isLegacyTokenSlotRefusal(loginOutput)) {
+    /**
+     * ★ 判据**不再要求非零退出**。
+     *
+     * 原来是 `login.exitCode !== 0 && isLegacyTokenSlotRefusal(...)`。而实测撞到
+     * 一种上游**退出码为 0、却没有把凭据写进来**的形态（见下面第二次复查那段：
+     * `token.json` 只有 `updated_at`）。带着退出码这个前置条件，这道判据在那种
+     * 形态上永远不成立 —— 于是流程一路报"成功"，几十秒后界面变未连接。
+     *
+     * 只看输出里有没有那几个特征词：它们来自上游明确的拒绝信息，
+     * 命中了就是"这次登录没落地"，与退出码是几无关。
+     */
+    if (isLegacyTokenSlotRefusal(loginOutput)) {
       /**
-       * detail 取 stderr 的尾部：整段输出可能很长，而 UI 只需要那句原因。
+       * detail 取输出的尾部：整段可能很长，而 UI 只需要那句原因。
        * 不放整段是因为它可能含组织 id 这类标识符。
+       *
+       * ★ 从 `loginOutput`（stderr + stdout）取而不是只取 stderr：
+       * 判据已经不要求非零退出，而退出码为 0 的那种形态下拒绝信息可能
+       * 打在 stdout 上 —— 只看 stderr 会得到一个空 detail，
+       * 于是界面上是一句没有任何线索的失败。
        */
-      const detail = login.stderr.trim().slice(-400)
+      const detail = loginOutput.trim().slice(-400)
       this.options.logger.warn("dws login refused to overwrite existing session", {
         exitCode: login.exitCode,
       })
@@ -334,6 +350,65 @@ export class DingTalkAuth implements ChannelAuth {
         retryable: true,
         messageKey: "errors:channel.authNotDetected",
       })
+    }
+
+    /**
+     * ★★★ 再用**采集实际会用的口径**（钉住身份）复查一次。
+     *
+     * ## 为什么必须有第二次（"连上了，过一会儿又显示未连接"的根因）
+     *
+     * 上面那次复查是 `pinned: false` —— 不带 `--profile`，也就跟着渠道 CLI 的
+     * **全局 currentProfile** 走。而采集/会话列表用的全是 `pinned: true`
+     * （带 `--profile`，指向这个 vault 的隔离目录）。两者读的是**两套凭据**。
+     *
+     * 实测（打包态真机，这次撞到的形状）：
+     * · 隔离目录里的 `token.json` 在授权那一刻确实被写了，但内容**只有
+     *   `updated_at`、一个 token 字段都没有**（47 字节空壳）——
+     *   那正是本文件 `LEGACY_TOKEN_SLOT_MARKERS` 上方记的「旧格式 token 槽」，
+     *   上游对它会**拒绝写入**（怕覆盖一份可能唯一的旧登录）；
+     * · 而机器上的全局 profile（用户以前在终端登录过的）是**有效的**，
+     *   于是第一次复查通过 → 我们报「授权成功」；
+     * · 随后每条带 profile 的命令都 `exitCode 2 / 未登录`
+     *   （`contact/get_current_user_profile`、`im/list_all_conversations`…），
+     *   界面几十秒后变成"未连接"。
+     *
+     * 用户看到的就是"点了登录，过一会儿又掉了"，而日志里授权那一段全是成功。
+     *
+     * ## 判据：钉住之后**仍然**是 authorized 才算真的成了
+     *
+     * 这一次不通过就是「凭据没能写进这个身份的目录」。归
+     * `authLegacyTokenSlot`（而不是 `authNotDetected`「请重试」）—— 重试一百次
+     * 都一样，出路是带 `--profile` 在终端跑一次 login 把旧槽迁移掉。
+     * 那句提示已经存在，之前只挂在 `exitCode !== 0` 那条分支上，
+     * 而这次上游**没有非零退出**，所以从没被触发过。
+     *
+     * ★ 顺序上放在第一次复查**之后**：第一次回答的是"刚扫码登进来的是谁"
+     * （那时新身份可能还没有 vault 映射，不能钉 —— 见 `queryStatus` 的注释），
+     * 第二次回答的是"这个身份自己的目录里凭据到位了吗"。两个问题都要答。
+     *
+     * ★ 没绑身份时 `dwsProfileArgs()` 返回空数组，此时两次复查等价 ——
+     * 那是"首次授权、还没有映射行"的正常情形，不该因此判失败。
+     * 所以只在**真的钉上了**（有 profile 参数）时才把它当门禁。
+     */
+    if (this.options.runtime.hasPinnedIdentity()) {
+      const pinnedStatus = await this.queryStatus({ pinned: true })
+      if (pinnedStatus.state !== "authorized") {
+        this.options.logger.warn("login succeeded globally but not for the pinned identity", {
+          globalState: status.state,
+          pinnedState: pinnedStatus.state,
+        })
+        ctx.onProgress({
+          phase: "failed",
+          messageKey: "errors:channel.authLegacyTokenSlot",
+          detail: "",
+        })
+        throw legacyTokenSlotError(
+          "登录没有写进这个身份的凭据目录（多半是本机存在一份旧格式的登录态，" +
+            "上游拒绝覆盖它）。请在终端带 --profile 跑一次 dws auth login 完成迁移后重试。",
+        )
+      }
+      ctx.onProgress({ phase: "succeeded", status: pinnedStatus })
+      return pinnedStatus
     }
 
     ctx.onProgress({ phase: "succeeded", status })

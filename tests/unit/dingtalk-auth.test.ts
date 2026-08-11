@@ -277,6 +277,14 @@ describe("DingTalkAuth：OAuth 后继续完成 PAT 范围授权", () => {
     const runtime = {
       resolve: () => ({ name: "dws", path: "/tmp/dws", platform: "test", source: "bundled" }),
       buildEnv: () => ({}),
+      /**
+       * ★ 没绑身份 —— 这条用例测的是**首次授权**（还没有 vault 映射行）。
+       *
+       * `login()` 在钉住了身份时会再用 `pinned: true` 复查一次（那是
+       * "报成功、随后全部未登录"那个 bug 的门禁，见 auth.ts 里那段）。
+       * 首次授权这一档两次复查等价，所以给 false 保持这条用例原来的语义。
+       */
+      hasPinnedIdentity: () => false,
     } as unknown as RuntimeEnv
     const auth = new DingTalkAuth({
       runtime,
