@@ -1837,6 +1837,20 @@ def _entity_similar_neighbors(entity_id: str) -> list[dict]:
     return neighbors
 
 
+#: Base (non-community) columns selected for ``/entity``, in tuple order.
+#: ``_entity_result_dict`` reads community levels at the four positions that
+#: follow these, so this list defines the fixed row layout.
+_ENTITY_BASE_COLS = (
+    "id",
+    "name",
+    "entity_type",
+    "mention_count",
+    "first_seen",
+    "last_seen",
+)
+_ENTITY_BASE_COLS_SQL = ", ".join(_ENTITY_BASE_COLS)
+
+
 def _entity_result_dict(row: tuple, has_community: bool, include_similar: bool) -> dict:
     """Build one ``/entity`` result payload from an ``entities`` row.
 
@@ -1932,13 +1946,16 @@ def _entity_lookup_impl(req: EntityRequest):
         c[1]
         for c in state.sqlite_conn.execute("PRAGMA table_info(entities)").fetchall()
     ]
+    # The community columns are created LAZILY, one per detected level, so a
+    # corpus that only produced L0..L1 has no community_L2/L3. Select exactly the
+    # columns that exist and pad the rest, otherwise this SELECT raises
+    # "no such column: community_L3" and turns into a hard 500.
+    present_levels = [lvl for lvl in range(4) if f"community_L{lvl}" in cols]
     has_community = COMMUNITIES_ENABLED and "community_L0" in cols
-    base_cols = (
-        "id, name, entity_type, mention_count, first_seen, last_seen,"
-        " community_L0, community_L1, community_L2, community_L3"
-        if has_community
-        else "id, name, entity_type, mention_count, first_seen, last_seen"
-    )
+    community_cols = [f"community_L{lvl}" for lvl in present_levels]
+    base_cols = _ENTITY_BASE_COLS_SQL
+    if has_community:
+        base_cols += "".join(f", {c}" for c in community_cols)
 
     if has_id:
         eid = req.entity_id.strip()
@@ -1960,15 +1977,23 @@ def _entity_lookup_impl(req: EntityRequest):
             (f"%{req.name}%", req.limit),
         ).fetchall()
 
-    # Pad non-community rows to a stable 10-wide shape for _entity_result_dict.
-    results = [
-        _entity_result_dict(
-            tuple(r) if has_community else (tuple(r) + (None, None, None, None)),
-            has_community,
-            req.include_similar,
+    # Pad to the stable 10-wide shape expected by _entity_result_dict, which
+    # reads row[6..9] as L0..L3 by POSITION. Community columns are created
+    # lazily per detected level, so a missing level must become None in ITS OWN
+    # slot -- appending at the end would shift e.g. an L0/L2 schema so that L2 is
+    # reported as L1.
+    results = []
+    for r in rows:
+        row = tuple(r)
+        if has_community:
+            base = row[: len(_ENTITY_BASE_COLS)]
+            by_level = dict(zip(present_levels, row[len(_ENTITY_BASE_COLS) :]))
+            row = base + tuple(by_level.get(lvl) for lvl in range(4))
+        else:
+            row = row + (None, None, None, None)
+        results.append(
+            _entity_result_dict(row, has_community, req.include_similar)
         )
-        for r in rows
-    ]
     return {"results": results, "count": len(results)}
 
 
@@ -2693,7 +2718,10 @@ def _importance(node_id: str) -> float:
     ntype = gw.node_type_of(node_id)
     bare = gw.strip_prefix(node_id)
     if ntype == "entity":
-        return state.pagerank.get(bare, 0.0)
+        # The PageRank prior is a startup-built index; treat a missing index as
+        # "no prior" (neighbours stay unordered) instead of raising, so a walk
+        # never turns into a 500 just because the optional prior is absent.
+        return (state.pagerank or {}).get(bare, 0.0)
     if ntype == "fact":
         row = state.sqlite_conn.execute(
             "SELECT confidence FROM facts WHERE id = ?", (bare,)
@@ -2755,7 +2783,7 @@ def _seeds_for_query(
 
     # (a) rewrite entities -> sim x pagerank
     for ent in matched:
-        pr = state.pagerank.get(ent["id"], 0.5)
+        pr = (state.pagerank or {}).get(ent["id"], 0.5)
         bump(gw.namespaced(ent["id"], "entity"), ent["sim"] * pr)
 
     # (b) top fact chunks as fact-seeds -> sim x confidence. Reuse Phase-1's
@@ -2785,7 +2813,7 @@ def _seeds_for_query(
             (mid,),
         ).fetchall()
         for (eid,) in rows:
-            pr = state.pagerank.get(eid, 0.5)
+            pr = (state.pagerank or {}).get(eid, 0.5)
             bump(gw.namespaced(eid, "entity"), h["score"] * pr)
 
     # dedup already done via seed_best; take top seed_k by relevance.
@@ -2839,7 +2867,7 @@ def _resolve_nodes(nodes: list[dict]) -> list[dict]:
                 out["name"] = row[0]
                 if has_comm:
                     out["community_L1"] = row[1]
-                out["pagerank"] = state.pagerank.get(bare, 0.0)
+                out["pagerank"] = (state.pagerank or {}).get(bare, 0.0)
         elif ntype == "fact":
             cols = "text, confidence, community_L1" if has_comm else "text, confidence"
             row = state.sqlite_conn.execute(
