@@ -41,15 +41,6 @@ skip_no_ladybug = pytest.mark.skipif(
     reason="ladybug not installed — install with: pip install ladybug",
 )
 
-# LadybugDB (Kuzu fork) has Cypher dialect incompatibilities: MERGE not supported,
-# variable-length path queries produce empty results. These tests document the
-# intended behavior but currently fail due to upstream dialect gaps.
-xfail_ladybug_dialect = pytest.mark.xfail(
-    reason="LadybugDB Cypher dialect incompatibility (MERGE, path queries)",
-    strict=False,
-)
-
-
 # ── ABC conformance (no ladybug needed) ──────────────────────────────────────
 
 
@@ -213,7 +204,6 @@ def test_insert_edges_goes_to_ladybug_not_sqlite(tmp_path: pathlib.Path) -> None
 
 
 @skip_no_ladybug
-@xfail_ladybug_dialect
 def test_count_edges_from_ladybug(tmp_path: pathlib.Path) -> None:
     """count_edges returns edges from LadybugDB."""
     store = create_store(
@@ -295,7 +285,6 @@ def test_find_paths_via_ladybug(tmp_path: pathlib.Path) -> None:
 
 
 @skip_no_ladybug
-@xfail_ladybug_dialect
 def test_scan_entity_edges_from_ladybug(tmp_path: pathlib.Path) -> None:
     """scan_entity_edges yields tuples from LadybugDB edges."""
     store = create_store(

@@ -35,6 +35,8 @@ dependencies = [
 # Optional vector backend: Qdrant server or embedded mode
 # Default is zvec (installed as a core dependency above)
 qdrant = ["qdrant-client>=1.9.0"]
+# Test runner and async-test support; install with `uv pip install -e ".[test]"`.
+test = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [build-system]
 requires = ["hatchling"]

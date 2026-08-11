@@ -20,15 +20,6 @@ skip_no_ladybug = pytest.mark.skipif(
     reason="ladybug not installed — install with: pip install ladybug",
 )
 
-# LadybugDB (Kuzu fork) has Cypher dialect incompatibilities: MERGE not supported,
-# variable-length path queries produce empty results. These tests document the
-# intended behavior but currently fail due to upstream dialect gaps.
-xfail_ladybug_dialect = pytest.mark.xfail(
-    reason="LadybugDB Cypher dialect incompatibility (MERGE, path queries)",
-    strict=False,
-)
-
-
 # ── Fixture helpers ───────────────────────────────────────────────────────────
 
 def _populate_triangle(db) -> None:
@@ -270,7 +261,6 @@ def test_delete_edges_by_property(tmp_path):
 
 
 @skip_no_ladybug
-@xfail_ladybug_dialect
 def test_find_paths_shortest(tmp_path):
     """find_paths returns the shortest path."""
     from kl_graph.storage.ladybug_graph import LadybugGraphDB
@@ -287,7 +277,6 @@ def test_find_paths_shortest(tmp_path):
 
 
 @skip_no_ladybug
-@xfail_ladybug_dialect
 def test_find_paths_all_shortest_diamond(tmp_path):
     """all_shortest=True returns both equal-length paths in a diamond graph."""
     from kl_graph.storage.ladybug_graph import LadybugGraphDB
@@ -351,7 +340,6 @@ def test_find_paths_max_hops_limits(tmp_path):
 # ── neighbors ─────────────────────────────────────────────────────────────────
 
 @skip_no_ladybug
-@xfail_ladybug_dialect
 def test_neighbors_out(tmp_path):
     """neighbors returns outgoing neighbors."""
     from kl_graph.storage.ladybug_graph import LadybugGraphDB
@@ -420,7 +408,6 @@ def test_raw_query_returns_list_of_dicts(tmp_path):
 
 
 @skip_no_ladybug
-@xfail_ladybug_dialect
 def test_raw_query_with_params(tmp_path):
     """query() accepts parameter dict."""
     from kl_graph.storage.ladybug_graph import LadybugGraphDB
@@ -437,7 +424,6 @@ def test_raw_query_with_params(tmp_path):
 # ── upsert nodes ──────────────────────────────────────────────────────────────
 
 @skip_no_ladybug
-@xfail_ladybug_dialect
 def test_upsert_entity_node(tmp_path):
     """upsert_entity_node inserts a queryable Entity node."""
     from kl_graph.storage.ladybug_graph import LadybugGraphDB
