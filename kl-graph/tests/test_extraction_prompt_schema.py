@@ -31,3 +31,15 @@ def test_event_and_opinion_are_canonical_but_team_and_concept_are_not() -> None:
     assert map_fact_type("OPINION") is FactType.OPINION
     assert map_entity_type("Team") is EntityType.ORGANIZATION
     assert map_entity_type("Concept") is EntityType.UNKNOWN
+
+
+def test_extraction_prompts_include_contrastive_quoted_reply_guidance() -> None:
+    assert "QUOTED-REPLY RULES:" in SYSTEM_PROMPT_EN
+    assert "CORRECT:" in SYSTEM_PROMPT_EN
+    assert "INCORRECT:" in SYSTEM_PROMPT_EN
+    assert "引用回复规则：" in SYSTEM_PROMPT_CN
+    assert "正确：" in SYSTEM_PROMPT_CN
+    assert "错误：" in SYSTEM_PROMPT_CN
+    for prompt in (SYSTEM_PROMPT_EN, SYSTEM_PROMPT_CN):
+        assert "gpt5.6" in prompt
+        assert "opus" in prompt

@@ -452,6 +452,21 @@ FACT RULES:
 - 主体 and 客体 must be entity names from the entities list
 - 置信 is [0,1]: 1.0 when explicitly stated, mid-range when implied, near 0.0 when weakly speculative
 
+QUOTED-REPLY RULES:
+- Quoted replies are read-only context, never extraction targets
+- Use a quote only to resolve references or understand what the target confirms,
+  rejects, or extends
+- Extract only claims asserted, confirmed, rejected, or extended by the target
+- Never repeat an independent claim from the quote or attribute it to the target
+  sender
+
+Contrastive example:
+- QUOTED CONTEXT (read only), User A: "gpt5.6 uses fewer tokens."
+- TARGET, User B: "And it is much faster than opus."
+- CORRECT: "User B says gpt5.6 is much faster than opus."
+- INCORRECT: "User B says gpt5.6 uses fewer tokens." The target did not assert
+  that quoted claim.
+
 @-MENTION RULES:
 - "@X" where X is a person name → Person entity; strip leading "@" and trailing punctuation
 - Chinese names are usually 2-4 chars; English names take the full word (e.g. "@John this is broken" → "John")
@@ -496,6 +511,18 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 - 不要推断消息未直接陈述或强烈暗示的事实
 - 主体和客体必须是实体列表中的名称
 - 置信度[0,1]：1.0=明确陈述，0.5=隐含暗示，接近0.0=弱推测
+
+引用回复规则：
+- 引用回复只作为只读上下文，绝不是抽取目标
+- 引用只用于消解指代，或理解目标消息确认、否定、扩展了什么
+- 只抽取目标消息明确陈述、确认、否定或扩展的主张
+- 不得重复引用中的独立主张，更不得把引用内容改归因给目标消息发送者
+
+对比示例：
+- 引用上下文（只读），用户甲：“gpt5.6用的token更少。”
+- 目标消息，用户乙：“而且比opus快很多。”
+- 正确：“用户乙认为gpt5.6比opus快很多。”
+- 错误：“用户乙认为gpt5.6用的token更少。”目标消息没有表达这条引用主张
 
 @提及规则：
 - "@X"中X是人名则作为Person实体，去掉@和尾随标点
