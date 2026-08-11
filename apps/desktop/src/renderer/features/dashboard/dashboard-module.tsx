@@ -41,14 +41,12 @@
  */
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
 import { Avatar, Button, Panel, PanelHeader } from "@mycontext/design"
-import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
   useAdoptableSession,
   useBootstrapState,
   useDashboardTrends,
   useKlGraphBuild,
   useOnboardingSteps,
-  useSelfIdentity,
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useTheme } from "../../lib/use-theme.js"
@@ -60,7 +58,7 @@ import { personaIdentityFromSteps } from "../persona/persona-identity.js"
 import { FocusBridge } from "./focus-bridge.js"
 import { Funnel } from "./funnel.js"
 import { GraphDetailPopover } from "./graph-detail-popover.js"
-import { GreetingRow, pickChannelNick, resolveGreetingName } from "./greeting-row.js"
+import { GreetingRow } from "./greeting-row.js"
 import { CountUp } from "./count-up.js"
 import { PersonaCard } from "./identity.js"
 import { CoverageBar, Distribution, Section } from "./primitives.js"
@@ -70,12 +68,10 @@ import {
   describeUnitsByType,
   formatCount,
   readFactTimestampGap,
-  readGraphLag,
   readIdentityBar,
   readIdentityProblem,
   readIngest,
   readPersona,
-  readProcessing,
   readTrendSummary,
 } from "./dashboard-data.js"
 
@@ -169,23 +165,26 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    */
   const steps = useOnboardingSteps()
   const personaIdentity = personaIdentityFromSteps(steps.data)
+  /** app 登录账号 —— 只给头像那张**照片**用（`avatarUrl`）。名字改由渠道账号定。 */
   const bootstrap = useBootstrapState()
   const session = bootstrap.data?.session ?? null
   /**
-   * 渠道花名（钉钉昵称）—— 问候语优先用它。
+   * 问候语用**当前渠道**绑定的已授权账号名（用户要求）。
    *
-   * ★ 走 `useSelfIdentity`（query，只读本地一行）而不是 `useResolveSelf`
-   * （mutation，每次真调渠道子进程）。让界面渲染触发一次渠道调用是
-   * 那种"顺手写下、之后每次进页面都慢一下"的代价。
+   * ★ 直接读 `scope.channels` 里当前渠道那条 `status`（授权态自带
+   * `userName`，见 `authStatusSchema`）——不再走 app 登录账号或主渠道花名。
+   * 切到飞书就是飞书账号名，切到钉钉就是钉钉账号名，跟着页头 picker 走。
    *
-   * 判定（与实名相同就不用）在 `pickChannelNick` 一处 ——
-   * 引导第一步用的是同一个函数。
+   * · `channelId === undefined`（渠道列表还没读到）→ `undefined`，整行不出现；
+   * · 当前渠道 `status.state !== "authorized"` → `null` → 显示「渠道未授权」；
+   * · 已授权 → `status.userName`。
    */
-  const selfIdentity = useSelfIdentity()
-  const channelNick =
-    session === null
-      ? null
-      : pickChannelNick(selfIdentity.data?.displayNames, resolveDisplayName(session))
+  const accountName: string | null | undefined = (() => {
+    if (scope.channelId === undefined) return undefined
+    const status = scope.channels.find((c) => c.id === scope.channelId)?.status
+    if (status === undefined) return undefined
+    return status.state === "authorized" ? status.userName : null
+  })()
 
   /**
    * 联动带当前筛出来多少条。
@@ -242,7 +241,6 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
       : tch(`${scope.channelId}.label`, { defaultValue: scope.channelId }),
   )
   const per = readPersona(scope.persona)
-  const processing = readProcessing({ feed: scope.feed, distill: scope.distill })
   const klView = describeKl(kl)
   const graph = overview.data ?? null
   /**
@@ -401,7 +399,7 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
       */}
       <div className="grid grid-cols-12 gap-6">
         {/* ── 段 1：你是谁 ───────────────────────────────── */}
-        {session === null ? null : (
+        {accountName === undefined ? null : (
           <div className="col-span-12 flex items-center gap-4">
             {/*
               ★ 头像在 greeting **左边**（用户最后一次明确的顺序）。
@@ -410,13 +408,17 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
 
               `items-center`：64px 头像与 48px 文字居中对齐，
               视觉重心在同一条水平线上。
+
+              ★ 头像的名字兜底用 `accountName`（当前渠道账号名），照片仍用
+              app 登录账号的 `avatarUrl`；未授权时 `accountName===null`，
+              兜底首字母用「未」而不是空。
             */}
             <Avatar
-              name={resolveGreetingName(session, channelNick)}
-              src={session.avatarUrl}
+              name={accountName ?? "未授权"}
+              src={session?.avatarUrl ?? null}
               size="xl"
             />
-            <GreetingRow session={session} channelNick={channelNick} />
+            <GreetingRow accountName={accountName} />
             {/*
               ── 刷新按钮去哪了 ──────────────────────────────
 
@@ -579,14 +581,13 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           </div>
         )}
         {/*
-          知识加工只在出事时出现一行 —— 那两个板块原来占的位置现在是空的，
-          而"什么都没有"正是一切正常时最好的表达。
+          ── 「知识加工落后 N 条」不在仪表盘出现（用户要求）──────────
+
+          这句原来在这里（`readProcessing` 的一行）。用户明确不要它出现在
+          仪表盘：它讲的是水位落后的架构细节，而仪表盘要答的是"能不能用"。
+          落后本身在**运行状态页**仍有完整表达（那里本就是排查用的）。
+          `readProcessing` 的判据保留（状态页在用），仪表盘只是不再渲染。
         */}
-        {processing === null ? null : (
-          <div className="col-span-12">
-            <ProblemLine text={processing.text} tone={processing.tone} />
-          </div>
-        )}
 
         {/*
           ── 分身的降级提示 ─────────────────────────────────
@@ -910,7 +911,6 @@ function TrendsSection({ building }: { building: boolean }) {
 
   const data = trends.data ?? null
   const summary = readTrendSummary(data)
-  const lag = readGraphLag(data)
   const factGap = readFactTimestampGap(data)
   // 「读过的内容」按类型拆一句人话（聊天 N · 会议记录 M · 文档 K）
   const unitsBreakdown = describeUnitsByType(data?.funnel.unitsByType)
@@ -974,26 +974,15 @@ function TrendsSection({ building }: { building: boolean }) {
       }
     >
       {/*
-        ★★ 图谱落后那句话排在**图之前**。
+        ── 「才学了 X%（还差 N 条）」不在仪表盘出现（用户要求）──────────
 
-        它是这一整块的结论（"下面的实体与事实只覆盖一小部分"），
-        而结论放在图后面就成了脚注 —— 用户看完图已经形成判断了。
-        只在 warn/bad 时出现（见 `readGraphLag`：追平时返回 null）。
-
-        ## ★ 正在同步时不出现（`!building`）
-
-        `graph-build` 水位是**批处理**的，只在一轮建图**成功之后**才前移
-        （见 `GraphSyncService.markBuilt`）。所以同步进行中它必然落后 ——
-        那一刻算出的比例是"还没结束"，不是"建得少"。此时喊
-        "才学了 X% —— 只覆盖一小部分" 是把一个**正在收敛**的中间态
-        当成问题报，而用户明明看到进度条在跑。等这一轮建完，水位一次性
-        追上，这句话该消失的自然消失、该留的（真落后）才留。
-
-        所以：同步中一律不显示这句结论 —— 它描述的是"停下来之后还差多少"。
+        这句原来排在图之前（`readGraphLag` 的 bad/warn 档）。用户明确不要它
+        出现在仪表盘：`graph-build` 水位是批处理的、天然落后，且这台机器上
+        它有"初始建图从没推过游标"的历史成因，算出来的比例常常与真实覆盖
+        相反（实测图已建好而水位停在 0 → 报 0.0%）。这类"数字与事实相反"的
+        提示放在首页只会误导。落后本身在**运行状态页**仍有完整表达。
+        `readGraphLag` 的判据保留（状态页/popover 在用），仪表盘不再渲染。
       */}
-      {building || lag?.text === undefined || lag.text === null ? null : (
-        <ProblemLine text={lag.text} tone={lag.tone === "bad" ? "bad" : "warn"} />
-      )}
 
       <Panel tone="raised" className="flex flex-col gap-4">
         {hasData ? (

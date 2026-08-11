@@ -42,21 +42,16 @@
  */
 import { useMemo } from "react"
 import { cn, greetingKeyForHour } from "@mycontext/design"
-import { resolveDisplayName, type AuthSession } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { ParticleText } from "./particle-text.js"
 
 export interface GreetingRowProps {
-  /** 本人账号。`null` = bootstrap 还没回来 */
-  session: AuthSession | null
   /**
-   * 渠道花名（钉钉昵称）。`null` = 还没解析出身份，或与实名相同。
-   *
-   * ★ 由调用方算好传进来而不是在这里查：判断"与实名相同就别显示"
-   * 需要同时知道花名与实名，而那个判断在 `pickChannelNick` 里
-   * （引导第一步也用同一个）—— 一处判定，两处渲染。
+   * 当前渠道已授权账号的显示名（`status.userName`）。
+   * `null` = 当前渠道**未授权** → 显示「渠道未授权」而不是问候。
+   * `undefined` = 渠道列表还没读到（首帧）→ 整行不出现，免得闪。
    */
-  channelNick: string | null
+  accountName: string | null | undefined
 }
 
 /**
@@ -81,7 +76,7 @@ export interface GreetingRowProps {
  * 有时花名很长（"J.Shen（工作账号）"）。`truncate` 让它省略而不是换行 ——
  * 换行会让这一整行的高度跳变，右边的主数字也会跟着上下漂。
  */
-export function GreetingRow({ session, channelNick }: GreetingRowProps) {
+export function GreetingRow({ accountName }: GreetingRowProps) {
   const { t } = useDynamicTranslation("search")
   /**
    * 按小时分段。`useMemo` 只是免得每次渲染都取一次系统时间 ——
@@ -90,13 +85,17 @@ export function GreetingRow({ session, channelNick }: GreetingRowProps) {
    */
   const greetingKey = useMemo(() => greetingKeyForHour(new Date().getHours()), [])
 
-  // bootstrap 还没回来：不画占位骨架，整行不出现。
+  // 渠道列表还没读到（undefined）：不画占位骨架，整行不出现。
   // 一个"？头像 + 你好，—"比空着更像坏了，而它只闪一瞬。
-  if (session === null) return null
+  if (accountName === undefined) return null
 
-  // 整行问候拼成一个字符串再交给粒子特效 —— 粒子采样需要**完整一行**
-  // 才能把标点与名字一起拼进同一片粒子里；分三段会采成三块分开的字。
-  const line = `${t(greetingKey)}${t("welcome.separator")}${resolveGreetingName(session, channelNick)}`
+  // 当前渠道未授权（null）：不问候，直接说"渠道未授权"——
+  // 「下午好，」后面接不上名字是假的，而"未授权"正是这一刻要传达的状态。
+  // 仍走 ParticleText 保持这一行的视觉一致（同样的排版/特效）。
+  const line =
+    accountName === null
+      ? "渠道未授权"
+      : `${t(greetingKey)}${t("welcome.separator")}${accountName}`
 
   return (
     <ParticleText
@@ -138,43 +137,4 @@ export function GreetingRow({ session, channelNick }: GreetingRowProps) {
       )}
     />
   )
-}
-
-/**
- * 问候语里显示哪个名字 —— **头像的兜底首字母也用它**。
- *
- * ★ 抽成函数是因为它有**两个**消费者：这一行的文字，与它左边那个头像
- * （`Avatar` 取不到图时画名字的首字母）。两处各算一遍的话，
- * 某天改了其中一个就会出现"头像上是沈、旁边写着小王"。
- *
- * 这个仓库有过同型的教训：侧栏用 `resolveDisplayName` 显示「高鹏」，
- * 而搜索首屏自己切 email 前缀显示「gaopeng」—— 同一屏两个我。
- */
-export function resolveGreetingName(session: AuthSession, channelNick: string | null): string {
-  // `resolveDisplayName` 自己会在 displayName 为空时退到 email 前缀，
-  // 所以这里不需要再写一层兜底。
-  return channelNick ?? resolveDisplayName(session)
-}
-
-/**
- * 渠道花名的取法 —— **判定在这里一处，渲染在两处**。
- *
- * ## ★ 为什么"与实名相同就返回 null"
- *
- * 否则会得到「高鹏（高鹏）」这种自我重复。引导第一步
- * （`channel-auth-panel.tsx`）已经有同一个判断，这个函数就是从那儿
- * 抽出来的 —— 两处各写一遍的话，某天改了其中一个就会出现
- * "引导里不显示、仪表盘里重复显示"。
- *
- * @param displayNames 渠道返回的显示名数组（一人可能多个名字）
- * @param realName 账号里的实名，用来比对
- */
-export function pickChannelNick(
-  displayNames: readonly string[] | undefined,
-  realName: string,
-): string | null {
-  // `displayNames[0]` 是渠道返回的主显示名
-  const nick = displayNames?.[0]
-  if (nick === undefined || nick === "" || nick === realName) return null
-  return nick
 }

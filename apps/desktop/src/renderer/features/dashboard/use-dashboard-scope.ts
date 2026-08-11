@@ -24,7 +24,7 @@
  * 挑哪一个是这一层的事。
  */
 import { useMemo } from "react"
-import type { ChannelSummary, IngestSnapshot } from "@mycontext/ipc-contract"
+import type { ChannelSummary, IngestSnapshot, KlServerStatus } from "@mycontext/ipc-contract"
 import {
   useChannels,
   useDistillProgress,
@@ -150,7 +150,37 @@ export function useDashboardScope(pickedChannelId: string | null): DashboardScop
    */
   const channelId = pickedChannelId ?? authorizedChannelIds[0] ?? undefined
 
-  const kl = useKlServerStatus()
+  const klTop = useKlServerStatus()
+  /**
+   * ★★ kl 状态**按当前渠道**取，而不是用顶层合并态。
+   *
+   * 顶层 `state/building/buildProgress` 是**合并**过的：`state` 取主渠道、
+   * `building` 是"任一渠道在建"、`buildProgress` 是"任一在建那个的进度"
+   * （见 `MultiKlServerService.status()` 与契约里 `perChannel` 的注释）。
+   * 于是页头 picker 选飞书、而钉钉在建图时，这一页会显示钉钉那轮的
+   * 「建图中 85%」、副标题读钉钉的就绪态 —— 数字属于飞书、状态属于钉钉，
+   * 两件事错配且界面无痕迹。这与 `ingest`/`ego`/`overview` 都已按渠道取
+   * 却独漏了 kl 是同一类疏漏。
+   *
+   * 做法：把 `perChannel` 里当前渠道那一行**盖回**顶层形状（`state/reason/
+   * port/building/buildProgress`），其余字段（`networkEgress` 等诊断项）沿用
+   * 顶层。这样 `describeKl(kl)` 与 `building` 都无需改签名就变成按渠道 ——
+   * 与 `scopeSnapshot` 把 ingest 逐字段盖回是同一个手法。
+   * 找不到 perChannel（单渠道 / 旧主进程不带该字段）时原样用顶层，零回归。
+   */
+  const kl = useMemo<KlServerStatus | null>(() => {
+    if (klTop === null || channelId === undefined) return klTop
+    const row = klTop.perChannel?.find((r) => r.channelId === channelId)
+    if (row === undefined) return klTop
+    return {
+      ...klTop,
+      state: row.state,
+      reason: row.reason,
+      port: row.port,
+      building: row.building,
+      buildProgress: row.buildProgress ?? null,
+    }
+  }, [klTop, channelId])
   const building = kl?.building === true
   const ingest = useIngestSnapshot(true)
   const feed = useFeedInfo(true, channelId)
