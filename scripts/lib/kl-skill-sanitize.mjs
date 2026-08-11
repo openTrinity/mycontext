@@ -198,9 +198,51 @@ const HOST_PREAMBLE = `<!-- 由 sync:kl-skill 注入：本宿主（MyContext 桌
  * ★ 幂等：已经有前言的文本再跑一次不变（判据是那行注入标记）——
  * 与 `sanitize` 同一个要求，否则重复同步会叠出好几段前言。
  * 只对 SKILL.md 做（其余文件是参考资料，agent 不从那里学怎么调命令）。
+ *
+ * ## ★★★ 必须插在 **frontmatter 之后**，不能拼在文件最前面
+ *
+ * 这里原来是 `return HOST_PREAMBLE + text` —— 而 SKILL.md 的开头**不是正文**，
+ * 是 `---` 包起来的 YAML frontmatter（`name` / `description` 在里面）。
+ * 拼在最前面会把 frontmatter 挤到文件中间，于是 opencode 解析这个 skill
+ * **直接失败并丢掉它**。
+ *
+ * 实测（打包态真机，opencode 1.18.11）：
+ * · agent 自报「目前没有任何可用的 skill」/ 只有内置的 customize-opencode；
+ * · opencode 自己的日志里 `message=init count=1`（只加载了内置那一个）；
+ * · 手造一个同结构的最小 skill（`<paths>/probeskill/SKILL.md`，
+ *   带正确 frontmatter）→ `count=2` —— 也就是 `skills.paths` 机制本身没问题，
+ *   唯独我们这份产物的头部坏了。
+ * · 而且**没有** `skill path not found` 警告：目录是对的、文件也扫到了，
+ *   是解析阶段被丢的 —— 全程零报错，典型的静默失效。
+ *
+ * 后果是搜索**从来没查过知识图谱**：问「我和谁聊过晚饭」它去翻会话历史猜，
+ * 问人名直接说不知道。
+ *
+ * 前言仍然排在**上游正文之前**（原注释那个意图是对的：agent 得先读到
+ * "在这个宿主里别推导 KL_REPO"，再读上游那套路径规则），只是它的位置
+ * 应当是"frontmatter 之后、正文之前"这个夹层。
  */
 export function withHostPreamble(text) {
   if (text.includes("由 sync:kl-skill 注入")) return text
+  /**
+   * 切出 frontmatter：`---\n … \n---\n`。
+   *
+   * ★ 判据要求它在**文件最开头**（`startsWith("---")`）—— 正文里也可能有
+   * `---` 分隔线，从中间找会把前言插到某个小节里。
+   * 没有 frontmatter 时退回原行为（拼最前面）：那时不存在被挤走的东西，
+   * 而"静默不加前言"比"位置不完美"更糟。
+   */
+  if (text.startsWith("---")) {
+    const end = text.indexOf("\n---", 3)
+    if (end !== -1) {
+      const afterMarker = text.indexOf("\n", end + 1)
+      if (afterMarker !== -1) {
+        const head = text.slice(0, afterMarker + 1)
+        const body = text.slice(afterMarker + 1)
+        return `${head}\n${HOST_PREAMBLE}${body.replace(/^\n+/, "")}`
+      }
+    }
+  }
   return HOST_PREAMBLE + text
 }
 

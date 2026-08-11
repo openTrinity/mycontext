@@ -831,8 +831,7 @@ export function registerIpc(deps: IpcDependencies): void {
    */
   ipcMain.handle(IPC_CHANNELS.klGraphBuild, (_event, fresh: unknown, channelId: unknown) =>
     attempt(async () => {
-      const target =
-        typeof channelId === "string" && channelId !== "" ? channelId : undefined
+      const target = typeof channelId === "string" && channelId !== "" ? channelId : undefined
       /**
        * ★★★ 建图**之前先导出一次** —— 否则手动建图在"刚采完"那段必然失败。
        *

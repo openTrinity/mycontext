@@ -519,9 +519,7 @@ export class PersonaService {
              * （见 `PersonaAcpOptions.getPythonEnv` 上方那段实测记录）。
              * 单测不给：那条路不起真进程。
              */
-            ...(options.getPythonEnv === undefined
-              ? {}
-              : { getPythonEnv: options.getPythonEnv }),
+            ...(options.getPythonEnv === undefined ? {} : { getPythonEnv: options.getPythonEnv }),
             /**
              * ★ 用回调，不是数组。
              *

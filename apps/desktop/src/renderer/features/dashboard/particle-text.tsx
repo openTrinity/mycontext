@@ -201,8 +201,7 @@ export function ParticleText({ text, className }: ParticleTextProps) {
       if (startAt === 0) startAt = now
       const elapsed = now - startAt
       // 凝固进度：assembly 结束后从 0 涨到 1。
-      const solid =
-        elapsed <= ASSEMBLY_MS ? 0 : Math.min(1, (elapsed - ASSEMBLY_MS) / SOLIDIFY_MS)
+      const solid = elapsed <= ASSEMBLY_MS ? 0 : Math.min(1, (elapsed - ASSEMBLY_MS) / SOLIDIFY_MS)
 
       // 物理：弹簧归位 + 指针斥力（凝固阶段斥力渐弱，收束到静止）。
       const repelScale = 1 - solid

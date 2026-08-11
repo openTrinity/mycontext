@@ -1220,10 +1220,13 @@ export class DistillService {
        *   而攒批判据下一轮照样成立（语料不会跑掉），没必要在这里耗着。
        */
       if (this.options.graphBusy?.() === true) {
-        this.options.logger.info("work layer waiting: graph build in progress (forge already ran)", {
-          reason: decision.run ? decision.reason : "forced",
-          waitMs: GRAPH_SETTLE_WAIT_MS,
-        })
+        this.options.logger.info(
+          "work layer waiting: graph build in progress (forge already ran)",
+          {
+            reason: decision.run ? decision.reason : "forced",
+            waitMs: GRAPH_SETTLE_WAIT_MS,
+          },
+        )
         await this.sleep(GRAPH_SETTLE_WAIT_MS)
       }
 

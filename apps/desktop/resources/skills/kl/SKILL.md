@@ -1,3 +1,8 @@
+---
+name: kl
+description: Query the DingTalk spatio-temporal knowledge graph for grounded workplace answers. Always run `kl capabilities --json` first and use only live-enabled commands; communities and global search are optional experimental features.
+---
+
 <!-- 由 sync:kl-skill 注入：本宿主（MyContext 桌面端）的运行环境与上游假设不同 -->
 # 在这个宿主里怎么调 kl（先读这一段，它覆盖下文的路径推导）
 
@@ -16,11 +21,6 @@
 
 下文是上游原文，其中的路径推导与启动说明按上面这几条替换。
 
----
-
----
-name: kl
-description: Query the DingTalk spatio-temporal knowledge graph for grounded workplace answers. Always run `kl capabilities --json` first and use only live-enabled commands; communities and global search are optional experimental features.
 ---
 
 # Knowledge Graph Query (kl)

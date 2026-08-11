@@ -246,7 +246,7 @@ export function ShuffleText({
     } else {
       // random：每条一个随机起播延迟（用索引+位移派生伪随机，避免 Math.random 的不确定）
       strips.forEach((s, i) => {
-        const jitter = maxDelay <= 0 ? 0 : ((i * 2654435761) % 1000) / 1000 * maxDelay
+        const jitter = maxDelay <= 0 ? 0 : (((i * 2654435761) % 1000) / 1000) * maxDelay
         tl.to(s.inner, { [axis]: s.final, duration, ease, force3D: true }, jitter)
       })
     }
