@@ -319,7 +319,7 @@ kl context <fact_id>   # Source message + context + entities
 kl timeline "<entity>" [--from YYYY-MM-DD] [--to YYYY-MM-DD]
 kl stats               # Detailed statistics
 kl search "<query>" [-c chunks|messages|facts|entities|communities] [-k 10]  # vector ANN, one collection
-kl ask "<question>" [-k 10] [--phase2] [--seed-k 6] [--radius 1] [--max-nodes 40]  # hybrid retrieval + graph walk (+ optional synthesis)
+kl ask "<question>" [-k 10] [--phase2|--no-phase2] [--entity NAME] [--entity-type TYPE] [--fact-type TYPE] [--seed-k 6] [--radius 1] [--max-nodes 40]
 kl global-search "<question>" [--user "<name>"] [--json]  # experimental; use only when capability says enabled
 kl hop -n <node_id> -c '<cursor_json>'   # expand one node one hop deeper (no LLM/embed)
 ```
@@ -375,10 +375,15 @@ kl status                            # poll: "Ingest: running NN% (phase_a|phase
 `search` returns raw nearest-neighbor hits from a single collection (default
 `facts`; other collections: `chunks`/`messages`, `entities`, `communities` —
 `chunks` is the unified retrieval-unit collection for all embedded source
-content, and `messages` is a backward-compat alias for it). `ask` runs the full engine over chunks+facts (dense+sparse+RRF) **and**
-walks the depth-1 graph from the entities/facts the query extracted — one call,
-one LLM invocation. It may also return a synthesized `answer` (opt-in via
-`--phase2`). Both output JSON by default; add `--pretty` for a human view, or
+content, and `messages` is a backward-compat alias for it). `ask` runs the full
+engine over chunks+facts (dense+sparse+RRF) **and** walks the depth-1 graph from
+the entities/facts the query extracted. Agent callers must derive the retrieval
+intent themselves and pass repeatable `--entity`, `--entity-type`, and
+`--fact-type` flags using the values advertised by `capabilities`; this skips
+the server-side rewrite LLM while retaining server-side entity resolution.
+Also pass `--no-phase2` and synthesize from the returned evidence. Plain clients
+may omit intent and let the server rewrite, or request a synthesized `answer`
+with `--phase2`. Output is JSON by default; add `--pretty` for a human view, or
 `--json` to force JSON explicitly. (The browsing commands like `entity` /
 `community` also support `--json`.)
 
@@ -389,7 +394,7 @@ graph view:
 
 - `items`: the embedding-recalled items (dense+sparse+RRF fused facts+chunks),
   cut at `top_k`. This is the flat vector recall.
-- `answer`: LLM synthesis, or `null` unless Phase 2 escalated / `--phase2` set.
+- `answer`: LLM synthesis, or `null` when `--no-phase2` is set.
 - `seeds`: entry nodes as `{id, label}` (`ent:<uuid>`/`fact:<uuid>` + name/text).
 - `nodes`: seeds (hop 0) **plus** the hop-1 frontier reached from them, each
   resolved to `{id, type, score, hop, name|text, ...}`.
@@ -526,7 +531,8 @@ requires a full re-embed.
 ### 1. Direct Answer (factual questions)
 
 ```bash
-kl ask "who decided to use e2b for sandbox" -k 5   # hybrid retrieval + synthesis
+kl ask "who decided to use e2b for sandbox" -k 5 \
+  --entity e2b --entity-type SYSTEM --fact-type DECISION --no-phase2
 kl context <best_fact_id>                          # ground the answer in source
 ```
 
