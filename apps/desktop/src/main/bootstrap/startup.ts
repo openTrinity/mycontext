@@ -32,6 +32,7 @@ import {
   createDingTalkPlugin,
   createFeishuPlugin,
   createRegistry,
+  parseScopedChannelId,
   seedChannelProfile,
 } from "@mycontext/channels"
 import { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
@@ -2514,6 +2515,40 @@ export function bootstrapApp(mainDir: string): AppContext {
     revokeAuth: (channelId) => channels.logout(channelId),
     destroyVault: (vaultId) => {
       vaults.destroy(vaultId)
+    },
+    /**
+     * 这个 vault 上除了给定渠道还绑着哪些渠道（多渠道共用 vault 时 > 0）。
+     * `listByVaultId` 返回该 vault 的全部身份行，按 channelId 去掉自己。
+     * ★ 比较用 `parseScopedChannelId` 剥掉来源段后的裸渠道名：库里存的可能
+     * 带 `@src-xxxx` 后缀，直接字符串比会把"同一个渠道的另一来源"当成别的渠道。
+     */
+    siblingChannels: (vaultId, channelId) => {
+      const bare = (id: string): string => parseScopedChannelId(id).channelId
+      const self = bare(channelId)
+      return identities
+        .listByVaultId(vaultId)
+        .map((row) => bare(row.channelId))
+        .filter((id) => id !== self)
+    },
+    /**
+     * 只删一个渠道在这个 vault 里的子树：`sources/<id>/`（库/导出/图谱/交接）
+     * 与 `channels/<id>/`（那份隔离的凭据目录）。用于多渠道共用 vault 的情形
+     * —— 见 `ChannelDataWipeOptions.destroyChannelSubtree` 的注释。
+     */
+    destroyChannelSubtree: (vaultId, channelId) => {
+      const bare = parseScopedChannelId(channelId).channelId
+      const targets = [
+        vaults.sourceRoot(vaultId, bare),
+        join(vaults.directory(vaultId), "channels", bare),
+      ]
+      let removed = 0
+      for (const dir of targets) {
+        if (!existsSync(dir)) continue
+        rmSync(dir, { recursive: true, force: true })
+        removed += 1
+      }
+      logger.info("channel subtree destroyed", { channelId: bare, removed })
+      return removed
     },
     unbindIdentity: (key) => {
       identities.unbind(key)

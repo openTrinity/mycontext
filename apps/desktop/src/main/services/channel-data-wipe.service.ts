@@ -107,6 +107,37 @@ export interface ChannelDataWipeOptions {
   unmount: () => Promise<void>
   /** 删掉整个 vault 目录（`VaultStore.destroy`，不可逆）。 */
   destroyVault: (vaultId: string) => void
+  /**
+   * 这个 vault 上**除了**给定渠道之外，还绑着哪些渠道的身份。
+   *
+   * ## ★★ 为什么必须有它（否则清一个渠道会连带删掉另一个）
+   *
+   * control v5 起**一个 vault 可以挂多个渠道的身份**（索引 `(vault_id, channel_id)`），
+   * 而非主渠道的库落在**这个 vault 目录里面**的 `sources/<channelId>/`。
+   * 于是"清空当前渠道"若走 `destroyVault`（删整个目录），实测后果是：
+   *
+   * · 本机 control 库里钉钉与飞书**共用同一个 vault**（实测：两条身份、
+   *   同一个 vault_id）；
+   * · 点一次「清空」→ 另一个渠道的 `sources/<channelId>/` 全部数据一起消失，
+   *   而它的身份映射还留在 control 库里指向一个已不存在的目录；
+   * · 下次登录 `resolveOnLogin` 挑中它 → `openStore` **新建一个空库** →
+   *   用户看到"已授权但什么都没有"的身份，且永远不会被清理。
+   *
+   * 有了这个判据就能分两档：还有别的渠道 → **只删这个渠道的子树**；
+   * 只剩它自己 → 照旧 destroy 整个 vault（省下一个没人引用的空壳）。
+   *
+   * @returns 其他渠道的 channelId 列表（不含传入的那个）
+   */
+  siblingChannels: (vaultId: string, channelId: string) => string[]
+  /**
+   * 删掉**一个渠道**在这个 vault 里的子树（`sources/<channelId>/` 与
+   * `channels/<channelId>/`：库、导出、图谱、交接文件、那份隔离的凭据目录）。
+   *
+   * 只在 vault 被多渠道共用时走这条 —— 见 `siblingChannels`。
+   *
+   * @returns 实际删掉的目录数（0 = 本来就没有）
+   */
+  destroyChannelSubtree: (vaultId: string, channelId: string) => number
   /** 解除 control 库里的身份 → vault 映射。 */
   unbindIdentity: (key: ChannelIdentityKey) => void
   /**
@@ -257,16 +288,40 @@ export class ChannelDataWipeService {
       }
 
       /**
-       * ④ 删掉整个 vault 目录（含那份本地凭据文件与全部数据）。
+       * ④ 删盘上的东西 —— **分两档**，取决于这个 vault 还有没有别的渠道。
+       *
+       * ## ★★ 为什么不能一律 `destroyVault`
+       *
+       * control v5 起一个 vault 可挂多个渠道的身份，而非主渠道的库就在
+       * **这个 vault 目录里**（`sources/<channelId>/`）。一律删整个目录的
+       * 实测后果：本机钉钉与飞书共用一个 vault，清任一个 → 另一个的语料、
+       * 图谱、导出全部消失，而它的映射还指向那个已不存在的目录（下次登录
+       * 会静默新建空库，得到一个"已授权但什么都没有"且清不掉的身份）。
+       *
+       * · 还有别的渠道 → 只删**这个渠道的子树**（`sources/<id>/` +
+       *   `channels/<id>/`），别人的东西一个字节都不碰；
+       * · 只剩它自己 → 照旧 destroy 整个 vault（否则留一个空壳目录）。
        *
        * `VaultStore.destroy` 会先 close 句柄再 `rmSync(recursive, force)`，
        * 所以 WAL/SHM 残留也一起走 —— 那很关键：留下 `-wal` 会让下次
-       * 打开同名库读到旧数据。
+       * 打开同名库读到旧数据。子树那条走 `destroyChannelSubtree`，
+       * 库已在 ① 的 `unmount()` 里关掉了。
        */
       if (existsSync(vault.root)) {
         // 没绑身份（基础 vault）时 vaultId 从目录名取 —— destroy 只用它拼路径
-        this.options.destroyVault(identity?.vaultId ?? basenameOf(vault.root))
-        removedPaths = 1
+        const vaultId = identity?.vaultId ?? basenameOf(vault.root)
+        const siblings =
+          identity === null ? [] : this.options.siblingChannels(vaultId, identity.key.channelId)
+        if (identity !== null && siblings.length > 0) {
+          removedPaths = this.options.destroyChannelSubtree(vaultId, identity.key.channelId)
+          this.options.logger.info("channel data wipe: kept shared vault", {
+            siblings: siblings.length,
+            removedPaths,
+          })
+        } else {
+          this.options.destroyVault(vaultId)
+          removedPaths = 1
+        }
       }
     } finally {
       /**

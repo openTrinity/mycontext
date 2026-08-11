@@ -67,6 +67,23 @@ const READ_COMMANDS: readonly string[][] = [
    * 归 READ：只接受 id 列表，不能用来枚举（拿不到 id 就取不到东西）。
    */
   ["im", "+messages-mget"],
+  /**
+   * 按**已知 open_id** 取单个人的基本信息 —— 只为拿头像 URL（见 `avatar.ts`）。
+   *
+   * ## ★ 为什么这一条不算扩大读取面（CLAUDE.md §5）
+   *
+   * · 它要求**先有 open_id**。我们的 open_id 只来自"已经采到的消息的发送者"
+   *   —— 也就是用户自己聊天里出现过的人。拿不到 id 就取不到任何东西，
+   *   不能用来枚举组织成员。
+   * · **刻意不加** `contact +search-user`（按姓名/关键词反查人）与
+   *   `user_profiles batch_query`：那是"按名字找人"，是更大的读取面，
+   *   且属于 PII 类反查 —— §5 明确不进白名单。
+   * · `Risk: read`（CLI 自报），不写任何东西。
+   *
+   * ★ scope 不用加：实测当前已有的 `contact:user.base:readonly` 就能拿到
+   * 头像 URL（本人跑通），所以"只要 base、不要 basic_profile"那条收窄仍成立。
+   */
+  ["contact", "+get-user"],
 ]
 
 /**
@@ -83,6 +100,25 @@ const INTERACTIVE_COMMANDS: readonly string[][] = [
   ["auth", "logout"],
   /** 首次初始化配置目录（我们指定的隔离目录）。 */
   ["config", "init"],
+  /**
+   * 移除 app 配置（**连 token 一起清**，CLI 自报 "clears all tokens and config"）。
+   *
+   * ## ★ 为什么必须有这一条（"换 app / 换账号"的唯一出路）
+   *
+   * `auth logout` 只清 token，**不动** `config.json` 里绑定的 app。而重新
+   * 授权时 `login()` 只在 catch 到 `not configured` 时才走 `config init --new`
+   * （选 app 那一步）—— 配置还在，就永远走不到那个分支，于是用户点一百次
+   * 「重新授权」都还是同一个 app、同一个账号。实测症状正是这个：
+   * "重新授权飞书登录态没法切换 app"。
+   *
+   * 所以「切换账号」= `config remove`（清 token + 配置）→ 再 `login()`，
+   * 那时 `not configured` 成立、`config init --new` 真的会跑、用户能重选 app。
+   *
+   * ★ 它是 `Risk: write` 且**破坏性**的（CLI 自己的 help 里就带一句
+   * "Do NOT remove profiles unless the user explicitly asks"）。所以只在
+   * 用户**显式点「切换账号」**时调，不进任何自动路径。
+   */
+  ["config", "remove"],
   /**
    * 把凭据存储从系统钥匙串降级到文件。
    *

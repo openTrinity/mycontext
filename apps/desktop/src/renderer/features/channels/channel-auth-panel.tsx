@@ -20,6 +20,7 @@ import {
   useAuthProgress,
   useBootstrapState,
   useCancelChannelAuth,
+  useResetChannelAuth,
   useSelfIdentity,
   useStartChannelAuth,
 } from "../../lib/queries.js"
@@ -67,6 +68,12 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const errorText = useErrorText()
   const start = useStartChannelAuth()
   const cancel = useCancelChannelAuth()
+  /**
+   * 退出授权 / 切换账号。`switchingAccount` 只用来决定**哪颗按钮转圈** ——
+   * 两颗共用一个 mutation，不记的话点「切换账号」时「退出授权」也在转。
+   */
+  const resetAuth = useResetChannelAuth()
+  const [switchingAccount, setSwitchingAccount] = useState(false)
   const [progress, setProgress] = useState<AuthProgress | null>(null)
   /**
    * 授权 URL 与授权码单独留存，不从「最后一个进度事件」推导。
@@ -344,6 +351,71 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
           {t("actions.useCode")}
         </Button>
       </Tooltip>
+      {/*
+        ── 退出授权 / 切换账号 ──────────────────────────────────
+
+        ## ★★ 判据是 `isolatedCredentials`，不是渠道 id
+
+        钉钉的 token 密钥在**系统钥匙串**、按系统用户存一份，与用户自己终端里
+        的 CLI 共用同一份登录态 —— 我们去退登会把他终端里正在用的那份也退掉。
+        所以那个渠道刻意**不给**这两颗按钮（只给 `SharedCredentialNote` 那句
+        "要退请自己在终端退"）。
+        飞书的凭据关在 `<vault>/channels/feishu/` 里，退它谁都不影响。
+
+        这个差别现在由插件自己声明（`capabilities.isolatedCredentials`），
+        UI 不认识任何渠道名字 —— 与这批多渠道重构消除 `=== "dingtalk"` 是
+        同一条纪律。字段缺失（旧主进程）时按 false 处理：宁可少个入口，
+        也不要在共用登录态的渠道上误退。
+
+        ## ★ 为什么「切换账号」必须与「重新授权」分开
+
+        「重新授权」只刷新当前账号的 token。而渠道 CLI 把"用哪个 app 授权"
+        也记在配置里，所以只要配置还在，再授权多少次都是**同一个账号**
+        —— 这正是用户报的"重新授权飞书没法切换 app"。「切换账号」会连 app
+        绑定一起清（`resetForAccountSwitch`），清完再点「开始授权」才能换人。
+
+        只在**已连上**时出现：没连的时候没有可退的东西，摆两颗禁用按钮是噪声。
+
+        ## ★ 必须用可选链读 `capabilities`
+
+        `capabilities` 是**后加**的字段，旧主进程的响应里整个不存在。直接
+        `channel.capabilities.isolatedCredentials` 会在那种组合下抛
+        "Cannot read properties of undefined" —— 而这一层是授权卡片，
+        抛了就是**整页白屏**（实测：46 条渲染测试同时红）。
+        这个坑仓库里记过一次（`canRunPersona` 那处也是可选链），别再踩。
+      */}
+      {channel.capabilities?.isolatedCredentials === true && accountConnected ? (
+        <>
+          <Tooltip content={t("actions.signOutHint")} placement="top">
+            <Button
+              size="md"
+              variant="secondary"
+              loading={resetAuth.isPending && !switchingAccount}
+              disabled={running || resetAuth.isPending}
+              onClick={() => {
+                setSwitchingAccount(false)
+                resetAuth.mutate({ channelId: channel.id, switchAccount: false })
+              }}
+            >
+              {t("actions.signOut")}
+            </Button>
+          </Tooltip>
+          <Tooltip content={t("actions.switchAccountHint")} placement="top">
+            <Button
+              size="md"
+              variant="secondary"
+              loading={resetAuth.isPending && switchingAccount}
+              disabled={running || resetAuth.isPending}
+              onClick={() => {
+                setSwitchingAccount(true)
+                resetAuth.mutate({ channelId: channel.id, switchAccount: true })
+              }}
+            >
+              {t("actions.switchAccount")}
+            </Button>
+          </Tooltip>
+        </>
+      ) : null}
     </div>
   )
 

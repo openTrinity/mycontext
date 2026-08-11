@@ -30,7 +30,14 @@
     "useCode": "Use a code",
     "useCodeHint": "If the browser cannot open, finish on another device with a code",
     "configure": "Configure",
-    "collapse": "Collapse"
+    "collapse": "Collapse",
+    "signOut": "Sign out",
+    "switchAccount": "Switch account",
+    "signOutHint": "Clear this channel's credentials stored by this app. Your data stays; authorize again to resume.",
+    "switchAccountHint": "Clear the credentials **and the bound app**, so you can authorize as a different account next time.",
+    "signOutDone": "Signed out",
+    "signOutFailed": "Could not clear credentials — there may have been no session",
+    "switchAccountDone": "Credentials and app binding cleared; hit Start to authorize another account"
   },
   "scope": {
     "readTitle": "Reads your work data",

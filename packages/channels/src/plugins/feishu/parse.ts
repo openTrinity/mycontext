@@ -120,15 +120,51 @@ export function parseLarkIdentity(payload: unknown): LarkIdentity | null {
   const user = record(identities["user"] ?? data["identity"])
   const openId = str(user["openId"], user["open_id"], data["openId"], data["open_id"])
   if (openId === null) return null
+  /**
+   * ★★ `tenantKey` 缺失时**不编造** `"feishu"` 这个字面量。
+   *
+   * ## 那个兜底为什么危险（隔离键会退化）
+   *
+   * `tenantKey` 进的是 `AuthStatus.corpId`，而 corpId 是身份隔离键
+   * `(accountId, channelId, corpId, userId)` 的一段（`ChannelIdentityVaultRepository`）。
+   * 兜底成常量的话，**两个不同租户的账号会拿到同一个 corpId** —— 键退化成
+   * 只靠 userId 区分，而界面上"组织名"全都显示「飞书」，用户在身份切换器里
+   * 分不出这两个"飞书"是哪个公司。更糟的是它**看起来是个合法值**，
+   * 没有任何迹象表明这是"读不到"（CLAUDE.md §4 说的静默降级）。
+   *
+   * ## 实测：正常路径根本用不到兜底
+   *
+   * `contact +get-user` / `auth status` 的响应里 `tenant_key` 是实打实有的
+   * （实测本机：16 字符）。所以这个分支只在**上游改了字段名**时才触发 ——
+   * 那正是最需要它说真话的时候。
+   *
+   * ## 做法：派生一个**带标记且唯一**的值
+   *
+   * `unknown-tenant:<openId 前 12 位>` —— 三个性质：
+   * · **唯一**：跟着 openId 走，两个账号不会撞；
+   * · **可识别**：`unknown-tenant:` 前缀一眼看出是"没读到租户"而不是真 id；
+   * · **稳定**：同一个人每次解析出同一个值，不会每次授权都新建一个 vault。
+   * `tenantName` 同理不再兜「飞书」（那会显示成一个像真的组织名），
+   * 而是明确说「未知组织」。
+   */
+  const tenantKey = str(
+    user["tenantKey"],
+    user["tenant_key"],
+    data["tenantKey"],
+    data["tenant_key"],
+  )
+  const tenantName = str(
+    user["tenantName"],
+    user["tenant_name"],
+    data["tenantName"],
+    data["tenant_name"],
+  )
   return {
     openId,
     userName:
       str(user["userName"], user["user_name"], user["name"], data["userName"]) ?? "飞书用户",
-    tenantKey:
-      str(user["tenantKey"], user["tenant_key"], data["tenantKey"], data["tenant_key"]) ?? "feishu",
-    tenantName:
-      str(user["tenantName"], user["tenant_name"], data["tenantName"], data["tenant_name"]) ??
-      "飞书",
+    tenantKey: tenantKey ?? `unknown-tenant:${openId.slice(0, 12)}`,
+    tenantName: tenantName ?? "未知组织",
   }
 }
 

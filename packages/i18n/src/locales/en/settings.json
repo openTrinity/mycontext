@@ -229,15 +229,15 @@
     "avatarAdvanced": "Enter an image URL manually"
   },
   "dataWipe": {
-    "action": "Clear this channel's data",
-    "hint": "Resets this channel completely: deletes all messages, indexes, graph data and downloaded files, and signs out. You will need to authorize, confirm your identity and pick a learning scope again. Not reversible.",
-    "confirmTitle": "Clear this channel's data?",
-    "confirmDetail": "Everything collected for this channel will be permanently deleted and the channel will be **signed out**. This cannot be undone.",
+    "action": "Clear this channel's signed-in account data",
+    "hint": "Reset everything for the **currently signed-in account on this channel**: its corpus, indexes, graph and downloaded files, and sign it out. **Other channels under the same account are untouched.** You'll need to authorize, confirm your identity and pick a learning scope again. Irreversible.",
+    "confirmTitle": "Clear this channel's signed-in account data?",
+    "confirmDetail": "Everything collected on this channel by the **currently signed-in account** is permanently deleted, and that channel is signed out. Other channels are unaffected. This cannot be undone.",
     "counting": "Counting what will be deleted…",
     "countFailed": "Could not count — you can still proceed, but without a total.",
     "willDelete": "Will delete {{rows}} rows (messages, indexes and run traces)",
     "resets": "After clearing you will need to: authorize again, confirm your identity, pick a learning scope, and set up the persona again.",
-    "confirmAction": "Delete and sign out",
+    "confirmAction": "Delete permanently and sign out of this channel",
     "cancel": "Cancel"
   },
   "onboarding": {

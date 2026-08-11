@@ -2,6 +2,7 @@
 import type { ChannelPlugin } from "../../types.js"
 import { FeishuAuth, type FeishuPluginOptions } from "./auth.js"
 import { LarkCli } from "./cli.js"
+import { createFeishuAvatars } from "./avatar.js"
 import { createFeishuConversations } from "./conversations.js"
 import { createFeishuDocuments } from "./documents.js"
 import { createFeishuIdentity, createFeishuIngest } from "./ingest.js"
@@ -22,6 +23,12 @@ export function createFeishuPlugin(options: FeishuPluginOptions): ChannelPlugin 
       media: false,
       sendAs: [],
       domains: ["chat", "doc"],
+      /**
+       * ★ 凭据关在 `<vault>/channels/feishu/` 里（`LarkCli.env()` 把 HOME、
+       * 配置目录、master key 全重定向过去，且 keychain-downgrade 不碰系统
+       * 钥匙串）。所以退登/换账号只影响这个 vault，界面可以给按钮。
+       */
+      isolatedCredentials: true,
     },
     auth: new FeishuAuth(options, cli),
     ingest: createFeishuIngest(cli),
@@ -45,6 +52,19 @@ export function createFeishuPlugin(options: FeishuPluginOptions): ChannelPlugin 
      */
     documents: createFeishuDocuments(cli),
     /**
+     * ★ 头像 —— 这个能力原来整个缺失，于是飞书那边所有人都只有文字兜底头像。
+     *
+     * 抽象层就是 `ChannelAvatars`（`types.ts` 的可选能力）：宿主统一按
+     * `ofUser({externalId, outputDir, signal})` 要图，**两个渠道各自实现**
+     * 取图路径 —— 因为路径差别很大：
+     * · 钉钉没有开放的用户头像接口，只能绕"共同群成员详情里的 avatarMediaId"
+     *   再换签名 URL；
+     * · 飞书有按 id 取人的接口，直接给一组 HTTPS URL。
+     * 差异被这个契约吃掉，上层（`AvatarService`）一份代码服务两个渠道。
+     * 见 `avatar.ts` 文件头（含实测出的字段形状）。
+     */
+    avatars: createFeishuAvatars(cli),
+    /**
      * ★★ 必须给，否则飞书的语料会被打上**钉钉的** workspace id
      * （导出层的缺省），于是两个渠道的会话挂在同一个 workspace 下 ——
      * "这条事实来自哪个渠道"在图里就丢了，而且不报错。
@@ -67,6 +87,7 @@ export { LarkCli, assertAllowedLarkCommand, describeLarkError, extractLarkJson }
 export { createFeishuIngest, createFeishuIdentity } from "./ingest.js"
 export { createFeishuConversations } from "./conversations.js"
 export { createFeishuDocuments } from "./documents.js"
+export { createFeishuAvatars } from "./avatar.js"
 export {
   LARK_AUTH_SCOPES,
   parseLarkAuthStatus,

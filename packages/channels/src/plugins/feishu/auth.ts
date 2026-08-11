@@ -197,4 +197,93 @@ export class FeishuAuth implements ChannelAuth {
       })
     }
   }
+
+  /**
+   * 退出授权 —— 清掉**这个身份目录里**的 token。
+   *
+   * ## ★ 为什么必须有它（原来整个方法都不存在）
+   *
+   * `ChannelAuth.logout` 是可选方法，飞书原来没实现 → `ChannelHost.logout()`
+   * 对飞书恒返回 `false`。连带两个真实后果：
+   * · 「清空当前渠道登录用户数据」永远报 `authRevoked: false`，token 留在盘上；
+   * · 界面上没有任何「退出授权」的出路，用户只能去一个他找不到的隔离 HOME
+   *   里手敲命令（i18n 里那句提示正是这么写的，已同步改掉）。
+   *
+   * ## ★ 与钉钉的差别：**不需要**「没绑身份就不退」那道守卫
+   *
+   * 钉钉的 token 密钥在系统钥匙串、**按系统用户存一份**，也就是与用户自己
+   * 终端里的 CLI 共用 —— 所以它必须先确认"有我们自己绑的身份"才敢退，
+   * 否则会把用户终端里正在用的登录态退掉（`dingtalk/auth.ts` 里那段长注释）。
+   *
+   * 飞书不同：`LarkCli.env()` 把 `HOME`/`XDG_CONFIG_HOME`/配置目录/master key
+   * **全部**重定向到 `<vault>/channels/feishu/` 下（`cli.ts` 的 `env()`），且
+   * `keychain-downgrade` 明确不碰系统钥匙串。凭据是**关在这个 vault 里的**，
+   * 退它不会影响用户终端。所以这里直退，不需要守卫。
+   *
+   * ## ★ 判据用 CLI 自报的 `loggedOut`，不看 exit code
+   *
+   * 实测（隔离空环境）：未配置时 `auth logout --json` 返回
+   * `{ok:true, loggedOut:false, reason:"not_configured"}` —— **exit 0 且不抛**。
+   * 也就是说 exit code 在这里没有区分力（"本来就没登录"与"退成功"都是 0），
+   * 必须读 `loggedOut` 字段。这与本仓库"不看退出码、看它自己报的状态"
+   * 是同一条纪律。
+   *
+   * @returns 是否真的退掉了（本来就没登录 → `false`，且**不是**错误）
+   */
+  async logout(): Promise<boolean> {
+    try {
+      const payload = await this.cli.json<unknown>(["auth", "logout", "--json"])
+      const loggedOut =
+        typeof payload === "object" && payload !== null
+          ? (payload as Record<string, unknown>)["loggedOut"] === true
+          : false
+      this.options.logger.info("lark auth logout", { loggedOut })
+      return loggedOut
+    } catch (error) {
+      // 未配置/已退过都会落到这里（`json()` 对 ok:false 信封抛）——不是错误
+      this.options.logger.warn("lark auth logout failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  }
+
+  /**
+   * 为「切换账号 / 换 app」做准备：把这个身份目录的 **token + app 配置**都清掉。
+   *
+   * ## ★ 为什么单清 token 不够（这是"切不了 app"的根因）
+   *
+   * `login()` 只在 catch 到 `not configured` 时才走 `configure()`
+   * （`config init --new` = 让用户重选 app）。而 `auth logout` **不动**
+   * `config.json` 里已绑定的 app —— 配置还在，`login()` 就永远走不到那个
+   * 分支，于是"重新授权"每次都用同一个 app、拿回同一个账号。
+   *
+   * `config remove` 是 CLI 自己提供的出路，help 原文
+   * "Remove app configuration (clears all tokens and config)"（实测确认）。
+   * 清完再 `login()`，`not configured` 成立 → 用户能重新选 app、扫另一个账号。
+   *
+   * ## ★ 只在用户显式要求时调
+   *
+   * 它是破坏性的（CLI 的 help 自己带一句"Do NOT remove profiles unless the
+   * user explicitly asks"）。所以这个方法**不进任何自动路径**：只由界面上
+   * 「切换账号」那颗按钮触发，而普通「重新授权」仍走原来的 `login()`
+   * （刷新当前账号的 token，不动 app 绑定）。
+   *
+   * @returns 是否清掉了（没配置过 → `false`，不是错误）
+   */
+  async resetForAccountSwitch(): Promise<boolean> {
+    // 先退 token：`config remove` 自己也会清，但先退一步能让"已登录"这个
+    // 状态在任何一步失败时都不至于留着（宁可多退一次，也不要留下活 token）
+    await this.logout()
+    try {
+      await this.cli.json<unknown>(["config", "remove"])
+      this.options.logger.info("lark config removed for account switch", {})
+      return true
+    } catch (error) {
+      this.options.logger.warn("lark config remove failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  }
 }

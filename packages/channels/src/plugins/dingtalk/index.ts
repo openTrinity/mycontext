@@ -40,6 +40,12 @@ export function createDingTalkPlugin(options: DingTalkAuthOptions): ChannelPlugi
       media: false,
       sendAs: ["self"],
       domains: ["chat", "contact", "doc", "minutes"],
+      /**
+       * ★ **false** —— token 的密钥在系统钥匙串、按系统用户存一份，与用户
+       * 自己终端里的 CLI 共用同一份登录态（实测）。我们退登会连带退掉用户
+       * 终端那份，所以界面不提供退出授权/切换账号，只给一句说明。
+       */
+      isolatedCredentials: false,
     },
     auth,
     ingest: createDingTalkIngest(cli),

@@ -12,6 +12,7 @@ import { scopedChannelId, sourceKeyOf } from "@mycontext/channels"
 import { attempt, AppError, type Logger } from "@mycontext/kernel"
 import {
   IPC_CHANNELS,
+  channelAuthResetInputSchema,
   channelAuthStartInputSchema,
   channelIdInputSchema,
   channelIdentitySwitchInputSchema,
@@ -243,6 +244,17 @@ export function registerIpc(deps: IpcDependencies): void {
 
   ipcMain.handle(IPC_CHANNELS.channelAuthCancel, (_event, payload: unknown) =>
     attempt(() => channels.cancelLogin(parse(channelIdInputSchema, payload).channelId)),
+  )
+
+  /**
+   * 退出授权 / 切换账号。`switchAccount` 为真时连 app 绑定一起清 ——
+   * 见 `ChannelHost.resetAuth`。破坏性动作，由界面上两颗不同的按钮触发。
+   */
+  ipcMain.handle(IPC_CHANNELS.channelAuthReset, (_event, payload: unknown) =>
+    attempt(() => {
+      const input = parse(channelAuthResetInputSchema, payload)
+      return channels.resetAuth(input.channelId, input.switchAccount)
+    }),
   )
 
   /**

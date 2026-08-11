@@ -35,6 +35,7 @@ import type {
   DistillSourceView,
   OnboardingStepId,
   OnboardingStepView,
+  ChannelAuthResetInput,
   ChannelAuthStartInput,
   ChannelSummary,
   Credentials,
@@ -104,6 +105,12 @@ export interface MyContextApi {
     authStatus(input: { channelId: string; refresh?: boolean }): Promise<Result<AuthStatus>>
     authStart(input: ChannelAuthStartInput): Promise<Result<AuthStatus>>
     authCancel(input: { channelId: string }): Promise<Result<boolean>>
+    /**
+     * 退出该渠道的授权；`switchAccount` 为真时连 app 绑定一起清 ——
+     * 那是"换成另一个账号"唯一有效的做法（只清 token 的话下次授权仍会
+     * 拿回同一个人）。返回是否真的清掉了。
+     */
+    authReset(input: ChannelAuthResetInput): Promise<Result<boolean>>
     /**
      * 订阅授权进度。返回取消订阅函数。
      * 只暴露具名订阅而不是整个 ipcRenderer，避免渲染层能监听任意通道。

@@ -168,6 +168,23 @@ export function useCancelChannelAuth() {
   )
 }
 
+/**
+ * 退出授权 / 切换账号。
+ *
+ * `switchAccount: true` = 连 app 绑定一起清，用户下次授权才能换成另一个账号
+ * （只清 token 的话渠道 CLI 仍用已绑定的 app 拿回同一个人 —— 实测症状）。
+ */
+export function useResetChannelAuth() {
+  return useChannelMutation<{ channelId: string; switchAccount?: boolean }>(async (input) =>
+    unwrap(
+      await window.mycontext.channels.authReset({
+        channelId: input.channelId,
+        switchAccount: input.switchAccount ?? false,
+      }),
+    ),
+  )
+}
+
 /** 订阅授权进度事件。组件卸载时自动退订。 */
 export function useAuthProgress(
   channelId: string,

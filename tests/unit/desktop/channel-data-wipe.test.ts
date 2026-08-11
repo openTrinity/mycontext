@@ -55,10 +55,18 @@ interface Trace {
   revoked: string[]
   unbound: ChannelIdentityKey[]
   destroyed: string[]
+  /** 只删了哪些渠道的子树（多渠道共用 vault 时走这条） */
+  subtrees: string[]
 }
 
-function makeService(options: { vaultRoot: string | null; database: string; identity?: boolean }) {
-  const trace: Trace = { steps: [], revoked: [], unbound: [], destroyed: [] }
+function makeService(options: {
+  vaultRoot: string | null
+  database: string
+  identity?: boolean
+  /** 这个 vault 上还绑着哪些**别的**渠道（非空 = 共用，不能删整个 vault） */
+  siblings?: string[]
+}) {
+  const trace: Trace = { steps: [], revoked: [], unbound: [], destroyed: [], subtrees: [] }
   const service = new ChannelDataWipeService({
     clock: new ManualClock(START),
     logger: createLogger("test-wipe", { level: "error" }),
@@ -76,6 +84,13 @@ function makeService(options: { vaultRoot: string | null; database: string; iden
     unbindIdentity: (key) => {
       trace.steps.push("unbind")
       trace.unbound.push(key)
+    },
+    // 默认「这个 vault 只有当前这一个渠道」→ 走 destroyVault（既有断言的前提）
+    siblingChannels: () => options.siblings ?? [],
+    destroyChannelSubtree: (_vaultId, channelId) => {
+      trace.steps.push("destroy-subtree")
+      trace.subtrees.push(channelId)
+      return 1
     },
     destroyVault: (vaultId) => {
       trace.steps.push("destroy")
@@ -158,6 +173,9 @@ describe("★★ 清空 = 归零（退授权 + 解绑 + 删目录 + 重挂）", 
       // 退登失败（子进程超时 / CLI 不支持）
       revokeAuth: async () => false,
       unbindIdentity: () => void trace.push("unbind"),
+      // 默认「这个 vault 只有当前这一个渠道」→ 走 destroyVault（既有断言的前提）
+      siblingChannels: () => [],
+      destroyChannelSubtree: () => 0,
       destroyVault: () => void trace.push("destroy"),
       remount: async () => void trace.push("remount"),
     })
@@ -181,6 +199,9 @@ describe("★★ 清空 = 归零（退授权 + 解绑 + 删目录 + 重挂）", 
       unmount: async () => void trace.push("unmount"),
       revokeAuth: async () => true,
       unbindIdentity: () => void trace.push("unbind"),
+      // 默认「这个 vault 只有当前这一个渠道」→ 走 destroyVault（既有断言的前提）
+      siblingChannels: () => [],
+      destroyChannelSubtree: () => 0,
       destroyVault: () => {
         throw new Error("目录被占用")
       },
@@ -229,5 +250,60 @@ describe("清空：预演", () => {
     // 但要让用户看到代价
     expect(result.identityUnbound).toBe(true)
     expect(result.authRevoked).toBe(true)
+  })
+})
+
+describe("★★ 多渠道共用同一个 vault 时，只清当前渠道", () => {
+  /**
+   * ## 这一条锁的是一次**真实的数据丢失**
+   *
+   * control v5 起一个 vault 可以挂多个渠道的身份（索引 `(vault_id, channel_id)`），
+   * 而非主渠道的库就落在**这个 vault 目录里面**的 `sources/<channelId>/`。
+   * 本机实测：钉钉与飞书两条身份、同一个 `vault_id`。
+   *
+   * 于是"清空当前渠道"若一律 `destroyVault`（删整个目录）：
+   * · 另一个渠道的语料/图谱/导出**全部一起消失**；
+   * · 它的身份映射还留在 control 库里指向一个已不存在的目录；
+   * · 下次登录 `resolveOnLogin` 挑中它 → `openStore` 新建一个空库 →
+   *   用户看到"已授权但什么都没有"的身份，而且永远清不掉。
+   *
+   * 全程不报错 —— 正是 CLAUDE.md §4 说的那类静默降级。
+   */
+  it("有别的渠道绑在同一个 vault → 只删这个渠道的子树，**不动整个 vault**", async () => {
+    const vault = makeVault()
+    const { service, trace } = makeService({
+      vaultRoot: vault.root,
+      database: vault.database,
+      siblings: ["feishu"],
+    })
+
+    const result = await service.wipe({ dryRun: false })
+
+    // ★ 关键断言：destroyVault 一次都没被调用
+    expect(trace.destroyed).toEqual([])
+    expect(trace.steps).not.toContain("destroy")
+    // 走的是子树那条，且删的正是**当前身份**那个渠道
+    expect(trace.steps).toContain("destroy-subtree")
+    expect(trace.subtrees).toEqual([KEY.channelId])
+    // vault 目录还在（另一个渠道的东西就在里面）
+    expect(existsSync(vault.root)).toBe(true)
+    expect(result.removedPaths).toBe(1)
+    // 授权仍然只退当前渠道这一个
+    expect(trace.revoked).toEqual([KEY.channelId])
+  })
+
+  it("只剩自己一个渠道 → 仍然删整个 vault（不留空壳）", async () => {
+    const vault = makeVault()
+    const { service, trace } = makeService({
+      vaultRoot: vault.root,
+      database: vault.database,
+      siblings: [],
+    })
+
+    await service.wipe({ dryRun: false })
+
+    expect(trace.destroyed).toEqual(["vault-1"])
+    expect(trace.steps).not.toContain("destroy-subtree")
+    expect(existsSync(vault.root)).toBe(false)
   })
 })

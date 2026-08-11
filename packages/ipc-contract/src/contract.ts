@@ -24,6 +24,14 @@ export const IPC_CHANNELS = {
   channelAuthStatus: "mycontext:channel/auth-status",
   channelAuthStart: "mycontext:channel/auth-start",
   channelAuthCancel: "mycontext:channel/auth-cancel",
+  /**
+   * 退出某个渠道的授权 / 切换到另一个账号。
+   *
+   * ★ 与 `channelAuthStart`（重新授权）是**两件事**：重新授权只刷新当前账号的
+   * token；这条要先把凭据（以及"切换账号"时连 app 绑定一起）清掉，用户下一次
+   * 授权才可能换成另一个账号 —— 见 `FeishuAuth.resetForAccountSwitch`。
+   */
+  channelAuthReset: "mycontext:channel/auth-reset",
   // Onboarding
   onboardingComplete: "mycontext:onboarding/complete",
   onboardingSkip: "mycontext:onboarding/skip",
@@ -1607,6 +1615,17 @@ export const channelSummarySchema = z.object({
   capabilities: z.object({
     sendAs: z.array(z.enum(["self", "bot"])),
     domains: z.array(z.enum(["chat", "doc", "minutes", "contact"])),
+    /**
+     * 凭据是否关在我们自己的目录里 —— 决定界面**给不给**「退出授权 /
+     * 切换账号」按钮（见 `ChannelCapabilities.isolatedCredentials`）。
+     *
+     * 这一项属于"渲染层该看见"的能力：它回答的是"这个操作在这个渠道上安全吗"，
+     * 而不是采集层的实现细节。缺了它 UI 只能回去写 `id === "dingtalk"`。
+     *
+     * ★ 可选 + 缺省当 false：旧主进程不带这个字段时，界面退回"不给按钮"
+     * 那一档（保守方向 —— 宁可少个入口，也不要在共用登录态的渠道上误退）。
+     */
+    isolatedCredentials: z.boolean().optional(),
   }),
 })
 
@@ -1618,6 +1637,24 @@ export const channelAuthStartInputSchema = z.object({
 })
 
 export type ChannelAuthStartInput = z.input<typeof channelAuthStartInputSchema>
+
+/**
+ * 退出授权 / 切换账号的入参。
+ *
+ * `switchAccount`：
+ * · `false`（默认）= 只退登（清 token）。用户还想用同一个账号时，下次
+ *   「重新授权」直接刷新即可；
+ * · `true` = **连 app 绑定一起清**。这是"换一个账号/换一个 app"唯一有效的
+ *   做法 —— 只清 token 的话，渠道 CLI 下次仍用已绑定的那个 app 与同一个
+ *   账号应答，用户点多少次「重新授权」都还是原来那个人（实测症状）。
+ *   破坏性更强，所以必须由用户显式选择，不进任何自动路径。
+ */
+export const channelAuthResetInputSchema = z.object({
+  channelId: z.string().min(1),
+  switchAccount: z.boolean().default(false),
+})
+
+export type ChannelAuthResetInput = z.input<typeof channelAuthResetInputSchema>
 
 export const channelIdInputSchema = z.object({ channelId: z.string().min(1) })
 

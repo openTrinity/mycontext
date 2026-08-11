@@ -118,6 +118,27 @@ export class ChannelHost {
     return ok
   }
 
+  /**
+   * 退出授权，并（`switchAccount` 为真时）连 app 绑定一起清 —— 让用户下一次
+   * 授权能换成**另一个账号**。见 `ChannelAuth.resetForAccountSwitch`。
+   *
+   * ★ 与 `logout` 一样必须清 status 的 TTL 缓存：不清的话界面在缓存过期前
+   * 仍显示"已授权"，用户会以为没生效而反复点（这是修过一次的形态）。
+   *
+   * @returns 是否真的清掉了（渠道不支持 / 本来就没配置 → false，不是错误）
+   */
+  async resetAuth(channelId: string, switchAccount: boolean): Promise<boolean> {
+    const auth = this.registry.get(channelId).auth
+    const ok =
+      switchAccount && auth.resetForAccountSwitch !== undefined
+        ? await auth.resetForAccountSwitch()
+        : auth.logout !== undefined
+          ? await auth.logout()
+          : false
+    this.cache.delete(channelId)
+    return ok
+  }
+
   /** 是否有渠道已授权：Onboarding 的判定依据。 */
   async hasAnyAuthorized(): Promise<boolean> {
     for (const plugin of this.registry.list()) {

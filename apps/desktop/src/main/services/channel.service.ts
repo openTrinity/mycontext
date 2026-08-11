@@ -82,6 +82,7 @@ export class ChannelService {
         capabilities: {
           sendAs: [...plugin.capabilities.sendAs],
           domains: [...plugin.capabilities.domains],
+          isolatedCredentials: plugin.capabilities.isolatedCredentials,
         },
       })
     }
@@ -131,6 +132,29 @@ export class ChannelService {
     } catch (error) {
       this.options.logger.warn("channel logout failed", {
         channelId,
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  }
+
+  /**
+   * 退出授权 / 切换账号（`switchAccount` 为真时连 app 绑定一起清）。
+   *
+   * 用户在界面上有两颗按钮：「退出授权」= 只清凭据；「切换账号」= 还要清掉
+   * app 绑定，否则下一次授权仍会拿回同一个账号（见 `ChannelHost.resetAuth`）。
+   *
+   * 与 `logout` 一样**不抛**：失败降级成 `false`，由界面呈现"没退掉"。
+   */
+  async resetAuth(channelId: string, switchAccount: boolean): Promise<boolean> {
+    try {
+      const ok = await this.options.host.resetAuth(channelId, switchAccount)
+      this.options.logger.info("channel auth reset", { channelId, switchAccount, ok })
+      return ok
+    } catch (error) {
+      this.options.logger.warn("channel auth reset failed", {
+        channelId,
+        switchAccount,
         detail: error instanceof Error ? error.message : String(error),
       })
       return false

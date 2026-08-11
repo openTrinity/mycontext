@@ -30,7 +30,14 @@
     "useCode": "用授权码",
     "useCodeHint": "无法打开浏览器时，用授权码在其他设备完成",
     "configure": "配置",
-    "collapse": "收起"
+    "collapse": "收起",
+    "signOut": "退出授权",
+    "switchAccount": "切换账号",
+    "signOutHint": "清掉这个渠道在本应用里的登录凭据。数据保留；想再用就重新授权。",
+    "switchAccountHint": "清掉登录凭据**与已绑定的应用**，下次授权时可以换成另一个账号。",
+    "signOutDone": "已退出授权",
+    "signOutFailed": "没能退掉凭据 —— 可能本来就没有登录态",
+    "switchAccountDone": "已清掉凭据与应用绑定，点「开始授权」换账号"
   },
   "scope": {
     "readTitle": "读取工作数据",

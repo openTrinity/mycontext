@@ -49,6 +49,7 @@ const api: MyContextApi = {
     authStart: (input: ChannelAuthStartInput) =>
       ipcRenderer.invoke(IPC_CHANNELS.channelAuthStart, input),
     authCancel: (input) => ipcRenderer.invoke(IPC_CHANNELS.channelAuthCancel, input),
+    authReset: (input) => ipcRenderer.invoke(IPC_CHANNELS.channelAuthReset, input),
     onAuthProgress: (listener) => {
       const handler = (_event: unknown, payload: ChannelAuthProgressEvent) => listener(payload)
       ipcRenderer.on(IPC_EVENTS.channelAuthProgress, handler)
