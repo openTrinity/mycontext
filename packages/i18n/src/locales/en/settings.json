@@ -6,7 +6,8 @@
     "about": "About",
     "persona": "Digital twin",
     "onboarding": "Setup steps",
-    "model": "Models"
+    "model": "Models",
+    "channelData": "Channel data"
   },
   "general": {
     "title": "General",
@@ -382,5 +383,11 @@
       "graphBuildMinIntervalMs": "At least this long between two graph builds. NOT a fixed schedule — it will not build without enough new data, and enough data still waits out this gap. A build recomputes the whole graph, so keep it sparse."
     },
     "note": "Second-level visibility for new messages comes from the event stream and probe-triggered targeted top-ups, not from raising the full-pagination rate."
+  },
+  "channelData": {
+    "description": "What this channel collects, how often, and its graph service.",
+    "needsChannel": "No authorized channel yet — connect one under Channels first.",
+    "channelPickerLabel": "Choose a channel",
+    "intervalsGlobalNote": "Collection intervals apply to **all channels** (not affected by the picker above)."
   }
 }

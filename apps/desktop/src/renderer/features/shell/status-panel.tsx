@@ -338,7 +338,15 @@ export function klServiceStateKey(state: KlServerStatus["state"]): string {
  * 而一轮增量建图要跑几十分钟。所以服务徽章只反映服务状态，
  * 建图忙不忙走它自己那一块（带 phase/percent，后端本来就在推）。
  */
-function KlPanel({ channelId }: { channelId: string | null }) {
+/**
+ * ★ `export` 是为了让**设置弹窗**也能渲染这一块（用户要求把渠道设置搬进设置）。
+ *
+ * 导出而不是把文件搬走 / 复制一份：这个组件的核心是"每渠道一张自包含的卡、
+ * 按钮长在卡里"那条不可逆动作的纪律（见下方注释）。复制一份就等于给那条纪律
+ * 开了第二个实现，而两份必然漂移 —— 漂移的代价是有人在错的渠道上点了 fresh。
+ * 运行状态页仍然渲染它（排障时要看进程/端口），两处同一份实现。
+ */
+export function KlPanel({ channelId }: { channelId: string | null }) {
   const { t } = useDynamicTranslation("settings")
   const status = useKlServerStatus()
 

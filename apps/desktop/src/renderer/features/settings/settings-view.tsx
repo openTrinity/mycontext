@@ -40,8 +40,18 @@ import { ChecklistIcon, InfoIcon, PlugIcon, SlidersIcon, TuningIcon } from "../s
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { personaCapableChannels } from "../../lib/channel-capability.js"
 import { ChannelPicker } from "../shell/channel-picker.js"
+import { CollectionScopePanel } from "../shell/collection-scope-panel.js"
+import { KlPanel } from "../shell/status-panel.js"
+import { IngestIntervalsPanel } from "./ingest-intervals-panel.js"
 
-type SectionId = "general" | "model" | "channels" | "persona" | "onboarding" | "about"
+type SectionId =
+  | "general"
+  | "model"
+  | "channels"
+  | "channelData"
+  | "persona"
+  | "onboarding"
+  | "about"
 
 /**
  * 导航分组。
@@ -63,6 +73,14 @@ const NAV_GROUPS: readonly {
       { id: "general", labelKey: "sections.general", icon: <SlidersIcon /> },
       { id: "model", labelKey: "sections.model", icon: <TuningIcon /> },
       { id: "channels", labelKey: "sections.channels", icon: <PlugIcon /> },
+      /**
+       * ★ 渠道**数据**（采什么 / 多久采一次 / 图谱服务）与上面的渠道**授权**
+       * 分成两栏：授权回答"连上了吗"，这一栏回答"采什么、怎么加工"。
+       * 混在一栏会让那一页同时装着扫码按钮和不可逆的删图按钮。
+       *
+       * 从「运行状态」页搬过来的（那一页本是排障用的，而这三块是日常配置）。
+       */
+      { id: "channelData", labelKey: "sections.channelData", icon: <SlidersIcon /> },
     ],
   },
   {
@@ -188,6 +206,8 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
             <ModelSection />
           ) : active === "channels" ? (
             <ChannelsSection />
+          ) : active === "channelData" ? (
+            <ChannelDataSection />
           ) : active === "persona" ? (
             <PersonaSection />
           ) : active === "onboarding" ? (
@@ -631,6 +651,86 @@ function WorkLayerRow() {
         </p>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * 渠道数据 —— 采什么 / 多久采一次 / 图谱服务。
+ *
+ * ## ★ 为什么从「运行状态」页搬到这里（用户要求）
+ *
+ * 那三块原来挂在运行状态页，而那一页的定位是**排障**（版本号、库路径、
+ * 迁移版本、配置条数）。"采集范围""采集周期""图谱要不要重建"是**日常配置**
+ * —— 用户找它们的时候会去设置里找，而不是去一个叫"运行状态"的地方。
+ *
+ * ## ★★ 搬迁时必须保住的三条既有结论（都是踩过的）
+ *
+ * 1. **kl 的启停/建图按钮不能交给页面级 picker 决定打给谁。** `KlPanel` 内部
+ *    是"每渠道一张自包含的卡、按钮长在卡里"，`channelId` 只用来高亮。
+ *    理由是 `fresh=true` **不可逆**（删图重烧、几小时、出网烧 LLM）——
+ *    "数据面选了飞书、建图按钮却打在钉钉上"那一下没法撤回。
+ * 2. **采集范围排在采集周期之前**：先回答"采什么"，再回答"多久采一次"。
+ * 3. **采集范围与 kl 共用同一个渠道选择**：这一栏只有一个取值范围。
+ *
+ * ## ★ 采集周期是**全局**的，这里必须说出来
+ *
+ * `intervalsSave` 把同一份值写进主库**以及每个非主渠道的库**（见
+ * `DataPlaneService`），也就是"一份配置广播到所有渠道"。它不接 channelId。
+ * 所以这一块**不能**放在 picker 之下装成按渠道的 —— 那会是个静默的谎
+ * （用户以为只改了飞书）。用一句话把它标出来，等哪天真做成按渠道了再挪。
+ */
+function ChannelDataSection() {
+  const { t } = useDynamicTranslation("settings")
+  const { t: tch } = useDynamicTranslation("channels")
+  const bootstrap = useBootstrapState()
+  const session = bootstrap.data?.session ?? null
+  const channels = useChannels()
+  const authorized = (channels.data ?? []).filter(
+    (c) => c.available && c.status.state === "authorized",
+  )
+  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
+  const activeChannelId = pickedChannelId ?? authorized[0]?.id ?? null
+
+  return (
+    <Section title={t("sections.channelData")} description={t("channelData.description")} wide>
+      {session === null ? (
+        <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
+          {t("onboarding.needsLogin")}
+        </p>
+      ) : authorized.length === 0 ? (
+        <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
+          {t("channelData.needsChannel")}
+        </p>
+      ) : (
+        <>
+          {/* 一个渠道时不摆下拉（picker 自己也会退化成静态标识） */}
+          {authorized.length > 1 ? (
+            <ChannelPicker
+              options={authorized.map((c) => ({
+                id: c.id,
+                label: tch(`${c.id}.label`, { defaultValue: c.id }),
+              }))}
+              activeId={activeChannelId}
+              onChange={setPickedChannelId}
+              ariaLabel={t("channelData.channelPickerLabel")}
+              side="bottom"
+            />
+          ) : null}
+
+          {/* ① 采什么 —— 按渠道 */}
+          <CollectionScopePanel channelId={activeChannelId} />
+
+          {/* ② 多久采一次 —— **全局**，见文件头那段 */}
+          <IngestIntervalsPanel />
+          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("channelData.intervalsGlobalNote")}
+          </p>
+
+          {/* ③ 图谱服务 —— 每渠道一张卡，channelId 只用来高亮（不可逆动作） */}
+          <KlPanel channelId={activeChannelId} />
+        </>
+      )}
+    </Section>
   )
 }
 

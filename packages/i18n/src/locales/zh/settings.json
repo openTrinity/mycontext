@@ -6,7 +6,8 @@
     "about": "关于",
     "persona": "数字分身",
     "onboarding": "引导流程",
-    "model": "模型"
+    "model": "模型",
+    "channelData": "渠道数据"
   },
   "general": {
     "title": "通用",
@@ -382,5 +383,11 @@
       "graphBuildMinIntervalMs": "两次建图之间至少隔这么久。**不是**「每隔这么久建一次」——数据不够时到点也不会建，而攒够了也要等这段时间过去。建图会重算整张图，所以不宜太勤。"
     },
     "note": "新消息的秒级可见性来自事件长连接与探测命中触发的定向补采，而非提高全量分页频率。"
+  },
+  "channelData": {
+    "description": "这个渠道采什么、多久采一次，以及它的图谱服务。",
+    "needsChannel": "还没有已授权的渠道 —— 先在「渠道」里连一个。",
+    "channelPickerLabel": "选择渠道",
+    "intervalsGlobalNote": "采集周期对**所有渠道**生效（不随上面的渠道选择变化）。"
   }
 }
