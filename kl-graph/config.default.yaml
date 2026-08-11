@@ -4,70 +4,115 @@
 # Override values with config.yaml, a CLI-supplied YAML, or KL_* environment
 # variables. The typed schema in kl_graph/config.py validates the final result.
 
+# Application paths shared by ingestion, storage, and serving.
 application:
+  # Runtime-data directory; an empty value resolves to <project>/data.
   data_dir: ${oc.env:KL_DATA_DIR,""}
+  # Root directory containing the DingTalk DWS export to ingest.
   dws_export_dir: ${oc.env:KL_DWS_EXPORT_DIR,""}
 
+# HTTP retrieval-server settings.
 server:
+  # TCP port on which the FastAPI server listens (1-65535).
   port: ${oc.env:KL_SERVER_PORT,8200}
 
 # Shared external/model services used by more than one pipeline.
 services:
+  # OpenAI-compatible service used to embed chunks, facts, entities, and queries.
   embedding:
+    # Embedding API base URL; empty uses the client/provider default.
     base_url: ${oc.env:KL_EMBED_BASE_URL,""}
+    # Model identifier sent to the embedding API.
     model: ${oc.env:KL_EMBED_MODEL,text-embedding-v4}
+    # API credential; may be empty for a trusted local service.
     api_key: ${oc.env:KL_EMBED_API_KEY,""}
+    # Expected vector width; must match the model output and stored collections.
     dim: ${oc.env:KL_EMBEDDING_DIM,1024}
+    # Whether to request `dim` explicitly; leave false for servers such as vLLM
+    # that reject the Matryoshka `dimensions` request field.
     send_dimensions: ${oc.env:KL_EMBED_SEND_DIMENSIONS,0}
 
+  # Low-latency chat-completion service used for extraction and synthesis.
   llm_flash:
+    # LiteLLM provider name (for example anthropic or openai).
     provider: ${oc.env:KL_LLM_FLASH_PROVIDER,${oc.env:KL_LLM_PROVIDER,anthropic}}
+    # Provider/API base URL; falls back to the legacy shared LLM variable.
     base_url: ${oc.env:KL_LLM_FLASH_BASE_URL,${oc.env:KL_LLM_BASE_URL,""}}
+    # Chat model identifier; falls back to the legacy shared LLM variable.
     model: ${oc.env:KL_LLM_FLASH_MODEL,${oc.env:KL_LLM_MODEL,qwen3.7-flash}}
+    # Per-request completion timeout in seconds.
     timeout: ${oc.env:KL_LLM_FLASH_TIMEOUT,${oc.env:KL_LLM_TIMEOUT,120}}
 
+  # External cross-encoder service used to rerank retrieval candidates.
   reranker:
+    # Reranker API base URL; empty uses the client/provider default.
     base_url: ${oc.env:KL_RERANK_BASE_URL,""}
+    # Model identifier sent to the reranking API.
     model: ${oc.env:KL_RERANK_MODEL,"gte-reranker-v2"}
+    # API credential; may be empty for a trusted local service.
     api_key: ${oc.env:KL_RERANK_API_KEY,""}
 
 # Backend-neutral store roles. Backend-specific options stay below the selected
 # implementation so another graph/vector implementation can be added cleanly.
 storage:
+  # Graph traversal and shortest-path storage.
   graph:
+    # Active implementation: sqlite, ladybug, or experimental falkordb.
     backend: ${oc.env:KL_GRAPH_BACKEND,ladybug}
+    # LadybugDB/Kuzu engine options; the database path is always under data_dir.
     ladybug:
-      # Engine options forwarded to ladybug.Database(). 0/False = Kuzu auto.
+      # Open the derived graph database without permitting writes.
       read_only: ${oc.env:KL_LADYBUG_READ_ONLY,0}
+      # Buffer-pool bytes; 0 delegates memory sizing to the Kuzu engine.
       buffer_pool_size: ${oc.env:KL_LADYBUG_BUFFER_POOL_SIZE,0}
+      # Worker-thread limit; 0 lets the Kuzu engine choose automatically.
       max_num_threads: ${oc.env:KL_LADYBUG_MAX_NUM_THREADS,0}
+    # Connection settings for the experimental FalkorDB backend.
     falkordb:
+      # FalkorDB server hostname or IP address.
       host: ${oc.env:KL_FALKOR_HOST,localhost}
+      # FalkorDB TCP port.
       port: ${oc.env:KL_FALKOR_PORT,6379}
+      # Logical graph name within the FalkorDB server.
       graph: ${oc.env:KL_FALKOR_GRAPH,kl_graph}
 
+  # Dense-vector indexes used by ingestion and semantic retrieval.
   vector:
+    # Active implementation: qdrant or zvec.
     backend: ${oc.env:KL_VECTOR_BACKEND,zvec}
+    # Qdrant local/remote mode and search behavior.
     qdrant:
+      # Use exhaustive search instead of the ANN index for maximum recall.
       exact_search: ${oc.env:KL_QDRANT_EXACT_SEARCH,0}
-      # Empty host selects embedded local-file mode.
+      # Remote Qdrant host; empty selects embedded local-file mode under data_dir.
       host: ${oc.env:KL_QDRANT_HOST,""}
+      # Remote Qdrant HTTP port; unused in embedded mode.
       port: ${oc.env:KL_QDRANT_PORT,6333}
+      # Remote Qdrant API key; unused when authentication is disabled/local.
       api_key: ${oc.env:KL_QDRANT_API_KEY,""}
+    # Zvec index construction and distance settings.
     zvec:
+      # ANN index implementation: hnsw, flat, ivf, or diskann.
       index_type: ${oc.env:KL_ZVEC_INDEX_TYPE,hnsw}
+      # Vector distance metric: cosine, inner product (ip), or Euclidean (l2).
       metric: ${oc.env:KL_ZVEC_METRIC,cosine}
 
+# Feature pipelines and their operational tuning.
 pipelines:
+  # Features that are available but not yet part of the stable default path.
   experimental:
+    # Hierarchical community build, summaries, and community-aware serving.
     communities:
-      # Disabled until incremental hierarchical maintenance is validated.
-      # Existing community artifacts remain on disk but are ignored while false.
+      # Enable community processing; disabled artifacts remain on disk but ignored.
       enabled: ${oc.env:KL_COMMUNITIES_ENABLED,0}
 
+  # Source loading, LLM extraction, embedding, and graph construction.
   ingestion:
+    # Preserve the durable Phase-A extraction cache after a successful run.
     keep_extraction_cache: ${oc.env:KL_KEEP_EXTRACTION_CACHE,1}
+    # Optional legacy-v1 entity JSON path used for migration/compatibility input.
     v1_entities_path: ${oc.env:KL_V1_ENTITIES_PATH,""}
+    # Source types handled by the generic loader when present in the DWS export.
     generic_sources:
       - work
       - contacts
@@ -75,91 +120,156 @@ pipelines:
       - calendar
       - drive
 
+    # Batched embedding behavior during ingestion.
     embedding:
+      # Number of accumulated records between durable vector-store flushes.
       flush_every: ${oc.env:KL_EMBED_FLUSH_EVERY,2000}
+      # Texts submitted in each embedding API request.
       batch_size: ${oc.env:KL_EMBED_BATCH_SIZE,10}
+      # Maximum embedding requests allowed in flight at once.
       concurrency: ${oc.env:KL_EMBED_CONCURRENCY,10}
+      # Retry count after an embedding request fails.
       max_retries: ${oc.env:KL_EMBED_MAX_RETRIES,6}
+      # Per-request embedding timeout in seconds.
       timeout: ${oc.env:KL_EMBED_TIMEOUT,60}
 
+    # Entity/fact extraction behavior and source-specific target granularity.
     extraction:
+      # Extraction items grouped into one scheduler batch.
       batch_size: ${oc.env:KL_LLM_BATCH_SIZE,5}
+      # Maximum seconds allowed for an extraction batch to finish.
       batch_timeout: ${oc.env:KL_LLM_BATCH_TIMEOUT,300}
+      # Maximum extraction API requests allowed in flight at once.
       concurrency: ${oc.env:KL_LLM_CONCURRENCY,50}
+      # Retry count after the first failed extraction attempt.
       max_retries: ${oc.env:KL_EXTRACTION_MAX_RETRIES,2}
+      # Maximum LRU entries retained in the separate extraction-cache database.
       cache_max_entries: ${oc.env:KL_EXTRACTION_CACHE_MAX_ENTRIES,100000}
+      # Extraction system-prompt language: zh or en.
       prompt_language: zh
+      # Map each source type to its extraction-item construction strategy.
       strategies:
+        # Extract each chat message, with neighboring/quoted text as context only.
         message: chat_message
+        # Extract each stored semantic document chunk.
         wiki: document_chunk
+        # Extract each stored semantic document chunk.
         mail: document_chunk
+        # Extract each stored semantic document chunk.
         minutes: document_chunk
+        # Extract each stored semantic document chunk.
         work: document_chunk
+        # Extract each stored semantic document chunk.
         drive: document_chunk
+        # Extract each stored semantic document chunk.
         calendar: document_chunk
+        # Extract each stored semantic document chunk.
         contacts: document_chunk
+        # Extract each stored semantic document chunk.
         attendance: document_chunk
+        # Fallback for unmapped source types: extract the stored chunk directly.
         default: stored_chunk
 
+    # Optional LLM-assisted review of suspicious extracted entity names.
     cleanup:
+      # Run the entity-cleanup stage after extraction.
       enabled: ${oc.env:KL_ENTITY_CLEANUP_ENABLED,0}
+      # Maximum number of ranked suspicious entities sent for review; 0 disables.
       max_entities: ${oc.env:KL_ENTITY_CLEANUP_BUDGET,500}
+      # Minimum heuristic suspicion score required to become a review candidate.
       min_suspicion_score: ${oc.env:KL_ENTITY_CLEANUP_MIN_SCORE,5}
+      # Report proposed cleanup decisions without applying mutations when true.
       dry_run: ${oc.env:KL_ENTITY_CLEANUP_DRY_RUN,1}
 
+    # Generation of human-readable descriptions for extracted entities.
     entity_description:
+      # Use the LLM to summarize entity evidence instead of only concatenating it.
       summarize: ${oc.env:KL_ENTITY_DESCRIPTION_SUMMARIZE,1}
+      # Maximum entity-description LLM requests allowed in flight at once.
       concurrency: ${oc.env:KL_ENTITY_DESCRIPTION_CONCURRENCY,8}
 
+    # LLM report generation for detected communities.
     community_summarization:
-      # Max concurrent LLM calls when generating community reports (one call per
-      # community). Higher values finish the summarization stage faster at the
-      # cost of more in-flight requests against the LLM endpoint.
+      # Maximum community-summary requests allowed in flight at once.
       max_concurrent: ${oc.env:KL_COMMUNITY_SUMMARY_CONCURRENCY,50}
 
+    # Strategies used when improving an existing graph incrementally.
     incremental:
+      # Changed-member ratio at which an existing community summary is invalidated.
       community_summary_threshold: ${oc.env:KL_INCR_COMMUNITY_SUMMARY_THRESHOLD,0.1}
+      # Registered strategy used to add similarity edges for changed nodes.
       similarity_strategy: ${oc.env:KL_INCR_SIMILARITY_STRATEGY,ann_intra_batch}
+      # Registered strategy used to update community assignments incrementally.
       community_strategy: ${oc.env:KL_INCR_COMMUNITY_STRATEGY,dynamic_frontier_leiden}
 
+    # Structural similarity-edge construction thresholds.
     similarity:
-      threshold: 0.85  # retained from the former thresholds.similar_to setting
+      # Minimum cosine similarity required to create a SIMILAR_TO edge.
+      threshold: 0.85
 
+  # Retrieval, ranking, graph expansion, and optional answer synthesis.
   query:
+    # Combined retrieval-and-graph-walk `/ask` endpoint defaults.
     ask:
-      # Callers can override this per /ask request with force_phase2. Agent
-      # callers normally synthesize from returned evidence themselves.
+      # Generate a Phase-2 LLM answer by default; requests may override this.
       synthesize: ${oc.env:KL_ASK_SYNTHESIZE,0}
 
+    # Query-text embedding resilience settings.
     embedding:
+      # Retry count after the first failed query-embedding attempt.
       max_retries: ${oc.env:KL_QUERY_EMBED_MAX_RETRIES,2}
+      # Per-request query-embedding timeout in seconds.
       timeout: ${oc.env:KL_QUERY_EMBED_TIMEOUT,30}
 
+    # Maximum message candidates retained from instant Phase-1 retrieval.
     phase1_message_limit: 20
+    # Maximum fact candidates retained from instant Phase-1 retrieval.
     phase1_fact_limit: 10
+    # Maximum related entities added while expanding Phase-1 entity hits.
     phase1_entity_expand_limit: 20
+    # Maximum evidence items supplied to Phase-2 answer synthesis.
     phase2_context_limit: 50
+    # Maximum asynchronous query subtasks allowed in flight at once.
     max_concurrency: ${oc.env:KL_QUERY_MAX_CONCURRENCY,50}
+    # Collapse equivalent retrieval candidates before final ranking when true.
     dedup_enabled: ${oc.env:KL_QUERY_DEDUP,1}
 
+    # Confidence bands used to label retrieval/answer confidence.
     confidence:
+      # Score at or above which confidence is classified as high.
       high: 0.7
+      # Score below which confidence is classified as low.
       low: 0.3
 
+    # Reciprocal Rank Fusion settings for combining independent result lists.
     fusion:
+      # RRF rank-offset constant; larger values flatten rank-position differences.
       rrf_k: 60
 
+    # Cross-encoder reranking limits.
     reranking:
+      # Number of fused candidates submitted to the reranker.
       window: 64
+      # Number of reranked candidates retained for downstream use.
       top_k: 30
 
+    # Map/reduce search across hierarchical community summaries.
     global_search:
+      # User identity supplied to global-search prompting when available.
       current_user: ${oc.env:KL_CURRENT_USER,""}
+      # Compatibility setting; levels are currently discovered dynamically.
       levels: "${oc.env:KL_GLOBAL_SEARCH_LEVELS,\"L0,L1,L2,L3\"}"
+      # Approximate input-token budget for each map prompt batch.
       map_budget: ${oc.env:KL_GLOBAL_SEARCH_MAP_BUDGET,4000}
+      # Approximate input-token budget for the final reduce prompt.
       reduce_budget: ${oc.env:KL_GLOBAL_SEARCH_REDUCE_BUDGET,4000}
+      # Maximum completion tokens requested from each map call.
       map_max_tokens: ${oc.env:KL_GLOBAL_SEARCH_MAP_MAX_TOKENS,1024}
+      # Maximum completion tokens requested from the final reduce call.
       reduce_max_tokens: ${oc.env:KL_GLOBAL_SEARCH_REDUCE_MAX_TOKENS,1500}
+      # Compatibility setting; selection is currently governed by token budgets.
       max_communities: ${oc.env:KL_GLOBAL_SEARCH_MAX_COMMUNITIES,16}
+      # Maximum map-stage LLM requests allowed in flight at once.
       map_concurrency: ${oc.env:KL_GLOBAL_SEARCH_MAP_CONCURRENCY,4}
+      # Compatibility setting; selection is currently deterministic by relevance.
       shuffle_seed: ${oc.env:KL_GLOBAL_SEARCH_SHUFFLE_SEED,86}
