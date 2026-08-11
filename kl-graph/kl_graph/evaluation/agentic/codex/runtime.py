@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,6 @@ from .models import (
     artifact_stem,
     parse_agent_output,
 )
-from .prompts import DEVELOPER_INSTRUCTIONS, case_prompt
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +41,12 @@ class RuntimeOptions:
     reasoning_effort: str | None
     max_kl_calls: int | None
     timeout_s: float
+    developer_instructions: str
+    prompt_builder: Callable[[AgentCase, int | None], str]
+    scoped_cli_module: str
+    client_name: str = "kl_agentic_eval"
+    client_title: str = "KL Agentic Eval"
+    temporary_home_prefix: str = "kl-agentic-codex-"
 
 
 def load_codex_sdk(sdk_path: Path | None = None) -> dict[str, Any]:
@@ -90,7 +96,7 @@ class CodexRuntimePool:
         client_type = self.sdk["AsyncCodex"]
         try:
             self._temporary_home = tempfile.TemporaryDirectory(
-                prefix="kl-locomo-codex-"
+                prefix=self.options.temporary_home_prefix
             )
             codex_home = Path(self._temporary_home.name)
             materialize_isolated_codex_home(
@@ -107,8 +113,8 @@ class CodexRuntimePool:
                 config = config_type(
                     codex_bin=str(self.options.codex_bin),
                     cwd=str(self.options.project_root),
-                    client_name="kl_locomo_agentic_eval",
-                    client_title="KL LoCoMo Agentic Eval",
+                    client_name=self.options.client_name,
+                    client_title=self.options.client_title,
                     env=runtime_env,
                 )
                 client = client_type(config=config)
@@ -184,6 +190,8 @@ async def _run_case(
         stem,
         options.project_root / "kl",
         options.max_kl_calls,
+        case.scope_id,
+        options.scoped_cli_module,
         options.skill_path,
     )
     result.transcript_path = str(transcript_path.relative_to(options.output_dir))
@@ -196,7 +204,7 @@ async def _run_case(
             "approval_mode": sdk["ApprovalMode"].deny_all,
             "config": {"sandbox_workspace_write": {"network_access": True}},
             "cwd": str(workspace),
-            "developer_instructions": DEVELOPER_INSTRUCTIONS,
+            "developer_instructions": options.developer_instructions,
             "ephemeral": True,
             "sandbox": sdk["Sandbox"].workspace_write,
         }
@@ -225,7 +233,9 @@ async def _run_case(
                     name="kl",
                     path=str(workspace / ".agents" / "skills" / "kl" / "SKILL.md"),
                 ),
-                sdk["TextInput"](text=case_prompt(case, options.max_kl_calls)),
+                sdk["TextInput"](
+                    text=options.prompt_builder(case, options.max_kl_calls)
+                ),
             ],
             **turn_kwargs,
         )

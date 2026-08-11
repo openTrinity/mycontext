@@ -1,4 +1,4 @@
-"""Self-contained LoCoMo answer and evidence scoring for agentic runs."""
+"""Self-contained LoCoMo answer and evidence scoring."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ from typing import Any
 
 from nltk.stem import PorterStemmer
 
-from kl_graph.data.locomo import json_lines
-
-from .artifacts import atomic_write_json, atomic_write_jsonl
+from kl_graph.evaluation.io import (
+    atomic_write_json,
+    atomic_write_jsonl,
+    json_lines,
+)
 
 CATEGORY_NAMES = {
     1: "Multi Hop",
@@ -90,20 +92,31 @@ def retrieval_scores(
     """Return evidence recall and complete-evidence recall."""
     if not evidence:
         return 1.0, 1.0
-    found = len(set(evidence) & set(retrieved))
+    retrieved_ids = set(retrieved)
+    # Match the official LoCoMo evaluator's per-Gold membership check.  This
+    # matters for the one benchmark row whose Gold evidence repeats a dia_id:
+    # retrieving that dia_id satisfies both annotated occurrences.
+    found = sum(value in retrieved_ids for value in evidence)
     return found / len(evidence), float(found == len(evidence))
 
 
-def evaluate_answers(
-    answer_path: Path,
-    metrics_path: Path,
-    scored_path: Path,
-) -> dict[str, Any]:
-    """Score agent answers and their final cited evidence against LoCoMo Gold."""
-    rows = list(json_lines(answer_path))
-    retrieval_modes = sorted({
-        str(row.get("retrieval_mode") or "codex_agentic") for row in rows
-    })
+def score_answer_rows(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Pure LoCoMo answer/evidence scoring over normalized rows."""
+    retrieval_modes = sorted(
+        {str(row.get("retrieval_mode") or "codex_agentic") for row in rows}
+    )
+    generator_models = sorted(
+        {str(row["generator_model"]) for row in rows if row.get("generator_model")}
+    )
+    generation_top_k = sorted(
+        {
+            int(row["generation_top_k"])
+            for row in rows
+            if row.get("generation_top_k") is not None
+        }
+    )
     buckets = {
         category: {
             "answer": [],
@@ -120,24 +133,21 @@ def evaluate_answers(
             row["evidence"], row["global_dia_ids"]
         )
         prediction = str(row.get("generated_answer") or "").strip()
-        answer_score = (
-            official_answer_score(category, prediction, row["ground_truth"])
-            if prediction
-            else None
-        )
+        answer_score = official_answer_score(category, prediction, row["ground_truth"])
         bucket = buckets[category]
-        if answer_score is not None:
-            bucket["answer"].append(answer_score)
+        bucket["answer"].append(answer_score)
         bucket["global"].append(global_recall)
         if row["evidence"]:
             bucket["global_nonempty"].append(global_recall)
         bucket["global_complete"].append(global_complete)
-        scored.append({
-            **row,
-            "answer_score": answer_score,
-            "global_evidence_recall": global_recall,
-            "global_complete_evidence_recall": global_complete,
-        })
+        scored.append(
+            {
+                **row,
+                "answer_score": answer_score,
+                "global_evidence_recall": global_recall,
+                "global_complete_evidence_recall": global_complete,
+            }
+        )
 
     by_category = {}
     for category in (4, 1, 2, 3, 5):
@@ -145,12 +155,14 @@ def evaluate_answers(
         by_category[CATEGORY_NAMES[category]] = {
             "category": category,
             "questions": len(bucket["global"]),
-            "generated_answers": len(bucket["answer"]),
+            "generated_answers": sum(
+                bool(str(row.get("generated_answer") or "").strip())
+                for row in scored
+                if int(row["category"]) == category
+            ),
             "answer_score": _mean(bucket["answer"]),
             "global_evidence_recall": _mean(bucket["global"]),
-            "global_evidence_recall_nonempty_gold": _mean(
-                bucket["global_nonempty"]
-            ),
+            "global_evidence_recall_nonempty_gold": _mean(bucket["global_nonempty"]),
             "global_complete_evidence_recall": _mean(bucket["global_complete"]),
         }
     all_answer = [score for bucket in buckets.values() for score in bucket["answer"]]
@@ -159,14 +171,23 @@ def evaluate_answers(
         score for bucket in buckets.values() for score in bucket["global_nonempty"]
     ]
     report = {
-        "benchmark": "LoCoMo QA — Codex agentic KL workflow",
+        "benchmark": (
+            "LoCoMo QA — Codex agentic KL workflow"
+            if retrieval_modes == ["codex_agentic"]
+            else "LoCoMo QA — cached KL retrieval answer generation"
+        ),
         "retrieval_modes": retrieval_modes,
+        "generator_models": generator_models,
+        "generation_top_k": generation_top_k,
         "metric": (
             "official normalized token F1 / adversarial accuracy and "
-            "citation dia_id evidence recall"
+            "retrieved dia_id evidence recall"
         ),
         "questions": len(rows),
-        "generated_answers": len(all_answer),
+        "generated_answers": sum(
+            bool(str(row.get("generated_answer") or "").strip()) for row in rows
+        ),
+        "generation_errors": sum(bool(row.get("generation_error")) for row in rows),
         "overall": {
             "answer_score": _mean(all_answer),
             "global_evidence_recall": _mean(all_global),
@@ -174,6 +195,16 @@ def evaluate_answers(
         },
         "by_category": by_category,
     }
+    return scored, report
+
+
+def evaluate_answers(
+    answer_path: Path,
+    metrics_path: Path,
+    scored_path: Path,
+) -> dict[str, Any]:
+    """Score an answer artifact and persist the standard evaluator outputs."""
+    scored, report = score_answer_rows(list(json_lines(answer_path)))
     atomic_write_jsonl(scored_path, scored)
     atomic_write_json(metrics_path, report)
     print(json.dumps(report["overall"], ensure_ascii=False, sort_keys=True))

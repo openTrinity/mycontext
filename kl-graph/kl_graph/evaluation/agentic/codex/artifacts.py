@@ -1,4 +1,4 @@
-"""Atomic run artifacts, event transcripts, and per-agent KL wrappers."""
+"""Atomic run artifacts, event transcripts, and per-Codex KL wrappers."""
 
 from __future__ import annotations
 
@@ -7,43 +7,9 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-
-def atomic_write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-        os.replace(temporary_name, path)
-    except Exception:
-        try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def atomic_write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        os.replace(temporary_name, path)
-    except Exception:
-        try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
-        raise
-
 
 class TranscriptWriter:
     """Stream one Codex turn to a case-local JSONL transcript."""
@@ -89,14 +55,19 @@ def create_agent_workspace(
     case_stem: str,
     real_kl_path: Path,
     max_kl_calls: int | None,
+    scope_id: str,
+    scoped_cli_module: str,
     skill_path: Path | None = None,
 ) -> Path:
-    """Create an isolated cwd with a budget-enforcing ``./kl`` wrapper."""
+    """Create an isolated cwd with budget and hidden-scope enforcement."""
     work_root.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix=f"{case_stem}.", dir=work_root))
     wrapper = workspace / "kl"
     wrapper.write_text(
-        _wrapper_source(real_kl_path.resolve(), max_kl_calls), encoding="utf-8"
+        _wrapper_source(
+            real_kl_path.resolve(), max_kl_calls, scope_id, scoped_cli_module
+        ),
+        encoding="utf-8",
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
     if skill_path is not None:
@@ -129,7 +100,12 @@ def remove_agent_workspace(workspace: Path) -> None:
     shutil.rmtree(workspace)
 
 
-def _wrapper_source(real_kl_path: Path, max_kl_calls: int | None) -> str:
+def _wrapper_source(
+    real_kl_path: Path,
+    max_kl_calls: int | None,
+    scope_id: str,
+    scoped_cli_module: str,
+) -> str:
     """Build a self-contained Python executable without shell interpolation."""
     return f'''#!/usr/bin/env python3
 import fcntl
@@ -141,6 +117,8 @@ from pathlib import Path
 
 REAL_KL = {str(real_kl_path)!r}
 MAX_CALLS = {max_kl_calls!r}
+SCOPE_ID = {scope_id!r}
+SCOPED_CLI_MODULE = {scoped_cli_module!r}
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / ".kl_budget"
 LOG = ROOT / "kl_calls.jsonl"
@@ -175,5 +153,23 @@ if not allowed:
     }}, ensure_ascii=False))
     raise SystemExit(0)
 
-os.execv(REAL_KL, [REAL_KL, *sys.argv[1:]])
+project_root = Path(REAL_KL).parent
+python = project_root / ".venv" / "bin" / "python"
+env = os.environ.copy()
+prior_pythonpath = env.get("PYTHONPATH", "")
+env["PYTHONPATH"] = (
+    str(project_root) + (os.pathsep + prior_pythonpath if prior_pythonpath else "")
+)
+os.execve(
+    python,
+    [
+        str(python),
+        "-m",
+        SCOPED_CLI_MODULE,
+        SCOPE_ID,
+        "--",
+        *sys.argv[1:],
+    ],
+    env,
+)
 '''

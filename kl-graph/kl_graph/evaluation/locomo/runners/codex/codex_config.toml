@@ -5,7 +5,7 @@
 # flags. Authentication is supplied separately and is never stored here.
 
 model = "gpt-5.6-sol"
-model_provider = "inkflow"
+model_provider = "mulerun"
 model_reasoning_effort = "xhigh"
 disable_response_storage = true
 preferred_auth_method = "apikey"
@@ -15,8 +15,8 @@ preferred_auth_method = "apikey"
 approval_policy = "never"
 sandbox_mode = "workspace-write"
 
-[model_providers.inkflow]
-name = "InkFlow"
-base_url = "https://llmapi.example.com/v1"
+[model_providers.mulerun]
+name = "MuleRun"
+base_url = "https://llmapi.mulerun.com/v1"
 wire_api = "responses"
 requires_openai_auth = true

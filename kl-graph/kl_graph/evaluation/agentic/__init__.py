@@ -1,10 +1,10 @@
-"""Codex-driven LoCoMo evaluation harness.
+"""Shared implementations for benchmark-independent agentic evaluation.
 
-The package deliberately delegates the retrieval loop to Codex.  It only
-selects benchmark cases, starts isolated Codex threads, persists their event
-streams, and joins Gold data after every agent has stopped.
+The current implementation lives under :mod:`.codex`. Dataset readers,
+prompts, scoring, ingestion adapters, and CLIs belong under their benchmark
+package (for example :mod:`kl_graph.evaluation.locomo`).
 """
 
-from .models import AgentCase, AgentResult, Citation
+from .codex.models import AgentCase, AgentResult, Citation
 
 __all__ = ["AgentCase", "AgentResult", "Citation"]

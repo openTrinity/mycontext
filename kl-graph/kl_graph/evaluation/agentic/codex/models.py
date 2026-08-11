@@ -1,11 +1,12 @@
-"""Data contracts shared by the Codex harness and scorer."""
+"""Benchmark-neutral data contracts for Codex agentic evaluation."""
 
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from kl_graph.evaluation.io import artifact_stem
 
 FINAL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -16,7 +17,10 @@ FINAL_OUTPUT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "enum": ["fact", "message"]},
+                    "type": {
+                        "type": "string",
+                        "enum": ["fact", "chunk", "message"],
+                    },
                     "id": {"type": "string"},
                 },
                 "required": ["type", "id"],
@@ -31,10 +35,16 @@ FINAL_OUTPUT_SCHEMA: dict[str, Any] = {
 
 @dataclass(frozen=True, slots=True)
 class AgentCase:
-    """The only benchmark fields exposed to a Codex agent."""
+    """The only case fields exposed to an evaluation agent.
+
+    ``scope_id`` is an opaque retrieval boundary. Dataset-only fields remain in
+    ``metadata`` and are never added to the prompt by the shared runtime.
+    """
 
     id: str
     question: str
+    scope_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,10 +57,9 @@ class Citation:
 class AgentResult:
     id: str
     question: str
-    category: int
-    sample_id: str
-    conversation_id: str
     status: str
+    scope_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
     answer: str = ""
     citations: list[Citation] = field(default_factory=list)
     thread_id: str | None = None
@@ -88,15 +97,11 @@ def parse_agent_output(text: str | None) -> tuple[str, list[Citation]]:
             raise ValueError("each citation must be an object")  # noqa: TRY004
         citation_type = raw.get("type")
         citation_id = raw.get("id")
-        if citation_type not in {"fact", "message"} or not isinstance(citation_id, str):
+        if citation_type not in {"fact", "chunk", "message"} or not isinstance(
+            citation_id, str
+        ):
             raise ValueError("citation type/id is invalid")
         citation_id = citation_id.strip()
         if citation_id:
             citations.append(Citation(type=citation_type, id=citation_id))
     return answer.strip(), citations
-
-
-def artifact_stem(case_id: str) -> str:
-    """Return a stable filename component for a LoCoMo question ID."""
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", case_id).strip("._")
-    return stem or "case"

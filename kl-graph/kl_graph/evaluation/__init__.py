@@ -1,1 +1,1 @@
-"""Codex agentic evaluation for KL skill workflows."""
+"""Shared evaluation runtimes and benchmark-specific adapters."""
