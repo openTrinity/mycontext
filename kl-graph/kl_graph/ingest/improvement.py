@@ -164,12 +164,12 @@ def _invalidate_summaries(
 ) -> int:
     """Mark summaries stale when at least one changed member exceeds the ratio.
 
-    NOTE (Task 5): this crude ``1 / member_count`` marker is retained ONLY as a
-    conservative fallback for the incremental path while HIT-Leiden incremental
-    detection is deferred to phase 2. The authoritative, baseline-relative gate
-    now lives in ``community_summarizer.run_gated_summarization`` and runs on the
-    full reconcile path. When the full path reconciles + gates, it supersedes
-    these coarse markers on the next full improve.
+    This crude ``1 / member_count`` marker is a conservative signal from the
+    incremental path: it flags a community as worth revisiting without deciding
+    whether to regenerate. The authoritative, baseline-relative gate lives in
+    ``community_summarizer.run_gated_summarization``, which honours these markers
+    (``communities.summary_stale``) and clears them only on a successful
+    regeneration. A full reconcile supersedes them on the next full improve.
     """
 
     if not community_ids:
@@ -314,13 +314,13 @@ def run_incremental_improvement(
                 except (TypeError, ValueError):
                     continue
 
-    # Step 2b: Summary invalidation. Incremental community *assignment* and the
-    # scoped COMM_MEMBER projection are deferred to the next full improve
-    # (hierarchical Leiden rebuilds the whole projection); the incremental
-    # strategy is a guarded no-op, so ``changed`` stays empty here. We still
-    # invalidate the summaries of the communities the touched nodes already
-    # belong to, so a stale report is not served for a community whose members
-    # changed.
+    # Step 2b: Summary invalidation. The incremental strategy now maintains the
+    # partition it owns and reports the communities whose membership changed, so
+    # ``changed`` is generally non-empty. The scoped COMM_MEMBER projection is
+    # still deferred to the next full improve (hierarchical Leiden rebuilds the
+    # whole projection). We union the reported changes with the communities the
+    # touched nodes already belong to, so a stale report is never served for a
+    # community whose members changed on either side of the move.
     projection_done = checkpoint is not None and checkpoint.is_done(
         "improve.incremental_projection", params=params
     )

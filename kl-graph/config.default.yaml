@@ -263,6 +263,14 @@ pipelines:
       similarity_strategy: ${oc.env:KL_INCR_SIMILARITY_STRATEGY,ann_intra_batch}
       # Registered strategy used to update community assignments incrementally.
       community_strategy: ${oc.env:KL_INCR_COMMUNITY_STRATEGY,dynamic_frontier_leiden}
+      # Incremental Leiden (HIT-Leiden) maintenance tunables. These govern the
+      # per-batch incremental path only; the full hierarchical rebuild uses the
+      # frozen GraphRAG knobs in kl_graph/periodic/community_detection.py.
+      leiden:
+        gamma: ${oc.env:KL_INCR_LEIDEN_GAMMA,1.0}
+        max_levels: ${oc.env:KL_INCR_LEIDEN_MAX_LEVELS,16}
+        seed: ${oc.env:KL_INCR_LEIDEN_SEED,12648430}
+        min_gain: ${oc.env:KL_INCR_LEIDEN_MIN_GAIN,1e-12}
 
     # Structural similarity-edge construction thresholds.
     similarity:
