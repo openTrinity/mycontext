@@ -1047,6 +1047,24 @@ export class IngestService {
       this.options.logger.error("fts integrity check failed", { detail: check.error })
     }
 
+    /**
+     * ★★★ 挂载时修一次「水位说采过了、库里却一条都没有」的矛盾态。
+     *
+     * 这是那个死锁的根因（见 `IngestScheduler.isWatermarkStale` 的长注释）：
+     * 水位被错误推过头、库里 0 条，于是增量只看最近几分钟、回填又被空库挡住，
+     * 点「立即同步」永远 0/0。把水位清零，下一轮 `nextWindow` 走首轮全回溯。
+     *
+     * ★ 只在 `start()` 里判、不在每轮 tick 判：这个信号在单次调用里无法与
+     * 「空频道正常向前爬」区分，每轮重扫会变成另一个活锁（见 scheduler
+     * 那段注释与 `ingest-window-queue` 的活锁门禁）。挂载是一次性的，安全。
+     */
+    if (this.scheduler.isWatermarkStale()) {
+      this.options.logger.warn("ingest watermark stale (advanced but db empty); resetting", {
+        channelId: this.options.plugin.meta.id,
+      })
+      this.scheduler.resetIncrementalWatermark()
+    }
+
     if (poll) this.resumePolling()
     this.options.logger.info("ingest started", { channelId: this.options.plugin.meta.id })
   }

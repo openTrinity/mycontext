@@ -13,6 +13,11 @@ const INPUT: KlGraphFactsInput = {
 
 const ego: KlGraphEgo = { available: false, reason: "钉钉未建图", self: null, nodes: [], edges: [] }
 
+/**
+ * ★ 假的 `facts` 返回 **Promise**：上游把 `GraphQueryService.facts()` 改成了
+ * 异步（关系边要问 kl 的 HTTP），聚合器跟着变 async。所有 fake 与调用点
+ * 都要按异步来 —— 否则测的是一个与生产不同的同步接口。
+ */
 function result(channelId: string, at: number): KlGraphFacts {
   return {
     available: true,
@@ -32,17 +37,22 @@ function result(channelId: string, at: number): KlGraphFacts {
   }
 }
 
+/** fake facts：返回 Promise，与生产的异步签名一致。 */
+function asyncResult(channelId: string, at: number): () => Promise<KlGraphFacts> {
+  return () => Promise.resolve(result(channelId, at))
+}
+
 describe("MultiGraphQueryService", () => {
-  it("分别查询每个物理图库，再按时间汇总", () => {
-    const dingtalkFacts = vi.fn(() => result("dingtalk", 10))
-    const feishuFacts = vi.fn(() => result("feishu", 20))
+  it("分别查询每个物理图库，再按时间汇总", async () => {
+    const dingtalkFacts = vi.fn(asyncResult("dingtalk", 10))
+    const feishuFacts = vi.fn(asyncResult("feishu", 20))
     const service = new MultiGraphQueryService(
       { ego: () => Promise.resolve(ego), facts: dingtalkFacts },
       "dingtalk",
       () => [{ channelId: "feishu", facts: feishuFacts }],
     )
 
-    const merged = service.facts(INPUT)
+    const merged = await service.facts(INPUT)
 
     expect(dingtalkFacts).toHaveBeenCalledOnce()
     expect(feishuFacts).toHaveBeenCalledOnce()
@@ -52,9 +62,9 @@ describe("MultiGraphQueryService", () => {
 
   it("ego 保持钉钉口径，不把飞书做成数字分身", async () => {
     const service = new MultiGraphQueryService(
-      { ego: () => Promise.resolve(ego), facts: () => result("dingtalk", 10) },
+      { ego: () => Promise.resolve(ego), facts: asyncResult("dingtalk", 10) },
       "dingtalk",
-      () => [{ channelId: "feishu", facts: () => result("feishu", 20) }],
+      () => [{ channelId: "feishu", facts: asyncResult("feishu", 20) }],
     )
     await expect(service.ego()).resolves.toBe(ego)
   })
@@ -77,7 +87,7 @@ describe("MultiGraphQueryService", () => {
   describe("★★ 指到一个挂不上的渠道时不许落回主渠道", () => {
     /** 只有主渠道挂着 —— 也就是"飞书刚授权，管线还没挂上"那一刻。 */
     function primaryOnly() {
-      const primaryFacts = vi.fn(() => result("dingtalk", 10))
+      const primaryFacts = vi.fn(asyncResult("dingtalk", 10))
       const primaryEgo = vi.fn(() => Promise.resolve(ego))
       const service = new MultiGraphQueryService(
         { ego: primaryEgo, facts: primaryFacts },
@@ -87,10 +97,10 @@ describe("MultiGraphQueryService", () => {
       return { service, primaryFacts, primaryEgo }
     }
 
-    it("facts：给出 available:false，而不是主渠道的事实", () => {
+    it("facts：给出 available:false，而不是主渠道的事实", async () => {
       const { service, primaryFacts } = primaryOnly()
 
-      const out = service.facts({ ...INPUT, channelId: "feishu" })
+      const out = await service.facts({ ...INPUT, channelId: "feishu" })
 
       // ★ 核心判据：一条钉钉的事实都不许出现
       expect(out.facts).toEqual([])
@@ -121,15 +131,17 @@ describe("MultiGraphQueryService", () => {
         nodes: [],
         edges: [],
       }
-      const feishuFacts = vi.fn(() => result("feishu", 20))
-      const primaryFacts = vi.fn(() => result("dingtalk", 10))
+      const feishuFacts = vi.fn(asyncResult("feishu", 20))
+      const primaryFacts = vi.fn(asyncResult("dingtalk", 10))
       const service = new MultiGraphQueryService(
         { ego: () => Promise.resolve(ego), facts: primaryFacts },
         "dingtalk",
         () => [{ channelId: "feishu", facts: feishuFacts, ego: () => Promise.resolve(feishuEgo) }],
       )
 
-      expect(service.facts({ ...INPUT, channelId: "feishu" }).facts[0]?.channelId).toBe("feishu")
+      expect((await service.facts({ ...INPUT, channelId: "feishu" })).facts[0]?.channelId).toBe(
+        "feishu",
+      )
       await expect(service.ego("feishu")).resolves.toBe(feishuEgo)
       expect(primaryFacts).not.toHaveBeenCalled()
     })
@@ -138,13 +150,13 @@ describe("MultiGraphQueryService", () => {
      * ★ 不给 channelId 仍然合并（搜索走这条 —— 每条带渠道徽章，来源不会混）。
      * 上面那条修复只该影响"指名了一个挂不上的渠道"，别顺手改了合并那条路。
      */
-    it("不指定渠道时照旧合并（搜索那条路不受影响）", () => {
+    it("不指定渠道时照旧合并（搜索那条路不受影响）", async () => {
       const service = new MultiGraphQueryService(
-        { ego: () => Promise.resolve(ego), facts: () => result("dingtalk", 10) },
+        { ego: () => Promise.resolve(ego), facts: asyncResult("dingtalk", 10) },
         "dingtalk",
-        () => [{ channelId: "feishu", facts: () => result("feishu", 20) }],
+        () => [{ channelId: "feishu", facts: asyncResult("feishu", 20) }],
       )
-      expect(service.facts(INPUT).total).toBe(2)
+      expect((await service.facts(INPUT)).total).toBe(2)
     })
   })
 })

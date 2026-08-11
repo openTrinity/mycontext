@@ -41,6 +41,31 @@ function makeScheduler(clock: ManualClock, pageLimit = 50) {
 }
 
 /**
+ * 往库里塞一条消息（`channel_id = dingtalk`）。
+ *
+ * `nextWindow` 现在的「水位可信」判据是 `earliestMessageAt() !== null` ——
+ * 也就是库里至少有一条消息。凡是"有水位、且水位应当被信任"的用例都要先塞
+ * 一条，否则会被当成「水位说采过了、库里却空」的矛盾态而回退到全回溯。
+ */
+function seedOneMessage(vault: ReturnType<typeof openTestVault>, sentAt: number): void {
+  vault.db
+    .prepare(
+      `INSERT OR IGNORE INTO conversations
+         (id, channel_id, external_id, type, title, created_at)
+       VALUES ('c1', 'dingtalk', 'cid-1', 'group', '群', 0)`,
+    )
+    .run()
+  vault.db
+    .prepare(
+      `INSERT INTO messages
+         (id, channel_id, conversation_id, external_id, content_text,
+          sent_at, direction, origin, created_at)
+       VALUES ('m1', 'dingtalk', 'c1', 'ext-m1', 'hi', ?, 'inbound', 'human', 0)`,
+    )
+    .run(sentAt)
+}
+
+/**
  * 模拟调用方「整窗抽干后推水位」的那一步。
  *
  * `IngestScheduler.commitWindow(window, maxSentAt)` 已被删掉：它只是
@@ -72,6 +97,8 @@ describe("时间窗计算", () => {
   it("有水位时往回退一个重叠窗（对抗时钟偏差与服务端延迟）", () => {
     const clock = new ManualClock(START)
     const { vault, scheduler } = makeScheduler(clock)
+    // 库里有消息 → 水位可信（见 `nextWindow` 的矛盾态判据）。
+    seedOneMessage(vault, START - 5000)
     scheduler.beginWindow({ start: START - 10_000, end: START, cursor: null })
     commitDrainedWindow(
       scheduler,
@@ -81,6 +108,59 @@ describe("时间窗计算", () => {
 
     const window = scheduler.nextWindow()
     expect(window.start).toBe(START - 1000 - WINDOW_OVERLAP_MS)
+    vault.close()
+  })
+
+  it("★ 水位说采过了、库里却一条都没有 → 清零后回到全回溯（那个死锁的根因）", () => {
+    /**
+     * 复现实测撞到的死锁：水位在近处、`messages` 表 0 条。成因是已修的时序
+     * bug 的遗留（采集比范围行先跑、拉到的全被 `scopeNotReady` 丢掉，水位却
+     * 照常前移）。若信这个水位，增量只看 `watermark - 2min` 那几分钟 ——
+     * 那里没有新消息，恒 0 条；而回填又被「库里没消息」挡在门外。两条腿都
+     * 不动，点「立即同步」永远 0/0。
+     *
+     * 修复放在**一次性**的 `resetIncrementalWatermark`（采集层在 `start()` 里
+     * 调）：把错误的水位清零，下一轮 `nextWindow` 自然走首轮全回溯。
+     * ★ 为什么不放进 `nextWindow`：那个信号在单次调用里分不清「水位错推」
+     * 与「空频道正常向前爬」，每轮判会变成另一个活锁（见 scheduler 注释）。
+     */
+    const clock = new ManualClock(START)
+    const { vault, scheduler, cursors } = makeScheduler(clock)
+    // 水位推到 START - 1000（近处），但**不塞任何消息**。
+    scheduler.beginWindow({ start: START - 10_000, end: START, cursor: null })
+    commitDrainedWindow(
+      scheduler,
+      { start: START - 10_000, end: START, cursor: null },
+      START - 1000,
+    )
+
+    // 修复前：水位在近处、库空 → nextWindow 只回退 2min，恒 0 条（死锁）。
+    expect(scheduler.isWatermarkStale()).toBe(true)
+    expect(scheduler.nextWindow().start).toBe(START - 1000 - WINDOW_OVERLAP_MS)
+
+    // 采集层挂载时的一次性修复：清零。
+    scheduler.resetIncrementalWatermark()
+
+    // ★★★ 核心断言：清零后回到全回溯，把最近这段重新扫回来。
+    // 把 `resetIncrementalWatermark` 改成空实现，这一条必红。
+    expect(cursors.watermark(scheduler.scope)).toBe(0)
+    expect(scheduler.nextWindow().start).toBe(START - INITIAL_BACKFILL_MS)
+    vault.close()
+  })
+
+  it("水位在近处、库里有消息 → 不是矛盾态，正常增量（不误清水位）", () => {
+    const clock = new ManualClock(START)
+    const { vault, scheduler } = makeScheduler(clock)
+    seedOneMessage(vault, START - 5000)
+    scheduler.beginWindow({ start: START - 10_000, end: START, cursor: null })
+    commitDrainedWindow(
+      scheduler,
+      { start: START - 10_000, end: START, cursor: null },
+      START - 1000,
+    )
+
+    expect(scheduler.isWatermarkStale()).toBe(false)
+    expect(scheduler.nextWindow().start).toBe(START - 1000 - WINDOW_OVERLAP_MS)
     vault.close()
   })
 
@@ -216,6 +296,10 @@ describe("★ 水位永不超过 now（空窗不造黑洞）", () => {
   it("空窗后下一窗仍覆盖 now 之前（黑洞不存在）", () => {
     const clock = new ManualClock(START)
     const { vault, scheduler } = makeScheduler(clock)
+    // 库里有一条消息 → 水位可信，走增量路径（这条测的是 clamp，不是空库自愈）。
+    // 不塞的话会命中 `nextWindow` 的「水位说采过、库里却空」矛盾态而回退到
+    // 全回溯，测不到这里要验的 `watermark - overlap`。
+    seedOneMessage(vault, START - 5000)
     const first = scheduler.nextWindow()
     scheduler.beginWindow(first)
     commitDrainedWindow(scheduler, first, null)

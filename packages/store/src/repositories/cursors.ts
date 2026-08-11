@@ -242,6 +242,18 @@ export class SyncCursorRepository {
       .all()
       .map(toCursor)
   }
+
+  /**
+   * 删掉一个 scope 的整行游标。
+   *
+   * 目前唯一的调用者是 `IngestScheduler.resetIncrementalWatermark`：水位
+   * 「说采过了、库里却一条都没有」这个矛盾态下，把它清零让下一轮走首轮
+   * 全回溯（见那里的注释）。删行而不是把 watermark 改 0 —— `nextWindow`
+   * 对「没有这一行」的处理本来就是全回溯，少一个特殊分支。
+   */
+  deleteScope(scope: string): void {
+    this.db.prepare("DELETE FROM sync_cursors WHERE scope = ?").run(scope)
+  }
 }
 
 export interface ProbeSnapshot {

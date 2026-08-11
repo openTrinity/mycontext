@@ -258,6 +258,48 @@ export class IngestScheduler {
     return { start, end: now + WINDOW_LOOKAHEAD_MS, cursor: null }
   }
 
+  /**
+   * 增量水位「说采过了、库里却一条都没有」的矛盾态。
+   *
+   * ## ★★★ 这是那个死锁的根因（实测）
+   *
+   * watermark>0 的语义是「`[0, watermark)` 已完整落库」。实测撞到过与它直接
+   * 矛盾的状态：watermark 在今天凌晨、`messages` 表 **0 条**。成因是已修的
+   * 时序 bug 的**遗留**——采集比范围行先跑、拉到的消息被 `scopeNotReady`
+   * 全丢，水位却照常前移（`commitWindow` 是 `MAX()` 单向前进，退不回来）。
+   *
+   * 后果是死锁：增量按 `watermark - 2min` 只看最近几分钟（没有新消息 →
+   * 恒 0 条），回填又被「库里没消息」挡在门外。点「立即同步」永远 0/0。
+   *
+   * ## ★ 为什么判据只能用在 `start()` 里做**一次性**修复，不能放进 `nextWindow`
+   *
+   * 「watermark>0 且库空」这个信号在**单次调用里**无法区分两种情况：
+   * · 本 bug（水位被错误推过头，其实有消息没采）——该重扫；
+   * · 空频道正常向前爬（真的没消息，水位跟着 now 走）——不该每轮重扫，
+   *   否则就是另一个活锁（见 `ingest-window-queue` 那条「反复撞预算时水位
+   *   单调前进」的门禁）。
+   *
+   * 两者只有**跨时间**才分得开。所以修复放在 `start()`：挂载时判一次、
+   * 把错误的水位清零（`resetIncrementalWatermark`），之后 `nextWindow` 自然
+   * 走首轮 `INITIAL_BACKFILL_MS` 全回溯 —— 一旦扫到消息，库不再空、水位重新
+   * 可信、回填也随之解冻。挂载不在每轮之间发生，所以不会与活锁门禁冲突。
+   */
+  isWatermarkStale(): boolean {
+    return this.cursors.watermark(this.scope) > 0 && this.earliestMessageAt() === null
+  }
+
+  /**
+   * 把增量水位清零 —— `start()` 检测到上面那个矛盾态时调用。
+   *
+   * 删整行而不是 UPDATE：`nextWindow` 对「没有这一行」（watermark 0）的处理
+   * 就是首轮全回溯，与我们要的行为完全同一条路，少一个特殊分支。
+   * 丢掉「`[0, watermark)` 已完整」这个断言是安全的 —— 库里一条都没有，
+   * 那个断言本来就是假的。
+   */
+  resetIncrementalWatermark(): void {
+    this.cursors.deleteScope(this.scope)
+  }
+
   beginWindow(window: PullWindow): void {
     this.cursors.beginWindow(this.scope, window.start, window.end)
   }
