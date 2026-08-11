@@ -106,6 +106,14 @@ pipelines:
       # Enable community processing; disabled artifacts remain on disk but ignored.
       enabled: ${oc.env:KL_COMMUNITIES_ENABLED,0}
 
+  # Offline ego-style modeling. The graph never depends on persona artifacts.
+  persona:
+    enabled: ${oc.env:KL_PERSONA_ENABLED,0}
+    # At least one stable identity field is required when building Layer A.
+    owner_name: ${oc.env:KL_PERSONA_OWNER_NAME,""}
+    owner_sender_id: ${oc.env:KL_PERSONA_OWNER_SENDER_ID,""}
+    min_messages: ${oc.env:KL_PERSONA_MIN_MESSAGES,3}
+
   # Source loading, LLM extraction, embedding, and graph construction.
   ingestion:
     # Preserve the durable Phase-A extraction cache after a successful run.

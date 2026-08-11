@@ -256,6 +256,15 @@ class CommunitiesPipelineConfig(_ConfigModel):
     enabled: bool = False
 
 
+class PersonaPipelineConfig(_ConfigModel):
+    """Offline persona build and serve-time conditioning settings."""
+
+    enabled: bool = False
+    owner_name: str = ""
+    owner_sender_id: str = ""
+    min_messages: int = Field(default=3, ge=1)
+
+
 class ExperimentalPipelinesConfig(_ConfigModel):
     """Feature-gated pipeline components that are not enabled by default."""
 
@@ -264,6 +273,7 @@ class ExperimentalPipelinesConfig(_ConfigModel):
 
 class PipelinesConfig(_ConfigModel):
     experimental: ExperimentalPipelinesConfig = ExperimentalPipelinesConfig()
+    persona: PersonaPipelineConfig = PersonaPipelineConfig()
     ingestion: IngestionPipelineConfig
     query: QueryPipelineConfig
 
