@@ -113,8 +113,17 @@ export interface AppContext {
     KlServerService,
     "status" | "ensureReady" | "stop" | "rebuildGraph" | "optimizeGraph" | "graphOverview"
   >
-  /** 图谱只读查询（ego 图 + 事实检索）。与 klServer 分开，见构造处注释 */
-  graphQuery: GraphQueryService
+  /**
+   * 图谱只读查询（ego 图 + 事实检索）。与 klServer 分开，见构造处注释。
+   *
+   * ★ 结构类型而不是具体的 `GraphQueryService`：装配层传的是
+   * `MultiGraphQueryService`（按渠道路由），它满足这两个方法但不是那个类的
+   * 实例。与 `IpcDependencies.graphQuery` 同一个形状 —— 两处要一致。
+   */
+  graphQuery: {
+    ego(channelId?: string): ReturnType<GraphQueryService["ego"]>
+    facts(input: Parameters<GraphQueryService["facts"]>[0]): ReturnType<GraphQueryService["facts"]>
+  }
   /** 仪表盘的时序 + 消化漏斗（独立通道 + 按 changelog head 缓存） */
   dashboardTrends: DashboardTrendsService
   /** 隐藏的极客配置页（应用级，不随账号切换） */
@@ -1607,8 +1616,21 @@ export function bootstrapApp(mainDir: string): AppContext {
     sourceChannelId: dingtalk.meta.id,
   })
 
-  const appGraphQuery = new MultiGraphQueryService(graphQuery, dingtalk.meta.id, () =>
+  /**
+   * 仪表盘的时序 + 漏斗。
+   *
+   * ★ 与 `graphQuery` 一样取**函数**而不是值（vault 跟着登录挂），
+   * 且刻意不并进 `IngestService.snapshot()` —— 那是每批采集都发的热路径，
+   * 而按天分桶实测 108ms（完整推理见该服务的文件头注释）。
+   */
   const dashboardTrends = new DashboardTrendsService({
+    logger: logger.child("DashboardTrends"),
+    clock: systemClock,
+    db: () => vaultDb(),
+    klDataDir: () => vaultPaths?.klRoot ?? "",
+  })
+
+  const appGraphQuery = new MultiGraphQueryService(graphQuery, dingtalk.meta.id, () =>
     pipelines.all().map((item) => ({
       channelId: item.channelId,
       facts: (input) => item.parts.graphQuery.facts(input),

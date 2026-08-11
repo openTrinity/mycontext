@@ -10,7 +10,7 @@ export class MultiGraphQueryService {
   constructor(
     private readonly primary: {
       ego(): Promise<KlGraphEgo>
-      facts(input: KlGraphFactsInput): KlGraphFacts
+      facts(input: KlGraphFactsInput): Promise<KlGraphFacts>
     },
     /**
      * ★ 函数而非数组：非主渠道的图库由 `ChannelPipelineManager` 在登录后
@@ -20,7 +20,7 @@ export class MultiGraphQueryService {
     private readonly primaryChannelId: string,
     private readonly getSources: () => readonly {
       channelId: string
-      facts(input: KlGraphFactsInput): KlGraphFacts
+      facts(input: KlGraphFactsInput): Promise<KlGraphFacts>
       /** 那个渠道自己的 ego 图（切换到它时用）。 */
       ego?: () => Promise<KlGraphEgo>
     }[],
@@ -28,7 +28,7 @@ export class MultiGraphQueryService {
 
   private get sources(): readonly {
     channelId: string
-    facts(i: KlGraphFactsInput): KlGraphFacts
+    facts(i: KlGraphFactsInput): Promise<KlGraphFacts>
     ego?: () => Promise<KlGraphEgo>
   }[] {
     return this.getSources()
@@ -95,8 +95,13 @@ export class MultiGraphQueryService {
    *
    * ★ `facts()` 抛错也算失败（不是只看 `available:false`）：图库文件损坏 /
    * 表结构不认识都会抛，而那时整个查询会 500，连另一个渠道的结果都拿不到。
+   *
+   * ★ `async` —— 与 `ego()` 同一个理由：上游把 `GraphQueryService.facts()`
+   * 改成了异步（关系边要问 kl 的 HTTP）。这里是聚合器，所以整条链跟着变
+   * Promise；扇出那段用 `Promise.all` 而**不是**顺序 await ——
+   * 逐个等的话 N 个渠道的延迟会线性叠加，而它们本来互不相干。
    */
-  facts(input: KlGraphFactsInput): KlGraphFacts {
+  async facts(input: KlGraphFactsInput): Promise<KlGraphFacts> {
     const requested = input.offset + input.limit
     const perSourceInput = { ...input, offset: 0, limit: requested }
     const failedSources: { channelId: string; reason: string }[] = []
@@ -129,7 +134,7 @@ export class MultiGraphQueryService {
         }
       }
       try {
-        return source.facts(input)
+        return await source.facts(input)
       } catch (error) {
         /**
          * ★ 抛错要**说出来**而不是静默落回主渠道 —— 后者会让用户以为
@@ -145,24 +150,33 @@ export class MultiGraphQueryService {
       }
     }
     if (only === this.primaryChannelId) return this.primary.facts(input)
-    const results = [
+    /**
+     * ★ 并发扇出（`Promise.all`）而不是逐个 await：各渠道的图库互不相干，
+     * 顺序等的话延迟线性叠加。
+     *
+     * ★ 每个源自己 try/catch，**不能**让一个失败的 reject 掉整个 `Promise.all`
+     * —— 那正是上面那段注释说的"一图失败不让整个查询失败"。失败的返回
+     * `null` 并记进 `failedSources`，随后 filter 掉。
+     */
+    const settled = await Promise.all([
       this.primary.facts(perSourceInput),
-      ...this.sources.flatMap((source) => {
+      ...this.sources.map(async (source) => {
         try {
-          const result = source.facts(perSourceInput)
+          const result = await source.facts(perSourceInput)
           if (!result.available && result.reason !== null) {
             failedSources.push({ channelId: source.channelId, reason: result.reason })
           }
-          return [result]
+          return result
         } catch (error) {
           failedSources.push({
             channelId: source.channelId,
             reason: error instanceof Error ? error.message : String(error),
           })
-          return []
+          return null
         }
       }),
-    ]
+    ])
+    const results = settled.filter((result): result is KlGraphFacts => result !== null)
     const available = results.some((result) => result.available)
     const facts = results
       .flatMap((result) => result.facts)
