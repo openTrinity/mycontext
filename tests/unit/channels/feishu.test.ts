@@ -125,7 +125,7 @@ describe("Feishu auth and ingest parsing", () => {
             identities: {
               user: {
                 openId: "ou_self",
-                userName: "Nico",
+                userName: "Alice",
                 tenantKey: "tenant",
                 tenantName: "Inklings",
                 status: "authenticated",
@@ -259,7 +259,7 @@ describe("Feishu auth and ingest parsing", () => {
   it("requires the complete read-only scope set", () => {
     const identity = {
       openId: "ou_self",
-      userName: "Nico",
+      userName: "Alice",
       tenantKey: "tenant",
       tenantName: "Inklings",
       status: "authenticated",

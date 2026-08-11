@@ -28,6 +28,7 @@
  */
 import { cn } from "../lib/cn.js"
 import { BrandMark } from "./brand-mark.js"
+import { ShuffleText } from "./shuffle-text.js"
 
 export interface BrandWordmarkProps {
   className?: string
@@ -43,15 +44,52 @@ export interface BrandWordmarkProps {
    * 不传则不渲染——正式发布后去掉这个 prop 即可，不用改布局。
    */
   tag?: string
+  /**
+   * hover 字标时是否播「洗牌」动效（`ShuffleText`）。默认 **false**。
+   *
+   * ★ 只有侧栏那处传 true：它是常驻的品牌区，一个轻彩蛋合适；
+   * 登录/onboarding 的字标是大留白里的静态锚点，不该动。
+   * reduced-motion 时 `ShuffleText` 自己退成静态文字，这里不用管。
+   */
+  shuffleOnHover?: boolean
 }
 
-export function BrandWordmark({ className, size = 20, mark = false, tag }: BrandWordmarkProps) {
+export function BrandWordmark({
+  className,
+  size = 20,
+  mark = false,
+  tag,
+  shuffleOnHover = false,
+}: BrandWordmarkProps) {
   return (
     <span className={cn("inline-flex min-w-0 items-center gap-2", className)}>
       {mark ? <BrandMark size={size} className="text-[var(--text-accent-normal)]" /> : null}
-      <span className="typography-wordmark min-w-0 truncate text-[var(--text-base-primary)]">
-        MyContext
-      </span>
+      {shuffleOnHover ? (
+        /*
+          侧栏字标的洗牌配置 —— 对齐用户在 React Bits 定制面板里选定的那组值：
+          方向 right、duration 0.35s、ease power3.out、shuffleTimes 1、
+          stagger 0.03s、animationMode evenodd、loop off、hover 重播 on。
+          `runOnMount`：一进侧栏先亮相一次（挂载即播）。
+          `respectReducedMotion` 内建在 ShuffleText 里（用 useReducedMotion）。
+        */
+        <ShuffleText
+          text="MyContext"
+          className="typography-wordmark min-w-0 text-[var(--text-base-primary)]"
+          shuffleDirection="right"
+          duration={0.35}
+          ease="power3.out"
+          shuffleTimes={1}
+          stagger={0.03}
+          animationMode="evenodd"
+          loop={false}
+          triggerOnHover
+          runOnMount
+        />
+      ) : (
+        <span className="typography-wordmark min-w-0 truncate text-[var(--text-base-primary)]">
+          MyContext
+        </span>
+      )}
       {tag === undefined ? null : (
         /*
           描边胶囊。几个值都是为了还原设计稿里那个小标签：

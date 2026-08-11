@@ -34,6 +34,7 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useTheme } from "../../lib/use-theme.js"
 import { FocusIcon } from "../shell/icons.js"
 import { EgoGraph } from "./ego-graph.js"
+import { SplashCursor } from "./splash-cursor.js"
 import {
   CHANNEL_FALLBACK,
   CHANNEL_STROKE,
@@ -251,10 +252,19 @@ export function EgoGraphPanel({
     /**
      * ★ `nodes.length <= 1` 也算没有图：只有中心节点意味着一个邻居都没有，
      * 那时画一个孤零零的圆点比不画更糟（看起来像功能坏了）。
+     *
+     * ## ★ 空态背景放一层流体（SplashCursor）
+     *
+     * 这块是"还没建好图"的**等待态**——用户会盯着它看。一层跟指针晕开、
+     * 空闲时自行流动的流体让"正在等"这件事不那么干等；它是**背景**，
+     * 说明文字与「建图」按钮照旧压在上面且可点（canvas 是
+     * `pointer-events-none`）。reduced-motion / 无 WebGL2 时它自己不出现，
+     * 只剩静态底色 —— 见 `splash-cursor.tsx`。
      */
     return (
       <Shell>
-        <div className="flex flex-col items-center gap-3 text-center">
+        <SplashCursor />
+        <div className="relative z-10 flex flex-col items-center gap-3 text-center">
           <p className="typography-body-small-400 max-w-[420px] text-[var(--text-base-secondary)]">
             {data?.reason ?? t("noGraph")}
           </p>
@@ -585,7 +595,9 @@ function Shell({ children }: { children: React.ReactNode }) {
   return (
     <Panel
       pad="none"
-      className="typography-body-small-400 flex h-[420px] items-center justify-center text-[var(--text-base-tertiary)]"
+      // `relative overflow-hidden`：给空态里的 SplashCursor 一个定位上下文，
+      // 让那层 `absolute inset-0` 的流体铺满这块、并被圆角裁住。
+      className="typography-body-small-400 relative flex h-[420px] items-center justify-center overflow-hidden text-[var(--text-base-tertiary)]"
     >
       {children}
     </Panel>

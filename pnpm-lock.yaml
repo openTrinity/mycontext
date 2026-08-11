@@ -271,12 +271,18 @@ importers:
       '@dicebear/thumbs':
         specifier: 9.4.2
         version: 9.4.2(@dicebear/core@9.4.2)
+      '@gsap/react':
+        specifier: 2.1.2
+        version: 2.1.2(gsap@3.15.0)(react@19.2.1)
       clsx:
         specifier: 2.1.1
         version: 2.1.1
       framer-motion:
         specifier: 12.43.0
         version: 12.43.0(react-dom@19.2.1(react@19.2.1))(react@19.2.1)
+      gsap:
+        specifier: 3.15.0
+        version: 3.15.0
       react:
         specifier: ^19.0.0
         version: 19.2.1
@@ -895,6 +901,12 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
+
+  '@gsap/react@2.1.2':
+    resolution: {integrity: sha512-JqliybO1837UcgH2hVOM4VO+38APk3ECNrsuSM4MuXp+rbf+/2IG2K1YJiqfTcXQHH7XlA0m3ykniFYstfq0Iw==}
+    peerDependencies:
+      gsap: ^3.12.5
+      react: '>=17'
 
   '@humanfs/core@0.19.2':
     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
@@ -2324,6 +2336,9 @@ packages:
 
   graphlib@2.1.8:
     resolution: {integrity: sha512-jcLLfkpoVGmH7/InMC/1hIvOPSUh38oJtGhvrOFGzioE1DZ+0YW16RgmOJhHiuWTvGiJQ9Z1Ik43JvkRPRvE+A==}
+
+  gsap@3.15.0:
+    resolution: {integrity: sha512-dMW4CWBTUK1AEEDeZc1g4xpPGIrSf9fJF960qbTZmN/QwZIWY5wgliS6JWl9/25fpTGJrMRtSjGtOmPnfjZB+A==}
 
   has-flag@4.0.0:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
@@ -4401,6 +4416,11 @@ snapshots:
     optionalDependencies:
       '@noble/hashes': 2.2.0
 
+  '@gsap/react@2.1.2(gsap@3.15.0)(react@19.2.1)':
+    dependencies:
+      gsap: 3.15.0
+      react: 19.2.1
+
   '@humanfs/core@0.19.2':
     dependencies:
       '@humanfs/types': 0.15.0
@@ -5930,6 +5950,8 @@ snapshots:
   graphlib@2.1.8:
     dependencies:
       lodash: 4.18.1
+
+  gsap@3.15.0: {}
 
   has-flag@4.0.0: {}
 

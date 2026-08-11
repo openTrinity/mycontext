@@ -34,6 +34,7 @@ import { ComingSoonPanel } from "./coming-soon-panel.js"
 import { PersonaModule } from "../persona/persona-module.js"
 import { DashboardModule } from "../dashboard/dashboard-module.js"
 import { ScopeChip } from "../dashboard/scope-chip.js"
+import { RefreshStatusButton } from "./refresh-status-button.js"
 
 import { DEFAULT_MODULE, FEATURE_MODULES, type ModuleId } from "./modules.js"
 import { SidebarNavItem } from "./sidebar-nav-item.js"
@@ -193,7 +194,7 @@ export function AppShell({ session }: AppShellProps) {
             {/* 品牌区：文字版标识 + Beta 标签；浮层态顶部补间距，替代被省掉的 System-bar */}
             {/* 浮层态没有 System-bar，顶部给 pt-4 免得品牌区贴着浮层上边缘 */}
             <div className={cn("flex items-center px-3 pb-2", sidebar.floating && "pt-4")}>
-              <BrandWordmark size={20} tag="Beta" />
+              <BrandWordmark size={20} tag="Beta" shuffleOnHover />
             </div>
 
             {/* 导航区 */}
@@ -323,11 +324,19 @@ export function AppShell({ session }: AppShellProps) {
           {...(active?.id === "dashboard"
             ? {
                 actions: (
-                  <ScopeChip
-                    channels={channels.data ?? []}
-                    activeChannelId={activeChannel}
-                    onChannelChange={setActiveChannel}
-                  />
+                  /*
+                    刷新在筹码**左边**：两者都是"这一屏的全局控制"，
+                    排在顶栏右侧同一条操作带上（筹码更靠右、贴近交通灯）。
+                    刷新按钮自包含（只用 queryClient），不依赖仪表盘正文。
+                  */
+                  <>
+                    <RefreshStatusButton />
+                    <ScopeChip
+                      channels={channels.data ?? []}
+                      activeChannelId={activeChannel}
+                      onChannelChange={setActiveChannel}
+                    />
+                  </>
                 ),
               }
             : headerSlot !== null

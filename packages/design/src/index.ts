@@ -36,6 +36,9 @@ export type { BrandMarkProps } from "./components/brand-mark.js"
 export { BrandWordmark } from "./components/brand-wordmark.js"
 export type { BrandWordmarkProps } from "./components/brand-wordmark.js"
 
+export { ShuffleText } from "./components/shuffle-text.js"
+export type { ShuffleTextProps } from "./components/shuffle-text.js"
+
 export { Tag } from "./components/tag.js"
 export type { TagProps, TagSize, TagStatus } from "./components/tag.js"
 

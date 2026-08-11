@@ -44,6 +44,7 @@ import { useMemo } from "react"
 import { cn, greetingKeyForHour } from "@mycontext/design"
 import { resolveDisplayName, type AuthSession } from "@mycontext/ipc-contract"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
+import { ParticleText } from "./particle-text.js"
 
 export interface GreetingRowProps {
   /** 本人账号。`null` = bootstrap 还没回来 */
@@ -93,8 +94,13 @@ export function GreetingRow({ session, channelNick }: GreetingRowProps) {
   // 一个"？头像 + 你好，—"比空着更像坏了，而它只闪一瞬。
   if (session === null) return null
 
+  // 整行问候拼成一个字符串再交给粒子特效 —— 粒子采样需要**完整一行**
+  // 才能把标点与名字一起拼进同一片粒子里；分三段会采成三块分开的字。
+  const line = `${t(greetingKey)}${t("welcome.separator")}${resolveGreetingName(session, channelNick)}`
+
   return (
-    <span
+    <ParticleText
+      text={line}
       className={cn(
         // ★★ 显式 text-[32px] + leading-none —— 不用 typography-* 组合类
         //
@@ -122,13 +128,15 @@ export function GreetingRow({ session, channelNick }: GreetingRowProps) {
         // 就变了，那 3px 不再准；而 32px + leading-none 已经把"下对齐没成立"
         // 修掉了 —— 光学 sidebearing 是**次要**问题，主要是"下对齐"没成立。
         // 如果 32px 下仍看到左缘不齐，那时再补。
+        //
+        // ## ★ ParticleText 会读这个 class 量真实字体
+        //
+        // 粒子按 `getComputedStyle` 采样字形，所以这里的字号/字重/字距就是
+        // 粒子拼出来的形状。reduced-motion 时它也用这个 class 原样渲染文字，
+        // 与非粒子态视觉一致。
         "typography-title-jumbo-600 min-w-0 truncate text-[var(--text-base-primary)]",
       )}
-    >
-      {t(greetingKey)}
-      {t("welcome.separator")}
-      {resolveGreetingName(session, channelNick)}
-    </span>
+    />
   )
 }
 

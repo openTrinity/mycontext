@@ -40,8 +40,7 @@
  * `ALL CHECKS PASS`），不是挑好看的。
  */
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
-import { useQueryClient } from "@tanstack/react-query"
-import { Avatar, Button, IconButton, Panel, PanelHeader, cn } from "@mycontext/design"
+import { Avatar, Button, Panel, PanelHeader } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"
 import {
   useAdoptableSession,
@@ -62,6 +61,7 @@ import { FocusBridge } from "./focus-bridge.js"
 import { Funnel } from "./funnel.js"
 import { GraphDetailPopover } from "./graph-detail-popover.js"
 import { GreetingRow, pickChannelNick, resolveGreetingName } from "./greeting-row.js"
+import { CountUp } from "./count-up.js"
 import { PersonaCard } from "./identity.js"
 import { CoverageBar, Distribution, Section } from "./primitives.js"
 import {
@@ -156,16 +156,6 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
     setEntityFocus(null)
     setFocusCount(null)
   }, [scope.channelId])
-
-  /**
-   * 「刷新状态」按钮的加载态 + 失效入口。
-   *
-   * 用 `useQueryClient` 而不是逐个 hook 的 `refetch()`：这一屏的数据来自
-   * 十几个 query（采集/图谱/数字人/水位/身份…），逐个列举必然漏，
-   * 而漏掉的那个恰好就是用户在看的那个。全失效的代价是一次多余的重取。
-   */
-  const queryClient = useQueryClient()
-  const [refreshing, setRefreshing] = useState(false)
 
   /**
    * 数字分身的名字与形象（引导流程的 payload）。
@@ -428,52 +418,13 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
             />
             <GreetingRow session={session} channelNick={channelNick} />
             {/*
-              ── 刷新：把这一屏的状态重新读一遍 ──────────────
+              ── 刷新按钮去哪了 ──────────────────────────────
 
-              ## ★★ 为什么需要它（而不是自动轮询）
-
-              这一屏的数字平时靠**事件推送**保持新鲜（`useIngestProgress`
-              把主进程推来的快照直接写进 query cache）——采集在跑时它比
-              任何轮询都实时，也更省。
-
-              但采集**不跑**时就没有事件。而那恰好是最需要看状态的时候
-              （身份没绑上、被 blocked、权限不足）：数字停在旧值上，
-              而用户唯一的出路是重启应用。这与我们修过的那批
-              「点了没反应」是同一类问题 —— 系统没在骗人，只是没有出口。
-
-              所以刷新是一个**用户主动**的动作，与"系统自动保持新鲜"
-              不是一回事，两者并存。
-
-              ## ★ 它不采集
-
-              点它只是重新读一遍状态，**不会**去拉新消息（那是
-              `ingest.runOnce`，另有入口）。文案必须说清 ——
-              两者混淆会让用户以为点一下就能把落后的消息补上来。
-
-              `ml-auto` 推到最右：它是这一行的次要动作，不该抢问候语的位置。
-
-              ## ★ 是图标不是文字（用户要求）
-
-              「刷新状态」四个字在这一行（问候语 + 大数字）里是纯噪声 ——
-              一个 ↻ 图标就说清了，可点区域也够（`IconButton` sm=24px）。
-              `title`/`aria-label` 仍带完整说明（"不会去拉新消息"那句关键，
-              别因为收成图标就把它丢了）。刷新中图标转圈（`animate-spin`），
-              把原来 `Button loading` 的转圈交给图标自己。
+              它移到了顶栏右上角（`app-shell.tsx` 的 actions 槽、渠道筹码左边）。
+              原来它挂在这一行 `ml-auto` 推到最右，落在问候语与大数字之间一片
+              空白的奇怪位置（用户反馈）。刷新是**整屏**的全局动作，与顶栏那枚
+              渠道筹码同一类，归到顶栏更合理。见 `RefreshStatusButton`。
             */}
-            <IconButton
-              label="刷新状态"
-              size="sm"
-              variant="ghost"
-              className="ml-auto"
-              disabled={refreshing}
-              onClick={() => {
-                setRefreshing(true)
-                void queryClient.invalidateQueries().finally(() => setRefreshing(false))
-              }}
-              title="重新读取这一屏的状态（不会去拉新消息）"
-            >
-              <RefreshGlyph spinning={refreshing} />
-            </IconButton>
           </div>
         )}
 
@@ -490,15 +441,19 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
           每一档都是 12 的整除数，所以**换行之后仍然对齐**。
         */}
         {[
-          { label: "会话", value: ing?.conversations ?? "—" },
-          { label: "图片与文件", value: ing?.media ?? "—" },
-          { label: "认识的人和事物", value: formatCount(graph?.entities ?? 0) },
-          { label: "记住的事", value: formatCount(graph?.facts ?? 0) },
-          { label: "关系", value: formatCount(graph?.edges ?? 0) },
-          { label: "消息", value: ing?.messages ?? "—" },
+          { label: "会话", value: ing?.conversations ?? "—", count: scope.ingest?.conversations },
+          { label: "图片与文件", value: ing?.media ?? "—", count: scope.ingest?.mediaAssets },
+          {
+            label: "认识的人和事物",
+            value: formatCount(graph?.entities ?? 0),
+            count: graph?.entities ?? 0,
+          },
+          { label: "记住的事", value: formatCount(graph?.facts ?? 0), count: graph?.facts ?? 0 },
+          { label: "关系", value: formatCount(graph?.edges ?? 0), count: graph?.edges ?? 0 },
+          { label: "消息", value: ing?.messages ?? "—", count: scope.ingest?.messages },
         ].map((item) => (
           <div key={item.label} className="col-span-6 sm:col-span-4 lg:col-span-2">
-            <MiniStat label={item.label} value={item.value} />
+            <MiniStat label={item.label} value={item.value} count={item.count} />
           </div>
         ))}
 
@@ -857,7 +812,23 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
  *
  * 给这六个也加凹槽会变成"十个一样的方块"，那时"哪个要我动手"读不出来。
  */
-function MiniStat({ label, value }: { label: string; value: string }) {
+function MiniStat({
+  label,
+  value,
+  count,
+}: {
+  label: string
+  /** 已格式化的展示串。`count` 缺失（如"—"占位）时直接显示它。 */
+  value: string
+  /**
+   * 原始数值。给了就用 `CountUp` 从 0 滚到它（`formatCount` 同源格式化）；
+   * `undefined`（渠道未连、拿不到数）就静态显示 `value`——占位符不该"从 0 数到 —"。
+   *
+   * ★ 显式带上 `undefined`：这六个数用 `.map` 一起过，`scope.ingest?.x` 天然
+   * 是 `number | undefined`，`exactOptionalPropertyTypes` 下不能塞进 `count?:`。
+   */
+  count?: number | undefined
+}) {
   return (
     <div className="flex flex-col gap-1">
       <span className="typography-caption-400 text-[var(--text-base-tertiary)]">{label}</span>
@@ -873,10 +844,23 @@ function MiniStat({ label, value }: { label: string; value: string }) {
         改回 18px（`title-base-600`）之后与 12px 的 label 差 6px，
         "标签小而淡 / 数字大而实"那个对比才成立。装不下就换行 ——
         换行比压字号好，那是这一轮松掉的那条假约束。
+
+        ## ★ CountUp：数值型才滚，占位符静态
+
+        有原始 `count` 就交给 `CountUp`（从 0 弹到目标，reduced-motion 直显终值、
+        只在进入视口时数一次），拿不到数的"—"仍走静态 `value` ——
+        让"从 0 数到 —"这种荒唐态不出现。
       */}
-      <span className="typography-title-base-600 leading-none text-[var(--text-base-primary)]">
-        {value}
-      </span>
+      {count === undefined ? (
+        <span className="typography-title-base-600 leading-none text-[var(--text-base-primary)]">
+          {value}
+        </span>
+      ) : (
+        <CountUp
+          value={count}
+          className="typography-title-base-600 leading-none text-[var(--text-base-primary)]"
+        />
+      )}
     </div>
   )
 }
@@ -995,8 +979,19 @@ function TrendsSection({ building }: { building: boolean }) {
         它是这一整块的结论（"下面的实体与事实只覆盖一小部分"），
         而结论放在图后面就成了脚注 —— 用户看完图已经形成判断了。
         只在 warn/bad 时出现（见 `readGraphLag`：追平时返回 null）。
+
+        ## ★ 正在同步时不出现（`!building`）
+
+        `graph-build` 水位是**批处理**的，只在一轮建图**成功之后**才前移
+        （见 `GraphSyncService.markBuilt`）。所以同步进行中它必然落后 ——
+        那一刻算出的比例是"还没结束"，不是"建得少"。此时喊
+        "才学了 X% —— 只覆盖一小部分" 是把一个**正在收敛**的中间态
+        当成问题报，而用户明明看到进度条在跑。等这一轮建完，水位一次性
+        追上，这句话该消失的自然消失、该留的（真落后）才留。
+
+        所以：同步中一律不显示这句结论 —— 它描述的是"停下来之后还差多少"。
       */}
-      {lag?.text === undefined || lag.text === null ? null : (
+      {building || lag?.text === undefined || lag.text === null ? null : (
         <ProblemLine text={lag.text} tone={lag.tone === "bad" ? "bad" : "warn"} />
       )}
 
@@ -1142,38 +1137,5 @@ function LegendDot({ color, label }: { color: string; label: string }) {
       <span className="size-2 shrink-0 rounded-full" style={{ background: color }} />
       <span className="typography-caption-400 text-[var(--text-base-secondary)]">{label}</span>
     </span>
-  )
-}
-
-/**
- * 刷新图标（循环箭头 ↻）。刷新中转圈。
- *
- * ★ `motion-reduce:animate-none` —— 尊重系统的减少动效偏好（与 `IconButton`
- * 里那条 `motion-reduce` 同一条纪律）。规格与本仓库其余内联图标一致：
- * `viewBox 0 0 16 16` + `size-4` + `currentColor` + 描边 1.4。
- */
-function RefreshGlyph({ spinning }: { spinning: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      fill="none"
-      className={cn("size-4", spinning ? "animate-spin motion-reduce:animate-none" : "")}
-      aria-hidden="true"
-    >
-      {/* 循环箭头：一段近乎整圈的弧 + 一个箭头，读作"重新读一遍" */}
-      <path
-        d="M13 8a5 5 0 1 1-1.46-3.54"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-      <path
-        d="M13.4 2.6v2.2h-2.2"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
   )
 }
