@@ -233,7 +233,13 @@ export function OnboardingView() {
     setHydrated(true)
   }, [hydrated, stepCount, byStep])
 
-  const list: ChannelSummary[] = channels.data ?? []
+  /**
+   * ★ 包一层 `useMemo`：`channels.data ?? []` 每次 render 都产生一个**新数组**，
+   * 而下面两个 `useMemo`（`authorizedChannelIds` / `readOnlyChannelIds`）
+   * 把它当依赖 —— 于是那两个缓存每次都失效，等于没有缓存。
+   * 依赖只写 `channels.data`：兜底的空数组不需要参与比较。
+   */
+  const list: ChannelSummary[] = useMemo(() => channels.data ?? [], [channels.data])
   const dingtalk = list.find((channel) => channel.id === "dingtalk")
   const authorized = dingtalk?.status.state === "authorized"
   /**

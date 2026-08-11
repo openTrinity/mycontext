@@ -612,11 +612,33 @@ export class DistillSourceService {
          * 来自 CLI 自己的错误信封，稳定且明确。
          */
         const notConfigured = /not.configured/i.test(detail)
+        /**
+         * ★★★ 「从没连过」与「连过但过期了」必须分开 —— 前者不该出现在这一步。
+         *
+         * `CHANNEL_IDENTITY_UNAVAILABLE`（还没绑渠道身份）原来和
+         * `SESSION_EXPIRED` 一起归成 `expired`，于是界面上打出
+         * 「钉钉 的登录已过期，重新连接后这里才会有它的会话」——
+         * 而实际情况是**这个渠道一次都没连过**（实测日志：「还没绑定渠道身份，
+         * 拒绝执行渠道命令」）。
+         *
+         * 用户的原话是"这里展示钉钉的文案很奇怪"：他只连了飞书，这一步却先
+         * 甩一句钉钉的过期提示，而下面列的全是飞书的会话。说"过期"还暗示
+         * 曾经连过、去重连就能恢复 —— 两件事都不成立。
+         *
+         * 归 `never-connected`：这一步问的是"接下来学哪些"，没连过的渠道
+         * 采集不会跑，**它整条都不该出现在这里**（渲染层据此整条跳过，
+         * 见 `sources-step.tsx`）。用户去「连接平台」连上之后它自然出现。
+         *
+         * ★ `not configured`（配置目录没初始化）也归这一档：同样是"还没连过"
+         * 的一种形态 —— 它要走的是一次完整授权，不是"重新连接"。
+         */
+        const neverConnected = code === "CHANNEL_IDENTITY_UNAVAILABLE" || notConfigured
         sources.push({
           channelId: target.channelId,
           count: local.length,
-          state:
-            code === "SESSION_EXPIRED" || code === "CHANNEL_IDENTITY_UNAVAILABLE" || notConfigured
+          state: neverConnected
+            ? "never-connected"
+            : code === "SESSION_EXPIRED"
               ? "expired"
               : "failed",
           reason: detail,

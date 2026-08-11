@@ -132,9 +132,7 @@ describe("★★ 首次建图前等够初始跨度（14 天 / min(14天, 学习�
     base({ graphExists: false, lastBuiltSeq: 0, lastBuiltAt: null, ackedSeq: 300, ...over })
 
   it("★★ 长范围 + 刚开始采（跨度 3 天 < 14）+ 没采满 → 等，原因 awaiting-initial-window", () => {
-    const d = decideAutoBuild(
-      firstBuild({ firstDataAt: NOW - 3 * DAY, collectionComplete: false }),
-    )
+    const d = decideAutoBuild(firstBuild({ firstDataAt: NOW - 3 * DAY, collectionComplete: false }))
     expect(d.build).toBe(false)
     expect(d.reason).toBe("awaiting-initial-window")
   })
@@ -148,9 +146,7 @@ describe("★★ 首次建图前等够初始跨度（14 天 / min(14天, 学习�
   })
 
   it("★★ 数据已采满 → 立刻建，不等跨度（历史导入一次就位）", () => {
-    const d = decideAutoBuild(
-      firstBuild({ firstDataAt: NOW - 1 * DAY, collectionComplete: true }),
-    )
+    const d = decideAutoBuild(firstBuild({ firstDataAt: NOW - 1 * DAY, collectionComplete: true }))
     expect(d.build).toBe(true)
     expect(d.reason).toBe("first-build")
   })
@@ -183,7 +179,9 @@ describe("★★ 首次建图前等够初始跨度（14 天 / min(14天, 学习�
   })
 
   it("★ 预测：等跨度时给到「最早 + min(14天,范围)」的倒计时", () => {
-    const f = forecastAutoBuild(firstBuild({ firstDataAt: NOW - 10 * DAY, collectionComplete: false }))
+    const f = forecastAutoBuild(
+      firstBuild({ firstDataAt: NOW - 10 * DAY, collectionComplete: false }),
+    )
     expect(f.decision.reason).toBe("awaiting-initial-window")
     // 还差 4 天（14 - 10）
     expect(f.etaMs).toBe(4 * DAY)

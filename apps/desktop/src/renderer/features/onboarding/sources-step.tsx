@@ -396,6 +396,18 @@ export function SourcesStep({
               conversations.data.sources
                 .filter((source) => source.state !== "ok")
                 /**
+                 * ★★★ 「从没连过」的渠道**整条不显示**（A 方案）。
+                 *
+                 * 这一步问的是"接下来学哪些"。没连过的渠道采集不会跑，把它的
+                 * 状态挂在这里只会让人困惑 —— 实测用户反馈：只连了飞书，这一步
+                 * 却先甩一句「钉钉 的登录已过期」，而下面列的全是飞书的会话。
+                 * （而且"过期"这个说法本身也不成立：那个渠道一次都没连过。
+                 * 主进程侧已经把两者分成 `never-connected` / `expired`。）
+                 *
+                 * 用户去「连接平台」连上之后它自然出现 —— 那时才有会话可选。
+                 */
+                .filter((source) => source.state !== "never-connected")
+                /**
                  * ★★ 跟着 `channelFilter` 过滤 —— **这一段原来没过滤**。
                  *
                  * 这个组件被两处复用：引导第 4 步（列全部已授权渠道）与

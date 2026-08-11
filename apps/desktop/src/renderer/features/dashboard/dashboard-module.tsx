@@ -39,7 +39,7 @@
  * 配色是**验证过的**（见 `../graph/palette.ts` 文件头记的那两组
  * `ALL CHECKS PASS`），不是挑好看的。
  */
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { Avatar, Button, IconButton, Panel, PanelHeader, cn } from "@mycontext/design"
 import { resolveDisplayName } from "@mycontext/ipc-contract"

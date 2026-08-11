@@ -489,9 +489,7 @@ export class ActiveIdentityService {
     const switchingIdentity = sameChannel.length > 0
     const current = this.current
     const joinCurrent = !switchingIdentity && current !== null
-    const vaultId = switchingIdentity
-      ? input.newVaultId()
-      : (current?.vaultId ?? input.baseVaultId)
+    const vaultId = switchingIdentity ? input.newVaultId() : (current?.vaultId ?? input.baseVaultId)
     this.options.identities.bind({
       ...input.key,
       vaultId,

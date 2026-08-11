@@ -38,15 +38,6 @@ import {
 import { canRunPersona } from "../../lib/channel-capability.js"
 
 /**
- * 主渠道 id —— 「语料归属」的判据（不是「谁能跑分身」，那个走 `canRunPersona`）。
- *
- * ★ 这两件事曾经共用一个常量，而它们会分叉：将来某个非主渠道开了发送能力时
- * 「能跑分身」变成两个渠道，而「语料来自哪个库」仍然只有主渠道一个
- * （`DistillService` 只有一个 `this.db`）。
- */
-const PRIMARY_CHANNEL_ID = "dingtalk"
-
-/**
  * 把顶层快照替换成**某个渠道**的那一份。
  *
  * ★ 逐字段叠而不是整份换：`storage`（整个 vault 的文件体积）与 `eventStream`

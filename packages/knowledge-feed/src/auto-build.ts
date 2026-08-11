@@ -148,7 +148,6 @@ function initialWindowEtaMs(input: AutoBuildInput): number | null {
   return Math.max(0, firstAt + requiredInitialWindowMs(input) - input.now)
 }
 
-
 export interface AutoBuildInput {
   /** 本轮导出确认到的 seq（也就是"数据已经准备到哪"） */
   ackedSeq: number

@@ -231,8 +231,11 @@ function initialWindowFields(hooks: AutoBuildHooks): {
   collectionComplete?: boolean
   learningRangeMs?: number
 } {
-  const out: { firstDataAt?: number | null; collectionComplete?: boolean; learningRangeMs?: number } =
-    {}
+  const out: {
+    firstDataAt?: number | null
+    collectionComplete?: boolean
+    learningRangeMs?: number
+  } = {}
   if (hooks.firstDataAt !== undefined) out.firstDataAt = hooks.firstDataAt()
   if (hooks.collectionComplete !== undefined) out.collectionComplete = hooks.collectionComplete()
   if (hooks.learningRangeMs !== undefined) {

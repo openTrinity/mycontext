@@ -205,7 +205,6 @@ describe("★★★ 按实体筛走 kl 真实关联（不是正文匹配）", ()
   })
 })
 
-
 describe("★ 「筛空了」与「图里没有」要给不同的话", () => {
   it("有筛选条件且 0 条 → 提示放宽条件", async () => {
     const result = await makeService(0).facts({ ...BASE, keyword: "查无此词" })
