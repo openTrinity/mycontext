@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from kl_graph.config import cfg
 from kl_graph.storage.vector_store import VectorPoint, VectorSearchResult, VectorStore
 
 _VECTOR_FIELD = "embedding"
 _PAYLOAD_FIELD = "_payload_json"
 _STABLE_ID_FIELD = "_stable_id"
+
+logger = logging.getLogger(__name__)
 
 
 def _domain_id(doc) -> str:
@@ -135,6 +139,7 @@ class ZvecVectorStore(VectorStore):
         metric: str = "cosine",
         collections: list[str] | tuple[str, ...] | None = None,
         optimize_on_upsert: bool = True,
+        verify_writes: bool | None = None,
     ) -> None:
         try:
             import zvec
@@ -149,6 +154,11 @@ class ZvecVectorStore(VectorStore):
         self.index_type = index_type.lower()
         self.metric = metric.lower()
         self.optimize_on_upsert = bool(optimize_on_upsert)
+        self.verify_writes = (
+            bool(cfg.application.debug)
+            if verify_writes is None
+            else bool(verify_writes)
+        )
         names = tuple(collections or ("chunks", "entities", "facts"))
         unknown = set(names) - set(_PAYLOAD_FIELDS)
         if unknown:
@@ -348,6 +358,25 @@ class ZvecVectorStore(VectorStore):
     def upsert(self, collection: str, points: list[VectorPoint]) -> None:
         if not points:
             return
+        # Zvec 0.6 may merge duplicate doc IDs in storage while still handing the
+        # original batch length to HNSW. Direct adapter callers therefore get
+        # the same first-seen-wins behavior as the ingestion flush boundary.
+        unique_by_id = {}
+        duplicate_ids: list[str] = []
+        for point in points:
+            if point.id in unique_by_id:
+                duplicate_ids.append(point.id)
+                continue
+            unique_by_id[point.id] = point
+        if duplicate_ids:
+            logger.warning(
+                "dropped %d duplicate Zvec points in %s; first-seen wins; sample=%r",
+                len(duplicate_ids),
+                collection,
+                list(dict.fromkeys(duplicate_ids))[:3],
+            )
+        points = list(unique_by_id.values())
+        stable_ids = list(unique_by_id)
         target = self._collection(collection)
         ids: list[str] = []
         for start in range(0, len(points), 1000):
@@ -362,9 +391,23 @@ class ZvecVectorStore(VectorStore):
             ]
             self._check_statuses(target.upsert(docs))
             ids.extend(self.stable_id_to_point_id(point.id) for point in batch)
-        target.flush()
+        self._check_statuses(target.flush())
         if self.optimize_on_upsert:
-            target.optimize()
+            self._check_statuses(target.optimize())
+
+        if self.verify_writes:
+            # Debug-only: some native failures are printed but not reflected in
+            # returned status. Reading full vectors is intentionally expensive.
+            expected = set(stable_ids)
+            written = self.retrieve_vectors(collection, stable_ids)
+            missing = expected - set(written)
+            if missing:
+                sample = sorted(missing)[:3]
+                raise RuntimeError(
+                    f"Zvec write verification failed for {collection!r}: "
+                    f"{len(missing)}/{len(expected)} vectors missing or unreadable; "
+                    f"sample={sample!r}"
+                )
         self._remember_ids(collection, ids)
 
     def _similarity(self, raw_score: float) -> float:

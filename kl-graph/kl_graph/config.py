@@ -50,6 +50,7 @@ class _ConfigModel(BaseModel):
 
 
 class ApplicationConfig(_ConfigModel):
+    debug: bool = False
     data_dir: str
     dws_export_dir: str
 

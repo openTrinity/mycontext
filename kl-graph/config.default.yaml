@@ -6,6 +6,8 @@
 
 # Application paths shared by ingestion, storage, and serving.
 application:
+  # Enable expensive diagnostic integrity checks; disabled in normal operation.
+  debug: ${oc.env:KL_DEBUG,0}
   # Runtime-data directory; an empty value resolves to <project>/data.
   data_dir: ${oc.env:KL_DATA_DIR,""}
   # Root directory containing the DingTalk DWS export to ingest.

@@ -122,6 +122,70 @@ def test_zvec_scroll_manifest_survives_reopen(tmp_path) -> None:
         reopened.close()
 
 
+def test_zvec_upsert_drops_duplicate_ids_before_hnsw_indexing(tmp_path) -> None:
+    pytest.importorskip("zvec")
+    store = create_vector_store(
+        "zvec",
+        data_dir=tmp_path,
+        embedding_dim=3,
+        collections=["facts"],
+    )
+    try:
+        store.upsert(
+            "facts",
+            [
+                VectorPoint("fact-a", [1.0, 0.0, 0.0], {"fact_id": "fact-a"}),
+                VectorPoint("fact-a", [0.0, 1.0, 0.0], {"fact_id": "fact-a"}),
+            ],
+        )
+        assert store.count("facts") == 1
+        assert store.retrieve_vectors("facts", ["fact-a"])["fact-a"] == pytest.approx(
+            [1.0, 0.0, 0.0]
+        )
+    finally:
+        store.close()
+
+
+def test_zvec_full_write_verification_is_debug_gated(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("zvec")
+    store = create_vector_store(
+        "zvec",
+        data_dir=tmp_path,
+        embedding_dim=3,
+        collections=["facts"],
+        verify_writes=False,
+    )
+    try:
+        monkeypatch.setattr(
+            store,
+            "retrieve_vectors",
+            lambda *_args, **_kwargs: pytest.fail("normal writes must not read vectors back"),
+        )
+        store.upsert(
+            "facts",
+            [VectorPoint("fact-a", [1.0, 0.0, 0.0], {"fact_id": "fact-a"})],
+        )
+    finally:
+        store.close()
+
+    debug_store = create_vector_store(
+        "zvec",
+        data_dir=tmp_path / "debug",
+        embedding_dim=3,
+        collections=["facts"],
+        verify_writes=True,
+    )
+    try:
+        monkeypatch.setattr(debug_store, "retrieve_vectors", lambda *_args, **_kwargs: {})
+        with pytest.raises(RuntimeError, match="write verification failed"):
+            debug_store.upsert(
+                "facts",
+                [VectorPoint("fact-b", [0.0, 1.0, 0.0], {"fact_id": "fact-b"})],
+            )
+    finally:
+        debug_store.close()
+
+
 def test_vector_store_path_separates_backends_and_namespaces(tmp_path) -> None:
     assert vector_store_path("qdrant", tmp_path) == tmp_path / "qdrant_data"
     assert vector_store_path("zvec", tmp_path) == tmp_path / "zvec_data"

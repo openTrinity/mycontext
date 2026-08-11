@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kl_graph.ingest.pipeline import IngestionPipeline
 from kl_graph.storage.qdrant_store import point_id
+from kl_graph.storage.vector_store import VectorPoint
 
 # ── point_id ──────────────────────────────────────────────────────────────
 
@@ -96,15 +97,20 @@ class _RecordingQdrant:
 
     def __init__(self) -> None:
         self.upserts: list[tuple[str, int]] = []
+        self.ids: set[str] = set()
 
     def upsert(self, collection, points):
         self.upserts.append((collection, len(points)))
+        self.ids.update(point.id for point in points)
+
+    def existing_ids(self, collection, ids):
+        return set(ids) & self.ids
 
 
 def test_flush_points_upserts_and_clears() -> None:
     pipe = _bare_pipeline()
     pipe.qdrant = _RecordingQdrant()
-    points = [object(), object(), object()]
+    points = [VectorPoint(str(i), [float(i)]) for i in range(3)]
     n = pipe._flush_points("chunks", points)
     assert n == 3
     assert points == []  # cleared in place
@@ -124,15 +130,29 @@ def test_flush_if_full_respects_threshold(monkeypatch) -> None:
     monkeypatch.setattr(plmod, "EMBED_FLUSH_EVERY", 3)
     pipe = _bare_pipeline()
     pipe.qdrant = _RecordingQdrant()
-    points = [object(), object()]
+    points = [VectorPoint(str(i), [float(i)]) for i in range(2)]
     # below threshold -> no flush
     assert pipe._flush_if_full("chunks", points) == 0
     assert len(points) == 2
     # at threshold -> flush + clear
-    points.append(object())
+    points.append(VectorPoint("2", [2.0]))
     assert pipe._flush_if_full("chunks", points) == 3
     assert points == []
     assert pipe.qdrant.upserts == [("chunks", 3)]
+
+
+def test_flush_points_drops_duplicate_ids_first_seen_wins() -> None:
+    pipe = _bare_pipeline()
+    pipe.qdrant = _RecordingQdrant()
+    points = [
+        VectorPoint("same", [1.0]),
+        VectorPoint("same", [2.0]),
+        VectorPoint("other", [3.0]),
+    ]
+
+    assert pipe._flush_points("facts", points) == 2
+    assert pipe.qdrant.upserts == [("facts", 2)]
+    assert points == []
 
 
 # ── existing_ids (skip-existing) ─────────────────────────────────────────────

@@ -49,7 +49,12 @@ class VectorStore(ABC):
 
     @abstractmethod
     def upsert(self, collection: str, points: list[VectorPoint]) -> None:
-        """Insert or replace points by stable ID."""
+        """Insert or replace points by stable ID.
+
+        Callers should submit unique stable IDs. Implementations must raise when
+        the backend reports a write failure; diagnostic verification may be
+        stronger when application debug mode is enabled.
+        """
 
     @abstractmethod
     def search(

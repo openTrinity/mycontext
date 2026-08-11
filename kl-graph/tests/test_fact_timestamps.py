@@ -190,3 +190,30 @@ def test_unit_incremental_fact_build_uses_dated_text():
     fact = pipe.all_facts[0]
     assert fact.text == _dated_fact_text(FACT_TEXT, ts)
     assert fact.id == _fact_id(MSG_ID, fact.text)
+
+
+def test_build_facts_deduplicates_repeated_llm_facts_before_storage():
+    """One extraction response may repeat an identical fact object."""
+
+    from kl_graph.models.types import Chunk
+
+    ts = _china_ts(2026, 7, 15)
+    chunk = Chunk(id=MSG_ID, content=FACT_TEXT, timestamp=ts)
+    repeated = {
+        "fact_text": FACT_TEXT,
+        "fact_type": "GENERAL",
+        "confidence": 0.9,
+    }
+    store = _FakeStore()
+    pipe = IngestionPipeline.__new__(IngestionPipeline)
+    pipe.checkpoint = None
+    pipe.messages = [chunk]
+    pipe.extra_chunks = []
+    pipe.extraction_results = {chunk.id: {"facts": [repeated, dict(repeated)]}}
+    pipe.all_facts = []
+    pipe.store = store
+
+    pipe._build_facts()
+
+    assert len(pipe.all_facts) == 1
+    assert len(store.facts) == 1

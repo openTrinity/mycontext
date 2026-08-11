@@ -1546,9 +1546,10 @@ class IngestionPipeline:
     def _build_facts(self):
         """Build facts from extraction results (over all chunks).
 
-        A fact's ``source_chunk_id`` holds the id of the **chunk** it was
-        extracted from, and the deterministic fact id is derived from that chunk
-        id + text, so facts from every source dedupe/replay the same way.
+        A fact's ``source_chunk_id`` holds the primary evidence chunk, while its
+        deterministic id is derived from the extraction-item id + text. Duplicate
+        fact objects returned in one LLM response therefore collapse here before
+        either SQLite or the vector backend sees them.
 
         U0 temporal grounding: each fact text is prefixed with the source
         chunk's date (``[YYYY-MM-DD]``, see :func:`_dated_fact_text`) before
@@ -1557,6 +1558,8 @@ class IngestionPipeline:
         with self.step("phase_b.build_facts", on_skip=self._ensure_facts_loaded) as s:
             if s.skip:
                 return
+            seen_fact_ids = {fact.id for fact in self.all_facts}
+            duplicate_count = 0
             for item, msg, result in self._extraction_records():
                 raw_facts = result.get("facts", [])
                 for raw in raw_facts:
@@ -1596,11 +1599,19 @@ class IngestionPipeline:
                         source_unit_id=item.source_unit_id,
                         extraction_item_id=item.id,
                     )
+                    if fact.id in seen_fact_ids:
+                        duplicate_count += 1
+                        continue
+                    seen_fact_ids.add(fact.id)
                     self.all_facts.append(fact)
 
             # Store in SQLite
             if self.all_facts:
                 self.store.insert_facts(self.all_facts)
+            if duplicate_count:
+                print(
+                    f"  Deduplicated {duplicate_count} repeated facts by deterministic ID"
+                )
             s.done(count=len(self.all_facts))
 
     async def _run_optional_cleanup(self) -> None:
@@ -1700,11 +1711,32 @@ class IngestionPipeline:
         return 0
 
     def _flush_points(self, collection: str, points: list) -> int:
-        """Upsert all ``points`` and clear the list; return how many were stored."""
+        """Coalesce duplicate IDs, upsert, and return the submitted count."""
         if not points:
             return 0
-        n = len(points)
-        self.qdrant.upsert(collection, points)
+
+        # Upstream builders normally guarantee unique stable IDs. As a final
+        # defensive fallback, keep the first point and warn instead of aborting
+        # after earlier batches may already have been persisted.
+        unique_by_id = {}
+        duplicate_ids: list[str] = []
+        for point in points:
+            if point.id in unique_by_id:
+                duplicate_ids.append(point.id)
+                continue
+            unique_by_id[point.id] = point
+        if duplicate_ids:
+            logger.warning(
+                "dropped %d duplicate vector points in %s; first-seen wins; sample=%r",
+                len(duplicate_ids),
+                collection,
+                list(dict.fromkeys(duplicate_ids))[:3],
+            )
+        unique_points = list(unique_by_id.values())
+        n = len(unique_points)
+        # Adapters raise on reported write failures. Zvec optionally performs an
+        # expensive read-back when the global application debug flag is enabled.
+        self.qdrant.upsert(collection, unique_points)
         points.clear()
         return n
 

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from kl_graph.config import AppConfig, cfg
 
 EXPECTED_LEAVES = {
+    "application.debug",
     "application.data_dir",
     "application.dws_export_dir",
     "server.port",
@@ -130,6 +131,10 @@ def test_default_config_contains_every_documented_field() -> None:
 
 def test_default_extraction_batch_size_is_five() -> None:
     assert cfg.pipelines.ingestion.extraction.batch_size == 5
+
+
+def test_debug_integrity_checks_are_disabled_by_default() -> None:
+    assert cfg.application.debug is False
 
 
 def test_default_extraction_retries_are_step_scoped() -> None:
