@@ -313,7 +313,9 @@
     },
     "autoSendTitle": "Auto-send",
     "autoSendHint": "When, and in which conversations, replies may go out as you",
-    "limitsSummary": "{{resident}} resident · {{concurrent}} concurrent"
+    "limitsSummary": "{{resident}} resident · {{concurrent}} concurrent",
+    "channelPickerLabel": "Choose a channel",
+    "channelUnsupported": "This channel is read-only — its chats feed the graph and search but are never used to reply for you, so there are no persona settings."
   },
   "model": {
     "description": "Configure the model gateway used to draft replies and organize knowledge. Changes here apply globally.",

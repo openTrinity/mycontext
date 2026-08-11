@@ -563,13 +563,32 @@ describe("★ 进度来自数据库，不是组件 state", () => {
     ])
     renderView()
 
-    // 第 1 步从渠道注册表动态渲染，不硬编码某一个渠道。
+    /**
+     * 第 1 步从渠道注册表动态渲染，不硬编码某一个渠道。
+     *
+     * ★ 断言从"两张卡同时在"改成"选中那张在 + 另一个渠道可切"：
+     * 这一步现在**一次只配一个渠道**（picker 选，见 onboarding-view 里那段
+     * 注释）。原来平铺全部渠道 + 完成判据写死主渠道，导致只连飞书的用户
+     * 第 1 步永远不会自动完成、只能「跳过」。
+     * 意图不变（不硬编码渠道），变的是表达。
+     */
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "连接钉钉" })).toBeTruthy()
-      expect(screen.getByRole("heading", { name: "连接飞书" })).toBeTruthy()
     })
-    const sourceLogo = document.querySelector<HTMLImageElement>('img[alt=""]')
-    expect(sourceLogo?.src).toContain("channel-source-logo.png")
+    // 另一个渠道通过 picker 可达（而不是同屏平铺两张授权卡）
+    expect(screen.getByRole("button", { name: /选择要配置的渠道|渠道/ })).toBeTruthy()
+    /**
+     * ★ 原来这里断言 `img[alt=""]` 的 src 是 `channel-source-logo.png`。
+     *
+     * 那张图是**飞书专属**的品牌 logo（`FEISHU_BRAND_LOGO_URL`），它当时能
+     * 被选到，只是因为第 1 步把**所有**渠道的授权卡平铺渲染。现在这一步
+     * 一次只配一个渠道（默认第一个 = 钉钉），飞书的 logo 自然不在 DOM 里
+     * —— 那是预期行为，不是回归。
+     *
+     * 所以这条断言改成：这一屏**不该**出现另一个渠道的品牌资源
+     * （反过来锁住"没有把两个渠道混在一屏"这件事，正是这次改动的目的）。
+     */
+    expect(document.querySelector('img[src*="channel-source-logo.png"]')).toBeNull()
     expect(screen.queryByText("时间范围")).toBeNull()
   })
 

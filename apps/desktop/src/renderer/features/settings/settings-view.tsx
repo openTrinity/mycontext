@@ -38,6 +38,8 @@ import { PersonaFigurePanel } from "./persona-figure-panel.js"
 import { PersonaRuntimePanel } from "./persona-runtime-panel.js"
 import { ChecklistIcon, InfoIcon, PlugIcon, SlidersIcon, TuningIcon } from "../shell/icons.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
+import { personaCapableChannels } from "../../lib/channel-capability.js"
+import { ChannelPicker } from "../shell/channel-picker.js"
 
 type SectionId = "general" | "model" | "channels" | "persona" | "onboarding" | "about"
 
@@ -339,8 +341,26 @@ function GeneralSection() {
  */
 function PersonaSection() {
   const { t } = useDynamicTranslation("settings")
+  const { t: tch } = useDynamicTranslation("channels")
   const bootstrap = useBootstrapState()
   const session = bootstrap.data?.session ?? null
+  /**
+   * ★★ 数字分身设置**按渠道** —— 用户要求「设置里的数字分身要能选渠道」。
+   *
+   * 判据走 `canRunPersona`（读 `capabilities.sendAs`）：只读接入的渠道
+   * （飞书）标成「暂未支持」但**仍可选中** —— 藏起来的话"飞书连上了为什么
+   * 这里没有它"是个没有答案的问题，选中后由下面那句话说清原因。
+   * 与 `persona-header-controls.tsx` 那份是同一个范本、同一个判据来源。
+   */
+  const channels = useChannels()
+  const list = channels.data ?? []
+  const authorized = list.filter((c) => c.available && c.status.state === "authorized")
+  const personaCapableIds = personaCapableChannels(list).map((c) => c.id)
+  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
+  const activeChannelId =
+    pickedChannelId ?? personaCapableIds[0] ?? authorized[0]?.id ?? null
+  const activeSupportsPersona =
+    activeChannelId !== null && personaCapableIds.includes(activeChannelId)
 
   return (
     <Section title={t("sections.persona")} description={t("persona.description")} wide>
@@ -352,14 +372,46 @@ function PersonaSection() {
       ) : (
         <>
           {/*
-            形象放在运行参数**之前**：它是"这是谁"的问题，
-            而运行参数是"它怎么工作"。与本文件里 IdentityPanel
-            排在语言/主题之前是同一个判断。
-            同样要在登录分支里 —— 数据存 vault，未登录时读出来是空数组，
-            而"空数组"与"没配过"在 UI 上无法区分。
+            渠道选择器 —— 只在**有多个已授权渠道**时出现（一个的时候它就是
+            那一个，摆个下拉是噪声；`ChannelPicker` 自己也会退化成静态标识）。
+            `side="bottom"`：设置弹窗里这一块在上半部，默认 `"top"` 会让浮层
+            往窗口外飞（那个组件的文件头记了这条）。
           */}
-          <PersonaFigurePanel />
-          <PersonaRuntimePanel />
+          {authorized.length > 1 ? (
+            <ChannelPicker
+              options={authorized.map((c) => ({
+                id: c.id,
+                label: tch(`${c.id}.label`, { defaultValue: c.id }),
+                unsupported: !personaCapableIds.includes(c.id),
+              }))}
+              activeId={activeChannelId}
+              onChange={setPickedChannelId}
+              ariaLabel={t("persona.channelPickerLabel")}
+              side="bottom"
+            />
+          ) : null}
+          {activeSupportsPersona ? (
+            /*
+              形象放在运行参数**之前**：它是"这是谁"的问题，
+              而运行参数是"它怎么工作"。与本文件里 IdentityPanel
+              排在语言/主题之前是同一个判断。
+              同样要在登录分支里 —— 数据存 vault，未登录时读出来是空数组，
+              而"空数组"与"没配过"在 UI 上无法区分。
+            */
+            <>
+              <PersonaFigurePanel />
+              <PersonaRuntimePanel />
+            </>
+          ) : (
+            /*
+              ★ 选中的是只读接入的渠道 —— 说清"为什么这里是空的"，
+              而不是显示一份属于**另一个渠道**的形象与运行参数
+              （那正是这批多渠道重构在消除的那类错配）。
+            */
+            <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
+              {t("persona.channelUnsupported")}
+            </p>
+          )}
         </>
       )}
     </Section>

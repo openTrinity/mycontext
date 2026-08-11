@@ -313,7 +313,9 @@
     },
     "autoSendTitle": "自动发送",
     "autoSendHint": "什么时候、哪些会话允许以你的身份直接发出去",
-    "limitsSummary": "常驻 {{resident}} · 并发 {{concurrent}}"
+    "limitsSummary": "常驻 {{resident}} · 并发 {{concurrent}}",
+    "channelPickerLabel": "选择渠道",
+    "channelUnsupported": "这个渠道是只读接入 —— 它的聊天只进图谱与搜索，不会用来替你回复，所以没有数字分身设置。"
   },
   "model": {
     "description": "配置生成回复与整理知识用的模型网关。这里改的会全局生效。",

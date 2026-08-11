@@ -55,6 +55,7 @@ import { PersonaStep, type PersonaDraft } from "./persona-step.js"
 import { SourcesStep, type SourcesDraft } from "./sources-step.js"
 import { ModelConfigForm } from "../settings/model-config-form.js"
 import { canRunPersona, personaCapableChannels } from "../../lib/channel-capability.js"
+import { ChannelPicker } from "../shell/channel-picker.js"
 
 const STEP_ORDER: readonly OnboardingStepId[] = [
   "channel",
@@ -240,8 +241,25 @@ export function OnboardingView() {
    * 依赖只写 `channels.data`：兜底的空数组不需要参与比较。
    */
   const list: ChannelSummary[] = useMemo(() => channels.data ?? [], [channels.data])
-  const dingtalk = list.find((channel) => channel.id === "dingtalk")
-  const authorized = dingtalk?.status.state === "authorized"
+  /**
+   * ★★ 引导第 1 步**当前在配哪个渠道** —— 用户要求「引导流程要能选渠道」。
+   *
+   * ## 为什么这不是个装饰性的下拉
+   *
+   * 改动前第 1 步的完成判据写死主渠道：`list.find(c => c.id === "dingtalk")`。
+   * 后果是**只连飞书的用户第 1 步永远不会自动完成**（钉钉那条 `authorized`
+   * 恒 false），他只能点「跳过此步」；下面那行「身份已确认」的绿字也永不出现。
+   * 也就是说"引导"对只用飞书的人是走不通的。
+   *
+   * 现在第 1 步有一个明确的"我在配哪个渠道"，授权卡片、完成门、身份确认入口
+   * 全部跟着它走。`null` = 还没选 → 取第一个可用渠道（多数人只连一个，
+   * 那时它就是自动的、看不出有 picker）。
+   */
+  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
+  const availableChannels = useMemo(() => list.filter((c) => c.available), [list])
+  const activeChannel =
+    availableChannels.find((c) => c.id === pickedChannelId) ?? availableChannels[0]
+  const authorized = activeChannel?.status.state === "authorized"
   /**
    * 有没有一个**已授权、且能跑数字分身**的渠道。
    *
@@ -295,6 +313,35 @@ export function OnboardingView() {
    */
   const adoptable = useAdoptableSession(authorized)
   const selfConfirmed = ingestSnapshot.data?.selfConfirmed ?? false
+  /**
+   * ★★ 第 1 步"够了吗"的判据 —— **按渠道能力分档**。
+   *
+   * ## 为什么不能一律要求 `selfConfirmed`
+   *
+   * 「确认本人身份」这件事只对**能跑数字分身**的渠道有意义：它决定 `is_self`
+   * 能不能回填，而那是蒸馏语料的前置（不确认 → 蒸馏拒掉全部语料且不报错，
+   * 这个坑真实踩过）。只读接入的渠道（`sendAs: []`，如飞书）压根没有 persona
+   * 身份这一层，`selfConfirmed` 恒 false —— 一律要求它，等于**只连飞书的用户
+   * 第 1 步永远不会自动完成**，只能靠「跳过此步」，而"跳过"在进度条上是另一
+   * 个语义（用户会以为自己漏了什么）。
+   *
+   * 所以：能跑分身的渠道要 `selfConfirmed`（守住那个静默坑）；只读渠道
+   * **授权即够**（它要的全部就是"能读到数据"）。
+   *
+   * ## ★★ 缺 `capabilities` 时必须倒向"要确认"，不能倒向"放宽"
+   *
+   * 不能直接写 `canRunPersona(activeChannel) ? selfConfirmed : authorized` ——
+   * `canRunPersona` 在 `capabilities` **缺失**时返回 false（对"能不能发消息"
+   * 这个问题保守是对的）。但拿它反推"要不要确认身份"就倒错了方向：
+   * 旧主进程的响应不带 `capabilities`，于是主渠道会被当成只读渠道 →
+   * 授权即打勾 → 身份歧义那个静默坑重新打开（实测：一条既有断言当场转红）。
+   *
+   * 判据因此改成**只有明确知道是只读**（`sendAs` 是显式空数组）才放宽；
+   * 字段缺失、或还没读到渠道列表，都按"要确认"处理。
+   */
+  const activeIsReadOnly = activeChannel?.capabilities?.sendAs?.length === 0
+  const channelStepSatisfied =
+    activeChannel === undefined ? false : activeIsReadOnly ? authorized : selfConfirmed
   const unjudged = ingestSnapshot.data?.unjudged ?? 0
   /**
    * 身份没确认的**原因** —— 界面据此给不同的引导。
@@ -330,13 +377,13 @@ export function OnboardingView() {
    * 用户执意继续也不被拦——见 footer 的 skipStep / skip。
    */
   useEffect(() => {
-    if (!authorized || !selfConfirmed) return
+    if (!authorized || !channelStepSatisfied) return
     if (byStep.get("channel")?.state === "done") return
     if (completeStep.isPending) return
     completeStep.mutate({ step: "channel" })
     // completeStep 每次渲染都是新对象，放进依赖会变成循环
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authorized, selfConfirmed, byStep])
+  }, [authorized, channelStepSatisfied, byStep])
 
   const visualState = (id: OnboardingStepId): StepVisualState => {
     const state = byStep.get(id)?.state
@@ -528,9 +575,43 @@ export function OnboardingView() {
                 </div>
               ) : list.length === 0 ? null : (
                 <div className="flex flex-col gap-[var(--gap-component-md)]">
-                  {list.map((channel) => (
-                    <ChannelAuthPanel key={channel.id} channel={channel} variant="onboarding" />
-                  ))}
+                  {/*
+                    ── 我在配哪个渠道 ──────────────────────────────────
+
+                    ## ★★ 为什么这一步需要一个明确的选择
+
+                    原来这里把**所有**渠道的授权卡片平铺出来，而完成判据写死
+                    主渠道。于是只连飞书的用户：卡片有两张、第 1 步永远不自动
+                    完成（钉钉那条 `authorized` 恒 false）、只能点「跳过此步」
+                    —— 而"跳过"在进度条上是另一个语义，他会以为自己漏了什么。
+
+                    现在这一步有一个明确的"当前渠道"：授权卡片、完成门、身份
+                    确认入口全部跟着它。只有一个可用渠道时 `ChannelPicker`
+                    自己退化成静态标识（见那个组件），所以多数人看不出有选择器。
+
+                    ★ `side="bottom"`：引导页这一块在上半屏，默认 `"top"` 会
+                    让浮层往窗口外飞（那个组件的文件头记了这条）。
+                  */}
+                  {availableChannels.length > 1 ? (
+                    <ChannelPicker
+                      options={availableChannels.map((c) => ({
+                        id: c.id,
+                        label: tc(c.labelKey, { defaultValue: c.id }),
+                      }))}
+                      activeId={activeChannel?.id ?? null}
+                      onChange={setPickedChannelId}
+                      ariaLabel={t("channel.pickerLabel")}
+                      prefix={t("channel.pickerPrefix")}
+                      side="bottom"
+                    />
+                  ) : null}
+                  {activeChannel === undefined ? null : (
+                    <ChannelAuthPanel
+                      key={activeChannel.id}
+                      channel={activeChannel}
+                      variant="onboarding"
+                    />
+                  )}
                   {/*
                    * 已授权但身份还没确认（同名多 ID 的歧义情形）——就地给确认入口。
                    *
