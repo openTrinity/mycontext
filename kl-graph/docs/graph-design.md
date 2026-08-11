@@ -82,15 +82,22 @@ source strategies may refine this with name/span matching. Extraction items
 never appear as graph edge endpoints.
 
 The built-in session-chat strategy extracts each complete message once while
-storing session slices. A future fixed-size strategy can inherit the common
-planning base and override storage-chunk construction, item construction,
-lineage spans, and projection selection; generic pipeline and graph modules do
-not change. Extracting isolated halves is reserved for an explicit
+storing session slices. The optional fixed-size chat strategy stores
+overlapping character-budget windows within each chat session. A window may
+contain parts of multiple messages and one message may span multiple windows;
+every `chunk_units` row records the exact source-relative half-open span
+`[start_offset, end_offset)`. Fixed-size windows never cross a session break.
+They inherit complete-message extraction and project each extraction item to
+every window containing part of that message, so storage boundaries do not
+duplicate facts. Extracting isolated halves is reserved for an explicit
 over-context-limit fallback and must use distinct extraction-item identities.
 
 Extraction strategy selection is explicit configuration keyed by `source_type`.
-The current strategy vocabulary is `chat_message`, `document_chunk`, and
-`stored_chunk`, with a configured default for unknown sources. Each item records
+The current strategy vocabulary is `chat_message`, `fixed_size_chat`,
+`document_chunk`, and `stored_chunk`, with a configured default for unknown
+sources. `fixed_size_chat` uses the configured positive character budget and a
+non-negative overlap smaller than that budget; both values form part of its
+strategy version and deterministic chunk identity. Each extraction item records
 its prompt and strategy versions. Prompt language is also explicit (`zh` or
 `en`); the configured language selects the matching system prompt and forms
 part of the prompt version used for cache identity.

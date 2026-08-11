@@ -1992,7 +1992,7 @@ class IngestionPipeline:
         plans.append(chat_plan)
         self.messages = chat_plan.chunks
         if self.messages:
-            print(f"  chat: {len(self.messages)} session slices")
+            print(f"  chat: {len(self.messages)} chunks")
 
         # Other sources live as sibling dirs under the export root. Derive the
         # root from the chat dir so a custom export_dir (per-ingest override)

@@ -55,6 +55,8 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.extraction.max_retries",
     "pipelines.ingestion.extraction.cache_max_entries",
     "pipelines.ingestion.extraction.prompt_language",
+    "pipelines.ingestion.extraction.fixed_size_chat.chunk_size_chars",
+    "pipelines.ingestion.extraction.fixed_size_chat.overlap_chars",
     "pipelines.ingestion.extraction.strategies.message",
     "pipelines.ingestion.extraction.strategies.wiki",
     "pipelines.ingestion.extraction.strategies.mail",
@@ -160,4 +162,13 @@ def test_schema_rejects_negative_extraction_retries() -> None:
     value["pipelines"]["ingestion"]["extraction"]["max_retries"] = -1
 
     with pytest.raises(ValidationError, match="max_retries"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_invalid_fixed_size_overlap() -> None:
+    value = deepcopy(_config_dict())
+    fixed = value["pipelines"]["ingestion"]["extraction"]["fixed_size_chat"]
+    fixed["overlap_chars"] = fixed["chunk_size_chars"]
+
+    with pytest.raises(ValidationError, match="overlap_chars"):
         AppConfig.model_validate(value)

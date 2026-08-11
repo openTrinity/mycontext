@@ -6,13 +6,18 @@ import json
 import uuid
 from dataclasses import replace
 
-from kl_graph.config import cfg
+import kl_graph.config as config_module
 from kl_graph.ingest.extraction_strategy import (
     CHAT_CONTEXT_WINDOW,
     PROMPT_VERSION,
     strategy_for,
 )
-from kl_graph.ingest.session_chunker import slice_chat_sessions
+from kl_graph.ingest.session_chunker import (
+    MESSAGE_JOIN,
+    _iter_sessions,
+    _strip_session_marker,
+    slice_chat_sessions,
+)
 from kl_graph.models.types import (
     Chunk,
     ChunkUnit,
@@ -288,6 +293,204 @@ class SessionChatProcessingStrategy(SourceProcessingStrategy):
         return projections
 
 
+class FixedSizeChatProcessingStrategy(SessionChatProcessingStrategy):
+    """Store overlapping fixed-size chat windows with exact unit lineage.
+
+    Storage windows are character-budgeted and remain inside the loader's
+    conversation/session boundaries. Complete-message extraction and
+    projection are inherited from :class:`SessionChatProcessingStrategy`.
+    """
+
+    def __init__(
+        self,
+        chunk_size_chars: int,
+        overlap_chars: int,
+        context_window: int = CHAT_CONTEXT_WINDOW,
+    ):
+        if chunk_size_chars <= 0:
+            raise ValueError("fixed-size chunk_size_chars must be positive")
+        if overlap_chars < 0:
+            raise ValueError("fixed-size overlap_chars cannot be negative")
+        if overlap_chars >= chunk_size_chars:
+            raise ValueError(
+                "fixed-size overlap_chars must be smaller than chunk_size_chars"
+            )
+        super().__init__(context_window=context_window)
+        self.chunk_size_chars = chunk_size_chars
+        self.overlap_chars = overlap_chars
+        self.version = (
+            f"fixed-size-chat-v1:{self.chunk_size_chars}:{self.overlap_chars}"
+        )
+
+    def build_stored_chunks(
+        self, records: list[Chunk], units: list[SourceUnit]
+    ) -> list[Chunk]:
+        chunks: list[Chunk] = []
+        session_index_by_conv: dict[str, int] = {}
+        for session in _iter_sessions(records):
+            conv_id = str(session[0].metadata.get("conversation_id") or "")
+            session_index = session_index_by_conv.get(conv_id, 0)
+            session_index_by_conv[conv_id] = session_index + 1
+            chunks.extend(
+                self._chunk_session(
+                    session,
+                    conversation_id=conv_id,
+                    session_index=session_index,
+                )
+            )
+        return chunks
+
+    def _chunk_session(
+        self,
+        records: list[Chunk],
+        *,
+        conversation_id: str,
+        session_index: int,
+    ) -> list[Chunk]:
+        """Slice one session and retain source-relative spans for every window."""
+        parts: list[str] = []
+        source_ranges: list[tuple[int, int, int, Chunk]] = []
+        cursor = 0
+        for index, record in enumerate(records):
+            if index:
+                parts.append(MESSAGE_JOIN)
+                cursor += len(MESSAGE_JOIN)
+            content = _strip_session_marker(record.content)
+            if not content:
+                raise ValueError(
+                    f"fixed-size chat record {record.id!r} has no content"
+                )
+            source_base = len(record.content) - len(content)
+            start = cursor
+            parts.append(content)
+            cursor += len(content)
+            source_ranges.append((start, cursor, source_base, record))
+
+        stream = "".join(parts)
+        step = self.chunk_size_chars - self.overlap_chars
+        first_meta = records[0].metadata
+        chunks: list[Chunk] = []
+        window_start = 0
+        window_ordinal = 0
+        while window_start < len(stream):
+            window_end = min(window_start + self.chunk_size_chars, len(stream))
+            lineage: list[dict[str, int | str]] = []
+            members: list[Chunk] = []
+            for unit_start, unit_end, source_base, record in source_ranges:
+                overlap_start = max(window_start, unit_start)
+                overlap_end = min(window_end, unit_end)
+                if overlap_start >= overlap_end:
+                    continue
+                lineage.append(
+                    {
+                        "unit_id": record.id,
+                        "start_offset": source_base + overlap_start - unit_start,
+                        "end_offset": source_base + overlap_end - unit_start,
+                    }
+                )
+                members.append(record)
+
+            # A tiny budget can produce a separator-only window. It carries no
+            # source evidence, so omit it from the ingestion plan.
+            if lineage:
+                metadata: dict = {
+                    "conversation_id": conversation_id,
+                    "session_index": session_index,
+                    "slice_index": window_ordinal,
+                    "member_message_ids": [record.id for record in members],
+                    "senders": list(
+                        dict.fromkeys(
+                            str(record.metadata.get("sender") or "")
+                            for record in members
+                            if record.metadata.get("sender")
+                        )
+                    ),
+                    "reply_to_message_ids": list(
+                        dict.fromkeys(
+                            str(record.metadata.get("reply_to") or "")
+                            for record in members
+                            if record.metadata.get("reply_to")
+                        )
+                    ),
+                    "extraction_target_contents": [
+                        str(
+                            record.metadata.get("extraction_target_content")
+                            or record.content
+                        )
+                        for record in members
+                    ],
+                    "quoted_contexts": [
+                        str(record.metadata.get("quoted_context") or "")
+                        for record in members
+                    ],
+                    "lineage_spans": lineage,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                }
+                if not chunks:
+                    metadata["session_start"] = True
+                for key in ("conversation_title", "chat_kind"):
+                    if first_meta.get(key):
+                        metadata[key] = first_meta[key]
+                span_identity = json.dumps(
+                    lineage, sort_keys=True, separators=(",", ":")
+                )
+                chunk_id = _stable_item_id(
+                    "fixed-size-chunk",
+                    self.version,
+                    conversation_id,
+                    span_identity,
+                )
+                chunks.append(
+                    Chunk(
+                        id=chunk_id,
+                        content=stream[window_start:window_end],
+                        source_type="message",
+                        timestamp=members[0].timestamp,
+                        source_ref=members[0].source_ref,
+                        metadata=metadata,
+                    )
+                )
+            if window_end == len(stream):
+                break
+            window_start += step
+            window_ordinal += 1
+        return chunks
+
+    def build_chunk_units(
+        self,
+        chunks: list[Chunk],
+        units: list[SourceUnit],
+        *,
+        source_id: str,
+    ) -> list[ChunkUnit]:
+        selected = {unit.unit_id for unit in units if unit.source_type == "message"}
+        ordinals: dict[str, int] = {}
+        rows: list[ChunkUnit] = []
+        for chunk in chunks:
+            unit_ordinal = 0
+            for span in chunk.metadata.get("lineage_spans") or []:
+                unit_id = str(span["unit_id"])
+                if unit_id not in selected:
+                    continue
+                chunk_ordinal = ordinals.get(unit_id, 0)
+                ordinals[unit_id] = chunk_ordinal + 1
+                rows.append(
+                    ChunkUnit(
+                        chunk_id=chunk.id,
+                        source_id=source_id,
+                        source_type="message",
+                        unit_id=unit_id,
+                        unit_ordinal_in_chunk=unit_ordinal,
+                        chunk_ordinal_in_unit=chunk_ordinal,
+                        start_offset=int(span["start_offset"]),
+                        end_offset=int(span["end_offset"]),
+                    )
+                )
+                unit_ordinal += 1
+        return rows
+
+
 _SOURCE_STRATEGIES: dict[str, SourceProcessingStrategy] = {
     "chat_message": SessionChatProcessingStrategy(),
     "document_chunk": SourceProcessingStrategy(),
@@ -296,8 +499,15 @@ _SOURCE_STRATEGIES: dict[str, SourceProcessingStrategy] = {
 
 
 def source_strategy_for(source_type: str) -> SourceProcessingStrategy:
-    configured = dict(cfg.pipelines.ingestion.extraction.strategies)
+    extraction_config = config_module.cfg.pipelines.ingestion.extraction
+    configured = dict(extraction_config.strategies)
     name = configured.get(source_type, configured.get("default", "stored_chunk"))
+    if name == "fixed_size_chat":
+        fixed = extraction_config.fixed_size_chat
+        return FixedSizeChatProcessingStrategy(
+            chunk_size_chars=int(fixed.chunk_size_chars),
+            overlap_chars=int(fixed.overlap_chars),
+        )
     return _SOURCE_STRATEGIES.get(name, _SOURCE_STRATEGIES["stored_chunk"])
 
 

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Literal
 
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Load structured config
@@ -142,6 +142,17 @@ class IngestionEmbeddingConfig(_ConfigModel):
     timeout: float
 
 
+class FixedSizeChatConfig(_ConfigModel):
+    chunk_size_chars: int = Field(gt=0)
+    overlap_chars: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_overlap(self) -> "FixedSizeChatConfig":
+        if self.overlap_chars >= self.chunk_size_chars:
+            raise ValueError("overlap_chars must be smaller than chunk_size_chars")
+        return self
+
+
 class ExtractionConfig(_ConfigModel):
     batch_size: int
     batch_timeout: int
@@ -149,6 +160,7 @@ class ExtractionConfig(_ConfigModel):
     max_retries: int = Field(ge=0)
     cache_max_entries: int = Field(gt=0)
     prompt_language: Literal["zh", "en"] = "zh"
+    fixed_size_chat: FixedSizeChatConfig
     strategies: dict[str, str] = Field(default_factory=dict)
 
 

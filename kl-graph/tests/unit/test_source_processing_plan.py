@@ -5,57 +5,20 @@ from __future__ import annotations
 import hashlib
 from unittest.mock import MagicMock
 
+from kl_graph.ingest.loaders.base import SESSION_BREAK_MARKER
 from kl_graph.ingest.pipeline import IngestionPipeline
-from kl_graph.ingest.source_strategy import SessionChatProcessingStrategy
+from kl_graph.ingest.source_strategy import (
+    FixedSizeChatProcessingStrategy,
+    SessionChatProcessingStrategy,
+    source_strategy_for,
+)
 from kl_graph.models.types import (
     Chunk,
-    ChunkUnit,
     EdgeType,
     ExtractionProjection,
     SourceUnit,
 )
 from kl_graph.storage.sqlite_store import SQLiteStore
-
-
-class FixedSizeChatStrategy(SessionChatProcessingStrategy):
-    """Tiny test policy: split storage while inheriting complete extraction."""
-
-    version = "fixed-size-test-v1"
-
-    def build_stored_chunks(self, records, units):
-        record = records[0]
-        midpoint = len(record.content) // 2
-        return [
-            Chunk(
-                id=f"fixed-{index}",
-                content=content,
-                source_type="message",
-                timestamp=record.timestamp,
-                metadata={
-                    "member_message_ids": [record.id],
-                    "conversation_id": record.metadata["conversation_id"],
-                },
-            )
-            for index, content in enumerate(
-                (record.content[:midpoint], record.content[midpoint:])
-            )
-        ]
-
-    def build_chunk_units(self, chunks, units, *, source_id):
-        split = len(chunks[0].content)
-        return [
-            ChunkUnit(
-                chunk_id=chunk.id,
-                source_id=source_id,
-                source_type="message",
-                unit_id=units[0].unit_id,
-                unit_ordinal_in_chunk=0,
-                chunk_ordinal_in_unit=index,
-                start_offset=0 if index == 0 else split,
-                end_offset=split if index == 0 else split + len(chunk.content),
-            )
-            for index, chunk in enumerate(chunks)
-        ]
 
 
 def _message_and_unit():
@@ -76,9 +39,16 @@ def _message_and_unit():
     return message, unit
 
 
+def _two_window_strategy(message: Chunk) -> FixedSizeChatProcessingStrategy:
+    return FixedSizeChatProcessingStrategy(
+        chunk_size_chars=(len(message.content) + 1) // 2,
+        overlap_chars=0,
+    )
+
+
 def test_fixed_storage_inherits_complete_message_extraction_and_projection():
     message, unit = _message_and_unit()
-    plan = FixedSizeChatStrategy().plan([message], [unit], source_id="ding")
+    plan = _two_window_strategy(message).plan([message], [unit], source_id="ding")
 
     assert len(plan.chunks) == 2
     assert len(plan.extraction_items) == 1
@@ -87,9 +57,12 @@ def test_fixed_storage_inherits_complete_message_extraction_and_projection():
     assert [row.chunk_ordinal_in_unit for row in plan.chunk_units] == [0, 1]
     assert [row.role for row in plan.projections] == ["primary", "supporting"]
     assert {row.chunk_id for row in plan.projections} == {
-        "ding:fixed-0",
-        "ding:fixed-1",
+        chunk.id for chunk in plan.chunks
     }
+    assert [(row.start_offset, row.end_offset) for row in plan.chunk_units] == [
+        (0, len(plan.chunks[0].content)),
+        (len(plan.chunks[0].content), len(message.content)),
+    ]
 
 
 def test_oversized_quote_is_stored_in_slices_but_never_becomes_target():
@@ -132,8 +105,9 @@ def test_oversized_quote_is_stored_in_slices_but_never_becomes_target():
 
 def test_extraction_identity_does_not_depend_on_storage_chunk_ids():
     message, unit = _message_and_unit()
-    first = FixedSizeChatStrategy().plan([message], [unit], source_id="ding")
-    second = FixedSizeChatStrategy().plan([message], [unit], source_id="ding")
+    strategy = _two_window_strategy(message)
+    first = strategy.plan([message], [unit], source_id="ding")
+    second = strategy.plan([message], [unit], source_id="ding")
     second.chunks[0].id = "different-storage-id"
 
     assert first.extraction_items[0].id == second.extraction_items[0].id
@@ -141,7 +115,7 @@ def test_extraction_identity_does_not_depend_on_storage_chunk_ids():
 
 def test_active_batch_round_trips_complete_extraction_plan(tmp_path):
     message, unit = _message_and_unit()
-    plan = FixedSizeChatStrategy().plan([message], [unit], source_id="ding")
+    plan = _two_window_strategy(message).plan([message], [unit], source_id="ding")
     store = SQLiteStore(tmp_path / "knowledge.db")
     try:
         store.insert_chunks_with_units(
@@ -159,6 +133,161 @@ def test_active_batch_round_trips_complete_extraction_plan(tmp_path):
         assert projections == plan.projections
     finally:
         store.close()
+
+
+def test_fixed_size_overlap_tracks_exact_spans_across_message_boundaries():
+    messages = [
+        Chunk(
+            id="m1",
+            content="abcdefghij",
+            source_type="message",
+            timestamp=1,
+            metadata={"conversation_id": "conv", "sender": "User A"},
+        ),
+        Chunk(
+            id="m2",
+            content="KLMNOPQRST",
+            source_type="message",
+            timestamp=2,
+            metadata={"conversation_id": "conv", "sender": "User B"},
+        ),
+    ]
+    units = [
+        SourceUnit("ding", "message", message.id, f"hash-{message.id}")
+        for message in messages
+    ]
+    strategy = FixedSizeChatProcessingStrategy(
+        chunk_size_chars=8, overlap_chars=2
+    )
+
+    plan = strategy.plan(messages, units, source_id="ding")
+
+    assert [len(chunk.content) for chunk in plan.chunks] == [8, 8, 8, 4]
+    assert plan.chunks[1].metadata["member_message_ids"] == ["m1", "m2"]
+    spans = [
+        (row.unit_id, row.start_offset, row.end_offset)
+        for row in plan.chunk_units
+    ]
+    assert spans == [
+        ("m1", 0, 8),
+        ("m1", 6, 10),
+        ("m2", 0, 2),
+        ("m2", 0, 8),
+        ("m2", 6, 10),
+    ]
+    assert len(plan.extraction_items) == 2
+    assert [item.content for item in plan.extraction_items] == [
+        "abcdefghij",
+        "KLMNOPQRST",
+    ]
+    projections_by_item = {
+        item.source_unit_id: [
+            row for row in plan.projections if row.extraction_item_id == item.id
+        ]
+        for item in plan.extraction_items
+    }
+    assert len(projections_by_item["m1"]) == 2
+    assert len(projections_by_item["m2"]) == 3
+
+
+def test_fixed_size_windows_never_cross_session_breaks():
+    messages = [
+        Chunk(
+            id="m1",
+            content="first",
+            metadata={"conversation_id": "conv", "sender": "User A"},
+        ),
+        Chunk(
+            id="m2",
+            content="second",
+            metadata={
+                "conversation_id": "conv",
+                "sender": "User B",
+                "session_start": True,
+            },
+        ),
+    ]
+    units = [
+        SourceUnit("ding", "message", message.id, f"hash-{message.id}")
+        for message in messages
+    ]
+
+    plan = FixedSizeChatProcessingStrategy(100, 10).plan(
+        messages, units, source_id="ding"
+    )
+
+    assert [chunk.content for chunk in plan.chunks] == ["first", "second"]
+    assert [chunk.metadata["session_index"] for chunk in plan.chunks] == [0, 1]
+    assert all(chunk.metadata["session_start"] for chunk in plan.chunks)
+
+
+def test_fixed_size_lineage_offsets_account_for_removed_session_marker():
+    prefix = f"{SESSION_BREAK_MARKER}\n"
+    message = Chunk(
+        id="m1",
+        content=f"{prefix}abcdef",
+        metadata={"conversation_id": "conv", "session_start": True},
+    )
+    unit = SourceUnit("ding", "message", "m1", "hash-m1")
+
+    plan = FixedSizeChatProcessingStrategy(3, 0).plan(
+        [message], [unit], source_id="ding"
+    )
+
+    assert [chunk.content for chunk in plan.chunks] == ["abc", "def"]
+    assert [(row.start_offset, row.end_offset) for row in plan.chunk_units] == [
+        (len(prefix), len(prefix) + 3),
+        (len(prefix) + 3, len(prefix) + 6),
+    ]
+
+
+def test_fixed_size_chunk_ids_are_deterministic_and_budget_specific():
+    message, unit = _message_and_unit()
+    first = FixedSizeChatProcessingStrategy(30, 5).plan(
+        [message], [unit], source_id="ding"
+    )
+    second = FixedSizeChatProcessingStrategy(30, 5).plan(
+        [message], [unit], source_id="ding"
+    )
+    changed_budget = FixedSizeChatProcessingStrategy(31, 5).plan(
+        [message], [unit], source_id="ding"
+    )
+
+    assert [chunk.id for chunk in first.chunks] == [
+        chunk.id for chunk in second.chunks
+    ]
+    assert [chunk.id for chunk in first.chunks] != [
+        chunk.id for chunk in changed_budget.chunks
+    ]
+
+
+def test_fixed_size_rejects_invalid_budgets():
+    for size, overlap in ((0, 0), (10, -1), (10, 10), (10, 11)):
+        try:
+            FixedSizeChatProcessingStrategy(size, overlap)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid fixed-size budget {size}/{overlap}")
+
+
+def test_fixed_size_strategy_is_selectable_from_source_configuration(monkeypatch):
+    from kl_graph.config import cfg
+
+    monkeypatch.setitem(
+        cfg.pipelines.ingestion.extraction.strategies,
+        "message",
+        "fixed_size_chat",
+    )
+
+    strategy = source_strategy_for("message")
+    assert isinstance(strategy, FixedSizeChatProcessingStrategy)
+    assert strategy.chunk_size_chars == int(
+        cfg.pipelines.ingestion.extraction.fixed_size_chat.chunk_size_chars
+    )
+    assert strategy.overlap_chars == int(
+        cfg.pipelines.ingestion.extraction.fixed_size_chat.overlap_chars
+    )
 
 
 def test_one_fact_can_state_multiple_chunks_without_duplicate_fact_identity():

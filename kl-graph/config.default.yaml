@@ -147,9 +147,16 @@ pipelines:
       cache_max_entries: ${oc.env:KL_EXTRACTION_CACHE_MAX_ENTRIES,100000}
       # Extraction system-prompt language: zh or en.
       prompt_language: zh
+      # Character-window settings used when a source selects fixed_size_chat.
+      fixed_size_chat:
+        # Maximum characters stored in one fixed-size chat window.
+        chunk_size_chars: ${oc.env:KL_FIXED_SIZE_CHAT_CHUNK_CHARS,1200}
+        # Characters repeated from the preceding window; must be less than size.
+        overlap_chars: ${oc.env:KL_FIXED_SIZE_CHAT_OVERLAP_CHARS,200}
       # Map each source type to its extraction-item construction strategy.
       strategies:
-        # Extract each chat message, with neighboring/quoted text as context only.
+        # Extract each chat message with read-only context. Set this to
+        # fixed_size_chat to store the configured overlapping character windows.
         message: chat_message
         # Extract each stored semantic document chunk.
         wiki: document_chunk
