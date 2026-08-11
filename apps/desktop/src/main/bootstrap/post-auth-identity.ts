@@ -165,6 +165,33 @@ export async function routeAuthorizedIdentity(deps: {
     return false
   }
 
+  /**
+   * ★★★ 并入了**当前这个** vault → 也不切库（多渠道并存那条路）。
+   *
+   * ## 为什么必须有这一条（连了飞书再连钉钉，飞书就掉线）
+   *
+   * 上面那个判据只比「组织 + 人」。而飞书与钉钉是两个不同企业的
+   * `corpId/userId`，所以加第二个渠道时它必然不成立 → 判成"换身份" → 切库。
+   * 而"切库"就是卸载当前 vault、挂载另一个 —— 先连的那个渠道的采集管线
+   * 随之被卸掉。实测就是这个形态。
+   *
+   * 从 control v5 起 `bindAuthorized` 会把"加一个新渠道"**并入当前 vault**
+   * （见那里的注释与 `CONTROL_0005_VAULT_MULTI_CHANNEL`）。既然 vault 没变，
+   * 就没有任何东西需要切 —— 挂载链路随后会把这个新渠道作为 source 挂进来
+   * （`pipelines.mount(vaultId, others)`，那条路本来就收列表）。
+   *
+   * 判据用 `vaultId` 相等而不是"是不是同一个人"：前者直接回答了
+   * "要不要换库"这个唯一的问题，而后者在跨渠道时本来就无法比较
+   * （两个渠道的 corpId 天然不同，比了只会得出错误的"换人了"）。
+   */
+  if (current !== null && bound.vaultId === current.vaultId) {
+    deps.logger.info("channel joined current vault; no switch needed", {
+      channelId: key.channelId,
+      corpName: deps.status.corpName,
+    })
+    return false
+  }
+
   deps.logger.info("routing to identity vault after auth", {
     channelId: key.channelId,
     corpName: deps.status.corpName,

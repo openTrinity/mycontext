@@ -2024,7 +2024,30 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 显式的 `null` 也当成"没传"，于是又去读那个可能过期的内存态。
      */
     const identity = seedIdentity === undefined ? activeIdentity.currentIdentity() : seedIdentity
-    if (identity !== null) {
+    /**
+     * ★★★ seed 钉钉的 profile 只能用**钉钉那一行**身份。
+     *
+     * ## 为什么现在必须显式挑渠道
+     *
+     * `seedChannelProfile` 是**钉钉专属**的（写的是 dws 的 `profiles.json`，
+     * 见 `plugins/dingtalk/profile-seed.ts`）。而从 control v5 起一个 vault
+     * 可以挂**多个渠道**的身份（飞书一行、钉钉一行 —— 那正是多渠道并存），
+     * 于是 `currentIdentity()` 返回的"这个 vault 的当前身份"**可能是飞书的**。
+     *
+     * 拿飞书的 `corpId/userId` 去 seed 钉钉的 profile，后果不是报错而是
+     * **越权读取面**：dws 会按一个不属于它的身份作答，也就是"拿着 A 的
+     * 凭据目录去读 B 的会话"。而这正是 profile-seed 这道防线本身要挡的事
+     * （见那个文件的文件头），却会被"vault 里有另一个渠道"从内部打开。
+     *
+     * 判据：只有当这一行身份**就是主渠道（钉钉）的**才 seed。
+     * 飞书的凭据走它自己的隔离目录（`channels/feishu/`，见 `LarkCli.authRoot`），
+     * 与 dws 的 profiles.json 无关，所以跳过对它完全无损。
+     *
+     * ★ 用 `startsWith(dingtalk.meta.id)` 而不是全等：`channelId` 会带
+     * 「来源应用」后缀（`dingtalk@src-…`，用户自备 CLI 那种），
+     * 全等会把自备那份漏掉、于是它的 profile 永远不被 seed。
+     */
+    if (identity !== null && identity.channelId.startsWith(dingtalk.meta.id)) {
       const seeded = seedChannelProfile(vp.dwsHome, {
         corpId: identity.corpId,
         userId: identity.userId,

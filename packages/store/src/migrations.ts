@@ -192,11 +192,53 @@ CREATE TABLE vault_settings (
 );
 `
 
+/**
+ * 放宽 `vault_id` 的唯一约束：一个 vault 允许挂**多个渠道**的身份。
+ *
+ * ## ★★★ 为什么 v4 那条 UNIQUE 过紧（连了飞书再连钉钉，飞书就掉线）
+ *
+ * v4 的注释说「一个 vault 只能属于一个身份」是真不变式，并把它当作
+ * `SelfIdentityRepository.upsert` 那道 fail-closed 守卫在库层的对应物。
+ * **前半句对、后半句不对**：那道守卫的隔离维度是
+ * 「**先按渠道分（每个渠道一行）**，渠道内再按组织 + 工号」
+ * （见 `conversations.ts` 的 `upsert`：`get(record.channelId)` +
+ * `ON CONFLICT(channel_id)`）。也就是说同一个 vault 里
+ * **飞书一行、钉钉一行是完全合规的**，守卫压根不会触发。
+ *
+ * 而库层这条 UNIQUE 比守卫**更严**：它连"同一个人的两个渠道"都挡。
+ * 后果是多渠道并存在数据层被结构性禁止：
+ *
+ *     连飞书 → 绑到基础 vault
+ *     连钉钉 → 想并入同一个 vault → 撞 UNIQUE → 只能新建一个 vault
+ *     → 一个时刻只挂一个 vault → 飞书的采集管线被卸载
+ *
+ * 而这个架构本来就是为并存设计的：`ChannelPipelineManager.mount(vaultId,
+ * channelIds)` 收的是**列表**，非主渠道的库/图/导出各自落在
+ * `sources/<channelId>/` 下。v4 那条索引把这条路堵死了。
+ *
+ * ## 放宽到什么程度：`(vault_id, channel_id)`
+ *
+ * 仍然保留"**同一个渠道**在一个 vault 里只能有一个身份"——那才是守卫的
+ * 真正对应物，也是"两个人的语料混进同一份画像"这件事的实际入口。
+ * 换组织/换人（同渠道、不同 corpId/userId）照旧走"新建一个 vault"。
+ *
+ * ## SQLite 上怎么改索引
+ *
+ * `DROP INDEX` + 建新索引即可 —— 索引不是表结构，不需要重建表搬数据，
+ * 所以这条迁移对存量行零风险（存量每个 vault 只有一行，新索引天然满足）。
+ */
+const CONTROL_0005_VAULT_MULTI_CHANNEL = `
+DROP INDEX IF EXISTS idx_identity_vaults_vault;
+CREATE UNIQUE INDEX idx_identity_vaults_vault_channel
+  ON channel_identity_vaults(vault_id, channel_id);
+`
+
 export const CONTROL_MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: CONTROL_0001_INIT },
   { version: 2, name: "account-vaults", sql: CONTROL_0002_VAULTS },
   { version: 3, name: "account-profile", sql: CONTROL_0003_PROFILE },
   { version: 4, name: "channel-identity-vaults", sql: CONTROL_0004_IDENTITY_VAULTS },
+  { version: 5, name: "vault-multi-channel", sql: CONTROL_0005_VAULT_MULTI_CHANNEL },
 ]
 
 /**

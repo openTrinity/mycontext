@@ -3546,6 +3546,38 @@ export class IngestService {
      * 与首次回填完全同一条路径。少一个特殊分支。
      */
     this.options.db.prepare("DELETE FROM sync_cursors WHERE scope = ?").run(this.backfillScopeKey())
+    /**
+     * ★★★ 增量水位也要一起重置 —— 否则新勾的会话的历史**永远补不回来**。
+     *
+     * ## 实测的坏形态（那 9 条消息）
+     *
+     * 时间线（本地，打包态真机）：
+     *
+     *     11:16:52  dropped:9 kept:0 allowed:0 restricted:true  ← 范围还没写，9 条全丢
+     *     11:16:52  ingest paused: collection scope not ready    ← 水位没推（那道保护生效了）
+     *     11:17:51  ingest scope change applied allowed:4        ← 范围此刻才写进来
+     *     11:18:19  用户点「立即同步」→ changed:0（点几次都一样）
+     *
+     * 手跑 CLI 核对过：那 9 条真实存在、`chat_id` 全部命中用户勾的 4 个会话、
+     * 业务时间 8-07（晚于 since）。也就是说它们本该被采到。
+     *
+     * 为什么没被采到：范围写好之后采集器继续跑**增量**，而增量窗只看
+     * 「水位 - 2 分钟」那一小段 —— 8-07 的消息早就落在窗外。要补它们只能靠
+     * 回填，而回填看到「库里 0 条消息」就 `return null` 不启动
+     * （见 `nextBackfillWindow`）。于是两条腿都够不到那 9 条，水位一路爬到现在。
+     *
+     * ## 判据：白名单**放宽**了，"水位左边已完整"这个断言就不再成立
+     *
+     * watermark 承载的是「`[0, watermark)` 已完整落库」。而新勾进来的会话
+     * 在那段区间里**从没采过** —— 断言对它们是假的。所以放宽范围时必须让
+     * 水位退回去重扫，而不是只重置回填游标（只重置回填时，回填还会被空库挡住，
+     * 两个一起失效，那正是这次的形态）。
+     *
+     * 删整行而不是改小：`nextWindow` 对「没有这一行」就是走首轮
+     * `INITIAL_BACKFILL_MS` 全回溯，与我们要的行为同一条路，少一个特殊分支。
+     * 重扫的成本由幂等键兜住（`payload_hash`），已有的消息不会变成重复行。
+     */
+    this.scheduler.resetIncrementalWatermark()
     this.backfillStalled = null
     this.backfillStalledRounds = 0
     this.backfillWidthOverrideMs = null
@@ -3578,6 +3610,8 @@ export class IngestService {
       purgedConversations: report.conversations,
       purgedFtsRows: report.ftsRows,
       purgedMediaAssets: report.mediaAssets,
+      // ★ 两个游标都重置了要说出来 —— 下一轮会做一次全回溯，那不是异常
+      cursorsReset: true,
     })
     // 清理会改变库里的条数 —— 推一次快照，否则界面上的数字要等下一批消息才更新。
     if (report.messages > 0) this.events.emit("batch.persisted", { changed: 0 })

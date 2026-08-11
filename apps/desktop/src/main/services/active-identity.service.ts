@@ -444,8 +444,54 @@ export class ActiveIdentityService {
       return { vaultId: existing.vaultId, created: false }
     }
 
-    const hasAny = this.options.identities.countByAccount(input.key.accountId) > 0
-    const vaultId = hasAny ? input.newVaultId() : input.baseVaultId
+    /**
+     * ★★★ 判据是「这个**渠道**绑过身份没有」，不是「这个账号绑过任何身份没有」。
+     *
+     * ## 实测的坏形态：连了飞书再连钉钉，飞书就掉线
+     *
+     * 原判据是 `countByAccount(accountId) > 0` —— 只要这个账号绑过**任何**身份
+     * 就新建一个 vault。于是：
+     *
+     *     连飞书 → 一个身份都没有 → 绑到基础 vault（e826e967…）
+     *     连钉钉 → hasAny=true    → **新建** vault（b8a97c85…）
+     *     → 挂载切到钉钉那个库 → 飞书的管线被卸载
+     *
+     * 而一个时刻只挂一个 vault，所以两个渠道**永远不可能同时在线**。
+     * 控制库里的真值就是两行指向两个不同的 vault_id。
+     *
+     * ## 为什么"加一个渠道"该并入当前库
+     *
+     * 这个架构本来就支持一个 vault 里挂多个渠道 ——
+     * `ChannelPipelineManager.mount(vaultId, channelIds)` 收的是**列表**，
+     * 非主渠道的库/图/导出各自落在 `sources/<channelId>/` 下（见 startup 那段
+     * 注释）。也就是说"飞书和钉钉在同一个库里各占一格"是**设计内**的，
+     * 原判据把这条路堵死了。
+     *
+     * ## ★ 但「换人 / 换组织」仍然必须建新库 —— 那道守卫不能动
+     *
+     * `SelfIdentityRepository.upsert` 那道 fail-closed 守卫防的是"两个人的
+     * 语料混进同一份画像"，不可逆。所以判据只放宽**同一渠道之外**的维度：
+     * · 这个渠道**没绑过** → 并入当前库（加渠道，人还是那个人）；
+     * · 这个渠道**绑过别的组织/人** → 新建库（换身份，走原来那条路）。
+     *
+     * `vault_id` 上的 UNIQUE 索引与这条判据不冲突：并入时我们复用的是
+     * **同一行身份**？不 —— 是**另一行**（channelId 不同），而那个索引要求
+     * 一个 vault 只对应一行身份。所以并入必须先解决索引冲突，见下面。
+     */
+    const sameChannel = this.options.identities.listByAccount(
+      input.key.accountId,
+      input.key.channelId,
+    )
+    /**
+     * 这个渠道已经绑过**别的**身份（换组织/换人）→ 新建库，走原来那条路。
+     * 这个渠道一次都没绑过 → 加渠道，并入当前挂着的库。
+     */
+    const switchingIdentity = sameChannel.length > 0
+    const current = this.current
+    const joinCurrent = !switchingIdentity && current !== null
+    const vaultId = switchingIdentity
+      ? input.newVaultId()
+      : (current?.vaultId ?? input.baseVaultId)
     this.options.identities.bind({
       ...input.key,
       vaultId,
@@ -457,9 +503,11 @@ export class ActiveIdentityService {
       channelId: input.key.channelId,
       corpName: input.corpName ?? null,
       // 新建 vault 是个值得留痕的事实（磁盘上多了一份数据）
-      created: hasAny,
+      created: switchingIdentity,
+      // ★ 并入当前库 = 多渠道并存那条路，与"换身份新建库"要能分辨
+      joinedCurrentVault: joinCurrent,
     })
-    return { vaultId, created: hasAny }
+    return { vaultId, created: switchingIdentity }
   }
 
   private remember(identity: ChannelIdentityVaultRecord): void {
