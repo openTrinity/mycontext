@@ -747,6 +747,13 @@ export class IngestService {
    * 错误埋掉（这一轮已经因此漏看过一次 `auth login`）。
    */
   private lastPullSkipReason: PullSkipReason | null = null
+  /**
+   * 「还没绑渠道身份」那条日志上次打的时刻；null = 还没打过。
+   *
+   * 只为了让它**只打一条**而不是每 10 秒一条 —— 见 `recordError` 里那段。
+   * 别的错误发生时复位（那说明身份闸这一段过去了）。
+   */
+  private lastIdentityGateLoggedAt: number | null = null
   private lastError: string | null = null
   private blockedReason: IngestSnapshot["blockedReason"] = null
   /**
@@ -3667,6 +3674,41 @@ export class IngestService {
    */
   private async recordError(error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error)
+    /**
+     * ★★★ 「还没绑渠道身份」不是错误，是**还没到能采的时候** —— 不记 lastError。
+     *
+     * ## 实测的形态（用户截图：飞书面板上挂着一条钉钉的红字）
+     *
+     * 只连了飞书、还没连钉钉的那几分钟里，**主渠道（钉钉）**的采集器照常
+     * 每 10 秒 tick 一次，每次都撞 `DwsCli` 那道身份闸（`CHANNEL_IDENTITY_UNAVAILABLE`），
+     * 于是：
+     *
+     *     06:06:43 ~ 06:07:53  ingest tick failed × 十几轮
+     *                          （外加 minutes tick / documents sync / active scan）
+     *     → lastError 被写成「还没绑定渠道身份，拒绝执行渠道命令」
+     *     → 界面上那条红字一直挂着，即使 06:08:01 钉钉连上之后也不会自己消失
+     *
+     * 两个问题：① 白跑一轮又一轮（每 10 秒三条 warn，刷了 8 分钟）；
+     * ② 那条 lastError 留在快照里，而它描述的是一个**已经过去**的状态。
+     *
+     * 事件流那条路早就这么处理了（`events.ts` 的
+     * `event stream not started: no bound identity` —— info 级、不当故障），
+     * 采集这条漏了同一条判据。
+     *
+     * ★ 归 info 且**不置 blocked**：授权完成后挂载链路会重新起采集，
+     * 不需要用户做任何事。置 blocked 反而要用户去点「重试」才恢复。
+     */
+    if (isAppError(error) && error.code === "CHANNEL_IDENTITY_UNAVAILABLE") {
+      if (this.lastIdentityGateLoggedAt === null) {
+        this.lastIdentityGateLoggedAt = this.options.clock.now()
+        this.options.logger.info("ingest skipped: no bound channel identity", {
+          channelId: this.options.plugin.meta.id,
+        })
+      }
+      return
+    }
+    // 别的错误发生了 → 复位那个"只打一条"的标记（下次没身份时要能重新留痕）
+    this.lastIdentityGateLoggedAt = null
     this.lastError = message
     if (isAppError(error)) {
       if (error.code === "SESSION_EXPIRED") {

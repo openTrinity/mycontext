@@ -117,8 +117,23 @@ export function DataPlanePanel({
            */
           storage: row.storage ?? raw.storage,
           running: row.running ?? raw.running,
-          lastError: row.lastError ?? raw.lastError,
-          blockedReason: row.blockedReason ?? raw.blockedReason,
+          /**
+           * ★★★ 错误与 blocked **不能用 `??` 回落到主渠道**。
+           *
+           * 这两个字段的 `null` 是**有意义的值**（"这个渠道没有错误"），
+           * 而 `??` 把它当"没给"，于是回落到顶层 —— 顶层是**主渠道**（钉钉）的。
+           *
+           * 实测的表现（用户截图）：渠道选择器选着**飞书**，飞书一切正常
+           * （9 条消息、4 个会话），而下面挂着一条红字
+           * 「还没绑定渠道身份，拒绝执行渠道命令」——那是**钉钉**在还没授权的
+           * 那几分钟里刷进 lastError 的，与飞书毫无关系。用户会以为自己在
+           * 飞书这里做错了什么。
+           *
+           * ★ 判据：`perChannel` 里有这个渠道的行，就**完全**采用它的值
+           * （包括 null）。这一行存在本身就说明"这个渠道的错误状态是已知的"。
+           */
+          lastError: row.lastError,
+          blockedReason: row.blockedReason,
         }
 
   return (

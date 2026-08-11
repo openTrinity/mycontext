@@ -28,7 +28,8 @@ import {
   type ThemePreference,
 } from "../../lib/use-theme.js"
 import { ChannelAuthPanel } from "../channels/channel-auth-panel.js"
-import { IdentitySwitcher } from "../channels/identity-switcher.js"
+// ★ `IdentitySwitcher` 暂时下架（多渠道并存后它的语义不对了，
+// 见下面渠道区那段注释）。组件本身保留，重写好之后再挂回来。
 import { AdvancedAiPanel } from "./advanced-ai.js"
 import { ModelConfigForm } from "./model-config-form.js"
 import { IdentityPanel } from "./identity-panel.js"
@@ -608,11 +609,19 @@ function ChannelsSection() {
             <ChannelAuthPanel key={channel.id} channel={channel} variant="settings" />
           ))}
           {/*
-            ★ 身份切换器放在授权卡片**之后**：先回答"连的是谁"，
-            再给"换成另一个谁"。反过来的话用户会先看到一个列表而不知道
-            它在说什么。只有一个身份时它自己不渲染（见组件注释）。
+            ★★ 身份切换器**暂时下架**（`IdentitySwitcher` 保留，只是不挂）。
+
+            它的语义在多渠道并存之后已经不对了：从 control v5 起一个 vault 可以
+            同时挂飞书与钉钉两个渠道的身份（见 `CONTROL_0005_VAULT_MULTI_CHANNEL`），
+            而这一块把它们列成两个**可互相切换**的独立身份，还说
+            「每个身份有自己独立的一份数据（会话、画像、图谱都不互通）」——
+            那是并存之前的模型。现在两者共用同一个 vault，"切换"到另一个渠道
+            并不会换库，文案与行为直接矛盾。
+
+            用户明确要求先隐藏。真正要做的是把它重写成「按**组织/人**切换」
+            （同一渠道下的多个 corpId 才是真的换库），而不是把渠道列进来 ——
+            那是独立一件事，不在这次修复范围里。
           */}
-          <IdentitySwitcher />
         </div>
       )}
     </Section>

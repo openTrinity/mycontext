@@ -831,10 +831,52 @@ export function registerIpc(deps: IpcDependencies): void {
    */
   ipcMain.handle(IPC_CHANNELS.klGraphBuild, (_event, fresh: unknown, channelId: unknown) =>
     attempt(async () => {
-      const result = await klServer.rebuildGraph(
-        fresh === true,
-        typeof channelId === "string" && channelId !== "" ? channelId : undefined,
-      )
+      const target =
+        typeof channelId === "string" && channelId !== "" ? channelId : undefined
+      /**
+       * ★★★ 建图**之前先导出一次** —— 否则手动建图在"刚采完"那段必然失败。
+       *
+       * ## 实测的形态（用户点钉钉「建图」一直报错）
+       *
+       * 建图读的是**导出的四件套**（`exports/<渠道>/chat/records.jsonl`），
+       * 而导出由 `FeedService` 的定时器推进 —— 周期 **10 分钟**
+       * （`GRAPH_SYNC_INTERVAL_MS`），挂载后另有一次 90 秒补跑。
+       *
+       * 于是"采集刚写完、定时器还没到"这个窗口里，库里有数据而导出目录是空的：
+       *
+       *     06:08:13  主渠道最后一次 graph sync tick（head: 0，那时还没授权钉钉）
+       *     06:09:33  钉钉的 1007 条消息落库
+       *     06:0x     用户点「建图」→ records.jsonl 是 0 字节
+       *               → "建图没有产出任何内容（连切块都没完成）"
+       *     06:18     下一次定时 tick 才会导出 —— 用户不可能等
+       *
+       * 那句报错还把人指向 embedding 网关（"去设置确认网关地址与密钥"），
+       * 而网关是好的 —— 这是最坏的一种错误提示：症状指向一个无关的方向。
+       *
+       * 手动点建图的语义就是"用现在库里的数据建一次"，所以先把库里的东西
+       * 导出来是这个动作的一部分，不是额外的好意。
+       *
+       * ★ `export()` 会导出**全部**渠道（主 + 各 source），代价是一次
+       * 增量物化（只写新增的 seq，见 `FeedService.export`），远小于一次建图。
+       * 不按渠道细分是因为 `dataPlane.export()` 本来就是全量入口，
+       * 而多导一个渠道不会让这次建图变慢（建图只读它自己那个目录）。
+       *
+       * ★ 导出失败**不阻断**建图：那时建图会给出它自己的、更准确的原因
+       * （比如"导出还没生成"那一档），而在这里抛错会把它盖掉。
+       */
+      try {
+        const exported = dataPlane.export()
+        logger.info("export before manual graph build", {
+          channelId: target ?? "(primary)",
+          headSeq: exported.headSeq,
+          messages: exported.totalMessages,
+        })
+      } catch (error) {
+        logger.warn("export before manual graph build failed (continuing)", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+      const result = await klServer.rebuildGraph(fresh === true, target)
       /**
        * ★ 手动建图成功后把建图水位推到已导出水位。
        *
