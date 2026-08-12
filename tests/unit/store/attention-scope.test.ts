@@ -435,3 +435,59 @@ describe("接线：监听范围并入学习范围（只增 + 可见）", () => {
     expect(src).toContain("attention scope learning merge failed")
   })
 })
+
+/**
+ * ── ★★★ 「监听范围可逆」这个决定的依据，锁在测试里 ──────────────
+ *
+ * 我曾把这个决定推给用户（"要不要也只增不减，你说一声"）。那是错的：
+ * 判据是可查的 —— 「只增不减」管的是"缩小会不会让**已有产出**与配置矛盾"，
+ * 而监听范围三条全不成立。这里把那三条钉住，免得日后被凭感觉改掉。
+ */
+describe("监听范围可逆：判据（不是偏好）", () => {
+  it("★★★ 这张表不引用任何消息数据", async () => {
+    /**
+     * 引用了消息就意味着它有"已经吃进去的历史"，那时缩小才会造成不一致。
+     *
+     * 反证：给 `attention-scope.ts` 加一个读 `messages` 的方法 → 这条转红，
+     * 而那正是"该重新考虑可逆性"的信号。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/store/src/repositories/attention-scope.ts", "utf8")
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
+    expect(code.includes("FROM messages")).toBe(false)
+    expect(code.includes("content_text")).toBe(false)
+  })
+
+  it("★★★ disable 只置位，不删行（可逆的前提）", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/store/src/repositories/attention-scope.ts", "utf8")
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
+    expect(code).toContain("UPDATE attention_scope SET active = 0")
+    // ★ 判据落在**剥注释后的代码**上：注释里解释过"不删行"，搜字符串会命中它
+    expect(code.includes("DELETE FROM attention_scope")).toBe(false)
+  })
+
+  it("★★★ 没有任何消费者的产出派生自它", async () => {
+    /**
+     * 图谱/蒸馏/分身三个包若开始读这张表，它就变成"有下游产出"的配置，
+     * 那时可逆性要重新论证。这条是那个变化的警报。
+     */
+    const { readdirSync, readFileSync, statSync } = await import("node:fs")
+    const walk = (dir: string): string[] => {
+      const out: string[] = []
+      for (const name of readdirSync(dir)) {
+        const full = `${dir}/${name}`
+        if (statSync(full).isDirectory()) out.push(...walk(full))
+        else if (full.endsWith(".ts")) out.push(full)
+      }
+      return out
+    }
+    const files = [
+      ...walk("packages/distill/src"),
+      ...walk("packages/knowledge-feed/src"),
+      ...walk("packages/persona/src"),
+    ]
+    const offenders = files.filter((file) => readFileSync(file, "utf8").includes("attention_scope"))
+    expect(offenders).toEqual([])
+  })
+})
