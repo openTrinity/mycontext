@@ -51,6 +51,7 @@ from kl_graph.ingest.extraction_strategy import build_extraction_items
 from kl_graph.ingest.llm_extractor import (
     ExtractionFailure,
     LLMExtractor,
+    coerce_fact_participants,
     summarize_entity_descriptions,
 )
 from kl_graph.ingest.loaders import (
@@ -2300,6 +2301,13 @@ class IngestionPipeline:
         # so a malformed/old-cache ``subject_entity='@李娜'`` must be stripped
         # here too or its ABOUT edge is dropped. ``.lstrip('@')`` on a clean name
         # (fresh cache) is a no-op, so this is behavior-preserving.
+        #
+        # Participant shapes are re-coerced here rather than trusted: this method
+        # also replays facts from the durable extraction cache, which may hold
+        # entries written before the extractor repaired list-valued
+        # subject/object fields. Coercing again is idempotent for clean facts and
+        # keeps a legacy cache row from aborting the whole graph build.
+        coerce_fact_participants(raw_fact)
         subject = (raw_fact.get("subject_entity") or "").strip().lstrip("@").strip()
         if subject and len(subject) >= 2:
             subj_eid = entity_id_from_name(subject)

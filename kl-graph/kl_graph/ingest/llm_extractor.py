@@ -203,6 +203,78 @@ def _clean_mention(name: str) -> str | None:
     return cleaned
 
 
+def _coerce_scalar_participant(
+    value: object, overflow: list[str]
+) -> str | None:
+    """Coerce an LLM participant field to a single name, spilling any extras.
+
+    ``subject_entity`` / ``object_entity`` are contractually one name each
+    (:class:`ExtractedFact`), but models do emit a *list* when a claim has
+    several objects ("A 通知 B、C"). Two behaviours are unacceptable there: a
+    raw list reaches ``_fact_edges`` and raises ``AttributeError: 'list' object
+    has no attribute 'strip'`` (an ingest-aborting crash), and silently dropping
+    the field loses real participants that the n-ary ``involved_entities``
+    fan-out is designed to carry.
+
+    So the first usable element becomes the scalar and the remainder is appended
+    to ``overflow`` for the caller to merge into ``involved_entities`` — where
+    co-equal participants belong, and where ``_normalize_result`` already
+    validates them against the extracted entity names.
+
+    Args:
+        value: The raw field value: a string, a list of strings, or anything else.
+        overflow: Accumulator that receives the additional names, in order.
+
+    Returns:
+        The single participant name, or ``None`` when the field carries no
+        usable name (absent, null, empty, or a non-string scalar).
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        names = [item for item in value if isinstance(item, str) and item.strip()]
+        if not names:
+            return None
+        overflow.extend(names[1:])
+        return names[0]
+    return None
+
+
+def _coerce_fact_participants(fact: dict) -> None:
+    """Normalize one fact's participant fields to the contracted shapes, in place.
+
+    Guarantees, for a dict fact: ``subject_entity`` is a ``str`` or absent,
+    ``object_entity`` is a ``str`` or ``None``, and ``involved_entities`` is a
+    ``list[str]`` that retains every name the model supplied — including the
+    extras spilled from a list-valued subject/object. Applied before structural
+    validation so a well-meaning but off-schema response is repaired rather than
+    either crashing the graph build or being discarded as malformed.
+    """
+    overflow: list[str] = []
+    subject = _coerce_scalar_participant(fact.get("subject_entity"), overflow)
+    obj = _coerce_scalar_participant(fact.get("object_entity"), overflow)
+    if subject is None:
+        fact.pop("subject_entity", None)
+    else:
+        fact["subject_entity"] = subject
+    fact["object_entity"] = obj
+
+    involved = fact.get("involved_entities")
+    names = [item for item in involved if isinstance(item, str)] if isinstance(
+        involved, list
+    ) else []
+    for extra in overflow:
+        if extra not in names:
+            names.append(extra)
+    if names or isinstance(involved, list) or overflow:
+        fact["involved_entities"] = names
+
+
+#: Public alias. The graph build re-coerces cache-replayed facts through this,
+#: since a durable cache row may predate the repair above.
+coerce_fact_participants = _coerce_fact_participants
+
+
 def _expand_compact_result(raw: dict) -> dict:
     """Expand compact Chinese-key LLM output to canonical English-key format.
 
@@ -273,6 +345,10 @@ def _expand_compact_result(raw: dict) -> dict:
         for fact in facts:
             if isinstance(fact, dict):
                 expanded = _remap(fact, FACT_MAP)
+                # Repair off-schema participant shapes (e.g. a list-valued
+                # object_entity) BEFORE validation, so extra names survive as
+                # involved_entities instead of crashing the graph build.
+                _coerce_fact_participants(expanded)
                 # Fill defaults for omitted nullable fields
                 if is_compact:
                     expanded.setdefault("object_entity", None)
