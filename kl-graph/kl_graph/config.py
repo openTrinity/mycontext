@@ -346,6 +346,7 @@ class QueryPipelineConfig(_ConfigModel):
     phase2_context_limit: int
     max_concurrency: int
     dedup_enabled: bool
+    fact_near_dup_threshold: float = 0.9
     confidence: ConfidenceConfig
     fusion: FusionConfig
     reranking: RerankingConfig

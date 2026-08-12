@@ -303,6 +303,10 @@ pipelines:
     max_concurrency: ${oc.env:KL_QUERY_MAX_CONCURRENCY,50}
     # Collapse equivalent retrieval candidates before final ranking when true.
     dedup_enabled: ${oc.env:KL_QUERY_DEDUP,1}
+    # Near-duplicate fact suppression (difflib ratio). Facts only: chunks are
+    # verbatim source text, so near-identical chunks are distinct evidence.
+    # 0 disables the fuzzy pass; the exact-hash pass is governed by dedup_enabled.
+    fact_near_dup_threshold: ${oc.env:KL_QUERY_FACT_NEAR_DUP,0.9}
 
     # Confidence bands used to label retrieval/answer confidence.
     confidence:

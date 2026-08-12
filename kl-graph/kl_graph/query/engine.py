@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, cfg
 from kl_graph.ingest.embedder import Embedder
@@ -34,6 +35,7 @@ PHASE1_FACT_LIMIT = int(cfg.pipelines.query.phase1_fact_limit)
 PHASE1_ENTITY_EXPAND_LIMIT = int(cfg.pipelines.query.phase1_entity_expand_limit)
 PHASE2_CONTEXT_LIMIT = int(cfg.pipelines.query.phase2_context_limit)
 QUERY_DEDUP_ENABLED = bool(cfg.pipelines.query.dedup_enabled)
+FACT_NEAR_DUP_THRESHOLD = float(cfg.pipelines.query.fact_near_dup_threshold)
 RERANK_TOP_K = int(cfg.pipelines.query.reranking.top_k)
 RERANK_WINDOW = int(cfg.pipelines.query.reranking.window)
 from kl_graph.models.types import EntityType
@@ -159,6 +161,98 @@ def _suppress_same_type_duplicates(
         suppressed_count += 1
 
     return kept, suppressed_count, merged
+
+
+def _suppress_near_duplicate_facts(
+    items: list[dict], threshold: float = FACT_NEAR_DUP_THRESHOLD
+) -> tuple[list[dict], int, list[dict]]:
+    """Collapse near-duplicate facts, keeping the highest-confidence survivor.
+
+    Runs after :func:`_suppress_same_type_duplicates` (which removes only
+    byte-identical text) and catches the rest: two extractions of the same claim
+    that differ in wording, punctuation, or a truncated tail. Similarity is
+    ``difflib.SequenceMatcher.ratio()`` over the whitespace-normalized text;
+    pairs scoring strictly above ``threshold`` are the same evidence.
+
+    **Facts only.** Chunks are verbatim source text, so two near-identical
+    messages (a quote and its reply, a resend) are genuinely distinct evidence
+    and must both survive. Non-fact items pass through untouched, keeping their
+    original relative order.
+
+    Survivor rule: highest ``confidence``, breaking ties by fused rank (earlier
+    in ``items`` wins, so an equally-confident but more relevant fact is kept).
+    This deliberately differs from the exact-hash pass, which keeps the
+    best-ranked item: for a *reworded* claim the more trustworthy extraction is
+    the one to surface, not merely the better-matching phrasing.
+
+    Cost: ``ratio()`` is O(n*m) in text length, so it is guarded by
+    ``real_quick_ratio()`` and ``quick_ratio()`` — both cheap upper bounds. A
+    pair whose upper bound cannot clear ``threshold`` is rejected without ever
+    running the full diff. Comparisons are only ever fact-vs-surviving-fact.
+
+    Args:
+        items: Resolved items in descending fused-score order.
+        threshold: Minimum ``ratio()`` to treat two facts as duplicates. Values
+            ``<= 0`` disable the pass entirely.
+
+    Returns:
+        ``(kept_items, suppressed_count, merged)`` where ``kept_items``
+        preserves the input order, ``suppressed_count`` is the number of dropped
+        facts, and ``merged`` is ``[{"survivor": id, "dropped": id}, ...]``.
+    """
+    if threshold <= 0.0:
+        return items, 0, []
+
+    # (index into items, normalized text) for each surviving fact.
+    survivors: list[tuple[int, str]] = []
+    dropped: set[int] = set()
+    merged: list[dict] = []
+
+    def _conf(item: dict) -> float:
+        raw = item.get("confidence")
+        return float(raw) if isinstance(raw, (int, float)) else 0.0
+
+    for i, item in enumerate(items):
+        if item.get("type") != "fact":
+            continue
+        text = _normalize_for_dedup(item.get("content", ""))
+        if not text:
+            # A blank fact must not collapse unrelated items.
+            continue
+
+        matcher = SequenceMatcher(None, text, "", autojunk=False)
+        hit: int | None = None
+        for kept_i, kept_text in survivors:
+            matcher.set_seq2(kept_text)
+            # Cheap upper bounds first: both are >= ratio(), so failing either
+            # proves ratio() cannot clear the threshold.
+            if matcher.real_quick_ratio() <= threshold:
+                continue
+            if matcher.quick_ratio() <= threshold:
+                continue
+            if matcher.ratio() > threshold:
+                hit = kept_i
+                break
+
+        if hit is None:
+            survivors.append((i, text))
+            continue
+
+        # Same claim: keep whichever is more trustworthy. On a confidence tie
+        # the earlier (better-fused) item wins, so ordering stays deterministic.
+        if _conf(item) > _conf(items[hit]):
+            winner, loser = i, hit
+            survivors = [(i, text) if s == hit else (s, t) for s, t in survivors]
+        else:
+            winner, loser = hit, i
+        dropped.add(loser)
+        items[winner].setdefault("merged_ids", []).append(items[loser]["id"])
+        merged.append({"survivor": items[winner]["id"], "dropped": items[loser]["id"]})
+
+    if not dropped:
+        return items, 0, []
+    kept = [it for i, it in enumerate(items) if i not in dropped]
+    return kept, len(dropped), merged
 
 
 @dataclass
@@ -864,6 +958,14 @@ class QueryEngine:
             items, suppressed, merged = _suppress_same_type_duplicates(items)
             dedup_stats["same_type_content"] = suppressed
             dedup_stats["merged"] = merged
+            # U3: near-duplicate facts (reworded/truncated restatements of one
+            # claim), which the byte-identical pass above cannot see. Runs on the
+            # already-collapsed list so the O(n*m) diff sees as few facts as
+            # possible, and before rerank/cut so a dropped duplicate frees a slot
+            # for genuinely new evidence.
+            items, fact_suppressed, fact_merged = _suppress_near_duplicate_facts(items)
+            dedup_stats["fact_near_dup"] = fact_suppressed
+            dedup_stats["merged"] = merged + fact_merged
 
         # 6. Optional model rerank over the resolved window, then final cut.
         # Gate on the reranker being configured (RAGFlow-style if rerank_mdl);
