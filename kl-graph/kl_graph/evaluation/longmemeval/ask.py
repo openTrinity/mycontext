@@ -32,7 +32,9 @@ from kl_graph.evaluation.longmemeval.build import (
     _load_case_entries,
     _resolve_manifest_path,
     _select_entries,
+    validate_built_case,
 )
+from kl_graph.evaluation.build_contract import retrieval_configuration
 
 TOP_K = 5
 SERVER_START_TIMEOUT = 60.0
@@ -130,9 +132,7 @@ def _wait_for_server(process: subprocess.Popen, port: int, log_path: Path) -> No
     deadline = time.monotonic() + SERVER_START_TIMEOUT
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(
-                f"KL server exited {process.returncode}; see {log_path}"
-            )
+            raise RuntimeError(f"KL server exited {process.returncode}; see {log_path}")
         try:
             response = httpx.get(f"http://127.0.0.1:{port}/health", timeout=1)
             if response.json().get("status") == "ok":
@@ -167,6 +167,8 @@ def _result_is_complete(
     question_id: str,
     rerank_base_url: str,
     rerank_model: str,
+    build_configuration_sha256: str,
+    retrieval_config: dict[str, Any],
 ) -> bool:
     """Return whether an ask artifact is safe to reuse for this run."""
     try:
@@ -187,6 +189,8 @@ def _result_is_complete(
         and artifact.get("force_phase2") is False
         and reranker.get("base_url") == rerank_base_url
         and reranker.get("model") == rerank_model
+        and artifact.get("build_configuration_sha256") == build_configuration_sha256
+        and artifact.get("retrieval_configuration") == retrieval_config
         and response.get("phase") == 1
         and response.get("answer") in (None, "")
         and isinstance(items, list)
@@ -205,8 +209,11 @@ def _run_case(
     case_root = _resolve_manifest_path(root, entry["path"], "path")
     dws_root = _resolve_manifest_path(root, entry["dws_root"], "dws_root")
     data_dir = case_root / CASE_DATA_DIRNAME
-    if not (data_dir / "knowledge.db").is_file():
-        raise FileNotFoundError(f"case {question_id} has not been built")
+    build_status = validate_built_case(root, entry)
+    if build_status is None:  # pragma: no cover - guarded by default validation
+        raise RuntimeError(f"case {question_id} has no build status")
+    build_configuration_sha256 = str(build_status["configuration_sha256"])
+    retrieval_config = retrieval_configuration()
 
     question = _question(case_root, question_id)
     results_dir = case_root / "results"
@@ -218,6 +225,8 @@ def _run_case(
             question_id=question_id,
             rerank_base_url=args.rerank_base_url,
             rerank_model=args.rerank_model,
+            build_configuration_sha256=build_configuration_sha256,
+            retrieval_config=retrieval_config,
         ):
             _print_block(f"[{position}/{total}] SKIPPED {question_id} (complete)")
             return
@@ -304,6 +313,8 @@ def _run_case(
                 },
                 "top_k": TOP_K,
                 "force_phase2": False,
+                "build_configuration_sha256": build_configuration_sha256,
+                "retrieval_configuration": retrieval_config,
                 "response": response,
             },
         )
@@ -351,6 +362,7 @@ def _run_cases(
                 future.result()
             except (
                 OSError,
+                TypeError,
                 ValueError,
                 RuntimeError,
                 TimeoutError,

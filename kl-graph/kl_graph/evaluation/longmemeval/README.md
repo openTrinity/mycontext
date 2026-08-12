@@ -94,13 +94,17 @@ python -m kl_graph.evaluation.longmemeval.build --case 00ca467f
 ```
 
 每个 case 的 `build_status.json` 记录编排状态，详细 ingestion 输出在
-`build.log`。
+`build.log`。Build 显式使用 `--improve-mode off`；传 `--with-improve` 时使用
+`full`。如果 production checkpoint 报告任一 extraction item 失败，该 case
+会标记为失败，不会把 partial graph 用于评估。状态文件同时记录构建时的
+embedding、vector backend 和 graph backend 配置。
 
 ## Phase 2：ask.py
 
 `ask.py` 为每个 case 临时启动一个指向其 `kl_data` 的生产 KL Server，再调用
 生产 `kl ask`。检索启用配置好的 reranker，只保留 Top-5，并关闭 KL Ask
-Phase 2。
+Phase 2。启动前会检查 build 状态，并拒绝使用 storage backend 或 embedding
+模型/维度与构建时不一致的图。
 
 ```bash
 python -m kl_graph.evaluation.longmemeval.ask \

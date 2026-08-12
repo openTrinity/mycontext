@@ -43,6 +43,7 @@ from kl_graph.evaluation.locomo.runtime.servers import (
     ProductionGraphServers,
     route_port,
 )
+from kl_graph.evaluation.build_contract import retrieval_configuration
 
 DEFAULT_TIMEOUT_SECONDS = 180.0
 DEFAULT_TOP_K = 5
@@ -71,10 +72,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=None,
-        help=(
-            "override the default benchmark/locomo-ask/CATEGORY/RUN_TIME "
-            "directory"
-        ),
+        help=("override the default benchmark/locomo-ask/CATEGORY/RUN_TIME directory"),
     )
     parser.add_argument("--run-id", default=None)
     parser.add_argument(
@@ -138,7 +136,7 @@ async def main(argv: list[str] | None = None) -> int:
     case_by_conversation = cases_by_conversation(dataset_dir)
     selected_conversations = sorted({row["conversation_id"] for row in rows})
     selected_cases = [case_by_conversation[value] for value in selected_conversations]
-    _validate_inputs(dataset_dir, selected_cases)
+    args.build_configuration_sha256 = _validate_inputs(dataset_dir, selected_cases)
     _validate_resume_configuration(output_dir, args, len(rows))
     _print_plan(args, dataset_dir, output_dir, len(rows), len(selected_cases))
     _log_event(
@@ -170,9 +168,16 @@ async def main(argv: list[str] | None = None) -> int:
     return 0 if len(results) == len(rows) and statuses.get("failed", 0) == 0 else 1
 
 
-def _validate_inputs(case_set_root: Path, cases: list[dict[str, Any]]) -> None:
+def _validate_inputs(
+    case_set_root: Path, cases: list[dict[str, Any]]
+) -> dict[str, str]:
+    fingerprints: dict[str, str] = {}
     for case in cases:
-        validate_built_case(case_set_root, case)
+        status = validate_built_case(case_set_root, case)
+        if status is None:  # pragma: no cover - guarded by default validation
+            raise RuntimeError("case has no build status")
+        fingerprints[str(case["conversation_id"])] = str(status["configuration_sha256"])
+    return fingerprints
 
 
 def _resolve_output_dir(args: argparse.Namespace, case_set_dir: Path) -> Path:
@@ -287,6 +292,7 @@ def _validate_resume_configuration(
         "top_k": args.top_k,
         "force_phase2": False,
         "graph_execution": "sequential",
+        "build_configuration_sha256": args.build_configuration_sha256,
     }
     mismatches = {
         key: {"recorded": run.get(key), "requested": value}
@@ -584,6 +590,8 @@ def _write_run(
             "timeout_seconds": args.timeout_seconds,
             "top_k": args.top_k,
             "force_phase2": False,
+            "build_configuration_sha256": args.build_configuration_sha256,
+            "retrieval_configuration": retrieval_configuration(),
             "models": _model_metadata(),
         },
     )

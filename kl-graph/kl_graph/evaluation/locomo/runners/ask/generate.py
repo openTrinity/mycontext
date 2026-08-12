@@ -2,7 +2,8 @@
 
 This stage does not call KL, repeat retrieval, resolve Gold evidence, or score
 answers. Each answer is generated from the first K items in a persisted Phase-1
-response. Scoring is owned by :mod:`kl_graph.evaluation.locomo.runners.ask.score`.
+response and can optionally include the response's cached community context.
+Scoring is owned by :mod:`kl_graph.evaluation.locomo.runners.ask.score`.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 import random
 import time
 import urllib.parse
@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 from kl_graph.config import cfg
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 from kl_graph.evaluation.io import (
     atomic_write_json,
     atomic_write_jsonl,
@@ -31,10 +30,13 @@ from kl_graph.evaluation.locomo.build import (
     cases_by_conversation,
     resolve_case_root,
 )
+from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
 SYSTEM_PROMPT = """You answer questions about long-running conversations.
 Use only the supplied retrieved evidence. Return one short phrase and no explanation.
-Use exact words from the evidence whenever possible.
+Always answer in English, even when some or all of the evidence is written in another language.
+Translate relevant evidence into English while preserving names, titles, and other proper nouns.
+When the evidence is already in English, use its exact words whenever possible.
 If the question cannot be answered, answer exactly: Not mentioned"""
 
 LLM_PROVIDER = str(cfg.services.llm_flash.provider)
@@ -71,6 +73,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--include-community-context",
+        action="store_true",
+        default=False,
+        help="append cached /ask community_context reports to the answer prompt",
+    )
+    parser.add_argument(
         "--allow-remote-content",
         action="store_true",
         help="allow sending cached LoCoMo evidence to a non-local answer model",
@@ -97,9 +105,12 @@ def _format_timestamp(timestamp_ms: int) -> str:
 
 
 def _context_from_response(
-    response: dict[str, Any], top_k: int
+    response: dict[str, Any],
+    top_k: int,
+    *,
+    include_community_context: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Build generation context directly from production ``kl ask`` items."""
+    """Build generation context directly from a cached production response."""
     items = response.get("items")
     if not isinstance(items, list):
         raise TypeError("cached response items are not a list")
@@ -127,7 +138,64 @@ def _context_from_response(
                 "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
             }
         )
+    if include_community_context:
+        community_parts, community_summaries = _community_context_from_response(
+            response, start_rank=len(summaries) + 1
+        )
+        context_parts.extend(community_parts)
+        summaries.extend(community_summaries)
     return "\n\n---\n\n".join(context_parts), summaries
+
+
+def _community_context_from_response(
+    response: dict[str, Any], *, start_rank: int
+) -> tuple[list[str], list[dict[str, Any]]]:
+    raw_communities = response.get("community_context", [])
+    if raw_communities is None:
+        raw_communities = []
+    if not isinstance(raw_communities, list):
+        raise TypeError("cached response community_context is not a list")
+
+    context_parts: list[str] = []
+    summaries: list[dict[str, Any]] = []
+    for community_rank, community in enumerate(raw_communities, 1):
+        if not isinstance(community, dict):
+            raise TypeError(
+                f"cached community context {community_rank} is not an object"
+            )
+        summary = str(community.get("summary") or "").strip()
+        if not summary:
+            continue
+        title = str(community.get("title") or "").strip()
+        level = community.get("level")
+        community_id = community.get("community_id")
+        tags = community.get("tags")
+        if not isinstance(tags, list):
+            tags = []
+
+        rendered = (
+            f"Community context {community_rank} "
+            f"[level={level}; id={community_id}; "
+            f"members={int(community.get('member_count') or 0)}]\n"
+            f"Title: {title or 'Untitled'}\n"
+            f"Summary: {summary}"
+        )
+        if tags:
+            rendered += "\nTags: " + ", ".join(str(tag) for tag in tags)
+        context_parts.append(rendered)
+        summaries.append(
+            {
+                "rank": start_rank + len(summaries),
+                "community_rank": community_rank,
+                "type": "community",
+                "id": f"community:L{level}:{community_id}",
+                "level": level,
+                "member_count": int(community.get("member_count") or 0),
+                "content_chars": len(rendered),
+                "content_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+            }
+        )
+    return context_parts, summaries
 
 
 def _question_prompt(row: dict[str, Any], context: str) -> str:
@@ -208,6 +276,9 @@ async def _generate_one(
                 "generated_answer": answer,
                 "generator_model": str(getattr(response, "model", None) or LLM_MODEL),
                 "generation_context_items": context_items,
+                "generation_includes_community_context": (
+                    args.include_community_context
+                ),
                 "generation_status": "completed",
                 "generation_attempts": attempt + 1,
                 "generation_duration_ms": round((time.monotonic() - started) * 1000),
@@ -224,6 +295,7 @@ async def _generate_one(
         "generated_answer": "",
         "generator_model": LLM_MODEL,
         "generation_context_items": context_items,
+        "generation_includes_community_context": args.include_community_context,
         "generation_status": "failed",
         "generation_attempts": args.max_retries + 1,
         "generation_duration_ms": round((time.monotonic() - started) * 1000),
@@ -433,6 +505,7 @@ async def main(argv: list[str] | None = None) -> int:
         "model": LLM_MODEL,
         "base_url": LLM_BASE_URL,
         "system_prompt": SYSTEM_PROMPT,
+        "include_community_context": args.include_community_context,
         "resume": args.resume,
         "repeats_retrieval": False,
     }
@@ -446,7 +519,11 @@ async def main(argv: list[str] | None = None) -> int:
             if str(row["id"]) in completed:
                 continue
             response = _read_response(ask_dir, row)
-            context, context_items = _context_from_response(response, args.top_k)
+            context, context_items = _context_from_response(
+                response,
+                args.top_k,
+                include_community_context=args.include_community_context,
+            )
             tasks.append(
                 asyncio.create_task(
                     _generate_one(

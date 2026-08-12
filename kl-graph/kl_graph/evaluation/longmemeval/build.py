@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -51,6 +52,15 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from kl_graph.evaluation.build_contract import (
+    BUILD_STATUS_SCHEMA_VERSION,
+    configuration_fingerprint,
+    load_ingest_result,
+    production_build_configuration,
+    require_successful_ingest,
+    validate_production_build_status,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CASE_SET = PROJECT_ROOT / "data" / "longmemeval"
@@ -64,6 +74,10 @@ _OUTPUT_LOCK = threading.Lock()
 _ACTIVE_PROCESS_LOCK = threading.Lock()
 _ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
 _STOP_REQUESTED = threading.Event()
+
+
+def case_source_id(question_id: str) -> str:
+    return f"longmemeval-{question_id}"
 
 
 def _positive_int(value: str) -> int:
@@ -128,7 +142,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "also run production similarity/community improvement; by default "
-            "the core graph is built with --no-improve"
+            "the core graph is built with --improve-mode off"
         ),
     )
     parser.add_argument(
@@ -252,13 +266,12 @@ def _ingest_command(
         "--input-dir",
         str(input_dir),
         "--source-id",
-        f"longmemeval-{question_id}",
+        case_source_id(question_id),
         "--full",
         "--concurrency",
         str(args.concurrency),
     ]
-    if not args.with_improve:
-        command.append("--no-improve")
+    command.extend(["--improve-mode", "full" if args.with_improve else "off"])
     if args.fresh:
         command.append("--fresh-db")
     if args.no_keep_cache:
@@ -295,6 +308,46 @@ def _write_status(path: Path, status: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def validate_built_case(
+    case_set: Path,
+    entry: dict[str, Any],
+    *,
+    check_build_status: bool = True,
+) -> dict[str, Any] | None:
+    """Require a complete production build for one LongMemEval case."""
+    question_id = str(entry["question_id"])
+    case_root = _resolve_manifest_path(case_set, entry["path"], "path")
+    data_dir = case_root / CASE_DATA_DIRNAME
+    build_status = None
+    if check_build_status:
+        build_status = validate_production_build_status(
+            case_root / BUILD_STATUS_FILENAME,
+            dataset="longmemeval",
+            source_id=case_source_id(question_id),
+        )
+
+    sqlite_path = data_dir / "knowledge.db"
+    if not sqlite_path.is_file():
+        raise FileNotFoundError(sqlite_path)
+    uri = f"{sqlite_path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        required = {"chunks", "facts"}
+        if not required.issubset(tables):
+            raise RuntimeError(
+                f"incomplete production graph {sqlite_path}; "
+                f"missing {sorted(required - tables)}"
+            )
+        if int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]) < 1:
+            raise RuntimeError(f"production graph has no chunks: {sqlite_path}")
+    return build_status
 
 
 def _print_block(*lines: str, file=None) -> None:
@@ -347,14 +400,18 @@ def _build_case(
     data_dir = case_root / CASE_DATA_DIRNAME
     status_path = case_root / BUILD_STATUS_FILENAME
     log_path = case_root / BUILD_LOG_FILENAME
-    command = _ingest_command(
-        args, input_dir=dws_root, question_id=question_id
-    )
+    command = _ingest_command(args, input_dir=dws_root, question_id=question_id)
     env = _case_environment(
         os.environ,
         question_id=question_id,
         dws_root=dws_root,
         data_dir=data_dir,
+    )
+    source_id = case_source_id(question_id)
+    improve_mode = "full" if args.with_improve else "off"
+    configuration = production_build_configuration(
+        source_id=source_id,
+        improve_mode=improve_mode,
     )
 
     _print_block(
@@ -370,9 +427,10 @@ def _build_case(
     data_dir.mkdir(parents=True, exist_ok=True)
     started_at = _utc_now()
     status: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": BUILD_STATUS_SCHEMA_VERSION,
         "dataset": "longmemeval",
         "question_id": question_id,
+        "source_id": source_id,
         "state": "running",
         "started_at": started_at,
         "finished_at": None,
@@ -384,6 +442,9 @@ def _build_case(
         "production_chunking": True,
         "with_improve": args.with_improve,
         "command": command,
+        "configuration": configuration,
+        "configuration_sha256": configuration_fingerprint(configuration),
+        "ingest": None,
         "exit_code": None,
     }
     _write_status(status_path, status)
@@ -413,20 +474,40 @@ def _build_case(
         _write_status(status_path, status)
         raise
 
+    status["exit_code"] = returncode
+    if returncode:
+        status.update(
+            state="interrupted" if _STOP_REQUESTED.is_set() else "failed",
+            finished_at=_utc_now(),
+            elapsed_seconds=round(time.monotonic() - started, 3),
+            error=f"production ingestion exited {returncode}; see {log_path}",
+        )
+        _write_status(status_path, status)
+        return returncode
+
+    try:
+        ingest = load_ingest_result(data_dir, source_id)
+        status["ingest"] = ingest
+        require_successful_ingest(ingest)
+        validate_built_case(case_set, entry, check_build_status=False)
+    except Exception as exc:
+        status.update(
+            state="failed",
+            finished_at=_utc_now(),
+            elapsed_seconds=round(time.monotonic() - started, 3),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        _write_status(status_path, status)
+        raise
+
     status.update(
-        state=(
-            "succeeded"
-            if returncode == 0
-            else "interrupted"
-            if _STOP_REQUESTED.is_set()
-            else "failed"
-        ),
+        state="complete",
         finished_at=_utc_now(),
         elapsed_seconds=round(time.monotonic() - started, 3),
-        exit_code=returncode,
+        error=None,
     )
     _write_status(status_path, status)
-    return returncode
+    return 0
 
 
 def _run_builds(

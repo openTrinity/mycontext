@@ -12,12 +12,15 @@ keeps the RRF order when it is disabled. The model is reached over HTTP (like
 the embedding server), so the served reranker is swappable without code changes.
 
 Targets the common ``POST /rerank`` shape used by TEI / vLLM / Cohere-style
-rerankers:
+rerankers, plus DashScope's native rerank endpoint:
 
     request : {"model": ..., "query": <str>, "documents": [<str>, ...]}
     response: {"results": [{"index": i, "relevance_score": s}, ...]}   # TEI/Cohere
               or {"results": [{"index": i, "score": s}, ...]}          # some vLLM
               or {"scores": [s, ...]}                                  # bare scores
+
+    DashScope request : {"model": ..., "input": {"query": ..., "documents": [...]}}
+    DashScope response: {"output": {"results": [...]}, ...}
 """
 
 from __future__ import annotations
@@ -109,10 +112,35 @@ class Reranker:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        payload = {"model": self.model, "query": query, "documents": documents}
+
+        is_dashscope = (
+            "dashscope.aliyuncs.com" in self.base_url
+            and "/api/v1/services/rerank/" in self.base_url
+        )
+        if is_dashscope:
+            endpoint = self.base_url
+            payload = {
+                "model": self.model,
+                "input": {"query": query, "documents": documents},
+                "parameters": {
+                    "return_documents": False,
+                    "top_n": len(documents),
+                },
+            }
+        else:
+            endpoint = (
+                self.base_url
+                if self.base_url.endswith(("/rerank", "/reranks"))
+                else f"{self.base_url}/rerank"
+            )
+            payload = {
+                "model": self.model,
+                "query": query,
+                "documents": documents,
+            }
 
         resp = httpx.post(
-            f"{self.base_url}/rerank",
+            endpoint,
             json=payload,
             headers=headers,
             timeout=self.timeout,
@@ -126,8 +154,11 @@ class Reranker:
         """Extract scores in original document order across known response shapes.
 
         Handles ``{"results": [{"index", "relevance_score"|"score"}]}`` (TEI /
-        Cohere / vLLM) and the bare ``{"scores": [...]}`` shape.
+        Cohere / vLLM), DashScope's ``{"output": {"results": [...]}}``, and the
+        bare ``{"scores": [...]}`` shape.
         """
+        if isinstance(data, dict) and isinstance(data.get("output"), dict):
+            data = data["output"]
         if isinstance(data, dict) and "results" in data:
             scores = [0.0] * n
             for r in data["results"]:

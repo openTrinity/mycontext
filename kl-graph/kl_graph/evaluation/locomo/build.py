@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from kl_graph.evaluation.io import json_lines
+from kl_graph.evaluation.build_contract import (
+    BUILD_STATUS_SCHEMA_VERSION,
+    configuration_fingerprint,
+    load_ingest_result,
+    production_build_configuration,
+    require_successful_ingest,
+    validate_production_build_status,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CASE_SET = PROJECT_ROOT / "data" / "locomo-v2"
@@ -52,7 +60,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--case-concurrency", type=positive_int, default=DEFAULT_CASE_CONCURRENCY
     )
-    parser.add_argument("--concurrency", type=positive_int, default=8)
+    parser.add_argument(
+        "--concurrency",
+        type=positive_int,
+        default=50,
+        help="maximum concurrent extraction LLM calls (default: %(default)s)",
+    )
     parser.add_argument("--with-improve", action="store_true")
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--no-keep-cache", action="store_true")
@@ -186,10 +199,22 @@ def case_environment(
     return env
 
 
-def validate_built_case(case_set_root: Path, case: dict[str, Any]) -> None:
+def validate_built_case(
+    case_set_root: Path,
+    case: dict[str, Any],
+    *,
+    check_build_status: bool = True,
+) -> dict[str, Any] | None:
     """Require one complete physical graph for exactly one conversation."""
     case_root = resolve_case_root(case_set_root, case)
     conversation_id = str(case["conversation_id"])
+    build_status = None
+    if check_build_status:
+        build_status = validate_production_build_status(
+            case_root / "build_status.json",
+            dataset=DATASET_NAME,
+            source_id=case_source_id(conversation_id),
+        )
     sqlite_path = case_root / CASE_DATA_DIRNAME / "knowledge.db"
     if not sqlite_path.is_file():
         raise FileNotFoundError(sqlite_path)
@@ -255,6 +280,7 @@ def validate_built_case(case_set_root: Path, case: dict[str, Any]) -> None:
             raise RuntimeError(
                 f"physical graph contains retired LoCoMo scope tables: {sqlite_path}"
             )
+    return build_status
 
 
 def ingest_command(
@@ -272,8 +298,7 @@ def ingest_command(
         "--concurrency",
         str(args.concurrency),
     ]
-    if not args.with_improve:
-        command.append("--no-improve")
+    command.extend(["--improve-mode", "full" if args.with_improve else "off"])
     if args.fresh:
         command.append("--fresh-db")
     if args.no_keep_cache:
@@ -294,10 +319,14 @@ def _run_case(
     data_dir = case_root / CASE_DATA_DIRNAME
     status_path = case_root / "build_status.json"
     log_path = case_root / "build.log"
-    command = ingest_command(
-        args, input_dir=dws_root, conversation_id=conversation_id
-    )
+    command = ingest_command(args, input_dir=dws_root, conversation_id=conversation_id)
     env = case_environment(os.environ, case_set_root, case)
+    source_id = case_source_id(conversation_id)
+    improve_mode = "full" if args.with_improve else "off"
+    configuration = production_build_configuration(
+        source_id=source_id,
+        improve_mode=improve_mode,
+    )
     _print(
         f"[{position}/{total}] START {conversation_id}",
         f"  KL_DWS_EXPORT_DIR={dws_root}",
@@ -309,9 +338,10 @@ def _run_case(
     data_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     status: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": BUILD_STATUS_SCHEMA_VERSION,
         "dataset": "locomo",
         "conversation_id": conversation_id,
+        "source_id": source_id,
         "state": "running",
         "started_at": _utc_now(),
         "finished_at": None,
@@ -320,33 +350,54 @@ def _run_case(
         "dws_root": str(dws_root),
         "data_dir": str(data_dir),
         "command": command,
+        "configuration": configuration,
+        "configuration_sha256": configuration_fingerprint(configuration),
+        "ingest": None,
         "exit_code": None,
     }
     _write_status(status_path, status)
-    with log_path.open("w", encoding="utf-8") as log:
-        completed = subprocess.run(
-            command,
-            cwd=PROJECT_ROOT,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            completed = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+        status["exit_code"] = completed.returncode
+        if completed.returncode:
+            raise RuntimeError(
+                f"production ingestion exited {completed.returncode}; see {log_path}"
+            )
+        ingest = load_ingest_result(data_dir, source_id)
+        status["ingest"] = ingest
+        require_successful_ingest(ingest)
+        validate_built_case(case_set_root, case, check_build_status=False)
+    except BaseException as exc:
+        status.update(
+            {
+                "state": "interrupted"
+                if isinstance(exc, KeyboardInterrupt)
+                else "failed",
+                "finished_at": _utc_now(),
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         )
+        _write_status(status_path, status)
+        raise
     status.update(
         {
-            "state": "complete" if completed.returncode == 0 else "failed",
+            "state": "complete",
             "finished_at": _utc_now(),
             "elapsed_seconds": round(time.monotonic() - started, 3),
-            "exit_code": completed.returncode,
+            "error": None,
         }
     )
     _write_status(status_path, status)
-    if completed.returncode:
-        raise RuntimeError(
-            f"production ingestion exited {completed.returncode}; see {log_path}"
-        )
-    validate_built_case(case_set_root, case)
     _print(f"[{position}/{total}] COMPLETE {conversation_id}")
     return 0
 

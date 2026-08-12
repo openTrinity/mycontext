@@ -77,10 +77,13 @@ KL_DATA_DIR=CASE/kl_data \
 python -m scripts.ingest \
   --input-dir CASE/dws \
   --source-id locomo-CONVERSATION_ID \
-  --full --no-improve
+  --full --improve-mode off
 ```
 
-Use `--fresh` only when the selected production graphs should be rebuilt.
+`--with-improve` changes the explicit mode from `off` to `full`. Build rejects
+partial extraction and records the production storage/embedding configuration
+in `build_status.json`. Use `--fresh` only when the selected production graphs
+should be rebuilt.
 
 ## Ask
 
@@ -89,6 +92,10 @@ production `kl ask` exactly once for every question belonging to that graph,
 stops the server, and advances to the next graph. Questions within the active
 graph may run concurrently. It stores only run metadata and the raw Phase-1
 responses; rerank remains part of production KL.
+
+Before starting a server, Ask requires a successful `build_status.json` and
+checks that the current graph/vector backend and embedding model/dimension match
+the build.
 
 When `--conversation` is specified, the default run directory is case-local:
 `cases/CONVERSATION/benchmark/locomo-ask/CATEGORY/RUN_TIME/`. Multi-conversation
@@ -112,6 +119,10 @@ score its own output. Its default output is case-local at
 python -m kl_graph.evaluation.locomo.runners.ask.generate \
   --ask-dir ASK_RUN
 ```
+
+Add `--include-community-context` to append the cached community reports returned
+by `/ask` to the generation prompt. This reads only the persisted response and
+does not query KL or the case database again.
 
 ## Score
 
