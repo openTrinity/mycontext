@@ -198,33 +198,60 @@ def _resolve_retrieval(
                 )
             response = _load_response(ask_dir, result)
             conversation_id = gold["conversation_id"]
+            item_references = ask_response_references(
+                response,
+                include_items=True,
+                include_graph=False,
+            )
+            item_at_k_references = ask_response_references(
+                _item_prefix(response, recall_k),
+                include_items=True,
+                include_graph=False,
+            )
+            graph_references = ask_response_references(
+                response,
+                include_items=False,
+                include_graph=True,
+            )
+            ask_references = ask_response_references(response)
             items = resolver.resolve(
-                ask_response_references(
-                    response,
-                    include_items=True,
-                    include_graph=False,
-                ),
+                item_references,
                 conversation_id,
             )
             items_at_k = resolver.resolve(
-                ask_response_references(
-                    _item_prefix(response, recall_k),
-                    include_items=True,
-                    include_graph=False,
-                ),
+                item_at_k_references,
                 conversation_id,
             )
             graph = resolver.resolve(
-                ask_response_references(
-                    response,
-                    include_items=False,
-                    include_graph=True,
-                ),
+                graph_references,
                 conversation_id,
             )
             ask = resolver.resolve(
-                ask_response_references(response),
+                ask_references,
                 conversation_id,
+            )
+            # Keep the former Fact -> source chunk -> every member expansion as
+            # an explicitly named comparison metric during the transition to
+            # exact source-unit evidence.
+            legacy_items = resolver.resolve(
+                item_references,
+                conversation_id,
+                fact_resolution="chunk_members",
+            )
+            legacy_items_at_k = resolver.resolve(
+                item_at_k_references,
+                conversation_id,
+                fact_resolution="chunk_members",
+            )
+            legacy_graph = resolver.resolve(
+                graph_references,
+                conversation_id,
+                fact_resolution="chunk_members",
+            )
+            legacy_ask = resolver.resolve(
+                ask_references,
+                conversation_id,
+                fact_resolution="chunk_members",
             )
             rows.append(
                 {
@@ -239,6 +266,18 @@ def _resolve_retrieval(
                     "graph_dia_ids": _dia_ids(graph),
                     "ask_evidence": ask,
                     "ask_dia_ids": _dia_ids(ask),
+                    "legacy_chunk_expanded_item_evidence": legacy_items,
+                    "legacy_chunk_expanded_item_dia_ids": _dia_ids(legacy_items),
+                    (
+                        f"legacy_chunk_expanded_item_evidence_at_{recall_k}"
+                    ): legacy_items_at_k,
+                    (f"legacy_chunk_expanded_item_dia_ids_at_{recall_k}"): _dia_ids(
+                        legacy_items_at_k
+                    ),
+                    "legacy_chunk_expanded_graph_evidence": legacy_graph,
+                    "legacy_chunk_expanded_graph_dia_ids": _dia_ids(legacy_graph),
+                    "legacy_chunk_expanded_ask_evidence": legacy_ask,
+                    "legacy_chunk_expanded_ask_dia_ids": _dia_ids(legacy_ask),
                 }
             )
     finally:
@@ -315,6 +354,22 @@ def _score_retrieval_row(row: dict[str, Any], recall_k: int) -> dict[str, Any]:
             evidence,
             row[f"item_dia_ids_at_{recall_k}"],
         )
+    legacy_ask_recall, legacy_ask_complete = retrieval_scores(
+        evidence, row["legacy_chunk_expanded_ask_dia_ids"]
+    )
+    legacy_item_recall, legacy_item_complete = retrieval_scores(
+        evidence, row["legacy_chunk_expanded_item_dia_ids"]
+    )
+    legacy_graph_recall, legacy_graph_complete = retrieval_scores(
+        evidence, row["legacy_chunk_expanded_graph_dia_ids"]
+    )
+    legacy_item_at_k_recall: float | None = None
+    legacy_item_at_k_complete: float | None = None
+    if evidence:
+        legacy_item_at_k_recall, legacy_item_at_k_complete = retrieval_scores(
+            evidence,
+            row[f"legacy_chunk_expanded_item_dia_ids_at_{recall_k}"],
+        )
     return {
         **row,
         "global_evidence_recall": ask_recall,
@@ -327,6 +382,18 @@ def _score_retrieval_row(row: dict[str, Any], recall_k: int) -> dict[str, Any]:
         f"item_complete_evidence_recall_at_{recall_k}": item_at_k_complete,
         "graph_evidence_recall": graph_recall,
         "graph_complete_evidence_recall": graph_complete,
+        "legacy_chunk_expanded_ask_evidence_recall": legacy_ask_recall,
+        "legacy_chunk_expanded_ask_complete_evidence_recall": legacy_ask_complete,
+        "legacy_chunk_expanded_item_evidence_recall": legacy_item_recall,
+        "legacy_chunk_expanded_item_complete_evidence_recall": (legacy_item_complete),
+        f"legacy_chunk_expanded_item_evidence_recall_at_{recall_k}": (
+            legacy_item_at_k_recall
+        ),
+        f"legacy_chunk_expanded_item_complete_evidence_recall_at_{recall_k}": (
+            legacy_item_at_k_complete
+        ),
+        "legacy_chunk_expanded_graph_evidence_recall": legacy_graph_recall,
+        "legacy_chunk_expanded_graph_complete_evidence_recall": (legacy_graph_complete),
     }
 
 
@@ -345,6 +412,8 @@ def _retrieval_report(
         "questions": len(rows),
         "retrieval_unit": "ranked /ask item (conversation-slice chunk)",
         "evidence_unit": "original LoCoMo message dia_id",
+        "fact_evidence_resolution": "facts.source_unit_id",
+        "comparison_metric": "legacy Fact whole-chunk expansion",
         "parameters": {
             "top_k": ask_run.get("top_k"),
             "recall_k": recall_k,
@@ -367,6 +436,10 @@ def _aggregate(rows: list[dict[str, Any]], recall_k: int) -> dict[str, Any]:
     nonempty = [row for row in rows if row.get("evidence")]
     recall_at_k = f"item_evidence_recall_at_{recall_k}"
     complete_at_k = f"item_complete_evidence_recall_at_{recall_k}"
+    legacy_recall_at_k = f"legacy_chunk_expanded_item_evidence_recall_at_{recall_k}"
+    legacy_complete_at_k = (
+        f"legacy_chunk_expanded_item_complete_evidence_recall_at_{recall_k}"
+    )
     return {
         "questions": len(rows),
         "questions_with_gold_evidence": len(nonempty),
@@ -392,6 +465,37 @@ def _aggregate(rows: list[dict[str, Any]], recall_k: int) -> dict[str, Any]:
         ),
         "graph_complete_evidence_recall": _mean(
             [float(row["graph_complete_evidence_recall"]) for row in rows]
+        ),
+        "legacy_chunk_expanded_ask_evidence_recall": _mean(
+            [float(row["legacy_chunk_expanded_ask_evidence_recall"]) for row in rows]
+        ),
+        "legacy_chunk_expanded_ask_complete_evidence_recall": _mean(
+            [
+                float(row["legacy_chunk_expanded_ask_complete_evidence_recall"])
+                for row in rows
+            ]
+        ),
+        "legacy_chunk_expanded_item_evidence_recall": _mean(
+            [float(row["legacy_chunk_expanded_item_evidence_recall"]) for row in rows]
+        ),
+        "legacy_chunk_expanded_item_complete_evidence_recall": _mean(
+            [
+                float(row["legacy_chunk_expanded_item_complete_evidence_recall"])
+                for row in rows
+            ]
+        ),
+        legacy_recall_at_k: _mean([float(row[legacy_recall_at_k]) for row in nonempty]),
+        legacy_complete_at_k: _mean(
+            [float(row[legacy_complete_at_k]) for row in nonempty]
+        ),
+        "legacy_chunk_expanded_graph_evidence_recall": _mean(
+            [float(row["legacy_chunk_expanded_graph_evidence_recall"]) for row in rows]
+        ),
+        "legacy_chunk_expanded_graph_complete_evidence_recall": _mean(
+            [
+                float(row["legacy_chunk_expanded_graph_complete_evidence_recall"])
+                for row in rows
+            ]
         ),
     }
 

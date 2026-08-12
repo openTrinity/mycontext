@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 class CitationLike(Protocol):
@@ -71,17 +71,28 @@ def ask_response_references(
     """Return evidence exposed by one ``kl ask`` response.
 
     ``items`` are the hybrid retrieval results consumed by KL's optional
-    synthesis step. ``nodes`` are the resolved graph-walk results returned by
-    the same request. Seeds and expandable nodes are intentionally omitted:
-    they are navigation metadata and duplicate nodes already present in the
-    resolved graph view.
+    synthesis step. Graph evidence is read from the current response contract,
+    ``graph.components[].nodes``. Seeds and expandable nodes are intentionally
+    omitted: they are navigation metadata. Top-level ``recalled_chunks`` are
+    also omitted because they are graph-walk hydration, not an independent
+    ranked retrieval channel; readable chunks already occur in component
+    nodes.
     """
     sections: list[Any] = []
     if include_items:
         sections.append(response.get("items") or [])
     if include_graph:
-        sections.append(response.get("nodes") or [])
+        graph = response.get("graph")
+        if isinstance(graph, dict):
+            components = graph.get("components")
+            if isinstance(components, list):
+                for component in components:
+                    if isinstance(component, dict):
+                        sections.append(component.get("nodes") or [])
     return _dedupe_references(_references_from_value(sections))
+
+
+FactResolution = Literal["source_unit", "chunk_members"]
 
 
 class EvidenceResolver:
@@ -89,10 +100,11 @@ class EvidenceResolver:
 
     Current LoCoMo ingest stores one *conversation slice* per ``chunks`` row.
     Its deterministic UUID is not a LoCoMo source-message ID; the original
-    message IDs live in ``metadata.member_message_ids``.  A Fact points at that
-    slice through ``facts.source_chunk_id``.  The evaluator therefore expands
-    either a Chunk citation or a Fact citation back to every original member
-    message before joining against LoCoMo ``dia_id`` Gold evidence.
+    message IDs live in ``metadata.member_message_ids``. A Fact points at its
+    exact originating message through ``facts.source_unit_id`` and at the
+    containing slice through ``facts.source_chunk_id``. Current evaluation uses
+    the exact source unit for Facts; whole-chunk Fact expansion remains
+    available only for comparison with legacy scores and databases.
 
     A one-message-per-chunk database remains supported: when
     ``member_message_ids`` is absent, the chunk ID itself is treated as the
@@ -104,6 +116,11 @@ class EvidenceResolver:
         self.conn = sqlite3.connect(uri, uri=True)
         self.conn.row_factory = sqlite3.Row
         self.dia_id_by_message = dia_id_by_message
+        fact_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(facts)").fetchall()
+        }
+        self._facts_have_source_unit_id = "source_unit_id" in fact_columns
 
     def close(self) -> None:
         self.conn.close()
@@ -112,17 +129,28 @@ class EvidenceResolver:
         self,
         references: Iterable[EvidenceReference],
         evidence_conversation_id: str,
+        *,
+        fact_resolution: FactResolution = "source_unit",
     ) -> list[dict[str, Any]]:
+        if fact_resolution not in {"source_unit", "chunk_members"}:
+            raise ValueError(f"unknown Fact resolution mode: {fact_resolution}")
         records: list[dict[str, Any]] = []
-        seen_sources: set[str] = set()
-        observation_rank_by_chunk: dict[str, int] = {}
-        for reference in references:
-            chunk_id = self._source_chunk_id(reference)
+        seen_records: set[tuple[str, str, str]] = set()
+        for observation_rank, reference in enumerate(references, start=1):
+            fact_id: str | None = None
+            source_unit_id: str | None = None
+            if reference.type in {"chunk", "message"}:
+                chunk_id = _strip_node_prefix(reference.id, "cnk")
+            else:
+                fact = self._fact_source(reference)
+                if fact is None:
+                    continue
+                fact_id = str(fact["id"])
+                chunk_id = str(fact["source_chunk_id"] or "")
+                if self._facts_have_source_unit_id and fact["source_unit_id"]:
+                    source_unit_id = str(fact["source_unit_id"])
             if not chunk_id:
                 continue
-            if chunk_id not in observation_rank_by_chunk:
-                observation_rank_by_chunk[chunk_id] = len(observation_rank_by_chunk) + 1
-            observation_rank = observation_rank_by_chunk[chunk_id]
             row = self.conn.execute(
                 "SELECT metadata, "
                 "json_extract(metadata, '$.conversation_id') AS conversation_id "
@@ -132,11 +160,30 @@ class EvidenceResolver:
             if row is None:
                 continue
             conversation_id = str(row["conversation_id"] or "")
-            source_ids = _member_message_ids(row["metadata"], chunk_id)
+            use_exact_fact_source = (
+                reference.type == "fact"
+                and fact_resolution == "source_unit"
+                and source_unit_id is not None
+            )
+            source_ids = (
+                [source_unit_id]
+                if use_exact_fact_source
+                else _member_message_ids(row["metadata"], chunk_id)
+            )
+            resolution = (
+                "fact_source_unit"
+                if use_exact_fact_source
+                else (
+                    "fact_chunk_members_legacy"
+                    if reference.type == "fact"
+                    else "chunk_members"
+                )
+            )
             for source_id in source_ids:
-                if source_id in seen_sources:
+                record_key = (reference.type, reference.id, source_id)
+                if record_key in seen_records:
                     continue
-                seen_sources.add(source_id)
+                seen_records.add(record_key)
                 dia_id = None
                 if _conversation_matches(conversation_id, evidence_conversation_id):
                     dia_id = self.dia_id_by_message.get(source_id)
@@ -144,8 +191,11 @@ class EvidenceResolver:
                     {
                         "reference_type": reference.type,
                         "reference_id": reference.id,
+                        "cited_fact_id": fact_id,
                         "source_chunk_id": chunk_id,
+                        "source_unit_id": source_unit_id,
                         "source_message_id": source_id,
+                        "resolution": resolution,
                         "observation_rank": observation_rank,
                         "conversation_id": conversation_id,
                         "dia_id": dia_id,
@@ -153,17 +203,26 @@ class EvidenceResolver:
                 )
         return records
 
-    def _source_chunk_id(self, reference: EvidenceReference) -> str | None:
-        value = reference.id
-        if reference.type in {"chunk", "message"}:
-            return value
-        if value.startswith("fact:"):
-            value = value.split(":", 1)[1]
-        row = self.conn.execute(
-            "SELECT source_chunk_id FROM facts WHERE id = ? OR id LIKE ? LIMIT 1",
-            (value, f"{value}%"),
-        ).fetchone()
-        return str(row["source_chunk_id"]) if row else None
+    def _fact_source(self, reference: EvidenceReference) -> sqlite3.Row | None:
+        """Resolve an exact Fact ID, allowing only an unambiguous old prefix."""
+        value = _strip_node_prefix(reference.id, "fact")
+        source_unit_select = (
+            "source_unit_id"
+            if self._facts_have_source_unit_id
+            else "NULL AS source_unit_id"
+        )
+        select = f"SELECT id, source_chunk_id, {source_unit_select} FROM facts"
+        row = self.conn.execute(f"{select} WHERE id = ?", (value,)).fetchone()
+        if row is not None:
+            return row
+        escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = self.conn.execute(
+            f"{select} WHERE id LIKE ? ESCAPE '\\' ORDER BY id LIMIT 2",
+            (f"{escaped}%",),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValueError(f"ambiguous Fact ID prefix: {reference.id}")
+        return rows[0] if rows else None
 
 
 class ConversationEvidenceResolver:
@@ -187,6 +246,8 @@ class ConversationEvidenceResolver:
         self,
         references: Iterable[EvidenceReference],
         evidence_conversation_id: str,
+        *,
+        fact_resolution: FactResolution = "source_unit",
     ) -> list[dict[str, Any]]:
         resolver = self._resolvers.get(evidence_conversation_id)
         if resolver is None:
@@ -200,12 +261,21 @@ class ConversationEvidenceResolver:
                 raise FileNotFoundError(sqlite_path)
             resolver = EvidenceResolver(sqlite_path, self.dia_id_by_message)
             self._resolvers[evidence_conversation_id] = resolver
-        return resolver.resolve(references, evidence_conversation_id)
+        return resolver.resolve(
+            references,
+            evidence_conversation_id,
+            fact_resolution=fact_resolution,
+        )
 
 
 def _conversation_matches(stored: str, expected: str) -> bool:
     """Accept legacy IDs and main's source-namespaced conversation IDs."""
     return stored == expected or stored == f"locomo-{expected}:{expected}"
+
+
+def _strip_node_prefix(value: str, prefix: str) -> str:
+    marker = f"{prefix}:"
+    return value.removeprefix(marker)
 
 
 def _parse_json_output(output: str) -> Any | None:

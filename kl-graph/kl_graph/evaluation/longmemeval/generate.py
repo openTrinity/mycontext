@@ -19,17 +19,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from kl_graph.config import cfg
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
-from kl_graph.evaluation.io import atomic_write_jsonl, json_lines
+from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl, json_lines
 from kl_graph.evaluation.longmemeval.build import (
     CASE_DATA_DIRNAME,
     DEFAULT_CASE_SET,
@@ -43,10 +44,17 @@ from kl_graph.evaluation.longmemeval.source import (
     load_cases,
     source_fingerprint,
 )
+from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
 DEFAULT_OUTPUT_NAME = "hypotheses.jsonl"
 DEFAULT_MAX_TOKENS = 500
 DEFAULT_CONCURRENCY = 5
+DEFAULT_MODEL_CONTEXT_TOKENS = 128_000
+PROMPT_RESERVE_TOKENS = 1_000
+DEFAULT_MAX_RETRIEVAL_LENGTH = (
+    DEFAULT_MODEL_CONTEXT_TOKENS - DEFAULT_MAX_TOKENS - PROMPT_RESERVE_TOKENS
+)
+FACT_CONTEXT_MODE = "none"
 
 LLM_PROVIDER = str(cfg.services.llm_flash.provider)
 LLM_BASE_URL = str(cfg.services.llm_flash.base_url or "")
@@ -87,6 +95,9 @@ class HydratedItem:
     first_turn_index: int
     session_date: str
     turns: list[dict[str, str]]
+    source_item_type: str
+    source_item_id: str
+    source_unit_id: str
 
 
 def _positive_int(value: str) -> int:
@@ -152,6 +163,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_MAX_TOKENS,
     )
     parser.add_argument(
+        "--model-context-tokens",
+        type=_positive_int,
+        default=DEFAULT_MODEL_CONTEXT_TOKENS,
+        help=(
+            "model context-window size used to derive LongMemEval's retrieval "
+            f"limit (default: {DEFAULT_MODEL_CONTEXT_TOKENS})"
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         type=_positive_int,
         default=DEFAULT_CONCURRENCY,
@@ -179,6 +199,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if external_ask_dir is None and not has_selection:
         parser.error("one of --case, --first, or --all is required")
+    if args.model_context_tokens <= args.max_tokens + PROMPT_RESERVE_TOKENS:
+        parser.error(
+            "--model-context-tokens must exceed --max-tokens plus the "
+            f"{PROMPT_RESERVE_TOKENS}-token prompt reserve"
+        )
     return args
 
 
@@ -271,28 +296,45 @@ def _read_ask_items(case_root: Path, question_id: str) -> list[dict[str, Any]]:
     return items
 
 
-def _read_chunk_members(
+def _read_item_source_units(
     conn: sqlite3.Connection,
     item: dict[str, Any],
     question_id: str,
 ) -> list[str]:
-    """Resolve a Top-5 item to the source chunk's original message IDs."""
+    """Resolve one item to exact user turns under official ``flat-turn``.
+
+    Facts use their precise ``source_unit_id``. A Fact from an old database
+    without that provenance falls back to all members of its source chunk.
+    Chunk/Message hits always expand all represented user turns.
+    """
     item_id = item.get("id")
-    item_type = item.get("type")
+    item_type = str(item.get("type") or "").lower()
     if not isinstance(item_id, str) or not item_id:
         raise ValueError(f"case {question_id}: ask item has no ID")
 
     if item_type == "fact":
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(facts)").fetchall()
+        }
+        source_unit_select = (
+            "source_unit_id"
+            if "source_unit_id" in columns
+            else "NULL AS source_unit_id"
+        )
         row = conn.execute(
-            "SELECT source_chunk_id FROM facts WHERE id = ?", (item_id,)
+            f"SELECT source_chunk_id, {source_unit_select} FROM facts WHERE id = ?",
+            (item_id.removeprefix("fact:"),),
         ).fetchone()
         if row is None:
             raise ValueError(
                 f"case {question_id}: fact is absent from knowledge.db: {item_id}"
             )
         chunk_id = row[0]
+        source_unit_id = row[1]
+        if isinstance(source_unit_id, str) and source_unit_id:
+            return [source_unit_id]
     else:
-        chunk_id = item_id
+        chunk_id = item_id.removeprefix("cnk:")
 
     row = conn.execute(
         "SELECT metadata FROM chunks WHERE id = ?", (chunk_id,)
@@ -326,7 +368,7 @@ def _hydrate_items(
     evaluation: EvaluationCase,
     items: list[dict[str, Any]],
 ) -> list[HydratedItem]:
-    """Restore source dialogue rounds for user-only chunk and fact hits."""
+    """Restore official flat-turn rounds for user-only Chunk and Fact hits."""
     database = (case_root / CASE_DATA_DIRNAME / "knowledge.db").resolve()
     if not database.is_file():
         raise FileNotFoundError(f"case {question_id} has not been built: {database}")
@@ -335,7 +377,7 @@ def _hydrate_items(
     seen_user_turns: set[tuple[int, int]] = set()
     with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as conn:
         for retrieval_rank, item in enumerate(items):
-            member_ids = _read_chunk_members(conn, item, question_id)
+            member_ids = _read_item_source_units(conn, item, question_id)
             locations: list[tuple[int, int]] = []
             for member_id_value in member_ids:
                 location = evaluation.message_locations.get(member_id_value)
@@ -358,34 +400,32 @@ def _hydrate_items(
                 # A message and a fact derived from it can both reach Top-5.
                 # Present the source dialogue once rather than duplicating it.
                 continue
-            session_indices = {location[0] for location in locations}
-            if len(session_indices) != 1:
-                raise ValueError(
-                    f"case {question_id}: one chunk spans multiple source sessions"
-                )
-            session_index = locations[0][0]
-            user_turn_indices = sorted({location[1] for location in locations})
-
-            # The official flat-turn generator expands each retrieved user turn
-            # to that turn plus the immediately following turn. A production KL
-            # chunk can contain several user turns, so take the ordered union.
-            turn_indices: set[int] = set()
-            session = evaluation.sessions[session_index]
-            for turn_index in user_turn_indices:
-                turn_indices.add(turn_index)
+            item_id = str(item["id"])
+            item_type = str(item.get("type") or "message").lower()
+            # The official flat-turn generator treats each retrieved user turn
+            # as a separate round and appends its immediately following turn.
+            # A production chunk can represent several user turns, so emit one
+            # HydratedItem per source unit rather than one disjoint pseudo-round.
+            for session_index, turn_index in sorted(set(locations)):
+                session = evaluation.sessions[session_index]
+                turns = [session[turn_index]]
                 if turn_index + 1 < len(session):
-                    turn_indices.add(turn_index + 1)
+                    turns.append(session[turn_index + 1])
                 seen_user_turns.add((session_index, turn_index))
-
-            hydrated.append(
-                HydratedItem(
-                    retrieval_rank=retrieval_rank,
-                    session_index=session_index,
-                    first_turn_index=user_turn_indices[0],
-                    session_date=evaluation.session_dates[session_index],
-                    turns=[session[index] for index in sorted(turn_indices)],
+                hydrated.append(
+                    HydratedItem(
+                        retrieval_rank=retrieval_rank,
+                        session_index=session_index,
+                        first_turn_index=turn_index,
+                        session_date=evaluation.session_dates[session_index],
+                        turns=turns,
+                        source_item_type=item_type,
+                        source_item_id=item_id,
+                        source_unit_id=message_id(
+                            question_id, session_index, turn_index
+                        ),
+                    )
                 )
-            )
 
     if not hydrated:
         raise ValueError(f"case {question_id}: Top-5 produced no source dialogue")
@@ -396,6 +436,8 @@ def _build_prompt(
     question: str,
     question_date: str,
     items: list[HydratedItem],
+    *,
+    max_retrieval_length: int,
 ) -> str:
     # The official generator presents retrieved source dialogue chronologically
     # rather than in retrieval-rank order.
@@ -422,7 +464,10 @@ def _build_prompt(
         )
     if not history:
         raise ValueError("retrieved items contain no usable text")
-    return PROMPT_TEMPLATE.format("\n\n".join(history), question_date, question)
+    history_text = _truncate_retrieval_history(
+        "\n\n".join(history), max_retrieval_length
+    )
+    return PROMPT_TEMPLATE.format(history_text, question_date, question)
 
 
 def _build_retrieved_prompt(
@@ -431,6 +476,7 @@ def _build_retrieved_prompt(
     items: list[dict[str, Any]],
     *,
     backend: str,
+    max_retrieval_length: int,
 ) -> str:
     """Use an external retrieval server's content in retrieval-rank order."""
     history: list[str] = []
@@ -451,11 +497,35 @@ def _build_retrieved_prompt(
         )
     if not history:
         raise ValueError(f"{backend} retrieval returned no usable content")
-    return PROMPT_TEMPLATE.format("\n\n".join(history), question_date, question)
+    history_text = _truncate_retrieval_history(
+        "\n\n".join(history), max_retrieval_length
+    )
+    return PROMPT_TEMPLATE.format(history_text, question_date, question)
+
+
+def _truncate_retrieval_history(history: str, max_retrieval_length: int) -> str:
+    """Apply LongMemEval's deterministic prefix truncation to retrieval text."""
+    if max_retrieval_length < 1:
+        raise ValueError("max_retrieval_length must be positive")
+    try:
+        import tiktoken
+
+        tokenizer = tiktoken.get_encoding("o200k_base")
+        tokens = tokenizer.encode(history, allowed_special={"<|endoftext|>"})
+        if len(tokens) <= max_retrieval_length:
+            return history
+        return tokenizer.decode(tokens[:max_retrieval_length])
+    except ImportError:
+        # Tiktoken is optional in KL's production environment. Keep a stable
+        # prefix with the same char/4 approximation used by ingestion.
+        return history[: max_retrieval_length * 4]
 
 
 def _retrieval_generation_inputs(
-    ask_dir: Path, *, backend: str
+    ask_dir: Path,
+    *,
+    backend: str,
+    max_retrieval_length: int = DEFAULT_MAX_RETRIEVAL_LENGTH,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
     """Validate one ask artifact and construct direct-content prompts."""
     ask_dir = ask_dir.expanduser().resolve()
@@ -513,6 +583,7 @@ def _retrieval_generation_inputs(
                     str(case["question_date"]),
                     items,
                     backend=backend,
+                    max_retrieval_length=max_retrieval_length,
                 ),
             )
         )
@@ -521,14 +592,26 @@ def _retrieval_generation_inputs(
 
 def _ragflow_generation_inputs(
     ask_dir: Path,
+    *,
+    max_retrieval_length: int = DEFAULT_MAX_RETRIEVAL_LENGTH,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
-    return _retrieval_generation_inputs(ask_dir, backend="ragflow")
+    return _retrieval_generation_inputs(
+        ask_dir,
+        backend="ragflow",
+        max_retrieval_length=max_retrieval_length,
+    )
 
 
 def _khoj_generation_inputs(
     ask_dir: Path,
+    *,
+    max_retrieval_length: int = DEFAULT_MAX_RETRIEVAL_LENGTH,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
-    return _retrieval_generation_inputs(ask_dir, backend="khoj")
+    return _retrieval_generation_inputs(
+        ask_dir,
+        backend="khoj",
+        max_retrieval_length=max_retrieval_length,
+    )
 
 
 async def _generate(prompt: str, args: argparse.Namespace) -> str:
@@ -588,20 +671,76 @@ def _completed_rows(path: Path) -> dict[str, dict[str, str]]:
     return completed
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _generation_configuration(
+    *,
+    args: argparse.Namespace,
+    backend: str,
+    root: Path,
+    output: Path,
+    max_retrieval_length: int,
+) -> dict[str, Any]:
+    return {
+        "benchmark": "longmemeval",
+        "stage": "generate",
+        "backend": backend,
+        "input_root": str(root),
+        "output": str(output),
+        "model": args.model,
+        "base_url": args.base_url,
+        "max_tokens": args.max_tokens,
+        "model_context_tokens": args.model_context_tokens,
+        "prompt_reserve_tokens": PROMPT_RESERVE_TOKENS,
+        "max_retrieval_length": max_retrieval_length,
+        "fact_context_mode": FACT_CONTEXT_MODE if backend == "kl" else None,
+    }
+
+
+def _validate_resume_run(path: Path, expected: dict[str, Any]) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError(
+            f"resume requires a generation run manifest; use --overwrite: {path}"
+        )
+    existing = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(existing, dict):
+        raise TypeError(f"generation run manifest is not an object: {path}")
+    actual = existing.get("configuration")
+    if actual != expected:
+        raise ValueError(
+            "generation configuration changed; use --overwrite instead of --resume"
+        )
+    return existing
+
+
 async def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        max_retrieval_length = (
+            args.model_context_tokens - args.max_tokens - PROMPT_RESERVE_TOKENS
+        )
         retrieval_prompts: list[tuple[str, str]] | None = None
         selected: list[dict[str, Any]] = []
         if args.ragflow_ask_dir is not None:
+            backend = "ragflow"
             root, manifest_order, retrieval_prompts = _ragflow_generation_inputs(
-                args.ragflow_ask_dir
+                args.ragflow_ask_dir,
+                max_retrieval_length=max_retrieval_length,
             )
         elif args.khoj_ask_dir is not None:
+            backend = "khoj"
             root, manifest_order, retrieval_prompts = _khoj_generation_inputs(
-                args.khoj_ask_dir
+                args.khoj_ask_dir,
+                max_retrieval_length=max_retrieval_length,
             )
         else:
+            backend = "kl"
             root, entries = _load_case_entries(args.case_set)
             selected = _select_entries(entries, args)
             manifest_order = [entry["question_id"] for entry in entries]
@@ -610,10 +749,20 @@ async def main(argv: list[str] | None = None) -> int:
             if args.output is not None
             else root / DEFAULT_OUTPUT_NAME
         )
+        run_path = Path(f"{output}.run.json")
+        run_configuration = _generation_configuration(
+            args=args,
+            backend=backend,
+            root=root,
+            output=output,
+            max_retrieval_length=max_retrieval_length,
+        )
 
         completed: dict[str, dict[str, str]] = {}
+        prior_run: dict[str, Any] = {}
         if output.exists():
             if args.resume:
+                prior_run = _validate_resume_run(run_path, run_configuration)
                 completed = _completed_rows(output)
             elif not args.overwrite and not args.dry_run:
                 raise FileExistsError(
@@ -645,6 +794,7 @@ async def main(argv: list[str] | None = None) -> int:
                             evaluation.question,
                             evaluation.question_date,
                             hydrated_items,
+                            max_retrieval_length=max_retrieval_length,
                         ),
                     )
                 )
@@ -662,6 +812,35 @@ async def main(argv: list[str] | None = None) -> int:
                 f"output contains question IDs outside this case set: "
                 f"{sorted(unknown_ids)[:5]}"
             )
+
+        prompt_sha256_by_question = {
+            str(key): str(value)
+            for key, value in (prior_run.get("prompt_sha256_by_question") or {}).items()
+        }
+        prompt_sha256_by_question.update(
+            {
+                question_id: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                for question_id, prompt in pending
+            }
+        )
+        started_at = (
+            str(prior_run.get("started_at") or "")
+            or datetime.now().astimezone().isoformat()
+        )
+        atomic_write_json(
+            run_path,
+            {
+                "status": "running",
+                "started_at": started_at,
+                "configuration": run_configuration,
+                "prompt_sha256_by_question": prompt_sha256_by_question,
+                "completed_question_ids": [
+                    question_id
+                    for question_id in manifest_order
+                    if question_id in completed
+                ],
+            },
+        )
 
         def checkpoint() -> None:
             ordered = (
@@ -716,6 +895,23 @@ async def main(argv: list[str] | None = None) -> int:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         print(f"saved hypotheses: {output}", flush=True)
+        atomic_write_json(
+            run_path,
+            {
+                "status": "complete",
+                "started_at": started_at,
+                "completed_at": datetime.now().astimezone().isoformat(),
+                "configuration": run_configuration,
+                "prompt_sha256_by_question": prompt_sha256_by_question,
+                "completed_question_ids": [
+                    question_id
+                    for question_id in manifest_order
+                    if question_id in completed
+                ],
+                "hypotheses_sha256": _file_sha256(output),
+            },
+        )
+        print(f"generation run: {run_path}", flush=True)
         return 0
     except Exception as exc:  # noqa: BLE001 - report a resumable batch failure
         print(f"error: {exc}", file=sys.stderr)

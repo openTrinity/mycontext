@@ -22,7 +22,7 @@ from typing import Any
 from openai import AsyncOpenAI
 from tqdm import tqdm
 
-from kl_graph.config import cfg  # noqa: E402
+from kl_graph.config import cfg
 from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl
 from kl_graph.evaluation.longmemeval.build import (
     DEFAULT_CASE_SET,
@@ -228,11 +228,16 @@ async def _score_one(
             temperature=0,
             max_tokens=10,
         )
-    response = (completion.choices[0].message.content or "").strip()
+    raw_response = completion.choices[0].message.content or ""
+    response = raw_response.strip()
     score = int("yes" in response.lower())
     scored = {
         **hypothesis,
-        "autoeval_label": {"model": model, "label": bool(score)},
+        "autoeval_label": {
+            "model": model,
+            "label": bool(score),
+            "raw_response": raw_response,
+        },
     }
     return question_id, question_type, score, scored
 
