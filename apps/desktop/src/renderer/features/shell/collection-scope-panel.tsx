@@ -262,9 +262,11 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
             {t("status.scope.save", { defaultValue: "保存范围" })}
           </Button>
           {/*
-            ★ 保存后必须说清**会发生什么** —— 这个动作会删数据（越界的消息
-            连带它的 FTS/向量/媒体行一起清），而那是不可逆的。
-            只显示一个"已保存"会让用户以为它只是记下了一个偏好。
+            ★ 保存后必须说清**会发生什么**。
+
+            ★★ 这句话原来是「越界的消息正在清理，图谱会重建」—— 那在
+            「只增不减」之后**不再成立**：范围不会变小，所以没有"越界"可清。
+            留着它就是在报告一件没发生的事（而且是删数据这么重的一件事）。
 
             ★★ 只在**保存过的那个渠道**上显示：这个提示原来是一个 boolean，
             于是切到另一个渠道后仍然挂着，而它说的是上一个渠道那次保存。
@@ -272,11 +274,30 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           {savedChannel === activeChannel ? (
             <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
               {t("status.scope.savedHint", {
-                defaultValue: "已保存。越界的消息正在清理，图谱会重建（分钟级）。",
+                defaultValue: "已保存。新增的范围会在下一轮采集时往回补（分钟级）。",
               })}
             </span>
           ) : null}
         </div>
+        {/*
+          ★★★ 「只增不减」必须**在用户动手之前**就说出来。
+
+          没有这句话时，取消勾选一个群 → 点保存 → 提示"已保存" → 而那个群
+          还在范围里。用户看到的是"保存没生效"，也就是一个 bug 的样子。
+          而实际行为是对的（消费者已经消费过那些会话，缩小会让图谱与蒸馏
+          产出跟范围永久不一致）。这类"行为正确但读起来像坏了"的情况，
+          修法是把判据讲出来，而不是改行为。
+
+          ★ 同时给出真正的退路 —— 用户误选了大群时确实需要能收回，
+          而那条路是「清空当前渠道数据」（它会真删，并且明确告知）。
+          不给退路的"只增不减"会变成一个陷阱。
+        */}
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("status.scope.growOnlyNote", {
+            defaultValue:
+              "范围只增不减：取消勾选不会删掉已经学到的内容，也不会缩小范围 —— 因为图谱和画像已经用过那些消息。要真正移除，用「通用 › 清空当前渠道数据」。",
+          })}
+        </p>
       </div>
     </Disclosure>
   )

@@ -714,9 +714,7 @@ describe("飞书两步授权：实测抓到的三个缺口", () => {
       },
       (args) => seen.push([...args]),
     )
-    await auth
-      .login({ mode: "loopback", onProgress: () => undefined })
-      .catch(() => undefined)
+    await auth.login({ mode: "loopback", onProgress: () => undefined }).catch(() => undefined)
     expect(seen.some((a) => a[0] === "config" && a[1] === "init")).toBe(true)
   })
 

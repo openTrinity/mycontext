@@ -666,9 +666,7 @@ export function usePersonaLimits(enabled = true, channelId?: string) {
   return useQuery({
     queryKey: [...QUERY_KEYS.personaLimits, channelId ?? null] as const,
     queryFn: async () =>
-      unwrap(
-        await window.mycontext.persona.limits(channelId === undefined ? {} : { channelId }),
-      ),
+      unwrap(await window.mycontext.persona.limits(channelId === undefined ? {} : { channelId })),
     staleTime: 60_000,
     enabled,
   })
@@ -1088,7 +1086,23 @@ export function useFetchSelfAvatar() {
 export function useRefreshChannelAvatar() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async (input: { channelId: string; externalId: string }) =>
+    mutationFn: async (input: {
+      channelId: string
+      externalId: string
+      /**
+       * ★★ 本人的**花名** —— 钉钉这条路**没它就一次命令都不发**。
+       *
+       * 钉钉没有开放的按 id 取头像接口，只能绕"共同群成员详情里的
+       * avatarMediaId"，而找共同群靠 `chat search-common --nicks <花名>`。
+       * 缺花名时渠道层直接返回 `not_attempted`（可重试）—— 表现是
+       * **点了刷新毫无变化**，而日志那条 `avatar lookup` 是 debug 级、
+       * 在 info 的运行环境里看不见。实测：钉钉 `failed:1` 且落回
+       * `not_attempted`，而飞书（按 open_id 直取，不需要花名）`fetched:1`。
+       *
+       * 飞书不需要它，但传了无害 —— 那条实现压根不读这个字段。
+       */
+      nick?: string | null
+    }) =>
       unwrap(
         await window.mycontext.media.avatarsFetch({
           externalIds: [input.externalId],
@@ -1096,6 +1110,9 @@ export function useRefreshChannelAvatar() {
           groupExternalId: null,
           channelId: input.channelId,
           force: true,
+          ...(input.nick === undefined || input.nick === null || input.nick === ""
+            ? {}
+            : { nickByExternalId: { [input.externalId]: input.nick } }),
         }),
       ),
     onSuccess: () => {

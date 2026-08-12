@@ -218,11 +218,7 @@ export function readFeishuTenantKey(payload: unknown): string | null {
  */
 export function readFeishuTenantName(payload: unknown): string | null {
   const root = record(payload)
-  const candidates = [
-    record(record(root["data"])["tenant"]),
-    record(root["tenant"]),
-    root,
-  ]
+  const candidates = [record(record(root["data"])["tenant"]), record(root["tenant"]), root]
   for (const tenant of candidates) {
     const raw = tenant["name"]
     if (typeof raw === "string" && raw.trim() !== "") return raw
@@ -274,7 +270,9 @@ export function parseLarkAuthStatus(payload: unknown, now: Date = new Date()): A
    * 只能给一颗含糊的「开始授权」按钮。
    */
   if (identity === null || (!verified && !valid) || !hasScopes) {
-    return appBinding === undefined ? { state: "unauthorized" } : { state: "unauthorized", appBinding }
+    return appBinding === undefined
+      ? { state: "unauthorized" }
+      : { state: "unauthorized", appBinding }
   }
   /**
    * 两个过期时间。CLI 用 camelCase（`expiresAt`/`refreshExpiresAt`），

@@ -26,7 +26,10 @@ import type {
   ChannelPullSpec,
 } from "../../types.js"
 import type { LarkCli } from "./cli.js"
-import { parseLarkAuthStatus, parseLarkIdentity, parseLarkMessagePage,
+import {
+  parseLarkAuthStatus,
+  parseLarkIdentity,
+  parseLarkMessagePage,
   readFeishuTenantKey,
 } from "./parse.js"
 

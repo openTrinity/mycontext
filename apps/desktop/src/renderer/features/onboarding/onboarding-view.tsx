@@ -580,18 +580,18 @@ export function OnboardingView() {
           </div>
         ) : null}
         <div className="min-w-0 flex-1">
-        <StepBar
-          items={stepItems}
-          activeId={activeId}
-          onSelect={(id) => setActiveId(id as OnboardingStepId)}
-          comingSoonSuffix={t("steps.comingSoonSuffix")}
-          stateLabels={{
-            done: t("state.done"),
-            skipped: t("state.skipped"),
-            current: t("state.current"),
-            pending: t("state.pending"),
-          }}
-        />
+          <StepBar
+            items={stepItems}
+            activeId={activeId}
+            onSelect={(id) => setActiveId(id as OnboardingStepId)}
+            comingSoonSuffix={t("steps.comingSoonSuffix")}
+            stateLabels={{
+              done: t("state.done"),
+              skipped: t("state.skipped"),
+              current: t("state.current"),
+              pending: t("state.pending"),
+            }}
+          />
         </div>
       </div>
 

@@ -515,7 +515,25 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
             disabled={running || refreshAvatar.isPending || selfExternalId === null}
             onClick={() => {
               if (selfExternalId === null) return
-              refreshAvatar.mutate({ channelId: channel.id, externalId: selfExternalId })
+              refreshAvatar.mutate({
+                channelId: channel.id,
+                externalId: selfExternalId,
+                /**
+                 * ★★ 传**原始花名**，不是 `channelNick`。
+                 *
+                 * `channelNick` 在"花名与实名相同"时故意返回 `null`
+                 * （那是为了不显示「王强（王强）」）—— 那是**展示**用的过滤。
+                 * 而取头像要的是能喂给 `chat search-common --nicks` 的那个词，
+                 * 过滤掉就等于没传 → 钉钉一次命令都不发、静默落
+                 * `not_attempted`（实测：钉钉 `failed:1`，而飞书按 open_id
+                 * 直取、不需要花名，同一次 `fetched:1`）。
+                 *
+                 * 同一个值两种用途、其中一种做了过滤 —— 这类错位的表现是
+                 * "点了刷新毫无变化"，而那条 `avatar lookup` 日志是 debug 级、
+                 * 在 info 的运行环境里看不见。
+                 */
+                nick: selfIdentity.data?.displayNames[0] ?? status.userName ?? null,
+              })
             }}
           >
             {t("actions.refreshAvatar")}
@@ -1006,10 +1024,7 @@ function AccountBlock({
       */}
       <dl className="flex flex-col gap-1">
         {appBinding === undefined ? null : (
-          <Field
-            label={t("account.app")}
-            value={appBinding.appName ?? appBinding.appId}
-          />
+          <Field label={t("account.app")} value={appBinding.appName ?? appBinding.appId} />
         )}
         <Field label={t("account.accessExpiresAt")} value={formatTime(status.accessExpiresAt)} />
         <Field label={t("account.refreshExpiresAt")} value={formatTime(status.refreshExpiresAt)} />

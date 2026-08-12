@@ -94,10 +94,8 @@ describe("MultiMediaService：头像按渠道路由", () => {
      */
     const calls: string[] = []
     let mounted: string[] = []
-    const media = new MultiMediaService(
-      fakeMedia("dingtalk", calls) as never,
-      "dingtalk",
-      () => mounted.map((channelId) => ({ channelId, media: fakeMedia(channelId, calls) })),
+    const media = new MultiMediaService(fakeMedia("dingtalk", calls) as never, "dingtalk", () =>
+      mounted.map((channelId) => ({ channelId, media: fakeMedia(channelId, calls) })),
     )
     media.avatarsFromCache(["ou_FAKE01"], "feishu") // 还没挂 → 主渠道
     mounted = ["feishu"]
@@ -188,8 +186,60 @@ describe("接线：授权卡的「刷新头像」不许走写账号那条", () =
 
   it("★ 而设置页的「从已连接的平台获取」**仍然**用 useFetchSelfAvatar（它就该写账号）", async () => {
     const { readFileSync } = await import("node:fs")
-    const src = readFileSync("apps/desktop/src/renderer/features/settings/identity-panel.tsx", "utf8")
+    const src = readFileSync(
+      "apps/desktop/src/renderer/features/settings/identity-panel.tsx",
+      "utf8",
+    )
     // 不能因为修串台就把这条也换掉：那个动作的语义就是"设成我的账号头像"
     expect(src).toContain("useFetchSelfAvatar")
+  })
+})
+
+/**
+ * ── ★★ 「刷新头像」必须带**花名** ──────────────────────────────
+ *
+ * 钉钉没有开放的按 id 取头像接口，只能绕"共同群成员详情里的 avatarMediaId"，
+ * 而找共同群靠 `chat search-common --nicks <花名>`。缺花名时渠道层
+ * **一次命令都不发**就返回 `not_attempted`。
+ *
+ * 实测（真应用 CDP）：不传 nick 时钉钉 `failed:1` 且缓存落回
+ * `not_attempted`，而飞书同一次 `fetched:1`（它按 open_id 直取、不需要花名）。
+ * 表现是"点了刷新毫无变化"—— 而那条 `avatar lookup` 日志是 debug 级，
+ * 在 info 的运行环境里看不见。
+ *
+ * 判据落在**渲染层有没有把 nick 传下去**，因为那才是我漏掉的地方。
+ */
+describe("接线：刷新头像必须带花名（否则钉钉一次命令都不发）", () => {
+  it("★★ hook 把 nick 映射成 nickByExternalId 传给 avatarsFetch", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/renderer/lib/queries.ts", "utf8")
+    const start = src.indexOf("export function useRefreshChannelAvatar")
+    expect(start).toBeGreaterThan(0)
+    const body = src.slice(start, start + 2000)
+    /**
+     * 反证：把那段 `nickByExternalId` 展开删掉 → 红。
+     * 而红之前的状态正是钉钉点刷新没反应。
+     */
+    expect(body).toContain("nickByExternalId")
+    expect(body).toContain("force: true")
+  })
+
+  it("★★ 按钮传的是**原始**花名，不是展示用的 channelNick", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync(
+      "apps/desktop/src/renderer/features/channels/channel-auth-panel.tsx",
+      "utf8",
+    )
+    const idx = src.indexOf("refreshAvatar.mutate(")
+    expect(idx).toBeGreaterThan(0)
+    const call = src.slice(idx, idx + 900)
+    /**
+     * `channelNick` 在"花名与实名相同"时返回 `null`（展示用的过滤）——
+     * 拿它当 nick 就等于没传。所以这里断言用的是身份行里的原始值。
+     *
+     * 反证：把 `nick:` 那行改成 `nick: channelNick` → 红。
+     */
+    expect(call).toContain("displayNames[0]")
+    expect(call.includes("nick: channelNick")).toBe(false)
   })
 })

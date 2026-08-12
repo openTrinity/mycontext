@@ -112,6 +112,113 @@ export interface DistillSourceServiceOptions {
   onScopeChanged?: (channelId: string) => void
 }
 
+/**
+ * 把新范围并进旧范围，**只许变宽**。
+ *
+ * ## ★★★ `undefined` 是"不设限"，也就是**最宽**的值 —— 它是吸收元
+ *
+ * 这是整段逻辑唯一容易写反的地方，而写反的后果是**反过来缩小范围**：
+ *
+ * 库里 `conversationIds` 是 `undefined`（全部会话都采）、这次传进来 10 个 ——
+ * 若按"数组求并集"处理，结果是那 10 个，于是"只增不减"这条规则
+ * 亲手把 92 个会话缩成了 10 个。所以判据不是"合并两个数组"，而是
+ * **"哪一边更宽就用哪一边"**，而 `undefined` 永远最宽。
+ *
+ * 四个字段各自的"宽"方向（与 `isConversationInScope` / `isSentAtInScope`
+ * 的放行条件一一对应，见 `packages/store/src/collection-scope.ts`）：
+ *
+ * | 字段              | 不设限     | 更宽的方向          |
+ * |-------------------|-----------|--------------------|
+ * | `conversationIds` | undefined | 并集               |
+ * | `chatKinds`       | undefined | 并集               |
+ * | `since`（下界）    | undefined | **更早**（`min`）   |
+ * | `until`（上界）    | undefined | **更晚**（`max`）   |
+ *
+ * ★ `since` 还有第三态：`isSentAtInScope` 里 `null` 与 `undefined` 都放行。
+ * 所以非 number 一律按"不设限"处理，不能只判 `undefined`。
+ *
+ * ★ 纯函数并导出：这根"接线"若留在 `save` 里，测试就只能透过服务去打它，
+ * 而本仓库已经吃过一次"两头都锁了、中间那根线是裸的"（删掉传值那一行，
+ * 1023 条测试一条都不红）。
+ */
+export function mergeScopeOnlyGrowing(
+  before: DistillScopeInput | undefined,
+  incoming: DistillScopeInput,
+): DistillScopeInput {
+  if (before === undefined) return incoming
+
+  const merged: DistillScopeInput = {}
+
+  const ids = widen(before.conversationIds, incoming.conversationIds, unionOf)
+  if (ids !== undefined) merged.conversationIds = ids
+  const kinds = widen(before.chatKinds, incoming.chatKinds, unionOf)
+  if (kinds !== undefined) merged.chatKinds = kinds
+
+  // 下界只能变早，上界只能变晚 —— 两个方向相反，只差一个函数
+  const since = widen(numOrUndef(before.since), numOrUndef(incoming.since), Math.min)
+  if (since !== undefined) merged.since = since
+  const until = widen(numOrUndef(before.until), numOrUndef(incoming.until), Math.max)
+  if (until !== undefined) merged.until = until
+
+  return merged
+}
+
+/**
+ * 一个字段的"只能变宽"合并。★ 三种情形，**两边的 `undefined` 含义不同**。
+ *
+ * | before | incoming | 结果 | 为什么 |
+ * |--------|----------|------|--------|
+ * | 无     | 有       | incoming | 库里**没记过这个字段的限制** → 这是第一次设，收下 |
+ * | 有     | 无       | 无（不设限） | 用户放宽到"不限" → 允许 |
+ * | 有     | 有       | `wider()` | 两个都是限制 → 取更宽的那个 |
+ *
+ * ## ★★★ 第一行为什么不能按"不设限是最宽、所以吸收 incoming"处理
+ *
+ * 我第一版正是那样写的（"任一边 undefined 就返回 undefined"），它**看起来**
+ * 更符合"只增不减"，实际后果是范围**永远设不进去**，而且是静默的：
+ *
+ * · `DistillSourceRepository.list()` 对每个 kind 都合成一行，`scope` 是 `{}`；
+ * · `syncTimeWindowToSources()` 在挂载时给每个非主渠道库写一行 chat，
+ *   而它**刻意不带 `conversationIds`**（那是别的渠道的 external_id，
+ *   复制过去会按一批不存在的 id 过滤 → 恒零，比超采更糟）。
+ *
+ * 于是飞书那一行天然是"有 since、没有 conversationIds"。把这个 `undefined`
+ * 当成"用户选了全部会话"，就等于让飞书**永远**无法设白名单 —— 每次保存都被
+ * 上一次的 `undefined` 吸收掉。那是超范围采集（CLAUDE.md 第 5 节）。
+ *
+ * 实测：那一版让 4 条隔离断言与 2 条读回断言转红（`conversationIds` 收到
+ * `undefined`），而这 6 条断言存在的理由恰好就是防这类静默扩面。
+ *
+ * ★ 代价说清：`无 → 有` 这一格意味着"从不限收窄到具体列表"是**允许**的，
+ * 那是范围唯一能变窄的路径。它与用户的要求不冲突 —— 要求是"不能取消
+ * **以前选的**"，而这一格里以前什么都没选。这条路径上 purge 仍会跑
+ * （越界数据被删），也就是隐私那一侧仍然成立。
+ */
+function widen<T>(
+  before: T | undefined,
+  incoming: T | undefined,
+  wider: (a: T, b: T) => T,
+): T | undefined {
+  if (before === undefined) return incoming
+  if (incoming === undefined) return undefined
+  return wider(before, incoming)
+}
+
+/** 集合求并集（去重）。 */
+function unionOf<T>(before: readonly T[], incoming: readonly T[]): T[] {
+  return [...new Set([...before, ...incoming])]
+}
+
+/**
+ * 非 number 一律当"不设限"。
+ *
+ * `isSentAtInScope` 判的是 `typeof scope.since === "number"` —— `null` 也放行。
+ * 只判 `undefined` 的话 `Math.min(null, 5000)` 会算成 0（1970 年）。
+ */
+function numOrUndef(value: number | null | undefined): number | undefined {
+  return typeof value === "number" ? value : undefined
+}
+
 export class DistillSourceService {
   private db: SqliteDatabase | null = null
   /**
@@ -347,11 +454,56 @@ export class DistillSourceService {
         fingerprint: ids.reduce((sum, id) => sum + id.length, 0),
       })
     }
-    repo.upsert(
-      input.kind,
-      { enabled: input.enabled, scope: input.scope },
-      this.options.clock.now(),
-    )
+    /**
+     * ── ★★★ 学习范围**只增不减** ────────────────────────────────
+     *
+     * 用户原话：「这些关心范围对业务领域现在不能变小，不能取消不选以前不选的，
+     * 只能增多，这是消费者业务决定的吧。」—— 判据正是"消费者已经消费过"：
+     * 图谱建过、蒸馏抽过那些会话，范围一缩小就与已有产出永久不一致
+     * （图里还有那个人，而范围说不该有）。
+     *
+     * ## ★ 与「清越界语料」那条隐私保障的关系（这里有真冲突，两者都保住）
+     *
+     * 下面 `onScopeChanged` 那条链会调 `purgeOutOfScopeMessages` ——
+     * **真删** messages + FTS + 向量 + 媒体，注释写明"那是隐私边界，不是缓存"。
+     * 而"只增不减"意味着 purge 在默认路径上永不触发。
+     *
+     * 两者不是互斥的，冲突只在**入口**：
+     * · 用户在会话列表里**取消勾选** → 那多半是手滑/改主意，不该静默删数据；
+     * · 用户明确要"把这个群的数据删掉" → 那是另一个动作
+     *   （现有出口是「清空当前渠道登录用户数据」，见 `OnboardingPanel`）。
+     *
+     * 所以这里把默认路径改成并集，**隐私边界仍然可达** —— 只是要用户显式要求，
+     * 而不是勾选框的副作用。
+     *
+     * ## 三个字段各自的"只增"方向
+     *
+     * · `conversationIds` → 并集（新旧都要）
+     * · `since`（时间下界）→ 只能**变早**（`Math.min`），变晚等于放弃一段历史
+     * · `until`（时间上界）→ 只能**变晚**（`Math.max`），同理
+     *
+     * ★ `enabled` 不在此列：关掉一个源是"暂停采集"，不是"缩小范围" ——
+     * 它不删任何已有数据，重新打开就继续。
+     */
+    const merged = mergeScopeOnlyGrowing(before?.scope, input.scope)
+    if (input.kind === "chat") {
+      const beforeCount = before?.scope.conversationIds?.length ?? 0
+      const afterCount = merged.conversationIds?.length ?? 0
+      const incomingCount = input.scope.conversationIds?.length ?? 0
+      /**
+       * ★ 只在**真的挡住了缩小**时记一条 —— 那是用户会来问"我取消了怎么还在"
+       * 的时刻，需要一条能对上的日志。个数够了，不记真实 id（§1.1）。
+       */
+      if (incomingCount < beforeCount) {
+        this.options.logger.info("learning scope shrink blocked (grow-only)", {
+          channelId: input.channelId,
+          stored: beforeCount,
+          incoming: incomingCount,
+          kept: afterCount,
+        })
+      }
+    }
+    repo.upsert(input.kind, { enabled: input.enabled, scope: merged }, this.options.clock.now())
 
     /**
      * ★★ 范围**改小**之后必须清掉越界语料 —— 那是隐私边界，不是缓存。
@@ -373,7 +525,20 @@ export class DistillSourceService {
      * `[Main:KlServer] graph build started` + `dataDir: …/kl`，
      * 而飞书的是 `…/kl/feishu`）。
      */
-    if (input.kind === "chat" && scopeChanged(before, input)) {
+    /**
+     * ★ 判据比的是**存进去的** `merged`，不是请求里的 `input`。
+     *
+     * 「只增不减」之后这两者会分叉：用户取消勾选 → `input` 变小、`merged`
+     * 与 `before` 相同。拿 `input` 比的话这里会判"范围变了"，于是触发
+     * 整条派生链 —— 而其中第 3 步是 `rebuildGraph(fresh)`，**分钟级**。
+     * 也就是说一次什么都没改的保存会让图谱重建一遍。
+     *
+     * ★ 放宽时这条链仍然必须跑：第 1 步除了清越界还**重置回填下界**，
+     * 不跑的话新放开的那段历史永远挖不回来（游标已经在更晚的位置）。
+     * 清越界那半在只增不减之后恒查不到东西 —— 那正是它应有的样子，
+     * 不是可以删掉的理由（显式的「清空渠道数据」仍走同一条路）。
+     */
+    if (input.kind === "chat" && scopeChanged(before, { enabled: input.enabled, scope: merged })) {
       this.options.onScopeChanged?.(input.channelId)
     }
     return true

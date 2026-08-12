@@ -114,7 +114,9 @@ export function PersonaRuntimePanel({ channelId }: PersonaRuntimePanelProps = {}
             <WorkHoursEditor
               value={current.workHours}
               busy={saveLimits.isPending}
-              onChange={(workHours) => saveLimits.mutate({ workHours, ...(channelId === undefined ? {} : { channelId }) })}
+              onChange={(workHours) =>
+                saveLimits.mutate({ workHours, ...(channelId === undefined ? {} : { channelId }) })
+              }
             />
 
             {/*
@@ -131,7 +133,9 @@ export function PersonaRuntimePanel({ channelId }: PersonaRuntimePanelProps = {}
             <RateLimitRows
               value={current.rateLimit}
               busy={saveLimits.isPending}
-              onChange={(rateLimit) => saveLimits.mutate({ rateLimit, ...(channelId === undefined ? {} : { channelId }) })}
+              onChange={(rateLimit) =>
+                saveLimits.mutate({ rateLimit, ...(channelId === undefined ? {} : { channelId }) })
+              }
             />
           </div>
         )}
@@ -163,7 +167,12 @@ export function PersonaRuntimePanel({ channelId }: PersonaRuntimePanelProps = {}
                 value={current[key]}
                 options={OPTIONS[key]}
                 busy={saveLimits.isPending}
-                onChange={(next) => saveLimits.mutate({ [key]: next, ...(channelId === undefined ? {} : { channelId }) })}
+                onChange={(next) =>
+                  saveLimits.mutate({
+                    [key]: next,
+                    ...(channelId === undefined ? {} : { channelId }),
+                  })
+                }
               />
             ))}
           </div>

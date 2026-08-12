@@ -476,7 +476,10 @@ export class FeishuAuth implements ChannelAuth {
       this.options.logger.info("lark app binding cleared", { exitCode })
       return true
     }
-    this.options.logger.warn("lark config remove failed", { exitCode, detail: output.slice(0, 200) })
+    this.options.logger.warn("lark config remove failed", {
+      exitCode,
+      detail: output.slice(0, 200),
+    })
     return false
   }
 }

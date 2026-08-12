@@ -198,10 +198,7 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
   )
   const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
   const activeChannelId =
-    pickedChannelId ??
-    authorizedChannels[0]?.id ??
-    channelList.find((c) => c.available)?.id ??
-    null
+    pickedChannelId ?? authorizedChannels[0]?.id ?? channelList.find((c) => c.available)?.id ?? null
   /** 当前这一栏受渠道管吗 —— 决定顶部那个选择器要不要出现。见 `CHANNEL_FREE_SECTIONS`。 */
   const sectionUsesChannel = !CHANNEL_FREE_SECTIONS.has(active)
 
@@ -339,43 +336,42 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="w-full p-6">
-          {active === "general" ? (
-            <GeneralSection />
-          ) : active === "model" ? (
-            <ModelSection channelId={activeChannelId} />
-          ) : active === "channelAuth" ||
-            active === "channelCollect" ||
-            active === "channelGraph" ? (
-            /* ★ 三个叶子共用一个组件，差别只是进来时停在哪一面 */
-            <ChannelsSection
-              channelId={activeChannelId}
-              tab={
-                active === "channelCollect"
-                  ? "collect"
-                  : active === "channelGraph"
-                    ? "graph"
-                    : "auth"
-              }
-              onTabChange={(next) =>
-                setActive(
-                  next === "collect"
-                    ? "channelCollect"
-                    : next === "graph"
-                      ? "channelGraph"
-                      : "channelAuth",
-                )
-              }
-            />
-
-          ) : active === "persona" ? (
-            <PersonaSection channelId={activeChannelId} />
-          ) : active === "onboarding" ? (
-            <OnboardingSection channelId={activeChannelId} />
-          ) : (
-            <AboutSection />
-          )}
-        </div>
+          <div className="w-full p-6">
+            {active === "general" ? (
+              <GeneralSection />
+            ) : active === "model" ? (
+              <ModelSection channelId={activeChannelId} />
+            ) : active === "channelAuth" ||
+              active === "channelCollect" ||
+              active === "channelGraph" ? (
+              /* ★ 三个叶子共用一个组件，差别只是进来时停在哪一面 */
+              <ChannelsSection
+                channelId={activeChannelId}
+                tab={
+                  active === "channelCollect"
+                    ? "collect"
+                    : active === "channelGraph"
+                      ? "graph"
+                      : "auth"
+                }
+                onTabChange={(next) =>
+                  setActive(
+                    next === "collect"
+                      ? "channelCollect"
+                      : next === "graph"
+                        ? "channelGraph"
+                        : "channelAuth",
+                  )
+                }
+              />
+            ) : active === "persona" ? (
+              <PersonaSection channelId={activeChannelId} />
+            ) : active === "onboarding" ? (
+              <OnboardingSection channelId={activeChannelId} />
+            ) : (
+              <AboutSection />
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -817,7 +813,7 @@ function WorkLayerRow() {
   const { t } = useDynamicTranslation("settings")
   const bootstrap = useBootstrapState()
   const setWorkLayer = useSetWorkLayerEnabled()
-/**
+  /**
    * ★ 默认 false。读不出来（还没登录 / bootstrap 在飞）时显示"关"——
    * 与主进程 `workLayerEnabled()` 的回落一致（见那里的注释：一个读值失败
    * 就自动开始花钱的开关是不可接受的）。两处默认必须同向，否则 UI 会显示
@@ -889,7 +885,6 @@ function ChannelsSection({
   const activeChannel = selectable.find((c) => c.id === channelId) ?? selectable[0]
   const authorized = activeChannel?.status.state === "authorized"
 
-
   return (
     <Section title={t("channels.title")} description={t("channels.description")} wide>
       {channels.isLoading ? (
@@ -917,11 +912,7 @@ function ChannelsSection({
                 ★ key 带 channel.id：切渠道时**重挂**授权面板，
                 否则它内部的进度/设备码 state 会留在上一个渠道那一轮。
               */}
-              <ChannelAuthPanel
-                key={activeChannel.id}
-                channel={activeChannel}
-                variant="settings"
-              />
+              <ChannelAuthPanel key={activeChannel.id} channel={activeChannel} variant="settings" />
               {/*
                 ★★ 身份切换器**暂时下架**（`IdentitySwitcher` 保留，只是不挂）。
 

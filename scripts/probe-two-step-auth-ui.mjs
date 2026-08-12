@@ -180,7 +180,8 @@ const i18n = await evaluate(`(() => {
 })()`)
 if (i18n?.missing === undefined && i18n !== undefined) {
   for (const [key, value] of Object.entries(i18n)) {
-    const resolved = typeof value === "string" && value !== key && !value.endsWith(key.split(":")[1])
+    const resolved =
+      typeof value === "string" && value !== key && !value.endsWith(key.split(":")[1])
     check(`i18n ${key} 有译文`, resolved, resolved ? `“${value.slice(0, 28)}…”` : `原样返回 key`)
   }
 } else {

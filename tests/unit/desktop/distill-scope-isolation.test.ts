@@ -296,17 +296,29 @@ describe("★★ 重复保存同一个范围只触发一次回调", () => {
    * 保留这条是为了说明"服务侧判据是对的，问题在调用方传了抖动的值"。
    */
   it("★ since 差 1ms 就算变了（所以调用方必须给稳定的值）", () => {
-    service.save({
-      channelId: SOURCE,
-      kind: "chat",
-      enabled: true,
-      scope: { since: 1_783_400_000_000, conversationIds: SOURCE_CONVS },
-    })
+    /**
+     * ★★ 「只增不减」之后这条要往**变早**的方向测。
+     *
+     * 原来第二次传的是 `+1ms`（更晚）—— 那现在会被挡住（下界只能变早），
+     * `merged` 与库里相同 → 不触发派生链，于是断言收到 `[SOURCE]`。
+     * 那**不是**回归：一次什么都没改的保存本来就不该触发
+     * `rebuildGraph(fresh)`（分钟级全量重建）。
+     *
+     * 但这条断言本来要防的东西仍然存在 —— 调用方给不稳定的 `since`
+     * （比如每次现算 `now - 30d`）会让每次保存都判"范围变了"，
+     * 于是反复重建图谱。往变早的方向仍然会触发，所以判据照旧成立。
+     */
     service.save({
       channelId: SOURCE,
       kind: "chat",
       enabled: true,
       scope: { since: 1_783_400_000_001, conversationIds: SOURCE_CONVS },
+    })
+    service.save({
+      channelId: SOURCE,
+      kind: "chat",
+      enabled: true,
+      scope: { since: 1_783_400_000_000, conversationIds: SOURCE_CONVS },
     })
     expect(scopeChangedFor).toEqual([SOURCE, SOURCE])
   })

@@ -93,9 +93,7 @@ export function GreetingRow({ accountName }: GreetingRowProps) {
   // 「下午好，」后面接不上名字是假的，而"未授权"正是这一刻要传达的状态。
   // 仍走 ParticleText 保持这一行的视觉一致（同样的排版/特效）。
   const line =
-    accountName === null
-      ? "渠道未授权"
-      : `${t(greetingKey)}${t("welcome.separator")}${accountName}`
+    accountName === null ? "渠道未授权" : `${t(greetingKey)}${t("welcome.separator")}${accountName}`
 
   return (
     <ParticleText

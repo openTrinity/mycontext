@@ -118,7 +118,9 @@ describe("飞书头像：响应形状", () => {
      * 修复前的代码，它让每个人都被误判成"没设头像"。
      */
     const seen: string[][] = []
-    const avatars = createFeishuAvatars(cliReturning({ ok: true, data: { user: {} } }, seen) as never)
+    const avatars = createFeishuAvatars(
+      cliReturning({ ok: true, data: { user: {} } }, seen) as never,
+    )
     await avatars.ofUser({
       externalId: "ou_FAKE0000000000000000000000000001",
       outputDir: mkdtempSync(join(tmpdir(), "mycontext-feishu-avatar-")),
