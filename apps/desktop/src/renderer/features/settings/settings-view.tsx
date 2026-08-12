@@ -47,8 +47,13 @@ import { IngestIntervalsPanel } from "./ingest-intervals-panel.js"
 type SectionId =
   | "general"
   | "model"
-  | "channels"
-  | "channelData"
+  /**
+   * 渠道拆成三个**叶子**（用户要求：层级放在侧栏里，不要页内 tab）。
+   * 父项「渠道」自己不是一个可选中的页面 —— 点它等于点第一个子项。
+   */
+  | "channelAuth"
+  | "channelCollect"
+  | "channelGraph"
   | "persona"
   | "onboarding"
   | "about"
@@ -63,24 +68,48 @@ type SectionId =
  *
  * 标题与项名都存 key，渲染时才翻译 —— 模块级常量在 i18n 就绪前就求值了。
  */
+interface NavItem {
+  id: SectionId
+  labelKey: string
+  icon: ReactNode
+  /**
+   * 子项 —— 侧栏里**缩进一档**显示（用户要求"都在侧边栏、只不过有层级关系"）。
+   *
+   * ★ 有 children 的父项自己**不承载页面**：点它落到第一个子项。
+   * 这样"点父项没反应"不会发生，而层级又是真的（不是把三个平级项硬凑一堆）。
+   */
+  children?: readonly { id: SectionId; labelKey: string }[]
+}
+
 const NAV_GROUPS: readonly {
   titleKey: string
-  items: readonly { id: SectionId; labelKey: string; icon: ReactNode }[]
+  items: readonly NavItem[]
 }[] = [
   {
     titleKey: "groups.app",
     items: [
       { id: "general", labelKey: "sections.general", icon: <SlidersIcon /> },
       { id: "model", labelKey: "sections.model", icon: <TuningIcon /> },
-      { id: "channels", labelKey: "sections.channels", icon: <PlugIcon /> },
-      /**
-       * ★ 渠道**数据**（采什么 / 多久采一次 / 图谱服务）与上面的渠道**授权**
-       * 分成两栏：授权回答"连上了吗"，这一栏回答"采什么、怎么加工"。
-       * 混在一栏会让那一页同时装着扫码按钮和不可逆的删图按钮。
-       *
-       * 从「运行状态」页搬过来的（那一页本是排障用的，而这三块是日常配置）。
-       */
-      { id: "channelData", labelKey: "sections.channelData", icon: <SlidersIcon /> },
+      {
+        /**
+         * ★ 渠道是一个**层级**：授权 / 采集 / 图谱服务。
+         *
+         * 上一版做成页内二级 tab（SegmentedControl），用户明确不要 ——
+         * 页内 tab 让"我在哪"有两个来源（侧栏说渠道、页内说采集），
+         * 而侧栏本来就是这个应用的导航语言。放进侧栏之后层级只有一处表达。
+         *
+         * 父项 id 用第一个子项（`channelAuth`）—— 点父项就是进「授权」，
+         * 不会出现"点了没反应"。
+         */
+        id: "channelAuth",
+        labelKey: "sections.channels",
+        icon: <PlugIcon />,
+        children: [
+          { id: "channelAuth", labelKey: "channels.tabs.auth" },
+          { id: "channelCollect", labelKey: "channels.tabs.collect" },
+          { id: "channelGraph", labelKey: "channels.tabs.graph" },
+        ],
+      },
     ],
   },
   {
@@ -149,28 +178,65 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
             <div className="typography-caption-400 px-2 pb-1 text-[var(--text-base-tertiary)]">
               {t(group.titleKey)}
             </div>
-            {group.items.map((section) => (
-              <button
-                key={section.id}
-                type="button"
-                aria-current={active === section.id ? "page" : undefined}
-                onClick={() => setActive(section.id)}
-                className={cn(
-                  "flex h-8 cursor-pointer items-center gap-2 radius-lg px-2 text-left",
-                  "typography-body-small-400 transition-colors duration-150",
-                  // 与主侧栏同一套选中语言（中性加深底色），否则同一屏里
-                  // 出现两种「当前项」的表达方式，看起来像两个不相关的控件。
-                  active === section.id
-                    ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
-                    : "text-[var(--text-base-secondary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
-                )}
-              >
-                <span className="flex size-4 shrink-0 items-center justify-center">
-                  {section.icon}
-                </span>
-                <span className="min-w-0 truncate">{t(section.labelKey)}</span>
-              </button>
-            ))}
+            {group.items.map((section) => {
+              /**
+               * 一个父项**是否处在选中状态** —— 它自己或它任一子项被选中。
+               *
+               * ★ 父项与子项**同时**高亮（父项用弱一档的底色）：那是"你在
+               * 渠道 › 采集"这条路径的视觉表达。只高亮子项的话，层级在扫视时
+               * 就丢了（用户看到的是三个缩进项，不知道它们归谁）。
+               */
+              const childIds = (section.children ?? []).map((child) => child.id)
+              const inSubtree = active === section.id || childIds.includes(active)
+              return (
+                <div key={section.id} className="flex flex-col gap-0.5">
+                  <button
+                    type="button"
+                    aria-current={active === section.id ? "page" : undefined}
+                    // 父项展开态：有子项时永远展开（不做折叠 —— 三项而已，
+                    // 折叠只会多一次点击，且藏起来的东西找不到）
+                    {...(section.children === undefined ? {} : { "aria-expanded": true })}
+                    onClick={() => setActive(section.id)}
+                    className={cn(
+                      "flex h-8 cursor-pointer items-center gap-2 radius-lg px-2 text-left",
+                      "typography-body-small-400 transition-colors duration-150",
+                      // 与主侧栏同一套选中语言（中性加深底色），否则同一屏里
+                      // 出现两种「当前项」的表达方式，看起来像两个不相关的控件。
+                      inSubtree
+                        ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
+                        : "text-[var(--text-base-secondary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
+                    )}
+                  >
+                    <span className="flex size-4 shrink-0 items-center justify-center">
+                      {section.icon}
+                    </span>
+                    <span className="min-w-0 truncate">{t(section.labelKey)}</span>
+                  </button>
+                  {section.children === undefined
+                    ? null
+                    : section.children.map((child) => (
+                        <button
+                          key={child.id}
+                          type="button"
+                          aria-current={active === child.id ? "page" : undefined}
+                          onClick={() => setActive(child.id)}
+                          className={cn(
+                            // ★ `ml-6`：与父项图标（size-4 + gap-2）对齐出一个
+                            //   明确的缩进档；子项没有图标 —— 图标是"这是一类
+                            //   东西"的标记，而子项是同一类里的分面。
+                            "ml-6 flex h-7 cursor-pointer items-center radius-lg px-2 text-left",
+                            "typography-caption-400 transition-colors duration-150",
+                            active === child.id
+                              ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
+                              : "text-[var(--text-base-tertiary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
+                          )}
+                        >
+                          <span className="min-w-0 truncate">{t(child.labelKey)}</span>
+                        </button>
+                      ))}
+                </div>
+              )
+            })}
           </div>
         ))}
       </nav>
@@ -204,10 +270,29 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
             <GeneralSection />
           ) : active === "model" ? (
             <ModelSection />
-          ) : active === "channels" ? (
-            <ChannelsSection />
-          ) : active === "channelData" ? (
-            <ChannelDataSection />
+          ) : active === "channelAuth" ||
+            active === "channelCollect" ||
+            active === "channelGraph" ? (
+            /* ★ 三个叶子共用一个组件，差别只是进来时停在哪一面 */
+            <ChannelsSection
+              tab={
+                active === "channelCollect"
+                  ? "collect"
+                  : active === "channelGraph"
+                    ? "graph"
+                    : "auth"
+              }
+              onTabChange={(next) =>
+                setActive(
+                  next === "collect"
+                    ? "channelCollect"
+                    : next === "graph"
+                      ? "channelGraph"
+                      : "channelAuth",
+                )
+              }
+            />
+
           ) : active === "persona" ? (
             <PersonaSection />
           ) : active === "onboarding" ? (
@@ -624,7 +709,7 @@ function WorkLayerRow() {
   const { t } = useDynamicTranslation("settings")
   const bootstrap = useBootstrapState()
   const setWorkLayer = useSetWorkLayerEnabled()
-  /**
+/**
    * ★ 默认 false。读不出来（还没登录 / bootstrap 在飞）时显示"关"——
    * 与主进程 `workLayerEnabled()` 的回落一致（见那里的注释：一个读值失败
    * 就自动开始花钱的开关是不可接受的）。两处默认必须同向，否则 UI 会显示
@@ -654,94 +739,43 @@ function WorkLayerRow() {
   )
 }
 
-/**
- * 渠道数据 —— 采什么 / 多久采一次 / 图谱服务。
- *
- * ## ★ 为什么从「运行状态」页搬到这里（用户要求）
- *
- * 那三块原来挂在运行状态页，而那一页的定位是**排障**（版本号、库路径、
- * 迁移版本、配置条数）。"采集范围""采集周期""图谱要不要重建"是**日常配置**
- * —— 用户找它们的时候会去设置里找，而不是去一个叫"运行状态"的地方。
- *
- * ## ★★ 搬迁时必须保住的三条既有结论（都是踩过的）
- *
- * 1. **kl 的启停/建图按钮不能交给页面级 picker 决定打给谁。** `KlPanel` 内部
- *    是"每渠道一张自包含的卡、按钮长在卡里"，`channelId` 只用来高亮。
- *    理由是 `fresh=true` **不可逆**（删图重烧、几小时、出网烧 LLM）——
- *    "数据面选了飞书、建图按钮却打在钉钉上"那一下没法撤回。
- * 2. **采集范围排在采集周期之前**：先回答"采什么"，再回答"多久采一次"。
- * 3. **采集范围与 kl 共用同一个渠道选择**：这一栏只有一个取值范围。
- *
- * ## ★ 采集周期是**全局**的，这里必须说出来
- *
- * `intervalsSave` 把同一份值写进主库**以及每个非主渠道的库**（见
- * `DataPlaneService`），也就是"一份配置广播到所有渠道"。它不接 channelId。
- * 所以这一块**不能**放在 picker 之下装成按渠道的 —— 那会是个静默的谎
- * （用户以为只改了飞书）。用一句话把它标出来，等哪天真做成按渠道了再挪。
- */
-function ChannelDataSection() {
-  const { t } = useDynamicTranslation("settings")
-  const { t: tch } = useDynamicTranslation("channels")
-  const bootstrap = useBootstrapState()
-  const session = bootstrap.data?.session ?? null
-  const channels = useChannels()
-  const authorized = (channels.data ?? []).filter(
-    (c) => c.available && c.status.state === "authorized",
-  )
-  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
-  const activeChannelId = pickedChannelId ?? authorized[0]?.id ?? null
+/** 渠道设置里的二级 tab —— 用户要求「渠道」下分「授权 / 采集 / 图谱服务」。 */
+type ChannelTab = "auth" | "collect" | "graph"
 
-  return (
-    <Section title={t("sections.channelData")} description={t("channelData.description")} wide>
-      {session === null ? (
-        <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
-          {t("onboarding.needsLogin")}
-        </p>
-      ) : authorized.length === 0 ? (
-        <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
-          {t("channelData.needsChannel")}
-        </p>
-      ) : (
-        <>
-          {/* 一个渠道时不摆下拉（picker 自己也会退化成静态标识） */}
-          {authorized.length > 1 ? (
-            <ChannelPicker
-              options={authorized.map((c) => ({
-                id: c.id,
-                label: tch(`${c.id}.label`, { defaultValue: c.id }),
-              }))}
-              activeId={activeChannelId}
-              onChange={setPickedChannelId}
-              ariaLabel={t("channelData.channelPickerLabel")}
-              side="bottom"
-            />
-          ) : null}
-
-          {/* ① 采什么 —— 按渠道 */}
-          <CollectionScopePanel channelId={activeChannelId} />
-
-          {/* ② 多久采一次 —— **全局**，见文件头那段 */}
-          <IngestIntervalsPanel />
-          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-            {t("channelData.intervalsGlobalNote")}
-          </p>
-
-          {/* ③ 图谱服务 —— 每渠道一张卡，channelId 只用来高亮（不可逆动作） */}
-          <KlPanel channelId={activeChannelId} />
-        </>
-      )}
-    </Section>
-  )
-}
-
-function ChannelsSection() {
+function ChannelsSection({
+  tab,
+  onTabChange: _onTabChange,
+}: {
+  /**
+   * 当前看渠道的哪一面 —— **由侧栏决定**（受控）。
+   *
+   * ★ 用户明确不要页内 tab：层级只在侧栏表达一次。所以这里不再自己持
+   * `useState`，而是把"我在哪"交给唯一的导航（`SettingsView` 的 `active`）。
+   * 两处各存一份的话，侧栏与页内必然出现"说的不是同一件事"。
+   */
+  tab: ChannelTab
+  /** 预留：页内若将来需要跳到另一面（目前不用，层级切换走侧栏）。 */
+  onTabChange?: (next: ChannelTab) => void
+}) {
   const { t } = useDynamicTranslation("settings")
   const { t: tc } = useDynamicTranslation()
+  const { t: tch } = useDynamicTranslation("channels")
   const errorText = useErrorText()
   const channels = useChannels()
+  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
+
+  const list = channels.data ?? []
+  /**
+   * ★ picker 列**全部可用渠道**（不只已授权的）：没授权的那个恰恰是用户
+   * 要进来点「开始授权」的那个 —— 只列已授权会让他找不到入口。
+   */
+  const selectable = list.filter((channel) => channel.available)
+  const activeChannel = selectable.find((c) => c.id === pickedChannelId) ?? selectable[0]
+  const authorized = activeChannel?.status.state === "authorized"
+
 
   return (
-    <Section title={t("channels.title")} description={t("channels.description")}>
+    <Section title={t("channels.title")} description={t("channels.description")} wide>
       {channels.isLoading ? (
         <p className="typography-body-base-400 text-[var(--text-base-tertiary)]">
           {t("channels.loading")}
@@ -755,25 +789,74 @@ function ChannelsSection() {
             {tc("app.retry")}
           </Button>
         </div>
+      ) : activeChannel === undefined ? (
+        <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
+          {t("channels.none")}
+        </p>
       ) : (
-        <div className="flex flex-col gap-3">
-          {(channels.data ?? []).map((channel) => (
-            <ChannelAuthPanel key={channel.id} channel={channel} variant="settings" />
-          ))}
+        <div className="flex flex-col gap-4">
           {/*
-            ★★ 身份切换器**暂时下架**（`IdentitySwitcher` 保留，只是不挂）。
-
-            它的语义在多渠道并存之后已经不对了：从 control v5 起一个 vault 可以
-            同时挂飞书与钉钉两个渠道的身份（见 `CONTROL_0005_VAULT_MULTI_CHANNEL`），
-            而这一块把它们列成两个**可互相切换**的独立身份，还说
-            「每个身份有自己独立的一份数据（会话、画像、图谱都不互通）」——
-            那是并存之前的模型。现在两者共用同一个 vault，"切换"到另一个渠道
-            并不会换库，文案与行为直接矛盾。
-
-            用户明确要求先隐藏。真正要做的是把它重写成「按**组织/人**切换」
-            （同一渠道下的多个 corpId 才是真的换库），而不是把渠道列进来 ——
-            那是独立一件事，不在这次修复范围里。
+            渠道选择 —— 只有一个可用渠道时 `ChannelPicker` 自己退化成静态标识
+            （见那个组件），所以不必在这里判长度。
+            `side="bottom"`：这一块在弹窗上半部，默认 `"top"` 会让浮层飞出窗口。
           */}
+          <ChannelPicker
+            options={selectable.map((c) => ({
+              id: c.id,
+              label: tch(`${c.id}.label`, { defaultValue: c.id }),
+            }))}
+            activeId={activeChannel.id}
+            onChange={setPickedChannelId}
+            ariaLabel={t("channels.channelPickerLabel")}
+            side="bottom"
+          />
+
+          {tab === "auth" ? (
+            <>
+              {/*
+                ★ key 带 channel.id：切渠道时**重挂**授权面板，
+                否则它内部的进度/设备码 state 会留在上一个渠道那一轮。
+              */}
+              <ChannelAuthPanel
+                key={activeChannel.id}
+                channel={activeChannel}
+                variant="settings"
+              />
+              {/*
+                ★★ 身份切换器**暂时下架**（`IdentitySwitcher` 保留，只是不挂）。
+
+                它的语义在多渠道并存之后已经不对了：从 control v5 起一个 vault
+                可以同时挂飞书与钉钉两个渠道的身份，而这一块把它们列成两个
+                **可互相切换**的独立身份，还说「每个身份有自己独立的一份数据」
+                —— 那是并存之前的模型。现在两者共用同一个 vault，"切换"到另一个
+                渠道并不会换库，文案与行为直接矛盾。
+
+                真正要做的是把它重写成「按**组织/人**切换」（同一渠道下的多个
+                corpId 才是真的换库），而不是把渠道列进来 —— 那是独立一件事。
+              */}
+            </>
+          ) : !authorized ? (
+            /*
+              ★ 没授权时后两个 tab 没有可配的东西 —— 说清出路（去「授权」那一栏），
+              而不是显示一堆空面板让用户以为坏了。
+            */
+            <p className="typography-body-small-400 text-[var(--text-base-secondary)]">
+              {t("channels.needsAuthFirst")}
+            </p>
+          ) : tab === "collect" ? (
+            <>
+              {/* ① 采什么 —— 按渠道 */}
+              <CollectionScopePanel channelId={activeChannel.id} />
+              {/* ② 多久采一次 —— **全局**，见本组件文件头那段 */}
+              <IngestIntervalsPanel />
+              <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+                {t("channelData.intervalsGlobalNote")}
+              </p>
+            </>
+          ) : (
+            /* ③ 图谱服务 —— 每渠道一张卡，channelId 只用来高亮（不可逆动作） */
+            <KlPanel channelId={activeChannel.id} />
+          )}
         </div>
       )}
     </Section>

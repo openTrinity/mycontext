@@ -29,7 +29,16 @@
   "channels": {
     "title": "Channels",
     "description": "MyContext can only read conversations and draft replies once a channel is connected. Authorization happens as you.",
-    "loading": "Reading channel status…"
+    "loading": "Reading channel status…",
+    "tabs": {
+      "auth": "Authorization",
+      "collect": "Collection",
+      "graph": "Graph service"
+    },
+    "tabsLabel": "Channel settings tabs",
+    "channelPickerLabel": "Choose a channel",
+    "none": "No channels available to configure yet.",
+    "needsAuthFirst": "Connect this channel under Authorization first, then configure collection and the graph service."
   },
   "about": {
     "title": "About",

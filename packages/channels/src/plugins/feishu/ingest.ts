@@ -291,6 +291,30 @@ export function createFeishuIngest(cli: Pick<LarkCli, "json">): ChannelIngest {
   }
 }
 
+/**
+ * 从 `contact +get-user` 的响应里取 `tenant_key`（组织 id）。
+ *
+ * ## ★ 层级是实测出来的
+ *
+ * 真实响应：`{ ok, identity, data: { user: { …, tenant_key } } }`
+ * —— 人在 **`data.user`** 下（`/entity` 那类接口是 `results`，别混）。
+ * 同时兼容"信封已被拆掉"的两种形状，上游改层级时不至于静默变成
+ * 「未知组织」（那正是这次要修的症状）。
+ */
+function readTenantKey(payload: unknown): string | null {
+  const asRecord = (value: unknown): Record<string, unknown> | null =>
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null
+  const root = asRecord(payload)
+  if (root === null) return null
+  const candidates = [asRecord(asRecord(root["data"])?.["user"]), asRecord(root["user"]), root]
+  for (const user of candidates) {
+    if (user === null) continue
+    const raw = user["tenant_key"] ?? user["tenantKey"]
+    if (typeof raw === "string" && raw !== "") return raw
+  }
+  return null
+}
+
 export function createFeishuIdentity(cli: Pick<LarkCli, "json">): ChannelIdentity {
   return {
     async resolveSelf() {
@@ -300,12 +324,59 @@ export function createFeishuIdentity(cli: Pick<LarkCli, "json">): ChannelIdentit
       if (status.state !== "authorized" || identity === null) {
         throw new AppError("CHANNEL_AUTH_FAILED", "飞书身份不可用，请重新授权")
       }
+      /**
+       * ★★ 组织 id（`tenant_key`）**必须另外取一次** —— `auth status` 里没有。
+       *
+       * ## 实测（本机，飞书已授权）
+       *
+       * `auth status --json --verify` 的 `identities.user` 只有
+       * `status / available / verified / message / openId / userName /
+       *  tokenStatus / scope / expiresAt / refreshExpiresAt / grantedAt`
+       * —— **没有 tenantKey，也没有任何组织名字段**。
+       * 而 `contact +get-user` 有真的 `tenant_key`（实测 16 字符）。
+       *
+       * ## 为什么这不只是界面上一句话
+       *
+       * `corpId` 是身份隔离键 `(accountId, channelId, corpId, userId)` 的一段。
+       * 取不到时 `parseLarkIdentity` 会派生 `unknown-tenant:<openId 前 12 位>`
+       * —— 唯一性有了，但那个值**跟着人走而不是跟着组织走**：同一个人在
+       * 两个组织里会撞成同一个键，两个组织的数据共用一个 vault。
+       * 所以拿到真 `tenant_key` 是**正确性**问题，不只是显示问题
+       * （用户看到的「未知组织」是它的表面症状）。
+       *
+       * ★ 取不到就沿用派生值、**不抛**：这一步失败不该让整个身份解析失败，
+       * 那会把"已授权"变成一条走不通的路。
+       */
+      let tenantKey = identity.tenantKey
+      try {
+        const user = await cli.json<unknown>([
+          "contact",
+          "+get-user",
+          "--as",
+          "user",
+          "--format",
+          "json",
+        ])
+        const real = readTenantKey(user)
+        if (real !== null) tenantKey = real
+      } catch {
+        // 沿用 parseLarkIdentity 的派生值（形如 `unknown-tenant:…`）
+      }
       return {
         userId: identity.openId,
         openIds: [{ kind: "open_id", value: identity.openId }],
         displayNames: [identity.userName],
-        corpId: identity.tenantKey,
-        corpName: identity.tenantName,
+        corpId: tenantKey,
+        /**
+         * ★ 组织**名**：两条命令都不给（实测 `get-user` 的字段里只有
+         * `tenant_key`，没有 tenant name）。所以**不编**一个假名字，
+         * 而是显示 `tenant_key` 的短码 —— 用户至少能分辨"这是哪个组织"，
+         * 且两个组织不会都显示成「未知组织」。
+         * 连 `tenant_key` 都拿不到时才回落到 parse 层那句「未知组织」。
+         */
+        corpName: tenantKey.startsWith("unknown-tenant:")
+          ? identity.tenantName
+          : `组织 ${tenantKey.slice(0, 8)}`,
         /**
          * 飞书只有一条路：`auth status --verify` 直接给出本人身份。
          *

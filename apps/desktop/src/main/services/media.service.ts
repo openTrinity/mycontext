@@ -623,10 +623,33 @@ export class MediaService {
     if (identity === null) return { path: null, reason: "identity_unresolved" }
 
     /**
-     * 取 `openDingTalkId` 那一个 —— `avatarMediaId` 是按它查的。
-     * `userId` 查不到头像（那是另一套标识体系）。
+     * 取这个渠道用来查头像的那个 id。
+     *
+     * ## ★★ 不能只认 `openDingTalkId` —— 那让飞书永远取不到头像
+     *
+     * 各渠道写进 `open_ids_json` 的 `kind` 不同（实测）：
+     * · 钉钉 → `openDingTalkId`（`avatarMediaId` 按它查；`userId` 是另一套
+     *   标识体系，查不到头像）；
+     * · 飞书 → `open_id`（`ingest.ts` 里 `openIds: [{kind:"open_id", …}]`）。
+     *
+     * 原来这里写死找 `openDingTalkId`，于是飞书恒返回 `no_open_id` ——
+     * 头像取不到、而且**不报错**（就是个 reason 字符串），界面只好一直显示
+     * 文字兜底头像。用户反馈的"飞书头像没获取"有两半，这是第二半
+     * （第一半是飞书压根没实现 `avatars` 能力，已补）。
+     *
+     * ★ 按顺序找而不是硬编码某一个：先试这个渠道的主 id 种类，再退到
+     * 任意一个非空的 —— 新渠道接进来时不必回来改这里（它自己声明 kind
+     * 就够），而"一个都没有"仍然如实报 `no_open_id`。
      */
-    const openId = identity.openIds.find((entry) => entry.kind === "openDingTalkId")?.value
+    const preferredKinds =
+      this.options.channelId === "feishu"
+        ? ["open_id", "openDingTalkId"]
+        : ["openDingTalkId", "open_id"]
+    const openId =
+      preferredKinds
+        .map((kind) => identity.openIds.find((entry) => entry.kind === kind)?.value)
+        .find((value) => value !== undefined && value !== "") ??
+      identity.openIds.find((entry) => entry.value !== "")?.value
     if (openId === undefined || openId === "") return { path: null, reason: "no_open_id" }
 
     return this.avatar({

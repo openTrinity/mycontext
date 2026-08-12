@@ -257,8 +257,22 @@ export function OnboardingView() {
    */
   const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
   const availableChannels = useMemo(() => list.filter((c) => c.available), [list])
+  /**
+   * 当前在配哪个渠道。
+   *
+   * ## ★★ 缺省是**已授权的那个**，不是注册表里的第一个
+   *
+   * 原来是 `availableChannels[0]` —— 而注册表里钉钉在前，于是"在设置里授权了
+   * 飞书之后进引导页，默认仍是钉钉"（用户实测反馈）。那个默认值等于把用户
+   * 刚做完的事忽略掉：他要配的显然是刚连上的那个渠道。
+   *
+   * 优先级：① 用户在 picker 里选过的；② **已授权**的第一个；③ 可用的第一个
+   * （都没授权时，那时任选一个都是"去授权"，用注册顺序不影响判断）。
+   */
   const activeChannel =
-    availableChannels.find((c) => c.id === pickedChannelId) ?? availableChannels[0]
+    availableChannels.find((c) => c.id === pickedChannelId) ??
+    availableChannels.find((c) => c.status.state === "authorized") ??
+    availableChannels[0]
   const authorized = activeChannel?.status.state === "authorized"
   /**
    * 有没有一个**已授权、且能跑数字分身**的渠道。
@@ -355,12 +369,30 @@ export function OnboardingView() {
    * `undefined`（快照还没回来）→ 不下结论：下面那块整体不渲染。
    */
   const identityState = ingestSnapshot.data?.selfIdentityState
-  const identityProblem = readIdentityProblem({
-    selfState:
-      identityState === undefined ? "unknown" : selfConfirmed ? "confirmed" : "unconfirmed",
-    adoptable: adoptable.data,
-    identityState,
-  })
+  /**
+   * ## ★★ 只对**能跑数字分身**的渠道算（用户截图里那条假警告）
+   *
+   * `ingestSnapshot` 与 `adoptable` 都是**主渠道**的（那两个 IPC 不带渠道），
+   * 而这块原来不认渠道 —— 于是选中飞书时照样渲染，界面上冒出
+   * 「这台电脑上已有 <某组织·某人> 的登录态，但当前账号还没用过它」：
+   * 那句话讲的是**钉钉**的机器级登录态（它的 token 按系统用户共享），
+   * 内容属于另一个渠道，而用户正在配飞书 —— 他还会照着提示去点「解析身份」，
+   * 而那对飞书什么都不会做。
+   *
+   * 另外，"确认「你」是谁"只对能跑分身的渠道有意义（它决定 `is_self` 能不能
+   * 回填 → 那是蒸馏语料的前置）。只读接入的渠道（`sendAs: []`）没有这一层，
+   * 对它要求确认身份是一道无意义的门。
+   *
+   * 所以只读渠道直接 `null` —— 这一整块（含那条黄字与「解析身份」按钮）不出现。
+   */
+  const identityProblem = activeIsReadOnly
+    ? null
+    : readIdentityProblem({
+        selfState:
+          identityState === undefined ? "unknown" : selfConfirmed ? "confirmed" : "unconfirmed",
+        adoptable: adoptable.data,
+        identityState,
+      })
 
   /**
    * 授权且身份已确认，才把第 1 步记成 done（软门）。
@@ -514,7 +546,40 @@ export function OnboardingView() {
         `pb-4`：状态文字行去掉之后整条矮了一档，下留白跟着收 —— 否则
         步骤条与分隔线之间会空出一条与上方不对称的缝。
       */}
-      <div className="shrink-0 border-b border-[var(--border-divider-light)] px-12 pb-4 pt-1">
+      {/*
+        ── 步骤条那一行：**渠道选择在左、五步在右** ──────────────────
+
+        ## ★★ 为什么 picker 在这里而不是第 1 步里面（用户要求）
+
+        它原来长在第 1 步的内容区。那样只有**站在第 1 步**时才能切渠道 ——
+        而"我现在在配哪个渠道"是**整条引导**的取值范围：第 4 步选会话、
+        第 5 步看进度，都是这个渠道的。走到第 4 步发现选错了渠道，得先退回
+        第 1 步才能换，那是一次没有必要的往返。
+
+        放在步骤条左侧之后，任何一步都能看到、也能切 —— 与仪表盘把渠道筹码
+        放在页头（而不是页面内容里）是同一个判断：作用于整页的控件不该长在
+        某一小块里面。
+
+        ★ `shrink-0` + `min-w-0`：picker 不参与压缩，步骤条自己在窄屏收；
+        否则窗口一窄就是 picker 先被挤成两行。
+      */}
+      <div className="flex shrink-0 items-center gap-4 border-b border-[var(--border-divider-light)] px-12 pb-4 pt-1">
+        {availableChannels.length > 1 ? (
+          <div className="shrink-0">
+            <ChannelPicker
+              options={availableChannels.map((c) => ({
+                id: c.id,
+                label: tc(c.labelKey, { defaultValue: c.id }),
+              }))}
+              activeId={activeChannel?.id ?? null}
+              onChange={setPickedChannelId}
+              ariaLabel={t("channel.pickerLabel")}
+              prefix={t("channel.pickerPrefix")}
+              side="bottom"
+            />
+          </div>
+        ) : null}
+        <div className="min-w-0 flex-1">
         <StepBar
           items={stepItems}
           activeId={activeId}
@@ -527,6 +592,7 @@ export function OnboardingView() {
             pending: t("state.pending"),
           }}
         />
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -575,36 +641,6 @@ export function OnboardingView() {
                 </div>
               ) : list.length === 0 ? null : (
                 <div className="flex flex-col gap-[var(--gap-component-md)]">
-                  {/*
-                    ── 我在配哪个渠道 ──────────────────────────────────
-
-                    ## ★★ 为什么这一步需要一个明确的选择
-
-                    原来这里把**所有**渠道的授权卡片平铺出来，而完成判据写死
-                    主渠道。于是只连飞书的用户：卡片有两张、第 1 步永远不自动
-                    完成（钉钉那条 `authorized` 恒 false）、只能点「跳过此步」
-                    —— 而"跳过"在进度条上是另一个语义，他会以为自己漏了什么。
-
-                    现在这一步有一个明确的"当前渠道"：授权卡片、完成门、身份
-                    确认入口全部跟着它。只有一个可用渠道时 `ChannelPicker`
-                    自己退化成静态标识（见那个组件），所以多数人看不出有选择器。
-
-                    ★ `side="bottom"`：引导页这一块在上半屏，默认 `"top"` 会
-                    让浮层往窗口外飞（那个组件的文件头记了这条）。
-                  */}
-                  {availableChannels.length > 1 ? (
-                    <ChannelPicker
-                      options={availableChannels.map((c) => ({
-                        id: c.id,
-                        label: tc(c.labelKey, { defaultValue: c.id }),
-                      }))}
-                      activeId={activeChannel?.id ?? null}
-                      onChange={setPickedChannelId}
-                      ariaLabel={t("channel.pickerLabel")}
-                      prefix={t("channel.pickerPrefix")}
-                      side="bottom"
-                    />
-                  ) : null}
                   {activeChannel === undefined ? null : (
                     <ChannelAuthPanel
                       key={activeChannel.id}

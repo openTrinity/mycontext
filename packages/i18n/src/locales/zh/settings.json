@@ -29,7 +29,16 @@
   "channels": {
     "title": "渠道",
     "description": "连接 IM 渠道后，MyContext 才能读取会话并生成回复。授权以你本人的身份进行。",
-    "loading": "读取渠道状态…"
+    "loading": "读取渠道状态…",
+    "tabs": {
+      "auth": "授权",
+      "collect": "采集",
+      "graph": "图谱服务"
+    },
+    "tabsLabel": "渠道设置分类",
+    "channelPickerLabel": "选择渠道",
+    "none": "还没有可配置的渠道。",
+    "needsAuthFirst": "先在「授权」里连上这个渠道，然后再来配采集与图谱服务。"
   },
   "about": {
     "title": "关于",
