@@ -13,6 +13,12 @@ Locks the finalized recall-dedup design (docs/todo/recall-dedup.md):
   in the survivor's ``merged_ids``. Different types never suppress each other —
   a fact and its source chunk are BOTH kept, and two chunks from different
   source types are BOTH kept.
+- **U3** — near-duplicate **fact** suppression via ``difflib.SequenceMatcher``,
+  catching reworded/truncated restatements of one claim that U2's byte-identical
+  compare cannot see. Facts only (chunks are verbatim source text, so a quote and
+  its reply are distinct evidence). Survivor is the **highest confidence** one,
+  tie-broken by fused rank; threshold is
+  ``pipelines.query.fact_near_dup_threshold`` (``KL_QUERY_FACT_NEAR_DUP``).
 - **Gate** — both layers honour ``config.QUERY_DEDUP_ENABLED``
   (``KL_QUERY_DEDUP`` env). Off ⇒ exactly the pre-dedup behaviour, empty stats.
 
@@ -36,6 +42,7 @@ from kl_graph.query.engine import (
     QueryEngine,
     _is_duplicate,
     _normalize_for_dedup,
+    _suppress_near_duplicate_facts,
     _suppress_same_type_duplicates,
 )
 from kl_graph.utils.helpers import dedup_ranked
@@ -584,4 +591,294 @@ def test_config_env_gate_parses_truthy_and_falsy(monkeypatch) -> None:
     finally:
         # Restore the process-default binding regardless of assertion outcome.
         monkeypatch.delenv("KL_QUERY_DEDUP", raising=False)
+        importlib.reload(config_mod)
+
+
+# ── U3: near-duplicate fact suppression (SequenceMatcher) ─────────────────────
+# Ratios below are pre-verified against the real helpers on normalized text, so
+# each fixture sits unambiguously on one side of the 0.9 threshold:
+#   _NEAR_A / _NEAR_B        ratio 0.9714  → duplicates
+#   _NEAR_A / _PUNCT_VARIANT ratio 0.8947  → NOT duplicates at 0.9
+#   _NEAR_A / _FAR           ratio 0.2353  → unrelated
+_NEAR_A = "张伟决定将API迁移到新的数据库集群"
+_NEAR_B = "张伟决定将API迁移到新数据库集群"
+_PUNCT_VARIANT = "张伟决定将API迁移到新的数据库集群。"
+_FAR = "李娜负责前端重构与组件库升级"
+
+
+def _fact_item(fid: str, text: str, confidence: float, score: float) -> dict:
+    """A resolved fact item as U3 sees it (post-fusion, pre-rerank)."""
+    return {
+        "type": "fact",
+        "id": fid,
+        "score": score,
+        "content": text,
+        "fact_type": "GENERAL",
+        "timestamp": 100,
+        "confidence": confidence,
+    }
+
+
+def test_near_dup_facts_keep_highest_confidence() -> None:
+    """A reworded restatement collapses; the more confident extraction wins.
+
+    The lower-confidence copy is ranked FIRST (higher fused score), so this also
+    pins that U3 overrides fused order for facts — unlike U2, which keeps the
+    best-ranked item.
+    """
+    items = [
+        _fact_item("f_low", _NEAR_A, confidence=0.70, score=0.95),
+        _fact_item("f_high", _NEAR_B, confidence=0.95, score=0.80),
+    ]
+
+    kept, suppressed, merged = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["f_high"]
+    assert suppressed == 1
+    assert kept[0]["merged_ids"] == ["f_low"]
+    assert merged == [{"survivor": "f_high", "dropped": "f_low"}]
+
+
+def test_near_dup_confidence_tie_keeps_better_fused_rank() -> None:
+    """On a confidence tie the earlier (better-fused) fact survives.
+
+    Guarantees a deterministic winner instead of one that depends on iteration
+    order.
+    """
+    items = [
+        _fact_item("f_first", _NEAR_A, confidence=0.9, score=0.95),
+        _fact_item("f_second", _NEAR_B, confidence=0.9, score=0.70),
+    ]
+
+    kept, suppressed, _ = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["f_first"]
+    assert suppressed == 1
+    assert kept[0]["merged_ids"] == ["f_second"]
+
+
+def test_near_dup_below_threshold_both_survive() -> None:
+    """A punctuation-only variant scoring 0.8947 is NOT collapsed at 0.9.
+
+    Pins the threshold's real strictness on CJK text: swapping a full-width
+    comma and adding a trailing period is not enough to clear 0.9.
+    """
+    items = [
+        _fact_item("f1", _NEAR_A, confidence=0.5, score=0.95),
+        _fact_item("f2", "张伟决定将API迁移到新的数据库集群, 明天上线。", 0.99, 0.80),
+    ]
+
+    kept, suppressed, merged = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["f1", "f2"]
+    assert suppressed == 0
+    assert merged == []
+
+
+def test_near_dup_distinct_facts_all_survive() -> None:
+    """Unrelated facts (ratio 0.2353) never collapse."""
+    items = [
+        _fact_item("f1", _NEAR_A, confidence=0.8, score=0.95),
+        _fact_item("f2", _FAR, confidence=0.8, score=0.80),
+    ]
+
+    kept, suppressed, _ = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["f1", "f2"]
+    assert suppressed == 0
+    assert all("merged_ids" not in i for i in kept)
+
+
+def test_near_dup_never_touches_chunks() -> None:
+    """Near-identical chunks are distinct evidence and both survive.
+
+    Chunks carry verbatim source text: a quote and its reply, or a resend, are
+    separate observations even when the text nearly matches. Only facts are
+    fuzzily collapsed.
+    """
+    items = [
+        {"type": "message", "id": "c1", "score": 0.95, "content": _NEAR_A},
+        {"type": "message", "id": "c2", "score": 0.80, "content": _NEAR_B},
+    ]
+
+    kept, suppressed, merged = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["c1", "c2"]
+    assert suppressed == 0
+    assert merged == []
+
+
+def test_near_dup_threshold_zero_disables_pass() -> None:
+    """``threshold <= 0`` is the documented off switch: nothing is compared."""
+    items = [
+        _fact_item("f1", _NEAR_A, confidence=0.5, score=0.95),
+        _fact_item("f2", _NEAR_B, confidence=0.99, score=0.80),
+    ]
+
+    kept, suppressed, merged = _suppress_near_duplicate_facts(items, threshold=0.0)
+
+    assert [i["id"] for i in kept] == ["f1", "f2"]
+    assert suppressed == 0
+    assert merged == []
+
+
+def test_near_dup_blank_fact_never_collapses() -> None:
+    """A blank fact must not collapse unrelated items (mirrors U2's rule)."""
+    items = [
+        _fact_item("f_blank1", "   ", confidence=0.9, score=0.95),
+        _fact_item("f_blank2", "", confidence=0.5, score=0.80),
+    ]
+
+    kept, suppressed, _ = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["f_blank1", "f_blank2"]
+    assert suppressed == 0
+
+
+def test_near_dup_missing_confidence_treated_as_zero() -> None:
+    """A fact with no/invalid ``confidence`` loses to one that has it.
+
+    Guards the ``_conf`` coercion: a missing key must not raise, and must not
+    accidentally outrank a real score.
+    """
+    no_conf = _fact_item("f_none", _NEAR_A, confidence=0.9, score=0.95)
+    del no_conf["confidence"]
+    items = [no_conf, _fact_item("f_real", _NEAR_B, confidence=0.6, score=0.80)]
+
+    kept, suppressed, _ = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["f_real"]
+    assert suppressed == 1
+
+
+def test_near_dup_three_item_cluster_one_survivor() -> None:
+    """A 3-way cluster collapses to the single most confident fact."""
+    items = [
+        _fact_item("f1", _NEAR_A, confidence=0.60, score=0.95),
+        _fact_item("f2", _NEAR_B, confidence=0.99, score=0.85),
+        _fact_item("f3", _PUNCT_VARIANT, confidence=0.70, score=0.75),
+    ]
+
+    kept, suppressed, merged = _suppress_near_duplicate_facts(items)
+
+    assert [i["id"] for i in kept] == ["f2"]
+    assert suppressed == 2
+    assert sorted(kept[0]["merged_ids"]) == ["f1", "f3"]
+    assert len(merged) == 2
+
+
+def test_near_dup_preserves_order_of_survivors() -> None:
+    """Survivors keep their original relative order, mixed types included."""
+    items = [
+        _fact_item("f1", _NEAR_A, confidence=0.60, score=0.95),
+        {"type": "message", "id": "c1", "score": 0.90, "content": "无关的消息内容"},
+        _fact_item("f2", _FAR, confidence=0.80, score=0.85),
+        _fact_item("f3", _NEAR_B, confidence=0.99, score=0.70),
+    ]
+
+    kept, suppressed, _ = _suppress_near_duplicate_facts(items)
+
+    # f1 loses to f3 on confidence; everything else survives in place.
+    assert [i["id"] for i in kept] == ["c1", "f2", "f3"]
+    assert suppressed == 1
+
+
+def test_near_dup_prefilter_matches_naive_full_ratio() -> None:
+    """The ``quick_ratio`` prefilter must not change the outcome.
+
+    ``real_quick_ratio``/``quick_ratio`` are upper bounds on ``ratio``, so
+    skipping a pair that fails them is only safe if the result is identical to
+    comparing every pair with the full diff. This asserts that equivalence over
+    randomized inputs rather than trusting the bound.
+    """
+    import random
+    from difflib import SequenceMatcher
+
+    def _naive(items: list[dict], threshold: float = 0.9) -> list[str]:
+        survivors: list[tuple[int, str]] = []
+        dropped: set[int] = set()
+        for i, it in enumerate(items):
+            text = _normalize_for_dedup(it.get("content", ""))
+            if it.get("type") != "fact" or not text:
+                continue
+            hit = None
+            for kept_i, kept_text in survivors:
+                if SequenceMatcher(None, text, kept_text, autojunk=False).ratio() > threshold:
+                    hit = kept_i
+                    break
+            if hit is None:
+                survivors.append((i, text))
+            elif float(it["confidence"]) > float(items[hit]["confidence"]):
+                survivors = [(i, text) if s == hit else (s, t) for s, t in survivors]
+                dropped.add(hit)
+            else:
+                dropped.add(i)
+        return [x["id"] for j, x in enumerate(items) if j not in dropped]
+
+    rng = random.Random(20260812)
+    bases = [_NEAR_A, _FAR, "缓存层需要重写以支持多租户", "测试环境不稳定导致回归失败"]
+    for _ in range(200):
+        items = [
+            _fact_item(
+                f"f{k}",
+                rng.choice(bases) + "".join(rng.choice("，。! 的") for _ in range(rng.randint(0, 3))),
+                confidence=round(rng.uniform(0.5, 1.0), 2),
+                score=1.0 - k * 0.05,
+            )
+            for k in range(rng.randint(2, 8))
+        ]
+        fast = [i["id"] for i in _suppress_near_duplicate_facts([dict(d) for d in items])[0]]
+        assert fast == _naive([dict(d) for d in items])
+
+
+def test_near_dup_fires_in_the_real_query_path() -> None:
+    """End-to-end: two reworded facts recalled densely collapse to one item.
+
+    Exercises the wired call site (``dedup_stats["fact_near_dup"]``) rather than
+    the helper in isolation, so a future refactor that stops calling U3 fails
+    here.
+    """
+    store = _StubStore(n_ent=0, n_fact=0)  # no entities → dense-only
+    # Better-ranked fact is the LESS confident one, so a survivor of "f_high"
+    # can only come from U3's confidence rule.
+    low = _fact_hit("f_low", _NEAR_A, 0.9)
+    high = _fact_hit("f_high", _NEAR_B, 0.8)
+    high["payload"]["confidence"] = 0.99
+    qdrant = _StubQdrant({"facts": [low, high]})
+
+    res = _make_engine(store, qdrant).query("API 迁移")
+
+    assert [i["id"] for i in res.items] == ["f_high"]
+    assert res.items[0]["merged_ids"] == ["f_low"]
+    assert res.dedup_stats["fact_near_dup"] == 1
+    assert {"survivor": "f_high", "dropped": "f_low"} in res.dedup_stats["merged"]
+
+
+def test_near_dup_disabled_with_gate_off(monkeypatch) -> None:
+    """With ``QUERY_DEDUP_ENABLED`` off, U3 does not run either."""
+    monkeypatch.setattr(emod, "QUERY_DEDUP_ENABLED", False)
+
+    store = _StubStore(n_ent=0, n_fact=0)
+    qdrant = _StubQdrant(
+        {"facts": [_fact_hit("f1", _NEAR_A, 0.9), _fact_hit("f2", _NEAR_B, 0.8)]}
+    )
+
+    res = _make_engine(store, qdrant).query("API 迁移")
+
+    assert sorted(i["id"] for i in res.items) == ["f1", "f2"]
+    assert res.dedup_stats == {}
+
+
+def test_near_dup_threshold_env_override(monkeypatch) -> None:
+    """``KL_QUERY_FACT_NEAR_DUP`` reaches the config leaf U3 defaults to."""
+    try:
+        monkeypatch.setenv("KL_QUERY_FACT_NEAR_DUP", "0.75")
+        reloaded = importlib.reload(config_mod)
+        assert reloaded.cfg.pipelines.query.fact_near_dup_threshold == 0.75
+
+        monkeypatch.delenv("KL_QUERY_FACT_NEAR_DUP", raising=False)
+        reloaded = importlib.reload(config_mod)
+        assert reloaded.cfg.pipelines.query.fact_near_dup_threshold == 0.9  # default
+    finally:
+        monkeypatch.delenv("KL_QUERY_FACT_NEAR_DUP", raising=False)
         importlib.reload(config_mod)

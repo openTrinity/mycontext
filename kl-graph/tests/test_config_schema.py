@@ -8,7 +8,8 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from kl_graph.config import AppConfig, cfg
+from kl_graph import config as config_module
+from kl_graph.config import PROJECT_ROOT, AppConfig, cfg, load_config
 
 EXPECTED_LEAVES = {
     "application.debug",
@@ -79,9 +80,29 @@ EXPECTED_LEAVES = {
     "pipelines.ingestion.entity_description.summarize",
     "pipelines.ingestion.entity_description.concurrency",
     "pipelines.ingestion.community_summarization.max_concurrent",
-    "pipelines.ingestion.incremental.community_summary_threshold",
+    "pipelines.ingestion.community_summarization.resummarize_threshold",
+    "pipelines.ingestion.community_summarization.resummarize_denominator",
+    "pipelines.ingestion.community_identity.default.identity_min_intersection",
+    "pipelines.ingestion.community_identity.default.identity_jaccard_threshold",
+    "pipelines.ingestion.community_identity.default.identity_inclusion_threshold",
+    "pipelines.ingestion.community_identity.levels.L0.identity_min_intersection",
+    "pipelines.ingestion.community_identity.levels.L0.identity_jaccard_threshold",
+    "pipelines.ingestion.community_identity.levels.L0.identity_inclusion_threshold",
+    "pipelines.ingestion.community_identity.levels.L1.identity_min_intersection",
+    "pipelines.ingestion.community_identity.levels.L1.identity_jaccard_threshold",
+    "pipelines.ingestion.community_identity.levels.L1.identity_inclusion_threshold",
+    "pipelines.ingestion.community_identity.levels.L2.identity_min_intersection",
+    "pipelines.ingestion.community_identity.levels.L2.identity_jaccard_threshold",
+    "pipelines.ingestion.community_identity.levels.L2.identity_inclusion_threshold",
+    "pipelines.ingestion.community_identity.levels.L3.identity_min_intersection",
+    "pipelines.ingestion.community_identity.levels.L3.identity_jaccard_threshold",
+    "pipelines.ingestion.community_identity.levels.L3.identity_inclusion_threshold",
     "pipelines.ingestion.incremental.similarity_strategy",
     "pipelines.ingestion.incremental.community_strategy",
+    "pipelines.ingestion.incremental.leiden.gamma",
+    "pipelines.ingestion.incremental.leiden.max_levels",
+    "pipelines.ingestion.incremental.leiden.seed",
+    "pipelines.ingestion.incremental.leiden.min_gain",
     "pipelines.ingestion.similarity.threshold",
     "pipelines.query.ask.synthesize",
     "pipelines.query.embedding.max_retries",
@@ -92,6 +113,7 @@ EXPECTED_LEAVES = {
     "pipelines.query.phase2_context_limit",
     "pipelines.query.max_concurrency",
     "pipelines.query.dedup_enabled",
+    "pipelines.query.fact_near_dup_threshold",
     "pipelines.query.confidence.high",
     "pipelines.query.confidence.low",
     "pipelines.query.fusion.rrf_k",
@@ -181,3 +203,181 @@ def test_schema_rejects_invalid_fixed_size_overlap() -> None:
 
     with pytest.raises(ValidationError, match="overlap_chars"):
         AppConfig.model_validate(value)
+
+
+# ---------------------------------------------------------------------------
+# Community re-summarization gate + identity reconciliation knobs
+# ---------------------------------------------------------------------------
+
+
+def test_default_resummarization_gate_is_churn_over_baseline() -> None:
+    """The shipped default must reproduce the decided gate policy: a single 0.1
+    threshold compared against ``(|added| + |removed|) / |baseline|``."""
+    summarization = cfg.pipelines.ingestion.community_summarization
+
+    assert summarization.resummarize_threshold == 0.1
+    assert summarization.resummarize_denominator == "churn_over_baseline"
+
+
+def test_resummarize_threshold_is_the_only_gate_threshold() -> None:
+    """The former ``incremental.community_summary_threshold`` was renamed, not
+    duplicated — two independently-interpreted thresholds is the trap."""
+    assert "community_summary_threshold" not in cfg.pipelines.ingestion.incremental
+    gate_leaves = {
+        leaf for leaf in EXPECTED_LEAVES if leaf.endswith("resummarize_threshold")
+    }
+    assert gate_leaves == {
+        "pipelines.ingestion.community_summarization.resummarize_threshold"
+    }
+
+
+@pytest.mark.parametrize("bad", [1.5, -0.1])
+def test_schema_rejects_out_of_range_resummarize_threshold(bad: float) -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_summarization"][
+        "resummarize_threshold"
+    ] = bad
+
+    with pytest.raises(ValidationError, match="resummarize_threshold"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_unsupported_resummarize_denominator() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_summarization"][
+        "resummarize_denominator"
+    ] = "added_over_moon_phase"
+
+    with pytest.raises(ValidationError, match="resummarize_denominator"):
+        AppConfig.model_validate(value)
+
+
+@pytest.mark.parametrize(
+    "denominator",
+    [
+        "added_over_current",
+        "added_over_baseline",
+        "churn_over_baseline",
+        "one_minus_jaccard",
+    ],
+)
+def test_schema_accepts_every_supported_denominator(denominator: str) -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_summarization"][
+        "resummarize_denominator"
+    ] = denominator
+
+    validated = AppConfig.model_validate(value)
+
+    assert (
+        validated.pipelines.ingestion.community_summarization.resummarize_denominator
+        == denominator
+    )
+
+
+def test_default_identity_thresholds_are_per_level_with_a_global_default() -> None:
+    """Identity overlap thresholds are configured per hierarchy level: a global
+    default plus an override slot for every level the hierarchy has."""
+    identity = cfg.pipelines.ingestion.community_identity
+
+    assert identity.default.identity_min_intersection == 2
+    assert identity.default.identity_jaccard_threshold == 0.3
+    assert identity.default.identity_inclusion_threshold == 0.5
+    assert set(identity.levels) == {"L0", "L1", "L2", "L3"}
+    # Shipped defaults override nothing; every level inherits ``default``.
+    for level in ("L0", "L1", "L2", "L3"):
+        overrides = identity.levels[level]
+        assert overrides.identity_min_intersection is None
+        assert overrides.identity_jaccard_threshold is None
+        assert overrides.identity_inclusion_threshold is None
+
+
+def test_schema_accepts_per_level_identity_overrides() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_identity"]["levels"]["L3"] = {
+        "identity_min_intersection": 1,
+        "identity_jaccard_threshold": 0.6,
+        "identity_inclusion_threshold": 0.8,
+    }
+
+    identity = AppConfig.model_validate(value).pipelines.ingestion.community_identity
+
+    assert identity.levels.L3.identity_jaccard_threshold == 0.6
+    # An override on one level must not leak into the others.
+    assert identity.levels.L0.identity_jaccard_threshold is None
+    assert identity.default.identity_jaccard_threshold == 0.3
+
+
+@pytest.mark.parametrize("bad", [1.5, -0.1])
+def test_schema_rejects_out_of_range_per_level_identity_jaccard(bad: float) -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_identity"]["levels"]["L1"][
+        "identity_jaccard_threshold"
+    ] = bad
+
+    with pytest.raises(ValidationError, match="identity_jaccard_threshold"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_out_of_range_per_level_identity_inclusion() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_identity"]["levels"]["L2"][
+        "identity_inclusion_threshold"
+    ] = 1.5
+
+    with pytest.raises(ValidationError, match="identity_inclusion_threshold"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_negative_identity_min_intersection() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_identity"]["default"][
+        "identity_min_intersection"
+    ] = -1
+
+    with pytest.raises(ValidationError, match="identity_min_intersection"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_unknown_identity_level() -> None:
+    """A typo'd level (or a level the hierarchy does not have) must fail loudly
+    rather than be silently dropped along with its thresholds."""
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_identity"]["levels"]["L9"] = {
+        "identity_jaccard_threshold": 0.4
+    }
+
+    with pytest.raises(ValidationError, match="L9"):
+        AppConfig.model_validate(value)
+
+
+def test_schema_rejects_unknown_community_summarization_field() -> None:
+    """Regression guard for the new sections: extras are still forbidden, so a
+    YAML key without a typed field cannot slip through unvalidated."""
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["community_summarization"][
+        "resummarise_threshold"
+    ] = 0.2
+
+    with pytest.raises(ValidationError, match="resummarise_threshold"):
+        AppConfig.model_validate(value)
+
+
+def test_default_yaml_loads_end_to_end() -> None:
+    """``config.default.yaml`` and the typed schema must stay in lockstep: the
+    shipped YAML has to validate on its own, or the app will not start.
+
+    Re-merging the default layer onto itself is idempotent, so this does not
+    disturb the global ``cfg`` other tests read.
+    """
+    before = _config_dict()
+
+    load_config(PROJECT_ROOT / "config.default.yaml")
+
+    reloaded = config_module.cfg.pipelines.ingestion
+    assert reloaded.community_summarization.resummarize_threshold == 0.1
+    assert reloaded.community_summarization.resummarize_denominator == (
+        "churn_over_baseline"
+    )
+    assert reloaded.community_identity.default.identity_min_intersection == 2
+    assert OmegaConf.to_container(config_module.cfg, resolve=True) == before
