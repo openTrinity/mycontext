@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Generate LongMemEval hypotheses from cached KL, RAGFlow, or Khoj retrieval.
+"""Generate LongMemEval hypotheses from cached KL retrieval.
 
 The prompt follows LongMemEval's direct retrieval-augmented generation format:
 each retrieved user-only chunk (or a fact's source chunk) is mapped back to its
@@ -10,9 +9,9 @@ JSONL contract::
 
     {"question_id": "...", "hypothesis": "..."}
 
-For RAGFlow and Khoj, the persisted server-owned chunk content is used directly
-because it does not retain KL message IDs. The output can be passed to LongMemEval's official
-``src/evaluation/evaluate_qa.py``. This module does not contain scoring logic.
+The output can be passed to LongMemEval's official
+``src/evaluation/evaluate_qa.py``. RAGFlow and Khoj prompt adapters remain as
+library helpers for their separate runners; this command is the KL YAML stage.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -29,16 +27,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kl_graph.config import cfg
+from omegaconf.errors import OmegaConfBaseException
+
 from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl, json_lines
 from kl_graph.evaluation.longmemeval.build import (
     CASE_DATA_DIRNAME,
-    DEFAULT_CASE_SET,
     _load_case_entries,
     _resolve_manifest_path,
-    _select_entries,
 )
 from kl_graph.evaluation.longmemeval.convert import message_id
+from kl_graph.evaluation.longmemeval.experiment import (
+    PROMPT_RESERVE_TOKENS,
+    GenerateConfig,
+    GenerateExperiment,
+    load_generate_experiment,
+    select_entries,
+)
 from kl_graph.evaluation.longmemeval.source import (
     cases_by_id,
     load_cases,
@@ -46,21 +50,7 @@ from kl_graph.evaluation.longmemeval.source import (
 )
 from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
 
-DEFAULT_OUTPUT_NAME = "hypotheses.jsonl"
-DEFAULT_MAX_TOKENS = 500
-DEFAULT_CONCURRENCY = 5
-DEFAULT_MODEL_CONTEXT_TOKENS = 128_000
-PROMPT_RESERVE_TOKENS = 1_000
-DEFAULT_MAX_RETRIEVAL_LENGTH = (
-    DEFAULT_MODEL_CONTEXT_TOKENS - DEFAULT_MAX_TOKENS - PROMPT_RESERVE_TOKENS
-)
 FACT_CONTEXT_MODE = "none"
-
-LLM_PROVIDER = str(cfg.services.llm_flash.provider)
-LLM_BASE_URL = str(cfg.services.llm_flash.base_url or "")
-LLM_MAX_RETRIES = int(os.environ.get("KL_LLM_MAX_RETRIES", "2"))
-LLM_MODEL = str(cfg.services.llm_flash.model)
-LLM_TIMEOUT = float(cfg.services.llm_flash.timeout)
 
 PROMPT_TEMPLATE = """I will give you several history chats between you and a user. \
 Please answer the question based on the relevant chat history.
@@ -100,111 +90,19 @@ class HydratedItem:
     source_unit_id: str
 
 
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return parsed
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Generate official-format LongMemEval hypotheses from cached "
-            "KL, RAGFlow, or Khoj retrieval."
-        )
+        description="Generate LongMemEval hypotheses from a KL experiment YAML."
     )
     parser.add_argument(
-        "case_set",
-        nargs="?",
-        type=Path,
-        default=DEFAULT_CASE_SET,
-        help=f"converted LongMemEval root (default: {DEFAULT_CASE_SET})",
-    )
-    retrieval = parser.add_mutually_exclusive_group()
-    retrieval.add_argument(
-        "--ragflow-ask-dir",
-        type=Path,
-        default=None,
-        help=(
-            "completed LongMemEval RAGFlow ask run; its native source and "
-            "selected cases replace the converted case set"
-        ),
-    )
-    retrieval.add_argument(
-        "--khoj-ask-dir",
-        type=Path,
-        default=None,
-        help=(
-            "completed LongMemEval Khoj ask run; its native source and "
-            "selected cases replace the converted case set"
-        ),
-    )
-    selection = parser.add_mutually_exclusive_group()
-    selection.add_argument(
-        "--case", dest="case_ids", action="append", metavar="QUESTION_ID"
-    )
-    selection.add_argument("--first", type=_positive_int, metavar="N")
-    selection.add_argument("--all", action="store_true")
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=None,
-        help=(
-            "hypothesis JSONL path (default: CASE_SET/hypotheses.jsonl, or "
-            "the selected external ASK_DIR/hypotheses.jsonl)"
-        ),
-    )
-    parser.add_argument("--model", default=LLM_MODEL)
-    parser.add_argument("--base-url", default=LLM_BASE_URL)
-    parser.add_argument(
-        "--max-tokens",
-        type=_positive_int,
-        default=DEFAULT_MAX_TOKENS,
-    )
-    parser.add_argument(
-        "--model-context-tokens",
-        type=_positive_int,
-        default=DEFAULT_MODEL_CONTEXT_TOKENS,
-        help=(
-            "model context-window size used to derive LongMemEval's retrieval "
-            f"limit (default: {DEFAULT_MODEL_CONTEXT_TOKENS})"
-        ),
-    )
-    parser.add_argument(
-        "--concurrency",
-        type=_positive_int,
-        default=DEFAULT_CONCURRENCY,
-        help=f"maximum concurrent generation calls (default: {DEFAULT_CONCURRENCY})",
-    )
-    output_mode = parser.add_mutually_exclusive_group()
-    output_mode.add_argument("--overwrite", action="store_true")
-    output_mode.add_argument(
-        "--resume",
-        action="store_true",
-        help="append only cases not already present in the output JSONL",
+        "--config", type=Path, required=True, help="LongMemEval experiment YAML"
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="validate inputs and construct prompts without calling the model",
     )
-    args = parser.parse_args(argv)
-    has_selection = bool(args.case_ids or args.first is not None or args.all)
-    external_ask_dir = args.ragflow_ask_dir or args.khoj_ask_dir
-    if external_ask_dir is not None and has_selection:
-        parser.error(
-            "--case/--first/--all are not used with an external ask directory; "
-            "the ask run already defines the subset"
-        )
-    if external_ask_dir is None and not has_selection:
-        parser.error("one of --case, --first, or --all is required")
-    if args.model_context_tokens <= args.max_tokens + PROMPT_RESERVE_TOKENS:
-        parser.error(
-            "--model-context-tokens must exceed --max-tokens plus the "
-            f"{PROMPT_RESERVE_TOKENS}-token prompt reserve"
-        )
-    return args
+    return parser.parse_args(argv)
 
 
 def _read_evaluation(case_root: Path, question_id: str) -> EvaluationCase:
@@ -247,7 +145,7 @@ def _read_evaluation(case_root: Path, question_id: str) -> EvaluationCase:
         normalized_turns: list[dict[str, str]] = []
         for turn_index, turn in enumerate(session):
             if not isinstance(turn, dict):
-                raise ValueError(
+                raise TypeError(
                     f"case {question_id} session {session_index} "
                     f"turn {turn_index}: invalid source turn"
                 )
@@ -276,21 +174,29 @@ def _read_evaluation(case_root: Path, question_id: str) -> EvaluationCase:
     )
 
 
-def _read_ask_items(case_root: Path, question_id: str) -> list[dict[str, Any]]:
-    path = case_root / "results" / "ask_top5.json"
+def _read_ask_items(
+    case_root: Path,
+    question_id: str,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    path = case_root / "results" / f"ask_top{top_k}.json"
     artifact = json.loads(path.read_text(encoding="utf-8"))
     if artifact.get("question_id") != question_id:
         raise ValueError(f"ask result question ID mismatch: {question_id}")
     if artifact.get("force_phase2") is not False:
         raise ValueError(f"case {question_id}: ask result must have Phase 2 off")
+    if artifact.get("top_k") != top_k:
+        raise ValueError(f"case {question_id}: ask result Top-K mismatch")
     response = artifact.get("response")
     if not isinstance(response, dict):
-        raise ValueError(f"case {question_id}: malformed ask response")
+        raise TypeError(f"case {question_id}: malformed ask response")
     items = response.get("items")
     if not isinstance(items, list) or not items:
         raise ValueError(f"case {question_id}: ask returned no items")
-    if len(items) > 5:
-        raise ValueError(f"case {question_id}: expected at most five ask items")
+    if len(items) > top_k:
+        raise ValueError(
+            f"case {question_id}: expected at most {top_k} ask items"
+        )
     if not all(isinstance(item, dict) for item in items):
         raise ValueError(f"case {question_id}: malformed ask items")
     return items
@@ -397,7 +303,7 @@ def _hydrate_items(
                     locations.append(location)
 
             if not locations:
-                # A message and a fact derived from it can both reach Top-5.
+                # A message and a fact derived from it can both be retrieved.
                 # Present the source dialogue once rather than duplicating it.
                 continue
             item_id = str(item["id"])
@@ -428,7 +334,7 @@ def _hydrate_items(
                 )
 
     if not hydrated:
-        raise ValueError(f"case {question_id}: Top-5 produced no source dialogue")
+        raise ValueError(f"case {question_id}: Ask produced no source dialogue")
     return hydrated
 
 
@@ -525,7 +431,7 @@ def _retrieval_generation_inputs(
     ask_dir: Path,
     *,
     backend: str,
-    max_retrieval_length: int = DEFAULT_MAX_RETRIEVAL_LENGTH,
+    max_retrieval_length: int,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
     """Validate one ask artifact and construct direct-content prompts."""
     ask_dir = ask_dir.expanduser().resolve()
@@ -593,7 +499,7 @@ def _retrieval_generation_inputs(
 def _ragflow_generation_inputs(
     ask_dir: Path,
     *,
-    max_retrieval_length: int = DEFAULT_MAX_RETRIEVAL_LENGTH,
+    max_retrieval_length: int,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
     return _retrieval_generation_inputs(
         ask_dir,
@@ -605,7 +511,7 @@ def _ragflow_generation_inputs(
 def _khoj_generation_inputs(
     ask_dir: Path,
     *,
-    max_retrieval_length: int = DEFAULT_MAX_RETRIEVAL_LENGTH,
+    max_retrieval_length: int,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
     return _retrieval_generation_inputs(
         ask_dir,
@@ -614,21 +520,19 @@ def _khoj_generation_inputs(
     )
 
 
-async def _generate(prompt: str, args: argparse.Namespace) -> str:
-    if not args.base_url:
-        raise ValueError("KL_LLM_BASE_URL or --base-url is required")
-    api_key = provider_api_key(LLM_PROVIDER) or ""
+async def _generate(prompt: str, config: GenerateConfig) -> str:
+    api_key = provider_api_key(config.provider) or ""
     if not api_key:
-        raise ValueError(f"API key for {LLM_PROVIDER!r} is required")
+        raise ValueError(f"API key for {config.provider!r} is required")
     response = await litellm.acompletion(
-        model=provider_model(LLM_PROVIDER, args.model),
+        model=provider_model(config.provider, config.model),
         messages=[{"role": "user", "content": prompt}],
-        api_base=args.base_url,
+        api_base=config.base_url,
         api_key=api_key,
-        temperature=0,
-        max_tokens=args.max_tokens,
-        timeout=LLM_TIMEOUT,
-        num_retries=LLM_MAX_RETRIES,
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+        timeout=config.timeout_seconds,
+        num_retries=config.max_retries,
     )
     hypothesis = (response.choices[0].message.content or "").strip()
     if not hypothesis:
@@ -639,7 +543,7 @@ async def _generate(prompt: str, args: argparse.Namespace) -> str:
 async def _generate_one(
     question_id: str,
     prompt: str,
-    args: argparse.Namespace,
+    config: GenerateConfig,
     semaphore: asyncio.Semaphore,
     position: int,
     total: int,
@@ -647,7 +551,7 @@ async def _generate_one(
     """Generate one hypothesis while respecting the shared request limit."""
     async with semaphore:
         print(f"[{position}/{total}] generating {question_id}", flush=True)
-        hypothesis = await _generate(prompt, args)
+        hypothesis = await _generate(prompt, config)
     return question_id, hypothesis
 
 
@@ -661,7 +565,7 @@ def _completed_rows(path: Path) -> dict[str, dict[str, str]]:
             question_id = row.get("question_id")
             hypothesis = row.get("hypothesis")
             if not isinstance(question_id, str) or not isinstance(hypothesis, str):
-                raise ValueError(f"invalid hypothesis row at {path}:{line_number}")
+                raise TypeError(f"invalid hypothesis row at {path}:{line_number}")
             if question_id in completed:
                 raise ValueError(f"duplicate hypothesis ID in {path}: {question_id}")
             completed[question_id] = {
@@ -681,32 +585,33 @@ def _file_sha256(path: Path) -> str:
 
 def _generation_configuration(
     *,
-    args: argparse.Namespace,
-    backend: str,
+    experiment: GenerateExperiment,
     root: Path,
     output: Path,
+    question_ids: list[str],
     max_retrieval_length: int,
 ) -> dict[str, Any]:
+    config = experiment.generate
     return {
         "benchmark": "longmemeval",
         "stage": "generate",
-        "backend": backend,
+        "backend": "kl",
         "input_root": str(root),
         "output": str(output),
-        "model": args.model,
-        "base_url": args.base_url,
-        "max_tokens": args.max_tokens,
-        "model_context_tokens": args.model_context_tokens,
+        "question_ids": question_ids,
+        "ask_top_k": experiment.ask_top_k,
+        **config.model_dump(),
         "prompt_reserve_tokens": PROMPT_RESERVE_TOKENS,
         "max_retrieval_length": max_retrieval_length,
-        "fact_context_mode": FACT_CONTEXT_MODE if backend == "kl" else None,
+        "fact_context_mode": FACT_CONTEXT_MODE,
     }
 
 
 def _validate_resume_run(path: Path, expected: dict[str, Any]) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError(
-            f"resume requires a generation run manifest; use --overwrite: {path}"
+            "resume requires a generation run manifest; set run.mode=overwrite: "
+            f"{path}"
         )
     existing = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(existing, dict):
@@ -714,90 +619,94 @@ def _validate_resume_run(path: Path, expected: dict[str, Any]) -> dict[str, Any]
     actual = existing.get("configuration")
     if actual != expected:
         raise ValueError(
-            "generation configuration changed; use --overwrite instead of --resume"
+            "generation configuration changed; set run.mode=overwrite"
         )
     return existing
 
 
 async def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
     try:
+        args = parse_args(argv)
+        experiment = load_generate_experiment(args.config)
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        OmegaConfBaseException,
+    ) as exc:
+        print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        config = experiment.generate
         max_retrieval_length = (
-            args.model_context_tokens - args.max_tokens - PROMPT_RESERVE_TOKENS
+            config.model_context_tokens - config.max_tokens - PROMPT_RESERVE_TOKENS
         )
-        retrieval_prompts: list[tuple[str, str]] | None = None
-        selected: list[dict[str, Any]] = []
-        if args.ragflow_ask_dir is not None:
-            backend = "ragflow"
-            root, manifest_order, retrieval_prompts = _ragflow_generation_inputs(
-                args.ragflow_ask_dir,
-                max_retrieval_length=max_retrieval_length,
-            )
-        elif args.khoj_ask_dir is not None:
-            backend = "khoj"
-            root, manifest_order, retrieval_prompts = _khoj_generation_inputs(
-                args.khoj_ask_dir,
-                max_retrieval_length=max_retrieval_length,
-            )
-        else:
-            backend = "kl"
-            root, entries = _load_case_entries(args.case_set)
-            selected = _select_entries(entries, args)
-            manifest_order = [entry["question_id"] for entry in entries]
-        output = (
-            args.output.expanduser().resolve()
-            if args.output is not None
-            else root / DEFAULT_OUTPUT_NAME
-        )
+        root, entries = _load_case_entries(experiment.case_set)
+        selected = select_entries(entries, experiment.selection)
+        manifest_order = [str(entry["question_id"]) for entry in selected]
+        output = experiment.hypotheses
         run_path = Path(f"{output}.run.json")
         run_configuration = _generation_configuration(
-            args=args,
-            backend=backend,
+            experiment=experiment,
             root=root,
             output=output,
+            question_ids=manifest_order,
             max_retrieval_length=max_retrieval_length,
         )
 
-        completed: dict[str, dict[str, str]] = {}
+        persisted: dict[str, dict[str, str]] = {}
         prior_run: dict[str, Any] = {}
-        if output.exists():
-            if args.resume:
-                prior_run = _validate_resume_run(run_path, run_configuration)
-                completed = _completed_rows(output)
-            elif not args.overwrite and not args.dry_run:
-                raise FileExistsError(
-                    f"output exists; pass --overwrite or --resume: {output}"
-                )
+        if output.exists() and experiment.run.mode == "resume":
+            prior_run = _validate_resume_run(run_path, run_configuration)
+            persisted = _completed_rows(output)
 
-        pending: list[tuple[str, str]] = []
-        if retrieval_prompts is not None:
-            pending = [
-                (question_id, prompt)
-                for question_id, prompt in retrieval_prompts
-                if question_id not in completed
-            ]
-        else:
-            for entry in selected:
-                question_id = entry["question_id"]
-                if question_id in completed:
-                    continue
-                case_root = _resolve_manifest_path(root, entry["path"], "path")
-                evaluation = _read_evaluation(case_root, question_id)
-                items = _read_ask_items(case_root, question_id)
-                hydrated_items = _hydrate_items(
-                    case_root, question_id, evaluation, items
+        unknown_ids = set(persisted).difference(manifest_order)
+        if unknown_ids:
+            raise ValueError(
+                "output contains question IDs outside this selection: "
+                f"{sorted(unknown_ids)[:5]}"
+            )
+
+        prompts: list[tuple[str, str]] = []
+        for entry in selected:
+            question_id = str(entry["question_id"])
+            case_root = _resolve_manifest_path(root, entry["path"], "path")
+            evaluation = _read_evaluation(case_root, question_id)
+            items = _read_ask_items(case_root, question_id, experiment.ask_top_k)
+            hydrated_items = _hydrate_items(
+                case_root, question_id, evaluation, items
+            )
+            prompts.append(
+                (
+                    question_id,
+                    _build_prompt(
+                        evaluation.question,
+                        evaluation.question_date,
+                        hydrated_items,
+                        max_retrieval_length=max_retrieval_length,
+                    ),
                 )
-                pending.append(
-                    (
-                        question_id,
-                        _build_prompt(
-                            evaluation.question,
-                            evaluation.question_date,
-                            hydrated_items,
-                            max_retrieval_length=max_retrieval_length,
-                        ),
-                    )
-                )
+            )
+
+        prompt_sha256_by_question = {
+            question_id: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            for question_id, prompt in prompts
+        }
+        prior_hashes = prior_run.get("prompt_sha256_by_question") or {}
+        if not isinstance(prior_hashes, dict):
+            raise TypeError("generation run has invalid prompt fingerprints")
+        completed = {
+            question_id: row
+            for question_id, row in persisted.items()
+            if prior_hashes.get(question_id)
+            == prompt_sha256_by_question.get(question_id)
+        }
+        pending = [
+            (question_id, prompt)
+            for question_id, prompt in prompts
+            if question_id not in completed
+        ]
 
         if args.dry_run:
             for question_id, prompt in pending:
@@ -806,23 +715,6 @@ async def main(argv: list[str] | None = None) -> int:
             return 0
 
         output.parent.mkdir(parents=True, exist_ok=True)
-        unknown_ids = set(completed).difference(manifest_order)
-        if unknown_ids:
-            raise ValueError(
-                f"output contains question IDs outside this case set: "
-                f"{sorted(unknown_ids)[:5]}"
-            )
-
-        prompt_sha256_by_question = {
-            str(key): str(value)
-            for key, value in (prior_run.get("prompt_sha256_by_question") or {}).items()
-        }
-        prompt_sha256_by_question.update(
-            {
-                question_id: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-                for question_id, prompt in pending
-            }
-        )
         started_at = (
             str(prior_run.get("started_at") or "")
             or datetime.now().astimezone().isoformat()
@@ -853,19 +745,17 @@ async def main(argv: list[str] | None = None) -> int:
                 ordered,
             )
 
-        # Preserve the old --overwrite contract: clear an existing output
-        # before the first model call. An empty file is also a valid resume
-        # checkpoint if the process is interrupted before any request finishes.
-        if not args.resume or not output.exists():
-            checkpoint()
+        # Remove stale answers before making requests. In resume mode, only
+        # rows whose prompt fingerprint still matches are retained.
+        checkpoint()
 
-        semaphore = asyncio.Semaphore(args.concurrency)
+        semaphore = asyncio.Semaphore(config.concurrency)
         tasks = [
             asyncio.create_task(
                 _generate_one(
                     question_id,
                     prompt,
-                    args,
+                    config,
                     semaphore,
                     position,
                     len(pending),
@@ -874,15 +764,15 @@ async def main(argv: list[str] | None = None) -> int:
             for position, (question_id, prompt) in enumerate(pending, start=1)
         ]
         try:
-            completed_now = 0
-            for task in asyncio.as_completed(tasks):
+            for completed_now, task in enumerate(
+                asyncio.as_completed(tasks), start=1
+            ):
                 question_id, hypothesis = await task
                 completed[question_id] = {
                     "question_id": question_id,
                     "hypothesis": hypothesis,
                 }
                 checkpoint()
-                completed_now += 1
                 print(
                     f"[{completed_now}/{len(pending)}] saved {question_id}",
                     flush=True,

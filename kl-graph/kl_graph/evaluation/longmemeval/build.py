@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Build one isolated production KL graph for each selected LongMemEval case.
 
 This module is deliberately only an orchestrator. It does not load messages,
@@ -26,14 +25,8 @@ The converted case directory becomes::
 
 Examples::
 
-    # Inspect the first case without starting ingestion.
-    python -m kl_graph.evaluation.longmemeval.build --first 1 --dry-run
-
-    # Smoke-test one case using the full production pipeline.
-    python -m kl_graph.evaluation.longmemeval.build --case 00ca467f
-
-    # Build every case with four independent ingest subprocesses (the default).
-    python -m kl_graph.evaluation.longmemeval.build --all --keep-going
+    python -m kl_graph.evaluation.longmemeval.build \
+      --config experiment.yaml --dry-run
 """
 
 from __future__ import annotations
@@ -53,6 +46,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from omegaconf.errors import OmegaConfBaseException
+
 from kl_graph.evaluation.build_contract import (
     BUILD_STATUS_SCHEMA_VERSION,
     configuration_fingerprint,
@@ -61,14 +56,18 @@ from kl_graph.evaluation.build_contract import (
     require_successful_ingest,
     validate_production_build_status,
 )
+from kl_graph.evaluation.longmemeval.experiment import (
+    BuildConfig,
+    BuildExperiment,
+    load_build_experiment,
+    select_entries,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CASE_SET = PROJECT_ROOT / "data" / "longmemeval"
 EXPECTED_FORMAT = "kl-evaluation-case-set"
 CASE_DATA_DIRNAME = "kl_data"
 BUILD_STATUS_FILENAME = "build_status.json"
 BUILD_LOG_FILENAME = "build.log"
-DEFAULT_CASE_CONCURRENCY = 4
 
 _OUTPUT_LOCK = threading.Lock()
 _ACTIVE_PROCESS_LOCK = threading.Lock()
@@ -80,13 +79,6 @@ def case_source_id(question_id: str) -> str:
     return f"longmemeval-{question_id}"
 
 
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return parsed
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -95,73 +87,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "case_set",
-        nargs="?",
-        type=Path,
-        default=DEFAULT_CASE_SET,
-        help=(f"converted LongMemEval case-set root (default: {DEFAULT_CASE_SET})"),
-    )
-
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument(
-        "--case",
-        dest="case_ids",
-        action="append",
-        metavar="QUESTION_ID",
-        help="build one question ID; repeat to select multiple cases",
-    )
-    selection.add_argument(
-        "--first",
-        type=_positive_int,
-        metavar="N",
-        help="build the first N manifest entries (useful for smoke tests)",
-    )
-    selection.add_argument(
-        "--all",
-        action="store_true",
-        help="build all cases in manifest order",
-    )
-
-    parser.add_argument(
-        "--case-concurrency",
-        type=_positive_int,
-        default=DEFAULT_CASE_CONCURRENCY,
-        help=(
-            "independent case-level ingest subprocesses "
-            f"(default: {DEFAULT_CASE_CONCURRENCY})"
-        ),
-    )
-    parser.add_argument(
-        "--concurrency",
-        type=_positive_int,
-        default=8,
-        help="production extraction concurrency passed to scripts.ingest",
-    )
-    parser.add_argument(
-        "--with-improve",
-        action="store_true",
-        help=(
-            "also run production similarity/community improvement; by default "
-            "the core graph is built with --improve-mode off"
-        ),
-    )
-    parser.add_argument(
-        "--fresh",
-        action="store_true",
-        help=(
-            "pass --fresh-db to production ingestion for each selected case; "
-            "this replaces only that case's kl_data stores"
-        ),
-    )
-    parser.add_argument(
-        "--no-keep-cache",
-        action="store_true",
-        help="discard each case's production extraction cache after graph build",
-    )
-    parser.add_argument(
-        "--keep-going",
-        action="store_true",
-        help="continue with later cases after a build subprocess fails",
+        "--config", type=Path, required=True, help="LongMemEval experiment YAML"
     )
     parser.add_argument(
         "--dry-run",
@@ -188,7 +114,7 @@ def _load_case_entries(case_set: Path) -> tuple[Path, list[dict[str, Any]]]:
     seen_ids: set[str] = set()
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            raise ValueError(f"case_entries[{index}] must be an object")
+            raise TypeError(f"case_entries[{index}] must be an object")
         question_id = entry.get("question_id")
         if not isinstance(question_id, str) or not question_id:
             raise ValueError(
@@ -238,26 +164,8 @@ def _validate_dws_root(question_id: str, dws_root: Path) -> None:
         )
 
 
-def _select_entries(
-    entries: list[dict[str, Any]], args: argparse.Namespace
-) -> list[dict[str, Any]]:
-    if args.case_ids:
-        by_id = {entry["question_id"]: entry for entry in entries}
-        unknown = [
-            question_id for question_id in args.case_ids if question_id not in by_id
-        ]
-        if unknown:
-            raise ValueError(f"unknown LongMemEval question ID(s): {unknown}")
-        if len(set(args.case_ids)) != len(args.case_ids):
-            raise ValueError("--case contains a duplicate question ID")
-        return [by_id[question_id] for question_id in args.case_ids]
-    if args.first is not None:
-        return entries[: args.first]
-    return entries
-
-
 def _ingest_command(
-    args: argparse.Namespace, *, input_dir: Path, question_id: str
+    config: BuildConfig, *, input_dir: Path, question_id: str
 ) -> list[str]:
     command = [
         sys.executable,
@@ -269,12 +177,12 @@ def _ingest_command(
         case_source_id(question_id),
         "--full",
         "--concurrency",
-        str(args.concurrency),
+        str(config.concurrency),
     ]
-    command.extend(["--improve-mode", "full" if args.with_improve else "off"])
-    if args.fresh:
+    command.extend(["--improve-mode", "full" if config.with_improve else "off"])
+    if config.fresh:
         command.append("--fresh-db")
-    if args.no_keep_cache:
+    if not config.keep_cache:
         command.append("--no-keep-cache")
     return command
 
@@ -389,10 +297,11 @@ def _terminate_active_processes() -> None:
 def _build_case(
     case_set: Path,
     entry: dict[str, Any],
-    args: argparse.Namespace,
+    experiment: BuildExperiment,
     *,
     position: int,
     total: int,
+    dry_run: bool,
 ) -> int:
     question_id = entry["question_id"]
     case_root = _resolve_manifest_path(case_set, entry["path"], "path")
@@ -400,7 +309,8 @@ def _build_case(
     data_dir = case_root / CASE_DATA_DIRNAME
     status_path = case_root / BUILD_STATUS_FILENAME
     log_path = case_root / BUILD_LOG_FILENAME
-    command = _ingest_command(args, input_dir=dws_root, question_id=question_id)
+    config = experiment.build
+    command = _ingest_command(config, input_dir=dws_root, question_id=question_id)
     env = _case_environment(
         os.environ,
         question_id=question_id,
@@ -408,7 +318,7 @@ def _build_case(
         data_dir=data_dir,
     )
     source_id = case_source_id(question_id)
-    improve_mode = "full" if args.with_improve else "off"
+    improve_mode = "full" if config.with_improve else "off"
     configuration = production_build_configuration(
         source_id=source_id,
         improve_mode=improve_mode,
@@ -421,7 +331,7 @@ def _build_case(
         f"  log={log_path}",
         f"  command={shlex.join(command)}",
     )
-    if args.dry_run:
+    if dry_run:
         return 0
 
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -440,7 +350,7 @@ def _build_case(
         "log_path": str(log_path),
         "pipeline": "scripts.ingest",
         "production_chunking": True,
-        "with_improve": args.with_improve,
+        "with_improve": config.with_improve,
         "command": command,
         "configuration": configuration,
         "configuration_sha256": configuration_fingerprint(configuration),
@@ -513,11 +423,13 @@ def _build_case(
 def _run_builds(
     case_set: Path,
     selected: list[dict[str, Any]],
-    args: argparse.Namespace,
+    experiment: BuildExperiment,
+    *,
+    dry_run: bool,
 ) -> list[tuple[str, int]]:
     """Run case builds in a bounded thread pool of isolated subprocesses."""
     total = len(selected)
-    workers = min(args.case_concurrency, total)
+    workers = min(experiment.build.case_concurrency, total)
     failures: list[tuple[str, int]] = []
     futures: dict[Future[int], tuple[int, str]] = {}
     executor = ThreadPoolExecutor(
@@ -531,9 +443,10 @@ def _run_builds(
                 _build_case,
                 case_set,
                 entry,
-                args,
+                experiment,
                 position=position,
                 total=total,
+                dry_run=dry_run,
             )
             futures[future] = (position, entry["question_id"])
 
@@ -545,7 +458,7 @@ def _run_builds(
             completed_count += 1
             try:
                 returncode = future.result()
-            except Exception as exc:  # status was already written by the worker
+            except Exception as exc:  # noqa: BLE001 - worker wrote failure status
                 returncode = 1
                 _print_block(
                     f"[{completed_count}/{total}] FAILED {question_id}: "
@@ -561,7 +474,7 @@ def _run_builds(
 
             if returncode:
                 failures.append((question_id, returncode))
-                if not args.keep_going and not stop_after_failure:
+                if not experiment.run.keep_going and not stop_after_failure:
                     stop_after_failure = True
                     for pending in futures:
                         pending.cancel()
@@ -577,23 +490,67 @@ def _run_builds(
     return failures
 
 
+def _pending_entries(
+    case_set: Path,
+    selected: list[dict[str, Any]],
+    experiment: BuildExperiment,
+) -> list[dict[str, Any]]:
+    """Return cases that are not reusable under resume mode."""
+    if experiment.build.fresh:
+        return selected
+
+    pending: list[dict[str, Any]] = []
+    for entry in selected:
+        question_id = str(entry["question_id"])
+        try:
+            status = validate_built_case(case_set, entry)
+        except (OSError, TypeError, ValueError, RuntimeError):
+            pending.append(entry)
+            continue
+        if status is None:  # pragma: no cover - default validation returns a status
+            pending.append(entry)
+            continue
+        recorded_improve = bool(status.get("with_improve"))
+        if recorded_improve != experiment.build.with_improve:
+            raise ValueError(
+                f"case {question_id}: existing build uses with_improve="
+                f"{recorded_improve}, requested {experiment.build.with_improve}; "
+                "set build.fresh=true to rebuild it"
+            )
+        _print_block(f"SKIPPED {question_id} (complete compatible build)")
+    return pending
+
+
 def main(argv: list[str] | None = None) -> int:
     _STOP_REQUESTED.clear()
-    args = parse_args(argv)
     try:
-        case_set, entries = _load_case_entries(args.case_set)
-        selected = _select_entries(entries, args)
-    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        args = parse_args(argv)
+        experiment = load_build_experiment(args.config)
+        case_set, entries = _load_case_entries(experiment.case_set)
+        selected = select_entries(entries, experiment.selection)
+        pending = _pending_entries(case_set, selected, experiment)
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        OmegaConfBaseException,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     _print_block(
         f"LongMemEval cases selected: {len(selected)}",
-        f"Case concurrency: {min(args.case_concurrency, len(selected))}",
-        f"Per-ingest extraction concurrency: {args.concurrency}",
+        f"Cases pending: {len(pending)}",
+        f"Case concurrency: {min(experiment.build.case_concurrency, len(pending))}",
+        f"Per-ingest extraction concurrency: {experiment.build.concurrency}",
     )
+    if not pending:
+        return 0
     try:
-        failures = _run_builds(case_set, selected, args)
+        failures = _run_builds(
+            case_set, pending, experiment, dry_run=args.dry_run
+        )
     except KeyboardInterrupt:
         return 130
 

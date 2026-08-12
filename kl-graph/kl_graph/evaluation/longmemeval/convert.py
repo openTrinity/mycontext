@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Prepare one independent DWS chat input for each LongMemEval case.
 
 The output is a case set, not one shared corpus::
@@ -32,8 +31,7 @@ enter chunks, embeddings, extraction, or the graph.
 Usage::
 
     python -m kl_graph.evaluation.longmemeval.convert \
-      /path/to/longmemeval_s_sample100.json \
-      /path/to/longmemeval_s_sample100_cases
+      --config /path/to/experiment.yaml
 """
 
 from __future__ import annotations
@@ -52,6 +50,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from kl_graph.evaluation.longmemeval.experiment import load_convert_experiment
 
 DATASET_NAME = "longmemeval"
 SCHEMA_VERSION = 3
@@ -110,7 +110,7 @@ def parse_longmemeval_date(value: str, timezone: ZoneInfo) -> int:
     not trusted, avoiding locale-dependent ``%a`` parsing.
     """
     if not isinstance(value, str):
-        raise ValueError(
+        raise TypeError(
             f"LongMemEval date must be a string, got {type(value).__name__}"
         )
     match = _DATE_RE.fullmatch(value.strip())
@@ -118,7 +118,7 @@ def parse_longmemeval_date(value: str, timezone: ZoneInfo) -> int:
         raise ValueError(
             f"invalid LongMemEval date {value!r}; expected YYYY/MM/DD (Day) HH:MM"
         )
-    parsed = datetime.strptime(  # noqa: DTZ007
+    parsed = datetime.strptime(
         f"{match.group('date')} {match.group('time')}", "%Y/%m/%d %H:%M"
     ).replace(tzinfo=timezone)
     return int(parsed.timestamp() * 1000)
@@ -127,7 +127,7 @@ def parse_longmemeval_date(value: str, timezone: ZoneInfo) -> int:
 def build_case_rows(case: dict[str, Any], timezone: ZoneInfo) -> CaseRows:
     """Validate and convert one case into isolated production-readable rows."""
     if not isinstance(case, dict):
-        raise ValueError("each LongMemEval case must be a JSON object")
+        raise TypeError("each LongMemEval case must be a JSON object")
 
     question_id = _required_text(case, "question_id")
     question = _required_text(case, "question")
@@ -214,7 +214,7 @@ def build_case_rows(case: dict[str, Any], timezone: ZoneInfo) -> CaseRows:
         for turn_index, turn in enumerate(session):
             source_turn_count += 1
             if not isinstance(turn, dict):
-                raise ValueError(
+                raise TypeError(
                     f"case {question_id} session {session_index} "
                     f"turn {turn_index}: turn must be an object"
                 )
@@ -226,7 +226,7 @@ def build_case_rows(case: dict[str, Any], timezone: ZoneInfo) -> CaseRows:
                     f"turn {turn_index}: unsupported role {role!r}"
                 )
             if not isinstance(content, str):
-                raise ValueError(
+                raise TypeError(
                     f"case {question_id} session {session_index} "
                     f"turn {turn_index}: content must be text"
                 )
@@ -318,8 +318,8 @@ def convert(
     input_path: Path,
     output_dir: Path,
     *,
-    overwrite: bool = False,
-    timezone_name: str = DEFAULT_TIMEZONE,
+    overwrite: bool,
+    timezone_name: str,
 ) -> dict[str, Any]:
     """Convert a LongMemEval JSON array into independent per-case bundles."""
     input_path = input_path.expanduser().resolve()
@@ -338,7 +338,7 @@ def convert(
     with input_path.open("r", encoding="utf-8") as stream:
         cases = json.load(stream)
     if not isinstance(cases, list):
-        raise ValueError(f"expected a top-level JSON array in {input_path}")
+        raise TypeError(f"expected a top-level JSON array in {input_path}")
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
@@ -550,7 +550,7 @@ def _required_text(row: dict[str, Any], key: str) -> str:
 def _required_list(row: dict[str, Any], key: str) -> list[Any]:
     value = row.get(key)
     if not isinstance(value, list):
-        raise ValueError(f"LongMemEval field {key!r} must be a list")
+        raise TypeError(f"LongMemEval field {key!r} must be a list")
     return value
 
 
@@ -587,28 +587,23 @@ def _sha256(path: Path) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, help="LongMemEval JSON array")
-    parser.add_argument("output", type=Path, help="output per-case bundle root")
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="atomically replace an existing prepared case-set directory",
-    )
-    parser.add_argument(
-        "--timezone",
-        default=DEFAULT_TIMEZONE,
-        help=f"timezone for source wall-clock dates (default: {DEFAULT_TIMEZONE})",
+        "--config",
+        type=Path,
+        required=True,
+        help="LongMemEval experiment YAML",
     )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    experiment = load_convert_experiment(args.config)
     manifest = convert(
-        args.input,
-        args.output,
-        overwrite=args.overwrite,
-        timezone_name=args.timezone,
+        experiment.source,
+        experiment.case_set,
+        overwrite=experiment.convert.reconvert,
+        timezone_name=experiment.convert.timezone,
     )
     json.dump(manifest["counts"], sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
