@@ -316,8 +316,21 @@ def _build_community_graph(
     #         n_comention += 1
     # print(f"    Co-mention edges: {n_comention} (skipped {n_comention_skipped} hub pairs)")
 
-    # Convert to list of triples.
-    edges = [(u, v, w) for (u, v), w in edge_weights.items()]
+    # Convert to a list of triples in a DETERMINISTIC order.
+    #
+    # ``edge_weights`` is a dict keyed by tuples whose iteration order follows
+    # insertion order, and insertion order follows the graph-scan order, which is
+    # not stable across runs (set iteration over ``entity_ids``/``fact_ids``, and
+    # backend scan order). ``hierarchical_leiden`` is order-SENSITIVE even with a
+    # fixed seed: the same graph in a different edge order yields a different
+    # hierarchy (measured: L1 ARI 0.75-0.90 between reruns on identical data, and
+    # even a different number of levels). That makes every partition comparison
+    # -- incremental vs full, day over day, before vs after a change -- read
+    # detector noise as if it were a real signal.
+    #
+    # Sorting here makes the whole detection path a pure function of the stored
+    # graph, which is what the frozen seed was always meant to deliver.
+    edges = sorted((u, v, w) for (u, v), w in edge_weights.items())
     print(f"    Total edges: {len(edges)}")
 
     return edges, label_map
@@ -358,7 +371,7 @@ def detect_communities_hierarchical(
         key = (u, v) if u < v else (v, u)
         normalized[key] = w
 
-    deduped_edges = [(u, v, w) for (u, v), w in normalized.items()]
+    deduped_edges = sorted((u, v, w) for (u, v), w in normalized.items())
     print(f"    Edges after normalization+dedup: {len(deduped_edges)}")
 
     if not deduped_edges:
@@ -441,6 +454,54 @@ def detect_communities_hierarchical(
     }
 
 
+def effective_assignments(detection_result: dict) -> dict[tuple[str, str], dict[int, int]]:
+    """Expand raw detection output into the per-level cells actually persisted.
+
+    ``hierarchical_leiden`` only reports a node at the levels where it was still
+    being subdivided: a node whose cluster is final at L1 simply does not appear
+    at L2/L3.  The ``community_L*`` columns, however, are dense — a node's final
+    cluster id is repeated into every deeper column so a query at any level
+    always resolves a community.  Anything that compares stored columns against
+    fresh detection output must apply this same expansion, or it will read the
+    absence of deep-level rows as a disagreement that does not exist.
+
+    This is the single source of truth for that rule, shared by
+    :func:`store_communities` (which writes the cells) and by any analysis that
+    reconstructs what a rerun would store.
+
+    Args:
+        detection_result: Dict from :func:`detect_communities_hierarchical` with
+            ``assignments`` and ``native_finality`` keys.
+
+    Returns:
+        ``{(node_type, original_id): {level: cluster_id}}`` covering every level
+        present in the result, or an empty dict when there are no assignments.
+    """
+    assignments = detection_result.get("assignments", {})
+    native_finality = detection_result.get("native_finality", {})
+    if not assignments:
+        return {}
+
+    levels = sorted(assignments.keys())
+    expanded: dict[tuple[str, str], dict[int, int]] = {}
+    for node_key in set().union(*[assignments[level].keys() for level in levels]):
+        # Prefer the native is_final_cluster record; fall back to the deepest
+        # level the node actually appears at.
+        final_level = native_finality.get(node_key)
+        if final_level is None:
+            final_level = max(
+                level for level in levels if node_key in assignments[level]
+            )
+        final_cid = assignments[final_level][node_key]
+        expanded[node_key] = {
+            level: (
+                assignments[level][node_key] if level <= final_level else final_cid
+            )
+            for level in levels
+        }
+    return expanded
+
+
 def store_communities(
     sqlite: SQLiteStore,
     detection_result: dict,
@@ -460,7 +521,6 @@ def store_communities(
             with 'assignments', 'native_parents', 'native_finality' keys.
     """
     assignments = detection_result.get("assignments", {})
-    native_finality = detection_result.get("native_finality", {})
 
     # Enumerate ALL existing community_L* columns dynamically.
     existing_cols: set[int] = set()
@@ -512,32 +572,11 @@ def store_communities(
     # This is the SINGLE SOURCE for column writes, Community rows, and
     # COMM_MEMBER edges.
     # node_key is (node_type, original_id) tuple to prevent collision.
-    effective_assignments: dict[tuple[str, str], dict[int, int]] = {}
-
-    for node_key in set().union(*[assignments[level].keys() for level in levels]):
-        # Determine final level: prefer native is_final_cluster record.
-        final_level = native_finality.get(node_key)
-        if final_level is None:
-            # Fallback: deepest level where this node appears.
-            final_level = max(level for level in levels if node_key in assignments[level])
-
-        # Build the effective assignment for this node across all levels.
-        node_assignments = {}
-        final_cid = assignments[final_level][node_key]
-
-        for level in levels:
-            if level <= final_level:
-                # Use the actual cluster id from this level.
-                node_assignments[level] = assignments[level][node_key]
-            else:
-                # Repeat the final-level cluster id into deeper columns.
-                node_assignments[level] = final_cid
-
-        effective_assignments[node_key] = node_assignments
+    effective = effective_assignments(detection_result)
 
     # Write assignments to the database.
     total_writes = 0
-    for node_key, node_assignments in effective_assignments.items():
+    for node_key, node_assignments in effective.items():
         # node_key is (node_type, original_id) tuple.
         node_type, original_id = node_key
         table = "entities" if node_type == "entity" else "facts"
