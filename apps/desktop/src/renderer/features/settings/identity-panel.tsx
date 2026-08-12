@@ -27,10 +27,11 @@
 import { useEffect, useState } from "react"
 import { Avatar, Button, Field, Input } from "@mycontext/design"
 import { resolveDisplayName, type AuthSession } from "@mycontext/ipc-contract"
-import { useUpdateProfile, useFetchSelfAvatar } from "../../lib/queries.js"
+import { useChannels, useUpdateProfile, useFetchSelfAvatar } from "../../lib/queries.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { ImagePicker } from "../shared/image-picker.js"
+import { ChannelPicker } from "../shell/channel-picker.js"
 
 export interface IdentityPanelProps {
   session: AuthSession
@@ -39,9 +40,30 @@ export interface IdentityPanelProps {
 export function IdentityPanel({ session }: IdentityPanelProps) {
   const { t } = useDynamicTranslation("settings")
   const { t: tc } = useDynamicTranslation("common")
+  const { t: tch } = useDynamicTranslation("channels")
   const errorText = useErrorText()
   const update = useUpdateProfile()
   const selfAvatar = useFetchSelfAvatar()
+  /**
+   * ── 「从已连接的平台获取」要问**哪个**平台 ─────────────────────
+   *
+   * ## ★ 为什么必须选
+   *
+   * 一个人在两个平台是**两张不同的头像**（各平台各自设置）。原来这颗按钮
+   * 走 `media.selfAvatar()` 不带渠道 → 恒按主渠道取，于是多渠道下
+   * "从已连接的平台获取"取回来的永远是钉钉那张，用户没有办法拿飞书的。
+   *
+   * ## ★ 只在有**多个**已授权渠道时才渲染选择器
+   *
+   * 只有一个时它就是那一个，摆个下拉是噪声（与设置页 persona 区、
+   * 搜索模块的档位同一条判断）。
+   */
+  const channels = useChannels()
+  const authorizedChannels = (channels.data ?? []).filter(
+    (c) => c.available && c.status.state === "authorized",
+  )
+  const [avatarChannelId, setAvatarChannelId] = useState<string | null>(null)
+  const activeAvatarChannel = avatarChannelId ?? authorizedChannels[0]?.id ?? null
 
   const [name, setName] = useState(session.displayName ?? "")
   const [avatar, setAvatar] = useState(session.avatarUrl ?? "")
@@ -176,16 +198,36 @@ export function IdentityPanel({ session }: IdentityPanelProps) {
                 「怎么才能拿到头像」是渠道特有的知识，收在渠道插件里
                 （`ChannelAvatars` 契约）—— 这里只管发起与回填。
               */}
+              {/*
+                ★ 多渠道时先选平台 —— 见 `activeAvatarChannel` 那段说明。
+                `side="bottom"`：这块在设置弹窗上半部，默认 `"top"` 会让
+                浮层飞到窗口外（`ChannelPicker` 文件头记了这条）。
+              */}
+              {authorizedChannels.length > 1 ? (
+                <ChannelPicker
+                  options={authorizedChannels.map((c) => ({
+                    id: c.id,
+                    label: tch(`${c.id}.label`, { defaultValue: c.id }),
+                  }))}
+                  activeId={activeAvatarChannel}
+                  onChange={setAvatarChannelId}
+                  ariaLabel={t("identity.avatarChannelLabel")}
+                  side="bottom"
+                />
+              ) : null}
               <Button
                 size="sm"
                 variant="ghost"
                 disabled={selfAvatar.isPending || update.isPending}
                 onClick={() => {
-                  selfAvatar.mutate(undefined, {
-                    onSuccess: (result) => {
-                      if (result.path !== null) setAvatar(result.path)
+                  selfAvatar.mutate(
+                    activeAvatarChannel === null ? {} : { channelId: activeAvatarChannel },
+                    {
+                      onSuccess: (result) => {
+                        if (result.path !== null) setAvatar(result.path)
+                      },
                     },
-                  })
+                  )
                 }}
               >
                 {selfAvatar.isPending

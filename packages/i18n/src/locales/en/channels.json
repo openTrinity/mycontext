@@ -34,6 +34,8 @@
     "signOut": "Sign out",
     "switchUser": "Switch account",
     "switchApp": "Change app",
+    "refreshAvatar": "Refresh avatar",
+    "refreshAvatarHint": "Re-fetch your avatar from the platform — use it after changing your avatar there (the cached image never expires on its own).",
     "signOutHint": "Clear only the credentials; the bound app stays. Your data stays too — hit Re-authorize to resume.",
     "switchUserHint": "Revoke the current credentials and keep the app binding — a different account can sign in next time.",
     "switchAppHint": "Also release the app binding — next authorization requires picking an app and signing in again. Use only when the app itself must change.",

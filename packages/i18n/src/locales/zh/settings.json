@@ -221,6 +221,7 @@
     "clearAvatarHint": "清空后显示名字首字，且之后渠道授权不会再自动替换",
     "avatarHint": "上传一张本地图片，或从已连接的平台取。留空则显示名字首字。",
     "avatarFromChannel": "从已连接的平台获取",
+    "avatarChannelLabel": "选择平台",
     "avatarFetching": "获取中…",
     "avatarMiss": {
       "not_set": "你在那个平台上没有设置头像",

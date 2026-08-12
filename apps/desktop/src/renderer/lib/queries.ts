@@ -1042,13 +1042,30 @@ export function useSaveMediaAs() {
  * ★ 不是 query 而是 mutation：它有副作用（可能写账号），而且要用户
  * 显式点一下 —— 自动取的话会在每次打开设置时多花 2-3 次 CLI 调用。
  */
+/**
+ * 从渠道取**本人**头像并回填账号。
+ *
+ * ★ 收 `channelId`：一个人在两个平台是两张头像，"从已连接的平台获取"
+ * 必须问清是哪个平台（不传 = 主渠道）。
+ */
 export function useFetchSelfAvatar() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async () => unwrap(await window.mycontext.media.selfAvatar()),
+    mutationFn: async (input: { channelId?: string } = {}) =>
+      unwrap(
+        await window.mycontext.media.selfAvatar(
+          input.channelId === undefined ? {} : { channelId: input.channelId },
+        ),
+      ),
     onSuccess: () => {
       // 写了账号 → bootstrap 里的 session 变了（侧栏头像也读它）
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.bootstrap })
+      /**
+       * ★ 也要清**渠道头像**那份缓存：这个动作重取了图，而
+       * `useContactAvatars` 的结果是按 `["media","avatars",…]` 缓的。
+       * 不清的话授权卡与仪表盘上那张还是旧图 —— 用户会以为"刷新没生效"。
+       */
+      void queryClient.invalidateQueries({ queryKey: ["media", "avatars"] })
     },
   })
 }

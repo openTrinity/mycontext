@@ -24,6 +24,7 @@ import {
   useSelfIdentity,
   useStartChannelAuth,
   useContactAvatars,
+  useFetchSelfAvatar,
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
@@ -74,6 +75,8 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * 三颗共用一个 mutation，不记的话点一颗时另外两颗也在转。
    */
   const resetAuth = useResetChannelAuth()
+  /** 刷新这个渠道的本人头像（走 force，跳过那张永不过期的缓存）。 */
+  const refreshAvatar = useFetchSelfAvatar()
   const [resetScope, setResetScope] = useState<"identity" | "session" | "app" | null>(null)
   const [progress, setProgress] = useState<AuthProgress | null>(null)
   /**
@@ -300,7 +303,21 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * **只是读**。拿不到时传 null，`Avatar` 自己退回首字母。
    */
   const bootstrap = useBootstrapState()
-  const selfAvatar = usesPersonaIdentity ? (bootstrap.data?.session?.avatarUrl ?? null) : null
+  /**
+   * 头部那个头像 —— **这个渠道本人的**，不是 app 登录账号那张。
+   *
+   * ## ★★ 原来这行是 `usesPersonaIdentity ? session.avatarUrl : null`
+   *
+   * 两个毛病：
+   * · `session.avatarUrl` 是**应用登录账号**的头像，全应用一份、不随渠道变
+   *   —— 于是飞书卡上显示的是钉钉那张脸；
+   * · `usesPersonaIdentity` 对飞书是 false → **恒 null**，飞书卡上永远没有
+   *   头像（首字母兜底）。用户报"头像还是没显示"这块也算一处。
+   *
+   * 现在用 `selfAvatarUrl`（按渠道查 `contact_avatars`，见它的声明），
+   * 取不到才回落 app 账号那张 —— 头像缺失是正常状态之一，不留空白。
+   */
+  const selfAvatar = selfAvatarUrl ?? bootstrap.data?.session?.avatarUrl ?? null
 
   /**
    * 上一次授权的失败原因。
@@ -491,6 +508,34 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
             `ChannelService.resetAuth`），所以 `isError` 永远不会真。
             这正是"两头都锁了、中间那根线是裸的"那类接线错位。
           */}
+          {/*
+            ★★ 刷新**渠道头像** —— 用户在平台上换了头像，这里一直是老的。
+            （用户原话："渠道可能我换了个头像，但现在一直是老的，重新授权也是老的"）
+
+            ## 为什么"重新授权"也不管用
+
+            缓存命中的判据是"有 local_path 且那个文件还在"，而**那张图永不过期**
+            （`needsFetch` 对已取到的行直接返回 false）。重新授权只换 token，
+            不动 `contact_avatars` 里那一行 —— 于是旧图一直显示下去。
+
+            `MediaService.avatar` 早就有 `force`（跳过缓存重取），但**界面上
+            没有任何入口**。这就是那个入口。
+
+            ★ 它同时清 `["media","avatars"]` 那份 react-query 缓存
+            （见 `useFetchSelfAvatar`）—— 不清的话主进程重下了新图、
+            界面还显示旧的，看起来像"点了没反应"。
+          */}
+          <Tooltip content={t("actions.refreshAvatarHint")} placement="top">
+            <Button
+              size="md"
+              variant="secondary"
+              loading={refreshAvatar.isPending}
+              disabled={running || refreshAvatar.isPending}
+              onClick={() => refreshAvatar.mutate({ channelId: channel.id })}
+            >
+              {t("actions.refreshAvatar")}
+            </Button>
+          </Tooltip>
           {resetAuth.isPending || resetScope === null || !resetAuth.isSuccess ? null : (
             <span
               className={
@@ -545,7 +590,6 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
           adoptable={adoptable.data ?? null}
           adopting={adopt.isPending}
           onAdopt={() => adopt.mutate()}
-          avatarUrl={selfAvatarUrl}
         />
       ) : (
         <div className="flex flex-col gap-0.5">
@@ -710,7 +754,19 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
 
   return (
     <Panel className="flex flex-col gap-[var(--gap-section-sm)]">
-      <div className="flex items-center gap-3">
+      {/*
+        ★★ `flex-wrap` + 让操作区在窄处**整体换行** —— 不然这一行会挤爆。
+
+        实测（CDP 截图）：授权后这一行有 5 颗按钮（重新授权 / 用授权码 /
+        退出授权 / 切换登录账号 / 更换应用）。原来是不换行的单行 flex，
+        于是剩给左侧的宽度不够，「飞书」被压成**竖排两个字**、「已连接」
+        徽章折成两行、组织名被截断成 `mycontext飞…`。
+
+        改成：整行允许 wrap；左侧身份块 `min-w-[240px]` 保底并 `flex-1`
+        吃掉剩余宽度；操作区 `ml-auto` 贴右、`shrink-0` 不被压缩 ——
+        宽度不够时它整块掉到第二行，而不是把左边挤变形。
+      */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         {/*
           ★ 已授权时这个位置放**本人头像**（渠道图标降为右下角角标），
           未授权时就是渠道图标本身。
@@ -753,9 +809,10 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         ) : (
           <ChannelBadge channelId={channel.id} />
         )}
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[240px] flex-1">
           <div className="flex items-center gap-2">
-            <span className="typography-body-base-500 text-[var(--text-base-primary)]">
+            {/* ★ `whitespace-nowrap`：不许把「飞书」折成竖排两个字 */}
+            <span className="typography-body-base-500 whitespace-nowrap text-[var(--text-base-primary)]">
               {t(channel.labelKey)}
             </span>
             <StateTag available state={status.state} />
@@ -774,7 +831,8 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
                   : t(channel.descriptionKey)}
           </p>
         </div>
-        {actions}
+        {/* ★ 贴右 + 不被压缩：宽度不够时整块换行，而不是挤变形左边 */}
+        <div className="ml-auto shrink-0">{actions}</div>
       </div>
 
       <div className="h-px bg-[var(--border-divider-light)]" />
@@ -837,7 +895,8 @@ function StateTag({ available, state }: { available: boolean; state: AuthStatus[
   return (
     <span
       className={cn(
-        "typography-caption-400 radius-sm px-1.5 py-0.5",
+        // ★ `shrink-0 whitespace-nowrap`：「已连接」三个字被挤成两行过（CDP 截图）
+        "typography-caption-400 radius-sm shrink-0 whitespace-nowrap px-1.5 py-0.5",
         available ? STATE_STYLE[state] : "bg-[var(--bg-card-z0)] text-[var(--text-base-tertiary)]",
       )}
     >
@@ -858,46 +917,30 @@ function AccountBlock({
   adoptable = null,
   adopting = false,
   onAdopt,
-  avatarUrl = null,
 }: {
   status: Extract<AuthStatus, { state: "authorized" }>
   adoptable?: { corpName: string; userName: string } | null
   adopting?: boolean
   onAdopt?: () => void
-  /** 本人在这个渠道的头像（取不到就首字母兜底）。 */
-  avatarUrl?: string | null
 }) {
   const { t } = useDynamicTranslation("channels")
   const appBinding = status.appBinding
   return (
-    <div className="flex flex-col gap-3 radius-md bg-[var(--bg-card-z0)] px-3.5 py-3">
+    <div className="flex flex-col gap-3 radius-md bg-[var(--bg-card-z0)] px-3.5 py-2.5">
       {/*
-        ── 身份头部：头像 + 人 + 组织 ─────────────────────────────
+        ── 只放**连接细节**，不重复身份 ────────────────────────────
 
-        ## ★ 为什么重画成这样（用户说"样式重新设计的高级一点"）
+        ## ★ 为什么这里**没有**头像/人名/组织名（我先在这加过，是错的）
 
-        原来是「小绿点 + 组织名」一行，下面 `dl` 里三条 `label: value`
-        —— 那是**表单**的排法，把"我是谁"和"token 什么时候过期"摆成同一
-        重量级。而这块回答的第一个问题是"当前是谁、在哪个组织"。
+        面板头部那一行本来就是「头像（渠道角标）+ 渠道名 + 状态徽章 +
+        `组织 · 姓名（花名）`」—— 那已经是"和当前已登录的人的身份放在
+        一起"的形态。我在这块又画了一遍头像+人名+组织名，于是同屏出现
+        两次同样的信息，而且把头部挤到「飞书」竖排、「已连接」折行、
+        组织名被截断（截图确认）。
 
-        所以改成**头像 + 两行文字**的身份卡范式（与侧栏账号行、仪表盘
-        greeting 同一套语言）：主行是人名，次行是组织名。有效期那些降到
-        下面的次要区，用更弱的字色 —— 它们是"需要时才看"的信息。
-
-        绿点也去掉了：整块只在已授权时渲染，"已连接"这件事由内容本身
-        表达（有人、有组织），一个装饰性圆点不增加信息。
+        所以这块回归本分：**只答"这条连接的细节"** —— 绑的哪个应用、
+        凭据什么时候到期。身份归头部，一处一份。
       */}
-      <div className="flex items-center gap-3">
-        <Avatar name={status.userName} src={avatarUrl} size="md" />
-        <div className="flex min-w-0 flex-col">
-          <span className="typography-body-base-500 truncate text-[var(--text-base-primary)]">
-            {status.userName}
-          </span>
-          <span className="typography-caption-400 truncate text-[var(--text-base-tertiary)]">
-            {status.corpName}
-          </span>
-        </div>
-      </div>
       {/*
         ── 连接详情：应用 / 凭据有效期 ────────────────────────────
 
@@ -911,7 +954,11 @@ function AccountBlock({
         ★ 应用那一行只在**真有应用层**时出现（`appBinding !== undefined`）——
         钉钉是一步授权，给它一行空的「应用」是凭空造概念。
       */}
-      <dl className="flex flex-col gap-1 border-t border-[var(--border-divider-light)] pt-2.5">
+      {/*
+        ★ 这里**不要**再画分隔线：外面（`Panel` 头部之后）已经有一条 `h-px`。
+        我加过 `border-t`，截图上就是紧挨着的两条线。
+      */}
+      <dl className="flex flex-col gap-1">
         {appBinding === undefined ? null : (
           <Field
             label={t("account.app")}

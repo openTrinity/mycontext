@@ -1,5 +1,6 @@
 import type { Result } from "@mycontext/kernel"
 import type {
+  MediaSelfAvatarInput,
   ChannelIdentity,
   ChannelIdentitySwitchInput,
   AdvancedAiConfigView,
@@ -409,7 +410,13 @@ export interface MyContextApi {
      * `written: false` 表示取到了但**没写账号** —— 用户手动设过头像，
      * 而 manual 永不被渠道覆盖。
      */
-    selfAvatar(): Promise<Result<{ path: string | null; reason: string | null; written?: boolean }>>
+    /**
+     * 从渠道取**本人**头像并回填账号。带渠道 —— 一个人在两个平台是两张头像。
+     * 不传 = 主渠道（存量调用点行为不变）。
+     */
+    selfAvatar(
+      input?: MediaSelfAvatarInput,
+    ): Promise<Result<{ path: string | null; reason: string | null; written?: boolean }>>
   }
   preferences: {
     /** 持久化语言偏好。`system` 表示跟随系统。 */

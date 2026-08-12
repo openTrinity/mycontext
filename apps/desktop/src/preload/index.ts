@@ -121,7 +121,7 @@ const api: MyContextApi = {
     avatarsFetch: (input) => ipcRenderer.invoke(IPC_CHANNELS.mediaAvatarsFetch, input),
     uploadImage: (input) => ipcRenderer.invoke(IPC_CHANNELS.mediaUploadImage, input),
     saveAs: (input) => ipcRenderer.invoke(IPC_CHANNELS.mediaSaveAs, input),
-    selfAvatar: () => ipcRenderer.invoke(IPC_CHANNELS.mediaSelfAvatar),
+    selfAvatar: (input) => ipcRenderer.invoke(IPC_CHANNELS.mediaSelfAvatar, input ?? {}),
   },
   preferences: {
     setLanguage: (input) => ipcRenderer.invoke(IPC_CHANNELS.preferencesSetLanguage, input),

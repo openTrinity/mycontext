@@ -1142,6 +1142,17 @@ export type MediaSaveAsResult = z.infer<typeof mediaSaveAsResultSchema>
  * （实测每次 0.3-0.8s），而一屏消息可能有 8 个不同的人 ——
  * 逐个 IPC 会让消息流一边渲染一边卡。上限 60：一屏不可能超过这个数。
  */
+/**
+ * 取**本人**头像的入参 —— 带渠道。
+ *
+ * ★ 一个人在两个渠道是两张不同的头像（各平台各自设置），所以"从已连接的
+ * 平台获取"必须问清是**哪个**平台。不传 = 主渠道（存量调用点行为不变）。
+ */
+export const mediaSelfAvatarInputSchema = z.object({
+  channelId: z.string().min(1).optional(),
+})
+export type MediaSelfAvatarInput = z.input<typeof mediaSelfAvatarInputSchema>
+
 export const mediaAvatarsInputSchema = z.object({
   externalIds: z.array(z.string().min(1)).max(60),
   /**

@@ -31,6 +31,7 @@ import {
   mediaDownloadInputSchema,
   mediaDownloadForMessagesInputSchema,
   mediaAvatarsInputSchema,
+  mediaSelfAvatarInputSchema,
   mediaUploadImageInputSchema,
   mediaSaveAsInputSchema,
   klGraphFactsInputSchema,
@@ -634,9 +635,16 @@ export function registerIpc(deps: IpcDependencies): void {
    * 于是"我在钉钉换了头像"这个最主要的使用场景点多少次都没反应。
    * 批量取头像走的是 `mediaAvatars`，那条路不 force。
    */
-  ipcMain.handle(IPC_CHANNELS.mediaSelfAvatar, () =>
+  ipcMain.handle(IPC_CHANNELS.mediaSelfAvatar, (_event, payload: unknown) =>
     attempt(async () => {
-      const result = await media.selfAvatar({ force: true })
+      /**
+       * ★ 按渠道取（不传 = 主渠道）。`force: true` 是这个通道的全部意义 ——
+       * 它是**用户显式点了「从已连接的平台获取」**，那时他就是想要最新那张。
+       * 缓存命中的判据是"有 local_path 且文件在"、那张图永不过期，
+       * 所以不 force 的话在平台换过头像之后点它也拿回旧图（用户报的正是这个）。
+       */
+      const channelId = parse(mediaSelfAvatarInputSchema, payload ?? {}).channelId
+      const result = await mediaByChannel.selfAvatar({ force: true }, channelId)
       if (result.path === null) return { path: null, reason: result.reason }
       /**
        * ★ 必须转成 `mycontext-file://` 才交给渲染层。

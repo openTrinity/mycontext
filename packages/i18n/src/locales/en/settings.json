@@ -221,6 +221,7 @@
     "clearAvatarHint": "Falls back to your initial, and channel authorization will not replace it again",
     "avatarHint": "Upload a local image, or fetch it from a connected platform. Leave empty to show your initial.",
     "avatarFromChannel": "Fetch from connected platform",
+    "avatarChannelLabel": "Choose platform",
     "avatarFetching": "Fetching…",
     "avatarMiss": {
       "not_set": "You have no avatar set on that platform",
