@@ -23,13 +23,17 @@ import type { Clock, Logger } from "@mycontext/kernel"
 import { AppError } from "@mycontext/kernel"
 import type { ChannelPlugin } from "@mycontext/channels"
 import {
+  ChatCoverageRepository,
   DistillSourceRepository,
+  SettingsRepository,
   DISTILL_SOURCE_KINDS,
   type DistillScope,
   type DistillSourceKind,
   type SqliteDatabase,
 } from "@mycontext/store"
 import type {
+  ChatCoverageInput,
+  ChatCoverageView,
   ChannelConversationListView,
   ChannelConversationSourceView,
   ChannelConversationView,
@@ -350,6 +354,80 @@ export class DistillSourceService {
    * ★ 拿不到那个渠道的库时返回"全部未启用"而不是抛：设置页在管线还没挂上
    * 时也会渲染，抛错会让整页显示错误横幅，而实际只是还没就绪。
    */
+  /**
+   * 读某个渠道的聊天覆盖面（「这段日期已有多少 / 齐没齐」）。
+   *
+   * ★ 放在这个服务里而不是 IPC 层：per-channel 的库解析已经在这里了
+   * （`save`/`list` 都要），让 IPC 层再学一遍"哪个渠道对应哪个 db"
+   * 就会出现第二处需要同步维护的映射 —— 而那正是本仓库那次
+   * "保存飞书的范围却写进主库"的成因。
+   *
+   * ★ 库没就绪时返回**空**而不是抛：设置页在管线挂上之前也会渲染。
+   * 空的语义是"还没有数据"，而界面对它的文案与"这段日期 0 条"不同 ——
+   * 前者说"还没开始采"，后者说"这段时间没有消息"。
+   */
+  chatCoverage(input: ChatCoverageInput): ChatCoverageView {
+    const db =
+      input.channelId === this.options.primaryChannelId
+        ? this.db
+        : (this.sourceDbs.get(input.channelId) ?? null)
+    if (db === null) {
+      return { days: [], localCount: 0, dayCount: 0, drainedDays: 0, pendingConversations: 0 }
+    }
+    const repo = new ChatCoverageRepository(db)
+    /**
+     * ★★★ 存量数据必须从 `messages` 回填一次 —— 而判据**不能**是"表是空的"。
+     *
+     * ## 我第一版的判据错了，而且错得很安静
+     *
+     * 第一版写的是 `count(*) === 0 → 重建`。实测（真应用 CDP）的后果：
+     * 钉钉显示 **884** 条，而库里有 **36296** 条。
+     *
+     * 因为 `bump()` 在采集时已经写进去几行（当天新采的），于是
+     * `count(*) > 0` 成立 → 回填**永不发生** → 界面把 884 当成"已有多少"
+     * 显示出来。那正是本仓库最贵的那类 bug：数字看起来正常，
+     * 与"真的只有 884 条"完全同形。
+     *
+     * ## 正确的判据：**这个渠道回填过没有**（一次性标记）
+     *
+     * 存进 `app_settings`（跟 vault 走，重启后仍然有效）。它与"表里有几行"
+     * 是两个独立的事实 —— 而只有前者能回答"回填做过没有"。
+     *
+     * ★ 回填本身是幂等的（覆盖写），所以标记丢了重跑一次也不会把数字弄错。
+     */
+    const backfillKey = `chatCoverage.backfilled.${input.channelId}`
+    // ★ 必须显式传 `vault_settings` —— 构造函数默认的是 `app_settings`，
+    // 那张表在**控制库**里，在 vault 上查它会 `no such table`（实测踩到）。
+    const settings = new SettingsRepository(db, "vault_settings")
+    if (settings.get(backfillKey) === null) {
+      try {
+        const rebuilt = repo.rebuildFromMessages(input.channelId, this.options.clock.now())
+        settings.set(backfillKey, "1", new Date(this.options.clock.now()).toISOString())
+        this.options.logger.info("chat coverage backfilled from messages", {
+          channelId: input.channelId,
+          rows: rebuilt,
+        })
+      } catch (error) {
+        /**
+         * ★ 失败**不写标记** —— 下次查询会再试。写了标记再失败就等于
+         * 永久停在一个不完整的数字上，而那是静默的。
+         */
+        this.options.logger.warn("chat coverage backfill failed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    const days = repo.listDays(input.channelId, input.fromDay, input.toDay)
+    const summary = repo.summarize(input.channelId, input.fromDay, input.toDay)
+    return {
+      days,
+      localCount: summary.localCount,
+      dayCount: summary.days,
+      drainedDays: summary.drainedDays,
+      pendingConversations: summary.pendingConversations,
+    }
+  }
+
   list(channelId?: string): DistillSourceView[] {
     const db =
       channelId === undefined || channelId === this.options.primaryChannelId

@@ -74,6 +74,7 @@ const api: MyContextApi = {
     sources: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSources, input ?? {}),
     sourceSave: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSourceSave, input),
     sourceReset: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSourceReset, input),
+    chatCoverage: (input) => ipcRenderer.invoke(IPC_CHANNELS.chatCoverage, input),
     progress: () => ipcRenderer.invoke(IPC_CHANNELS.distillProgress),
     start: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillStart, input),
     reset: () => ipcRenderer.invoke(IPC_CHANNELS.distillReset),

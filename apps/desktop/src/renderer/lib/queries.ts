@@ -380,6 +380,33 @@ export function useDistillSources(enabled = true, channelId?: string) {
   })
 }
 
+/**
+ * 「这段日期已有多少 / 齐没齐」。
+ *
+ * ★ `fromDay`/`toDay` 由调用方算好传进来（`YYYY-MM-DD`）—— 不在这里现算
+ * "近 30 天"：那样每次渲染都会得到一个新的 queryKey（今天的日期会变），
+ * 而且它必须与写入侧的 `toDayBucket` 用同一个时区判据。
+ */
+export function useChatCoverage(
+  channelId: string | undefined,
+  fromDay: string,
+  toDay: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["distill", "chatCoverage", channelId ?? "primary", fromDay, toDay] as const,
+    queryFn: async () =>
+      unwrap(
+        await window.mycontext.distill.chatCoverage({
+          channelId: channelId ?? "dingtalk",
+          fromDay,
+          toDay,
+        }),
+      ),
+    enabled: enabled && channelId !== undefined,
+  })
+}
+
 function useDistillMutation<TInput>(perform: (input: TInput) => Promise<unknown>) {
   const queryClient = useQueryClient()
   return useMutation({

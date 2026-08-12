@@ -18,6 +18,7 @@ import {
   channelIdentitySwitchInputSchema,
   createSearchSessionInputSchema,
   credentialsSchema,
+  chatCoverageInputSchema,
   distillSourceResetInputSchema,
   channelDataWipeInputSchema,
   distillSourceSaveInputSchema,
@@ -412,6 +413,9 @@ export function registerIpc(deps: IpcDependencies): void {
   )
   ipcMain.handle(IPC_CHANNELS.distillSourceReset, (_event, payload: unknown) =>
     attempt(() => distillSources.reset(parse(distillSourceResetInputSchema, payload).kind)),
+  )
+  ipcMain.handle(IPC_CHANNELS.chatCoverage, (_event, payload: unknown) =>
+    attempt(() => distillSources.chatCoverage(parse(chatCoverageInputSchema, payload))),
   )
   // 走子进程拿全量会话（约 5s，三路合并）。失败会降级成本地列表而不是报错。
   ipcMain.handle(IPC_CHANNELS.channelConversations, () =>

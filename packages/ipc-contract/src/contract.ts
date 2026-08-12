@@ -46,6 +46,14 @@ export const IPC_CHANNELS = {
   distillSources: "mycontext:distill/sources",
   distillSourceSave: "mycontext:distill/source-save",
   distillSourceReset: "mycontext:distill/source-reset",
+  /**
+   * 聊天覆盖面：「这段日期已有多少 / 齐没齐」（v27 `chat_coverage`）。
+   *
+   * ★ 与 `distillSources` 分开而不是塞进它的返回值：那个是**配置**
+   * （用户选了什么），这个是**事实**（实际采到了什么）。混在一起的话
+   * 保存配置的请求会顺带重算一遍聚合，而两者的刷新时机完全不同。
+   */
+  chatCoverage: "mycontext:distill/chat-coverage",
   /** 会话列表（蒸馏源选择用；走渠道 CLI） */
   channelConversations: "mycontext:channel/conversations",
   /** 蒸馏：进度 / 开跑 / 重来 */
@@ -582,6 +590,49 @@ export const distillSourceSaveInputSchema = z.object({
 })
 
 export const distillSourceResetInputSchema = z.object({ kind: distillSourceKindSchema })
+
+/**
+ * 聊天覆盖面的查询入参。
+ *
+ * `fromDay` / `toDay` 是 `YYYY-MM-DD`（闭区间）。★ 用日期字符串而不是
+ * 时间戳：那个"一天"的边界必须与写入侧算出来的 `day_bucket` **完全一致**，
+ * 而让读侧传时间戳就等于让它再做一次时区换算 —— 换算差一小时，
+ * 覆盖面就整体偏一天，且数字都"看起来对"。
+ */
+export const chatCoverageInputSchema = z.object({
+  channelId: z.string().min(1),
+  fromDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  toDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+})
+
+export const chatCoverageDaySchema = z.object({
+  dayBucket: z.string(),
+  localCount: z.number(),
+  /** 这一天**全部**在范围内的会话都抽干了吗（MIN 语义，不是 MAX） */
+  drained: z.boolean(),
+  pendingConversations: z.number(),
+})
+
+/**
+ * 覆盖面的返回。
+ *
+ * ★★★ 这里**故意没有** `total` / `percent` —— 渠道 API 不提供"某天共有
+ * 多少条"，那个分母拿不到真值。加上去就只能编，而这个项目已经因为编分母
+ * 吃过一次（仪表盘那句假的「才学了 0.0%」）。
+ *
+ * 界面能诚实说出来的是：「已采到 N 条，其中 X 天已采完、Y 天还在回溯」。
+ */
+export const chatCoverageViewSchema = z.object({
+  days: z.array(chatCoverageDaySchema),
+  localCount: z.number(),
+  dayCount: z.number(),
+  drainedDays: z.number(),
+  pendingConversations: z.number(),
+})
+
+export type ChatCoverageInput = z.infer<typeof chatCoverageInputSchema>
+export type ChatCoverageView = z.infer<typeof chatCoverageViewSchema>
+export type ChatCoverageDayView = z.infer<typeof chatCoverageDaySchema>
 
 /**
  * 清空当前渠道数据的入参与结果。

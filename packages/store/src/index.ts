@@ -78,6 +78,8 @@ export {
   MinutesRepository,
   MinutesCoverageRepository,
 } from "./repositories/media-minutes.js"
+export { ChatCoverageRepository, toDayBucket } from "./repositories/chat-coverage.js"
+export type { ChatCoverageRow, ChatCoverageDay } from "./repositories/chat-coverage.js"
 export { DocumentRepository } from "./repositories/documents.js"
 export type { DocumentUpsertResult } from "./repositories/documents.js"
 export type {

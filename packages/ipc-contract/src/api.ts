@@ -34,6 +34,8 @@ import type {
   PersonaTraceItem,
   PersonaTraceEvent,
   QuitDecision,
+  ChatCoverageInput,
+  ChatCoverageView,
   DistillSourceId,
   DistillScopeInput,
   DistillSourceView,
@@ -216,6 +218,14 @@ export interface MyContextApi {
     }): Promise<Result<true>>
     /** 清某个源的蒸馏水位 —— 下一轮从头再蒸（facet 幂等合并，不删已有结论） */
     sourceReset(input: { kind: DistillSourceId }): Promise<Result<true>>
+    /**
+     * 「这段日期已有多少 / 齐没齐」。
+     *
+     * ★ 与 `sources()` 分开：那个是配置（用户选了什么），这个是事实
+     * （实际采到了什么）。两者刷新时机不同，混在一起会让保存配置的请求
+     * 顺带重算一遍聚合。
+     */
+    chatCoverage(input: ChatCoverageInput): Promise<Result<ChatCoverageView>>
     /** 蒸馏进度（引导页第 4 步与设置页都读它） */
     progress(): Promise<Result<DistillProgressView>>
     /** 切窗入队并开始跑。幂等：重复调用不产生重复任务 */

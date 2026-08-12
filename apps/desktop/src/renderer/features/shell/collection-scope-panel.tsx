@@ -29,6 +29,7 @@ import { useDistillSources, useSaveDistillSource } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { SourcesStep, type SourcesDraft } from "../onboarding/sources-step.js"
+import { ScopeCoverage } from "./scope-coverage.js"
 
 /** 主渠道 id —— 它的白名单走 `scope.conversationIds`（存量形状）。 */
 const PRIMARY_CHANNEL_ID = "dingtalk"
@@ -223,17 +224,36 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
        */
       title={
         channelId === null
-          ? t("status.scope.title", { defaultValue: "采集范围" })
-          : `${t("status.scope.title", { defaultValue: "采集范围" })}·${t(
+          ? t("status.scope.title", { defaultValue: "学习范围" })
+          : `${t("status.scope.title", { defaultValue: "学习范围" })}·${t(
               `status.kl.channel.${channelId}`,
               { defaultValue: channelId },
             )}`
       }
+      /**
+       * ★★ 这句原来是「保存后立刻生效：越界的消息会被清掉」—— 在
+       * 「只增不减」之后**不再成立**（范围不会变小，没有越界可清）。
+       * 而它说的是删数据这么重的一件事，留着就是报告一件不会发生的事。
+       *
+       * ★ 「学习范围」而不是「采集范围」：用户的心智模型是两件事 ——
+       * 「我要它**学**哪些历史」与「我要分身**盯**哪些实时消息」。
+       * 后者是下面那块「分身监听范围」，两者必须在同一屏里能被区分开，
+       * 否则用户改了这里却期待分身行为变化（或反过来）。
+       */
       hint={t("status.scope.description", {
-        defaultValue: "改「采多久、采哪些会话」。保存后立刻生效：越界的消息会被清掉。",
+        defaultValue: "它**学**哪些历史：采多久、采哪些会话。范围只增不减。",
       })}
     >
       <div className="flex flex-col gap-3">
+        {/*
+          ★ 覆盖面放在**编辑器之前**：用户打开这块最先想知道的是
+          "我现在有多少"，而不是先面对一堆勾选框。
+        */}
+        <ScopeCoverage
+          channelId={channelId}
+          rangeDays={effective?.rangeDays ?? null}
+          customRange={effective?.customRange ?? null}
+        />
         {effective === null ? null : (
           <ScopeEditor
             channelId={channelId}
@@ -292,6 +312,31 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           而那条路是「清空当前渠道数据」（它会真删，并且明确告知）。
           不给退路的"只增不减"会变成一个陷阱。
         */}
+        {/*
+          ── ★★★ 「分身监听范围」—— 与学习范围**分开表达** ─────────────
+          用户的原话是「至少要分开两个吧，给用户的引导，学习的范围和监听范围」。
+
+          底层其实早就是两套（学习走 `distill_sources.scope_json`，监听走
+          `dh_conversation_configs` 的 per-conversation reply/trigger mode），
+          缺的是**在用户面前它们是两件事**：现在这块只在数字分身页里以
+          "会话列表"的形式出现，用户不会把它读成"监听范围"。
+
+          ★ 这里只做**指路 + 说清区别**，不把那个编辑器搬过来：
+          它有自己的一整套模式（自动/草稿/静默 × 触发条件），搬过来会变成
+          同一个编辑器两处实现，而那是本仓库那次"同一件事在两条路各解析一份"
+          的成因（改一条界面照旧）。
+        */}
+        <div className="flex flex-col gap-1 border-t border-[var(--border-divider-light)] pt-3">
+          <p className="typography-body-small-400 text-[var(--text-base-primary)]">
+            {t("status.scope.listen.title", { defaultValue: "分身监听范围（另一件事）" })}
+          </p>
+          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("status.scope.listen.note", {
+              defaultValue:
+                "上面是它**学**哪些历史；「监听范围」是分身**盯**哪些会话的实时消息 —— 那个只看新消息、不回溯历史，在「数字分身 › 会话」里按会话设。",
+            })}
+          </p>
+        </div>
         <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
           {t("status.scope.growOnlyNote", {
             defaultValue:

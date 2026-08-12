@@ -169,10 +169,23 @@
       "retryOn": "Retry {{channel}}"
     },
     "scope": {
-      "title": "Collection scope",
-      "description": "Choose how far back and which conversations to collect. Saving takes effect immediately: out-of-scope messages are purged.",
+      "title": "Learning scope",
+      "description": "What it **learns** from: how far back, and which conversations. Scope only grows.",
       "save": "Save scope",
-      "savedHint": "Saved. Out-of-scope messages are being purged and the graph will rebuild (minutes)."
+      "savedHint": "Saved. Newly added scope will be backfilled on the next collection pass (minutes).",
+      "growOnlyNote": "Scope only grows: unchecking does not delete what it already learned, nor shrink the scope — the graph and profile have already used those messages. To really remove data, use General › Wipe this channel's data.",
+      "listen": {
+        "title": "Persona listening scope (a separate thing)",
+        "note": "Above is what it **learns** from; the listening scope is which conversations the persona **watches** in real time — new messages only, no backfill. Set it per conversation under Persona › Conversations."
+      },
+      "coverage": {
+        "loading": "Counting what you already have…",
+        "empty": "No coverage records for this range yet — once collection runs, per-day counts show up here.",
+        "summary": "{{count}} messages since {{from}}, across {{days}} days",
+        "allDrained": "All of these days are fully collected (paged to the end).",
+        "pending": "{{done}} day(s) fully collected, {{pending}} still backfilling.",
+        "clamped": "(Counting the last 90 days only; earlier history is still in the learning scope.)"
+      }
     }
   },
   "advancedAi": {

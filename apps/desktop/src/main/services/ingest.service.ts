@@ -67,6 +67,8 @@ import {
   type PurgeReport,
   type MessageRow,
   type SqliteDatabase,
+  ChatCoverageRepository,
+  toDayBucket,
 } from "@mycontext/store"
 
 /** L1 探针基础周期。实测探针约 0.7s，15s 是「够快且不浪费」的折中。 */
@@ -2324,7 +2326,36 @@ export class IngestService {
         // 没抽干的两种情况：① 切了窗（子窗已入队，父窗不必放回）；
         // ② 预算耗尽（放回队首，让下面识别出"还有活没干完"）。
         if (drained) confirmedEnd = window.end
-        else if (pages >= MAX_PAGES_PER_WINDOW) {
+        /**
+         * ★ 窗抽干 → 把这段日期的覆盖面标成"齐了"。
+         *
+         * 判据挂在**这里**而不是 `!page.hasMore` 那个分支里：那个分支
+         * 只说明"这一页之后没有了"，而一个窗可能被 `splitIfTruncated`
+         * 切成两半 —— 只有走到这里的 `drained` 才是"整个窗翻完了"。
+         *
+         * 记账失败不许影响采集（同 persist 里那段的理由）。
+         */
+        if (drained) {
+          try {
+            const marked = new ChatCoverageRepository(this.options.db).markDaysDrained(
+              this.options.plugin.meta.id,
+              toDayBucket(window.start),
+              toDayBucket(window.end),
+              this.options.clock.now(),
+            )
+            if (marked > 0) {
+              this.options.logger.info("chat coverage marked drained", {
+                from: toDayBucket(window.start),
+                to: toDayBucket(window.end),
+                rows: marked,
+              })
+            }
+          } catch (error) {
+            this.options.logger.warn("chat coverage mark drained failed", {
+              detail: error instanceof Error ? error.message : String(error),
+            })
+          }
+        } else if (pages >= MAX_PAGES_PER_WINDOW) {
           queue.unshift(window)
           break
         }
@@ -3423,6 +3454,67 @@ export class IngestService {
         fetchedAt: this.options.clock.now(),
       }),
     )
+
+    /**
+     * ── 覆盖面记账：「这段日期我到底有多少」──────────────────────
+     *
+     * 用户要的是「说明现在已有那部分日期的那部分业务数据，以及要多少、
+     * 共已经有了多少」。听记那半 v24 已经有了，这里补聊天那半。
+     *
+     * ★ 挂在 `persist()` 里而不是让回溯/实时两条路各记一遍 —— 这是
+     * **唯一**的消息写入口（两条路都汇到这里），挂在这里才不会漏。
+     * 那与 `save()` 里挂 `onScopeChanged` 是同一个理由。
+     *
+     * ★ 记的是 `result.changed`（真的写进库的那些），不是 `page.messages`：
+     * 后者含已存在的重复行，拿它累加会让计数虚高，而虚高的"已有多少"
+     * 比没有这个数字更糟。
+     *
+     * ★ `drained` 这里**一律不动**（`bump` 不传它 → 保持 0/既有值）：
+     * 抽干是翻页那一侧的结论，见下面 backfill 里 `hasMore=false` 的分支。
+     */
+    if (result.changed.length > 0) {
+      try {
+        const byDay = new Map<string, number>()
+        const sentAtById = new Map<string, number>()
+        for (const message of scopedPage.messages) {
+          sentAtById.set(message.externalId, message.sentAt)
+        }
+        for (const row of result.changed) {
+          // 从这一页里找回它的会话 external_id（库里那一列是内部 id）
+          const source = scopedPage.messages.find(
+            (message) => message.externalId === row.externalId,
+          )
+          if (source === undefined) continue
+          const key = `${source.conversationExternalId}\u0000${toDayBucket(
+            sentAtById.get(row.externalId) ?? row.sentAt,
+          )}`
+          byDay.set(key, (byDay.get(key) ?? 0) + 1)
+        }
+        const coverage = new ChatCoverageRepository(this.options.db)
+        const at = this.options.clock.now()
+        for (const [key, delta] of byDay) {
+          const [conversationExternalId, dayBucket] = key.split("\u0000")
+          if (conversationExternalId === undefined || dayBucket === undefined) continue
+          coverage.bump(this.options.plugin.meta.id, {
+            conversationExternalId,
+            dayBucket,
+            delta,
+            at,
+          })
+        }
+      } catch (error) {
+        /**
+         * ★ 记账失败**不许**影响采集。
+         *
+         * 这张表是给界面看的派生物，而上面那几行才是真数据。让一个
+         * 统计写失败把整批消息回滚掉，是拿真数据去换一个数字。
+         * 但也不能静默 —— 那样"覆盖面为 0"与"记账挂了"不可区分。
+         */
+        this.options.logger.warn("chat coverage bump failed", {
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
 
     /**
      * ★ 认领数字人自己发出去的那些消息。

@@ -41,6 +41,7 @@ import { VAULT_0023_CONVERSATION_UNREADABLE } from "./migrations/vault/v23-conve
 import { VAULT_0024_MINUTES_COVERAGE } from "./migrations/vault/v24-minutes-coverage.js"
 import { VAULT_0025_SEARCH_GRAPH_SCOPE } from "./migrations/vault/v25-search-graph-scope.js"
 import { VAULT_0026_CLEAR_PLACEHOLDER_TITLES } from "./migrations/vault/v26-clear-placeholder-titles.js"
+import { VAULT_0027_CHAT_COVERAGE } from "./migrations/vault/v27-chat-coverage.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -349,6 +350,13 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
     name: "clear-placeholder-titles",
     sql: VAULT_0026_CLEAR_PLACEHOLDER_TITLES,
   },
+  /**
+   * 聊天的覆盖面记账 —— 「这段日期已有多少 / 齐没齐」。
+   *
+   * ★ 只加表。编号沿用全局单调（见 v25 那条注释）：撞号会让两台机器的
+   * 同一个版本号跑不同 SQL，那是不可修复的分叉。
+   */
+  { version: 27, name: "chat-coverage", sql: VAULT_0027_CHAT_COVERAGE },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */
