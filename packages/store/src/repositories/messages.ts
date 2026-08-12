@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto"
 import type { SqliteDatabase } from "../database.js"
+import { CORPUS_MESSAGE_PREDICATE } from "../corpus-predicate.js"
 import type { MessageInput, MessageRow } from "./types.js"
 
 /**
@@ -386,8 +387,7 @@ export class MessageRepository {
         .prepare<(number | string)[], MessageDbRow>(
           `SELECT * FROM messages
           WHERE sent_at >= ? AND sent_at < ?
-            AND content_text IS NOT NULL AND trim(content_text) <> ''
-            AND origin <> 'agent'${scopeClause}
+            AND ${CORPUS_MESSAGE_PREDICATE}${scopeClause}
           ORDER BY sent_at DESC
           LIMIT ?`,
         )

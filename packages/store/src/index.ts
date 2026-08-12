@@ -43,6 +43,7 @@ export { withTransaction, openConnection } from "./tx.js"
  * 而修复前那四处各有一份实现且语义已经漂了（见 collection-scope.ts 文件头）。
  */
 export { readCollectionScope, isConversationInScope, isSentAtInScope } from "./collection-scope.js"
+export { CORPUS_MESSAGE_PREDICATE, corpusMessagePredicate } from "./corpus-predicate.js"
 export type { CollectionScope } from "./collection-scope.js"
 export { purgeOutOfScopeMessages } from "./purge-scope.js"
 export type { PurgeReport } from "./purge-scope.js"

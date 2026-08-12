@@ -49,6 +49,7 @@ import { AppError, type Clock, type Logger } from "@mycontext/kernel"
 import {
   ConversationRepository,
   MediaAssetRepository,
+  CORPUS_MESSAGE_PREDICATE,
   type ConversationRow,
   type SqliteDatabase,
 } from "@mycontext/store"
@@ -750,12 +751,19 @@ export class ExportMaterializer {
      *   origin 排除它们，两边口径一致）。
      * 用可选片段拼 SQL：没配 scope 时退回原样（全库），兼容老库。
      */
-    const clauses: string[] = [
-      "conversation_id = ?",
-      "content_text IS NOT NULL",
-      "content_text <> ''",
-      "origin <> 'agent'",
-    ]
+    /**
+     * ★★★ 语料谓词**共用**同一份定义（`CORPUS_MESSAGE_PREDICATE`）。
+     *
+     * 这里原来是手写的三条，而 forge 那侧写的是
+     * `trim(content_text) <> ''` —— 实测（SQLite,5 条样本）纯空白消息
+     * （`"   "` / `"\n\t "`）**进了图谱、没进语料**：图谱里多一个由空消息
+     * 生成的节点，而蒸馏找不到对应语料。那不是"将来可能漂移"，
+     * 是已经在库里的不一致。
+     *
+     * 换成共用常量之后，改判据就是同时改两侧 —— 漂移在**结构上不可能**，
+     * 而不是靠一道测试事后发现（发现总是发生在造成不一致之后）。
+     */
+    const clauses: string[] = ["conversation_id = ?", CORPUS_MESSAGE_PREDICATE]
     const params: (string | number)[] = [conversation.id]
     if (scope?.since !== undefined) {
       clauses.push("sent_at >= ?")
