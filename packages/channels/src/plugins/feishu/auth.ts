@@ -106,7 +106,39 @@ export class FeishuAuth implements ChannelAuth {
         initial = await this.cli.json<unknown>(loginArgs, { signal: ctx.signal })
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
-        if (!/not configured/i.test(detail)) throw error
+        /**
+         * ★★★ 「还没绑应用」有**三种**错误形态，只认一种会把用户堵死。
+         *
+         * 飞书授权是两步：① 绑一个 CLI 应用（`config init`）② 拿登录态
+         * （`auth login`）。这个 catch 就是"第 ① 步还没做"的补做入口 ——
+         * 判据漏一种形态，那种形态下用户就**永远走不到第 ① 步**，
+         * 每次点「重新授权」都撞在同一句英文报错上，界面上没有任何出路。
+         *
+         * ## 实测三种形态（本机，逐个造出来验过）
+         *
+         * | config.json    | login 报的 message                            |
+         * |----------------|-----------------------------------------------|
+         * | 不存在         | `not configured`                              |
+         * | `{"apps":[]}`  | `not configured`                              |
+         * | `{"apps":[{}]}`| `…missing a required parameter: client_id.`   |
+         *
+         * 第三种是「文件在、但里面的应用条目残缺」。原来的
+         * `/not configured/` 只覆盖前两种 —— 而第三种**恰恰是
+         * `config remove` 可能留下的形态**（实测 remove 之后文件仍在，
+         * 内容是 `{"apps": []}`；若中途失败就会停在更残缺的状态）。
+         *
+         * `client_id` 是 OAuth 里应用的身份 —— 缺它，本质就是"没有应用"。
+         * 所以三种形态在语义上是同一件事，判据必须都收进来。
+         *
+         * ★ `config` 类的 `invalid_config` / `malformed` 也一并收：
+         * 那是 CLI 对同一件事的第三套措辞（`config show` 实测会这么报）。
+         */
+        const needsApp =
+          /not[ _]configured|no app configured|missing a required parameter: client_id|invalid[ _]config|malformed config/i.test(
+            detail,
+          )
+        if (!needsApp) throw error
+        this.options.logger.info("lark app binding missing; running app setup first", {})
         await this.cli.configure(
           (url) => {
             ctx.onProgress({ phase: "browser-opened", url })
@@ -286,35 +318,44 @@ export class FeishuAuth implements ChannelAuth {
     // 先退 token：`config remove` 自己也会清，但先退一步能让"已登录"这个
     // 状态在任何一步失败时都不至于留着（宁可多退一次，也不要留下活 token）
     await this.logout()
-    try {
-      await this.cli.json<unknown>(["config", "remove"])
-      this.options.logger.info("lark config removed for account switch", {})
+    /**
+     * ★★ 用 `run()` 而不是 `json()` —— 这条命令**不输出 JSON**。
+     *
+     * 实测（本机，飞书已配置）：
+     *
+     * ```
+     * $ lark-cli config remove
+     * OK: Configuration removed        ← 纯文本，退出码 0
+     * ```
+     *
+     * 原来走 `json()`，于是 `extractLarkJson` 抛"无法解析的内容"，真实日志：
+     *
+     * ```
+     * lark config remove failed {"detail":"飞书 CLI 返回了无法解析的内容"}
+     * channel auth reset {"switchAccount":true,"ok":false}
+     * ```
+     *
+     * **配置其实已经清掉了**（后续每条命令都变 `not_configured`），
+     * 界面却说失败 —— 用户反复点，而每次都真的又执行了一遍破坏性动作。
+     * 这是"成功被当失败"，与静默降级同源：界面状态与真实状态脱节。
+     */
+    const { exitCode, output } = await this.cli.run(["config", "remove"])
+    /**
+     * ★ 判据是**做完之后的实际状态**，不是这条命令的退出码。
+     *
+     * 目标状态 = "没有 app 配置了"。达到它的路径有三种，实测都见过：
+     * · exit 0 + `OK: Configuration removed`  —— 刚清掉
+     * · 非零 + `no app configured`            —— 本来就没有（连点两次）
+     * · 非零 + `not configured`               —— 同上，另一种措辞
+     *
+     * 三种都是**目标已达成**。所以不看退出码，看输出里有没有这三种迹象；
+     * 只有都不匹配才是真失败（文件被占用、权限不足等）。
+     */
+    if (exitCode === 0 || /no app configured|not[ _]configured|removed/i.test(output)) {
+      this.options.logger.info("lark app binding cleared", { exitCode })
       return true
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
-      /**
-       * ★★ **幂等**：本来就没有可清的，不是失败。
-       *
-       * 实测日志（用户连点两次「切换账号」）：
-       * · 第一次 → `config remove` 成功，`ok=true`；
-       * · 第二次 → `飞书 CLI 失败（exit 1）：no app configured`，于是这里
-       *   返回 false，界面把它呈现成"切换失败"。
-       *
-       * 但那一刻的**实际状态恰恰是我们想要的**（配置已经清空、
-       * `auth status` 报 `not_configured`）—— 用户却被告知失败，
-       * 于是他反复点，而每次都"失败"。这与 `logout()` 里
-       * `reason:"not_configured"` 要当成 false 是同一类判断错位：
-       * 那边"本来就没登录"不算错误，这边"本来就没配置"同样不算。
-       *
-       * 判据用 CLI 自己的两句话（`no app configured` / `not configured`）：
-       * 命中就当**已经是目标状态**，返回 true。其余才是真失败。
-       */
-      if (/no app configured|not[ _]configured/i.test(detail)) {
-        this.options.logger.info("lark config already empty; treat as switched", {})
-        return true
-      }
-      this.options.logger.warn("lark config remove failed", { detail })
-      return false
     }
+    this.options.logger.warn("lark config remove failed", { exitCode, detail: output.slice(0, 200) })
+    return false
   }
 }

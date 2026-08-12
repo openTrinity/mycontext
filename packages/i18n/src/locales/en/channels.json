@@ -32,12 +32,21 @@
     "configure": "Configure",
     "collapse": "Collapse",
     "signOut": "Sign out",
-    "switchAccount": "Switch account",
-    "signOutHint": "Clear this channel's credentials stored by this app. Your data stays; authorize again to resume.",
-    "switchAccountHint": "Clear the credentials **and the bound app**, so you can authorize as a different account next time.",
+    "switchUser": "Switch person",
+    "switchApp": "Switch app",
+    "signOutHint": "Clear only the credentials; the bound app stays. Your data stays too — hit Re-authorize to resume.",
+    "switchUserHint": "Clear the credentials (the bound app stays), so a different person can sign in next time.",
+    "switchAppHint": "Also clear the **bound app** — next time you authorize you pick an app again, then sign in. Use only when the app itself must change.",
     "signOutDone": "Signed out",
     "signOutFailed": "Could not clear credentials — there may have been no session",
-    "switchAccountDone": "Credentials and app binding cleared; hit Start to authorize another account"
+    "switchAccountDone": "Credentials and app binding cleared; hit Start to authorize another account",
+    "switchUserDone": "Signed out. Hit Start to sign in as someone else.",
+    "switchAppDone": "App binding cleared. Hit Start to pick an app and sign in."
+  },
+  "twoStep": {
+    "appLabel": "1 App",
+    "sessionLabel": "2 Session",
+    "sessionMissing": "Not done — hit Start to sign in"
   },
   "scope": {
     "readTitle": "Reads your work data",

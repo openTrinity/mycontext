@@ -69,11 +69,11 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const start = useStartChannelAuth()
   const cancel = useCancelChannelAuth()
   /**
-   * 退出授权 / 切换账号。`switchingAccount` 只用来决定**哪颗按钮转圈** ——
-   * 两颗共用一个 mutation，不记的话点「切换账号」时「退出授权」也在转。
+   * 退出授权 / 换人 / 换应用。`resetScope` 只用来决定**哪颗按钮转圈** ——
+   * 三颗共用一个 mutation，不记的话点一颗时另外两颗也在转。
    */
   const resetAuth = useResetChannelAuth()
-  const [switchingAccount, setSwitchingAccount] = useState(false)
+  const [resetScope, setResetScope] = useState<"identity" | "session" | "app" | null>(null)
   const [progress, setProgress] = useState<AuthProgress | null>(null)
   /**
    * 授权 URL 与授权码单独留存，不从「最后一个进度事件」推导。
@@ -99,6 +99,15 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const running = start.isPending
   const status = channel.status
   const authorized = status.state === "authorized"
+  /**
+   * **应用层**绑定（只有两步授权的渠道有；钉钉恒 undefined）。
+   *
+   * ★ 三个 `state` 分支上都可能有 —— 尤其 `unauthorized`：那是
+   * "应用绑好了、人还没登录"这个中间态，界面要能把它与"什么都没有"
+   * 区分开（见契约里 `channelAppBindingSchema` 的说明）。
+   * 所以这里从 `status` 上直接读，不做 `authorized` 前置判断。
+   */
+  const appBinding = status.appBinding
   const scopePrefix = channel.id === "feishu" ? "feishuScope" : "scope"
   /**
    * 「本机已有登录态」这句话的 i18n key —— **按渠道分**。
@@ -367,14 +376,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         同一条纪律。字段缺失（旧主进程）时按 false 处理：宁可少个入口，
         也不要在共用登录态的渠道上误退。
 
-        ## ★ 为什么「切换账号」必须与「重新授权」分开
-
-        「重新授权」只刷新当前账号的 token。而渠道 CLI 把"用哪个 app 授权"
-        也记在配置里，所以只要配置还在，再授权多少次都是**同一个账号**
-        —— 这正是用户报的"重新授权飞书没法切换 app"。「切换账号」会连 app
-        绑定一起清（`resetForAccountSwitch`），清完再点「开始授权」才能换人。
-
-        只在**已连上**时出现：没连的时候没有可退的东西，摆两颗禁用按钮是噪声。
+        只在**已连上**时出现：没连的时候没有可退的东西，摆几颗禁用按钮是噪声。
 
         ## ★ 必须用可选链读 `capabilities`
 
@@ -383,6 +385,29 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         "Cannot read properties of undefined" —— 而这一层是授权卡片，
         抛了就是**整页白屏**（实测：46 条渲染测试同时红）。
         这个坑仓库里记过一次（`canRunPersona` 那处也是可选链），别再踩。
+
+        ## ★★ 为什么是**三颗**而不是两颗（用户实测报的问题）
+
+        飞书的授权是**两步**（实测 `lark-cli`）：
+
+        ```
+        ① config init --new  → 绑一个 CLI 应用（appId）
+        ② auth login         → 那个应用下的人登录（openId）
+        ```
+
+        原来只有「退出授权」+「切换账号」两颗，而后者把两步**一起**清了。
+        于是"我只想换个人扫码"这件最常见的事做不到 —— 用户被迫连应用一起
+        重选。反过来"我要换成另一个 CLI 应用"也没有独立入口。
+
+        现在按**要重做哪一步**分三颗，每颗的破坏范围写在自己的文案里：
+
+        · 退出授权   → 只清登录态，应用绑定留着（scope: identity）
+        · 换个人登录 → 清登录态，下次扫码可换人（scope: session）
+        · 换应用     → 连应用绑定一起清，下次要重选应用（scope: app）
+
+        ★ 「换应用」只在**真有应用这一层**时出现（`appBinding !== undefined`）。
+        钉钉是一步授权、没有 appId 这一层，给它一颗「换应用」是凭空造概念
+        —— 这与"UI 不认识渠道名字"是同一条纪律：按**能力**渲染，不按渠道 id。
       */}
       {channel.capabilities?.isolatedCredentials === true && accountConnected ? (
         <>
@@ -390,37 +415,129 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
             <Button
               size="md"
               variant="secondary"
-              loading={resetAuth.isPending && !switchingAccount}
+              loading={resetAuth.isPending && resetScope === "identity"}
               disabled={running || resetAuth.isPending}
               onClick={() => {
-                setSwitchingAccount(false)
-                resetAuth.mutate({ channelId: channel.id, switchAccount: false })
+                setResetScope("identity")
+                resetAuth.mutate({ channelId: channel.id, scope: "identity" })
               }}
             >
               {t("actions.signOut")}
             </Button>
           </Tooltip>
-          <Tooltip content={t("actions.switchAccountHint")} placement="top">
+          <Tooltip content={t("actions.switchUserHint")} placement="top">
             <Button
               size="md"
               variant="secondary"
-              loading={resetAuth.isPending && switchingAccount}
+              loading={resetAuth.isPending && resetScope === "session"}
               disabled={running || resetAuth.isPending}
               onClick={() => {
-                setSwitchingAccount(true)
-                resetAuth.mutate({ channelId: channel.id, switchAccount: true })
+                setResetScope("session")
+                resetAuth.mutate({ channelId: channel.id, scope: "session" })
               }}
             >
-              {t("actions.switchAccount")}
+              {t("actions.switchUser")}
             </Button>
           </Tooltip>
+          {appBinding === undefined ? null : (
+            <Tooltip content={t("actions.switchAppHint")} placement="top">
+              <Button
+                size="md"
+                variant="secondary"
+                loading={resetAuth.isPending && resetScope === "app"}
+                disabled={running || resetAuth.isPending}
+                onClick={() => {
+                  setResetScope("app")
+                  resetAuth.mutate({ channelId: channel.id, scope: "app" })
+                }}
+              >
+                {t("actions.switchApp")}
+              </Button>
+            </Tooltip>
+          )}
+          {/*
+            ★★ 结果必须**说出来** —— 这三颗按钮原来点完毫无反馈。
+
+            语言包里早有 `signOutDone` / `switchAccountDone` / `signOutFailed`
+            三句话，但**没有任何地方渲染它们**（grep 过：零引用）。于是这三颗
+            按钮的形态正是仓库里记过的那类"点了没反应"：动作真的执行了，
+            界面上却看不出来，用户只能反复点 —— 而每次都真的又跑了一遍
+            破坏性动作。
+
+            ★ 用 `resetAuth.data === false` 判失败而不是 `isError`：主进程侧
+            `resetAuth` 是**不抛**的（失败降级成 false，见
+            `ChannelService.resetAuth`），所以 `isError` 永远不会真。
+            这正是"两头都锁了、中间那根线是裸的"那类接线错位。
+          */}
+          {resetAuth.isPending || resetScope === null || !resetAuth.isSuccess ? null : (
+            <span
+              className={
+                resetAuth.data === false
+                  ? "typography-caption-400 text-[var(--status-warning)]"
+                  : "typography-caption-400 text-[var(--text-base-tertiary)]"
+              }
+            >
+              {resetAuth.data === false
+                ? t("actions.signOutFailed")
+                : resetScope === "app"
+                  ? t("actions.switchAppDone")
+                  : resetScope === "session"
+                    ? t("actions.switchUserDone")
+                    : t("actions.signOutDone")}
+            </span>
+          )}
         </>
       ) : null}
     </div>
   )
 
+  /**
+   * ── 两步授权的**当前进度**（只有需要两步的渠道才渲染）─────────
+   *
+   * ## ★★ 为什么要把这一节画出来
+   *
+   * 用户的原话是"我不知道"—— 他点「授权」时先被要求选一个 CLI 应用、
+   * 紧接着又要授权登录态，而界面上没有任何东西告诉他"这是两步、
+   * 现在在第几步、每步绑的是什么"。
+   *
+   * 所以这里把两步各自的**已绑对象**如实列出来：
+   *
+   * ```
+   * ① 应用    cli_aaf1…（某人的飞书 CLI）      ← appBinding
+   * ② 登录态  <姓名> · <组织>                   ← status.authorized
+   * ```
+   *
+   * 没绑的那一步显示「未完成」，用户就知道自己差哪一步、
+   * 以及下面三颗按钮各自会重做哪一步。
+   *
+   * ★ `appBinding === undefined` 时整节不渲染 —— 一步授权的渠道
+   * （钉钉）没有"第 ① 步"，画一个空的比不画更让人困惑。
+   */
+  const twoStepBlock =
+    appBinding === undefined ? null : (
+      <div className="flex flex-col gap-1 radius-lg border border-[var(--border-divider-light)] bg-[var(--bg-base-normal)] px-3 py-2">
+        <div className="flex items-baseline gap-2">
+          <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
+            {t("twoStep.appLabel")}
+          </span>
+          <span className="typography-body-small-400 min-w-0 truncate text-[var(--text-base-primary)]">
+            {appBinding.appName ?? appBinding.appId}
+          </span>
+        </div>
+        <div className="flex items-baseline gap-2">
+          <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
+            {t("twoStep.sessionLabel")}
+          </span>
+          <span className="typography-body-small-400 min-w-0 truncate text-[var(--text-base-primary)]">
+            {status.state === "authorized" ? status.userName : t("twoStep.sessionMissing")}
+          </span>
+        </div>
+      </div>
+    )
+
   const body = (
     <>
+      {twoStepBlock}
       {authorized ? (
         <AccountBlock
           status={status}

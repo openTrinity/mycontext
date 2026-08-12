@@ -610,3 +610,151 @@ describe("★★ 退登 / 切换账号是幂等的（「本来就没有」不是
     expect(seen.some((a) => a[0] === "config" && a[1] === "remove")).toBe(true)
   })
 })
+
+/**
+ * ── 本轮真机实测抓到的三个缺口 ────────────────────────────────
+ *
+ * 三条都不是"想到的边界"，是**跑真 CLI 跑出来的**（本机，飞书已配置）。
+ * 每条都附了当时的真实输出，因为注释会过期而这些是判据的来源。
+ */
+describe("飞书两步授权：实测抓到的三个缺口", () => {
+  /** 造一个按 args 决定回什么的 auth（比 authWith 更细，能分命令给不同输出）。 */
+  function authRouting(
+    route: (args: string[]) => { exitCode: number; stdout: string },
+    onArgs?: (args: string[]) => void,
+  ) {
+    const processes = {
+      async exec(input: { args: string[] }) {
+        onArgs?.(input.args)
+        if (input.args[0] === "config" && input.args[1] === "keychain-downgrade") {
+          return { exitCode: 0, stdout: "already downgraded", stderr: "" }
+        }
+        const out = route(input.args)
+        return { exitCode: out.exitCode, stdout: out.stdout, stderr: "" }
+      },
+      async spawn(input: { args: string[] }) {
+        onArgs?.(input.args)
+        const out = route(input.args)
+        return {
+          exitCode: out.exitCode,
+          stdout: out.stdout,
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+          cancelled: false,
+        }
+      },
+    } as unknown as ProcessRunner
+    const options = {
+      processes,
+      logger: noopLogger(),
+      authRoot: () => "/tmp/inklings-feishu-twostep",
+      executable: "/tmp/lark-cli",
+      platform: "darwin" as const,
+      openExternal: async () => undefined,
+    }
+    return new FeishuAuth(options, new LarkCli(options))
+  }
+
+  it("★★ config remove 的输出是纯文本，成功不能被当成失败", async () => {
+    /**
+     * 实测：`lark-cli config remove` → `OK: Configuration removed`（exit 0）。
+     * 不是 JSON。原来走 `cli.json()` 于是抛"无法解析的内容"，真实日志：
+     *   lark config remove failed {"detail":"飞书 CLI 返回了无法解析的内容"}
+     *   channel auth reset {"switchAccount":true,"ok":false}
+     * 配置**已经清掉了**，界面却说失败 —— 用户反复点，每次都真的又清一遍。
+     *
+     * 反证：把 `resetForAccountSwitch` 改回 `cli.json(["config","remove"])`，
+     * 这一条立刻转红（纯文本会让 extractLarkJson 抛）。
+     */
+    const auth = authRouting((args) =>
+      args[0] === "config" && args[1] === "remove"
+        ? { exitCode: 0, stdout: "OK: Configuration removed" }
+        : { exitCode: 0, stdout: JSON.stringify({ ok: true, loggedOut: true }) },
+    )
+    expect(await auth.resetForAccountSwitch()).toBe(true)
+  })
+
+  it("★★ 「配置残缺」也要触发补做第 ① 步（应用绑定），不能只认 not configured", async () => {
+    /**
+     * 实测三种"没绑应用"的形态（逐个造出来验过）：
+     *
+     *  | config.json     | auth login 报的 message                      |
+     *  |-----------------|----------------------------------------------|
+     *  | 不存在          | not configured                               |
+     *  | {"apps":[]}     | not configured                               |
+     *  | {"apps":[{}]}   | …missing a required parameter: client_id.    |
+     *
+     * 第三种是 `config remove` 可能留下的形态（实测 remove 后文件仍在，
+     * 内容 `{"apps": []}`）。原来判据只有 `/not configured/`，于是第三种
+     * 形态下**永远走不到 `config init`** —— 用户每次点授权都撞同一句英文，
+     * 界面上没有任何出路。
+     *
+     * 这里断言的是"会去跑 config init"，即那条自愈路径真的被触发。
+     */
+    const seen: string[][] = []
+    const auth = authRouting(
+      (args) => {
+        if (args[0] === "auth" && args[1] === "login") {
+          return {
+            exitCode: 1,
+            stdout: JSON.stringify({
+              ok: false,
+              error: {
+                type: "authentication",
+                subtype: "unknown",
+                message:
+                  "device authorization failed: Device authorization failed: The request is missing a required parameter: client_id.",
+              },
+            }),
+          }
+        }
+        // config init 走 spawn；让它失败即可，我们只验"有没有走到这一步"
+        return { exitCode: 1, stdout: "" }
+      },
+      (args) => seen.push([...args]),
+    )
+    await auth
+      .login({ mode: "loopback", onProgress: () => undefined })
+      .catch(() => undefined)
+    expect(seen.some((a) => a[0] === "config" && a[1] === "init")).toBe(true)
+  })
+
+  it("★ appBinding：应用层与登录态是两件事，未登录也要能读出应用", () => {
+    /**
+     * 实测 `auth status --json --verify` 的字段位置：
+     *   .appId                  = 'cli_…'（顶层，不在 identities 下）
+     *   .identities.bot.appName = '<某人>的飞书 CLI'（只有 bot 这一支有）
+     *
+     * "应用已绑、人没登录"是两步之间的中间态。原来它与"什么都没有"
+     * 一样返回裸 `{state:"unauthorized"}`，于是界面无法区分、
+     * 也没法告诉用户"只差第 ② 步"。
+     *
+     * 反证：把 parse 里那个 `appBinding === undefined ? … : …` 改回恒
+     * 返回裸 unauthorized，这一条转红。
+     */
+    const status = parseLarkAuthStatus({
+      appId: "cli_FAKE00000000000001",
+      identities: {
+        bot: { status: "ready", appName: "测试用的 CLI 应用" },
+        // 故意不给 user —— 就是"应用绑好了、人还没登录"
+      },
+    })
+    expect(status.state).toBe("unauthorized")
+    expect(status.appBinding?.appId).toBe("cli_FAKE00000000000001")
+    expect(status.appBinding?.appName).toBe("测试用的 CLI 应用")
+  })
+
+  it("★ appName 取不到时是 null，不编一个假名字", () => {
+    // 界面据此回落显示 appId；编个名字会让用户以为那就是应用的真名
+    const status = parseLarkAuthStatus({ appId: "cli_FAKE00000000000002" })
+    expect(status.appBinding?.appName).toBeNull()
+  })
+
+  it("★ 一步授权的渠道没有应用层：没有 appId 就不该造出 appBinding", () => {
+    // 钉钉走的是另一个 parse，但这里锁住"字段缺失 → undefined"这个形状：
+    // 界面用 `appBinding === undefined` 决定要不要渲染「换应用」那颗按钮，
+    // 造一个空壳出来会让钉钉也长出一颗凭空的按钮。
+    expect(parseLarkAuthStatus({}).appBinding).toBeUndefined()
+  })
+})

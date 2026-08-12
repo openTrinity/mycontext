@@ -65,6 +65,7 @@ import {
   WORK_LAYER_SKILL_PATH,
 } from "../services/forge.service.js"
 import { MediaService } from "../services/media.service.js"
+import { MultiMediaService } from "../services/multi-media.service.js"
 import { PersonaService } from "../services/persona.service.js"
 import { PersonaGate } from "../services/persona-gate.js"
 import { SearchService } from "../services/search.service.js"
@@ -1281,6 +1282,11 @@ export function bootstrapApp(mainDir: string): AppContext {
     feed: FeedService
     klServer: KlServerService
     graphQuery: GraphQueryService
+    /**
+     * 这个渠道自己的头像/媒体取法（钉钉走共同群搜索、飞书走
+     * `contact +get-user` 的直链）。见 `MultiMediaService` 文件头。
+     */
+    media: MediaService
     feedDirs: {
       dataRoot: string
       exportRoot: string
@@ -1511,6 +1517,25 @@ export function bootstrapApp(mainDir: string): AppContext {
           }
         },
       })
+      /**
+       * ★★ 这个渠道**自己的** MediaService（头像取法按渠道不同）。
+       *
+       * 漏了它的表现就是用户报的"飞书头像没获取"：全局那一个 MediaService
+       * 装配时写死了主渠道的 `cli`/`avatars`/`channelId`，于是飞书的
+       * `createFeishuAvatars` 写好了却没有任何调用点，而且即使有缓存也
+       * 因为 channelId 键对不上而查不到 —— 两层都是静默的。
+       *
+       * `?? null` 而不是省略：`MediaService` 对 `null` 有明确行为
+       * （退化成首字母兜底），而"渠道没实现头像能力"是正常状态。
+       */
+      const channelPlugin = registry.get(spec.channelId)
+      const channelMedia = new MediaService({
+        clock: systemClock,
+        logger: logger.child(`Media:${spec.channelId}`),
+        cli: channelPlugin.mediaRunner ?? null,
+        avatars: channelPlugin.avatars ?? null,
+        channelId: spec.channelId,
+      })
       return {
         parts: {
           channelId: spec.channelId,
@@ -1520,6 +1545,7 @@ export function bootstrapApp(mainDir: string): AppContext {
           klServer: channelKl,
           graphQuery: channelGraph,
           feedDirs,
+          media: channelMedia,
         },
         /**
          * 拆除顺序：**先 await 停 kl**（让出端口 + 写掉 pidfile），
@@ -1809,6 +1835,13 @@ export function bootstrapApp(mainDir: string): AppContext {
            * `onScopeChanged` 里一句 if），现在只有这一处。
            */
           personaSupported: true,
+          /**
+           * ★ 主渠道的 media 就是那个应用级单例 —— 它的装配本来就是
+           * 主渠道的能力（`cli`/`avatars`/`channelId` 全取主渠道插件）。
+           * 现在它作为"主渠道这条 runtime 的 media"存在，而不再是
+           * "全应用唯一的 media"。
+           */
+          media,
         },
         ...pipelines.all().map((item) => ({
           channelId: item.channelId,
@@ -1819,11 +1852,23 @@ export function bootstrapApp(mainDir: string): AppContext {
           feed: item.parts.feed,
           klServer: item.parts.klServer,
           graphQuery: item.parts.graphQuery,
+          media: item.parts.media,
           personaSupported: false,
         })),
       ]
     },
   })
+
+  /**
+   * 按渠道路由的头像服务（见 `MultiMediaService` 文件头 —— 它修的是
+   * "飞书头像取不到"的真根因：全局唯一那个 MediaService 写死了主渠道）。
+   *
+   * ★ 必须在 `runtimes` 之后构造：它的第三个参数要读 runtime 列表，
+   * 而那些非主渠道的 runtime 是登录后才现造的（所以传函数）。
+   */
+  const mediaByChannel = new MultiMediaService(media, dingtalk.meta.id, () =>
+    runtimes.all().map((item) => ({ channelId: item.channelId, media: item.media })),
+  )
 
   /**
    * 管线变动后让数据面重认一次（新渠道要起自己的 `IngestService`）。
@@ -2705,6 +2750,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     distill,
     persona,
     media,
+    mediaByChannel,
     preferences,
     dataPlane,
     search,

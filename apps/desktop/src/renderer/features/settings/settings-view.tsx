@@ -202,9 +202,17 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
                       "typography-body-small-400 transition-colors duration-150",
                       // 与主侧栏同一套选中语言（中性加深底色），否则同一屏里
                       // 出现两种「当前项」的表达方式，看起来像两个不相关的控件。
-                      inSubtree
+                      //
+                      // ★ 父项与子项的选中态**不能用同一个强度**：父项此刻是
+                      //   "路径的上一级"而不是"当前页"，用同样的底色会让人以为
+                      //   有两个当前项。所以父项在子项被选中时只提亮文字
+                      //   （`inSubtree && active !== section.id`），
+                      //   实底色只留给真正落在它自己身上的那一次。
+                      active === section.id
                         ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
-                        : "text-[var(--text-base-secondary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
+                        : inSubtree
+                          ? "text-[var(--text-base-primary)] hover:bg-[var(--overlay-on-container-hover)]"
+                          : "text-[var(--text-base-secondary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
                     )}
                   >
                     <span className="flex size-4 shrink-0 items-center justify-center">
@@ -212,19 +220,32 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
                     </span>
                     <span className="min-w-0 truncate">{t(section.labelKey)}</span>
                   </button>
-                  {section.children === undefined
-                    ? null
-                    : section.children.map((child) => (
+                  {section.children === undefined ? null : (
+                    /**
+                     * ★ 子项组挂一条**层级引导线**（左侧 1px），而不是只靠
+                     *   `ml-6` 那点空白暗示父子关系。
+                     *
+                     * 只有缩进的话，三个子项在扫视时是三个"浮着的"条目 ——
+                     * 一条线把它们收成一簇、并明确指回上面那个父项，那才是
+                     * 层级本身的视觉表达（也是用户要的"有层级、更高级"）。
+                     *
+                     * 线画在容器上而不是每个子项上：逐项画会在项与项之间
+                     * 断开（gap-0.5 处有缝），看起来像虚线。
+                     *
+                     * `ml-[15px]` 让线落在父项图标（`px-2` + `size-4`）的
+                     * 中轴上 —— 线指向的是那个图标，而不是文字的左边缘。
+                     */
+                    <div className="ml-[15px] flex flex-col gap-0.5 border-l border-[var(--border-divider-light)] pl-[7px]">
+                      {section.children.map((child) => (
                         <button
                           key={child.id}
                           type="button"
                           aria-current={active === child.id ? "page" : undefined}
                           onClick={() => setActive(child.id)}
                           className={cn(
-                            // ★ `ml-6`：与父项图标（size-4 + gap-2）对齐出一个
-                            //   明确的缩进档；子项没有图标 —— 图标是"这是一类
-                            //   东西"的标记，而子项是同一类里的分面。
-                            "ml-6 flex h-7 cursor-pointer items-center radius-lg px-2 text-left",
+                            // 子项不带图标 —— 图标是"这是一类东西"的标记，
+                            // 而子项是同一类里的分面（授权/采集/图谱服务）。
+                            "flex h-7 cursor-pointer items-center radius-lg px-2 text-left",
                             "typography-caption-400 transition-colors duration-150",
                             active === child.id
                               ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
@@ -234,6 +255,8 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
                           <span className="min-w-0 truncate">{t(child.labelKey)}</span>
                         </button>
                       ))}
+                    </div>
+                  )}
                 </div>
               )
             })}

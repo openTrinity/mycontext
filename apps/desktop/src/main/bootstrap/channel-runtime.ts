@@ -49,6 +49,7 @@ import type { ChannelPlugin } from "@mycontext/channels"
 import type { FeedDirs, FeedService } from "../services/feed.service.js"
 import type { KlServerService } from "../services/kl-server.service.js"
 import type { GraphQueryService } from "../services/graph-query.service.js"
+import type { MediaService } from "../services/media.service.js"
 
 /**
  * 一个渠道的**完整**运行时。
@@ -83,6 +84,31 @@ export interface ChannelRuntime {
    * 只改一处。
    */
   readonly personaSupported: boolean
+  /**
+   * 这个渠道自己的媒体/头像服务。
+   *
+   * ## ★★ 为什么必须 per-channel（用户报的"飞书头像没获取"的真根因）
+   *
+   * `MediaService` 原来全局**只有一个**，且装配时三个参数全写死主渠道：
+   *
+   * ```ts
+   * cli: dingtalk.mediaRunner ?? null,
+   * avatars: dingtalk.avatars ?? null,     // ← 飞书的实现从没被接进来
+   * channelId: dingtalk.meta.id,          // ← 于是永远按钉钉查/写
+   * ```
+   *
+   * 后果有两层，而且都是静默的：
+   * ① 飞书的 `createFeishuAvatars` 写好了却**没有任何调用点**，
+   *    取头像永远退化成首字母兜底 —— 看起来像"这个人没设头像"；
+   * ② `avatarsFromCache` / `selfAvatar` 都按 `this.options.channelId` 过滤，
+   *    所以即使有飞书头像也查不到（键对不上）。
+   *
+   * 头像的**取法**本来就按渠道不同（钉钉走共同群搜索、飞书走
+   * `contact +get-user` 的直链字段），这正是插件能力契约存在的理由。
+   * 挂到 runtime 上之后，"用哪个渠道的取法"由调用点选哪个 runtime 决定，
+   * 不再有第二份写死的判据。
+   */
+  readonly media: MediaService
 }
 
 export interface ChannelRuntimeRegistryOptions {

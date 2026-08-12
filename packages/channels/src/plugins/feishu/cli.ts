@@ -504,6 +504,60 @@ export class LarkCli {
   }
 
   /**
+   * 跑一条命令，**不解析输出** —— 只回退出码与原始文本。
+   *
+   * ## ★★ 为什么必须有它（一个把成功记成失败的真 bug）
+   *
+   * 不是所有命令都输出 JSON。实测（本机，飞书已配置）：
+   *
+   * ```
+   * $ lark-cli config remove
+   * OK: Configuration removed          ← 纯文本，退出码 0
+   * ```
+   *
+   * 而 `json()` 会对它跑 `extractLarkJson` 并抛"无法解析的内容"。真实日志：
+   *
+   * ```
+   * lark config remove failed {"detail":"飞书 CLI 返回了无法解析的内容"}
+   * channel auth reset {"switchAccount":true,"ok":false}
+   * ```
+   *
+   * 配置**其实已经清掉了**（后续命令全变 `not_configured`），但界面被告知
+   * 失败 —— 用户于是反复点，而每次都真的执行了一遍破坏性动作。
+   *
+   * 这正是本仓库最贵的那类 bug 的镜像：不是"失败被当成功"，而是
+   * **"成功被当失败"**，两者都让界面上的状态与真实状态脱节。
+   *
+   * ## ★ 为什么不是"让 json() 容错空输出"
+   *
+   * 那会让**真正**该是 JSON 的命令（`auth status` 等）在返回垃圾时静默通过，
+   * 把一个解析错误变成一个空对象 —— 那是更坏的方向。命令**是否输出 JSON**
+   * 是调用点已知的事实，让调用点选对方法，而不是让解析器猜。
+   *
+   * ★ 非零退出**不抛**：这个方法的用途是"做一个动作然后自己判断状态"，
+   * 而"本来就没配置"这类情形会非零退出却恰恰是想要的结果（见
+   * `resetForAccountSwitch`）。把判定权交给调用点。
+   */
+  async run(
+    args: string[],
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ exitCode: number; output: string }> {
+    assertAllowedLarkCommand(args)
+    const result = await this.options.processes.exec({
+      executable: this.executable,
+      args,
+      env: this.env(),
+      timeoutMs: options.timeoutMs ?? (args[0] === "auth" ? STATUS_TIMEOUT_MS : QUERY_TIMEOUT_MS),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      maxOutputBytes: 1024 * 1024,
+    })
+    return {
+      exitCode: result.exitCode,
+      output: (result.stdout.trim() !== "" ? result.stdout : result.stderr).trim(),
+    }
+  }
+
+  /**
    * Pin the CLI master key to our isolated HOME before anything touches the
    * system Keychain.
    *

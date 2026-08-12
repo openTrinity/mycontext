@@ -67,6 +67,7 @@ import type { OnboardingService } from "../services/onboarding.service.js"
 import type { DistillSourceService } from "../services/distill-source.service.js"
 import type { DistillService } from "../services/distill.service.js"
 import type { MediaService } from "../services/media.service.js"
+import type { MultiMediaService } from "../services/multi-media.service.js"
 import { toLocalFileUrl } from "../windows/local-file-url.js"
 import {
   adoptExistingSession,
@@ -97,6 +98,14 @@ export interface IpcDependencies {
   distill: DistillService
   persona: PersonaService
   media: MediaService
+  /**
+   * 按渠道路由的头像取法（见 `MultiMediaService` 文件头）。
+   *
+   * ★ 与 `media` 并存而不是替换它：`media` 上还有一堆**与渠道无关**的
+   * 方法（上传图片、另存为、按 messageId 下媒体），那些不该被迫经过
+   * 一层路由。只有头像三条是按渠道分的。
+   */
+  mediaByChannel: MultiMediaService
   preferences: PreferencesService
   dataPlane: DataPlaneService
   search: SearchService
@@ -163,6 +172,7 @@ export function registerIpc(deps: IpcDependencies): void {
     distill,
     persona,
     media,
+    mediaByChannel,
     preferences,
     dataPlane,
     search,
@@ -253,7 +263,12 @@ export function registerIpc(deps: IpcDependencies): void {
   ipcMain.handle(IPC_CHANNELS.channelAuthReset, (_event, payload: unknown) =>
     attempt(() => {
       const input = parse(channelAuthResetInputSchema, payload)
-      return channels.resetAuth(input.channelId, input.switchAccount)
+      /**
+       * ★ `scope` 优先；没给时用旧的 `switchAccount` 布尔换算
+       * （`true` → 换应用，`false` → 只退登）。见契约里那段三档说明。
+       */
+      const scope = input.scope ?? (input.switchAccount ? "app" : "identity")
+      return channels.resetAuth(input.channelId, scope)
     }),
   )
 
@@ -515,7 +530,11 @@ export function registerIpc(deps: IpcDependencies): void {
   ipcMain.handle(IPC_CHANNELS.mediaAvatars, (_event, payload: unknown) =>
     attempt(() => {
       const input = parse(mediaAvatarsInputSchema, payload)
-      return media.avatarsFromCache(input.externalIds).map((entry) => ({
+      /**
+       * ★ 按渠道路由 —— 见 `MultiMediaService` 的文件头。
+       * 不传 channelId 时落回主渠道（存量调用点）。
+       */
+      return mediaByChannel.avatarsFromCache(input.externalIds, input.channelId).map((entry) => ({
         externalId: entry.externalId,
         /**
          * ★ 返回的是 `mycontext-file://` URL，不是文件系统路径。
@@ -578,13 +597,13 @@ export function registerIpc(deps: IpcDependencies): void {
          * "无论如何都要走完 60 个人"，而它不该依赖被调方的实现细节。
          */
         try {
-          const result = await media.avatar({
+          const result = await mediaByChannel.avatar({
             externalId,
             ...(nick === undefined || nick === "" ? {} : { nick }),
             ...(input.groupExternalId === undefined || input.groupExternalId === null
               ? {}
               : { groupExternalId: input.groupExternalId }),
-          })
+          }, input.channelId)
           if (result.path === null) failed += 1
           else fetched += 1
         } catch (error) {

@@ -1124,6 +1124,18 @@ export type MediaSaveAsResult = z.infer<typeof mediaSaveAsResultSchema>
 export const mediaAvatarsInputSchema = z.object({
   externalIds: z.array(z.string().min(1)).max(60),
   /**
+   * 问**哪个渠道**要头像。
+   *
+   * ★ 必须有：头像的取法与缓存键都按渠道分（钉钉走共同群搜索、飞书走
+   * `contact +get-user` 的直链）。不传的话主进程只能按主渠道查 ——
+   * 那正是用户报的"飞书头像没获取"：飞书的实现写好了却零调用点，
+   * 且缓存键对不上，两层都是静默的。
+   *
+   * 可选（不传 = 主渠道）：存量调用点还没全部带上渠道，
+   * 而突然要求必填会让那些路径直接报错而不是退化。
+   */
+  channelId: z.string().min(1).optional(),
+  /**
    * 这些人所在的会话（群）。
    *
    * 传了能省掉"搜共同群"那一步 —— 我们是从这个会话看到他们的，
@@ -1552,12 +1564,34 @@ export const authModeSchema = z.enum(["loopback", "device"])
 export type AuthMode = z.infer<typeof authModeSchema>
 
 /** 授权状态：判别联合，避免「未授权却有组织名」这类矛盾状态。 */
+/**
+ * **应用层**绑定（只有两步授权的渠道才有；见 channels 包的 `ChannelAppBinding`）。
+ *
+ * 飞书实测两步：① `config init --new` 绑一个 CLI 应用 → ② `auth login` 人登录。
+ * 这一层让界面能显示"当前绑的是哪个应用"，并把「换应用」与「换人」分成
+ * 两个各自可独立执行的动作 —— 原来糊成一颗「切换账号」，用户想换人却
+ * 把应用也清了。
+ *
+ * `appId` 是应用的公开标识（不是密钥）；`appName` 取不到就 `null`，
+ * 界面回落显示 appId，**不编**假名字。
+ */
+export const channelAppBindingSchema = z.object({
+  appId: z.string(),
+  appName: z.string().nullable(),
+})
+export type ChannelAppBinding = z.infer<typeof channelAppBindingSchema>
+
 export const authStatusSchema = z.discriminatedUnion("state", [
-  z.object({ state: z.literal("unauthorized") }),
+  z.object({
+    state: z.literal("unauthorized"),
+    /** ★ 未授权也可能已绑应用 —— 那是两步之间的中间态，界面要能区分。 */
+    appBinding: channelAppBindingSchema.optional(),
+  }),
   z.object({
     state: z.literal("expired"),
     corpName: z.string().optional(),
     userName: z.string().optional(),
+    appBinding: channelAppBindingSchema.optional(),
   }),
   z.object({
     state: z.literal("authorized"),
@@ -1568,6 +1602,7 @@ export const authStatusSchema = z.discriminatedUnion("state", [
     accessExpiresAt: z.string().nullable(),
     refreshExpiresAt: z.string().nullable(),
     daysUntilRefreshExpiry: z.number().nullable(),
+    appBinding: channelAppBindingSchema.optional(),
   }),
 ])
 
@@ -1649,9 +1684,43 @@ export type ChannelAuthStartInput = z.input<typeof channelAuthStartInputSchema>
  *   账号应答，用户点多少次「重新授权」都还是原来那个人（实测症状）。
  *   破坏性更强，所以必须由用户显式选择，不进任何自动路径。
  */
+/**
+ * 退出授权 / 切换的**范围** —— 三档，对应飞书那种"两步两层"的授权。
+ *
+ * ## ★★ 为什么是三档而不是一个布尔（实测依据）
+ *
+ * 飞书的授权实测是**两步**，产出**两层**东西：
+ *
+ * ```
+ * ① config init --new  → 绑定一个 CLI 应用（appId，落 config.json）
+ * ② auth login         → 拿登录态，产出 identities.bot（应用自己）
+ *                        与 identities.user（人，openId）
+ * ```
+ *
+ * 所以"我要换的是什么"有两个完全不同的答案，而原来的
+ * `switchAccount: boolean` 只能表达其中一个：
+ *
+ * · `session`  —— 只清登录态（`auth logout`）。换**人**：同一个应用下
+ *   换一个账号扫码。这是最常见的诉求，代价最小。
+ * · `app`      —— 连应用绑定一起清（`config remove`）。换**应用**：
+ *   下次授权会重新走"选哪个 CLI 应用"。破坏性更强。
+ * · `identity` —— 只退登、不打算马上换（等同 `session`，但语义是"我要退出"
+ *   而不是"我要换"）。界面上那颗「退出授权」用它。
+ *
+ * 钉钉只有一步（没有 appId 这一层），所以 `app` 档对它退化成 `session`
+ * —— 由插件自己决定（`ChannelAuth.resetForAccountSwitch` 可省略）。
+ */
+export const channelAuthResetScopeSchema = z.enum(["identity", "session", "app"])
+export type ChannelAuthResetScope = z.infer<typeof channelAuthResetScopeSchema>
+
 export const channelAuthResetInputSchema = z.object({
   channelId: z.string().min(1),
+  /**
+   * ★ 兼容旧渲染层：`switchAccount: true` 等价于 `scope: "app"`。
+   * 两个都给时以 `scope` 为准（它更精确）。
+   */
   switchAccount: z.boolean().default(false),
+  scope: channelAuthResetScopeSchema.optional(),
 })
 
 export type ChannelAuthResetInput = z.input<typeof channelAuthResetInputSchema>

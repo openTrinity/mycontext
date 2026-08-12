@@ -169,17 +169,25 @@ export function useCancelChannelAuth() {
 }
 
 /**
- * 退出授权 / 切换账号。
+ * 退出授权 / 换个人 / 换应用 —— **三档**，见契约里 `channelAuthResetScopeSchema`。
  *
- * `switchAccount: true` = 连 app 绑定一起清，用户下次授权才能换成另一个账号
- * （只清 token 的话渠道 CLI 仍用已绑定的 app 拿回同一个人 —— 实测症状）。
+ * · `identity` 只清登录态（应用绑定留着）
+ * · `session`  同上，语义是"要换个人来登"
+ * · `app`      连应用绑定一起清（只清 token 的话渠道 CLI 仍用已绑定的应用
+ *              拿回同一个人 —— 实测症状）
  */
 export function useResetChannelAuth() {
-  return useChannelMutation<{ channelId: string; switchAccount?: boolean }>(async (input) =>
+  return useChannelMutation<{
+    channelId: string
+    /** 退到哪一档：只退登 / 换人 / 连应用绑定一起换。见契约里那段说明。 */
+    scope?: "identity" | "session" | "app"
+  }>(async (input) =>
     unwrap(
       await window.mycontext.channels.authReset({
         channelId: input.channelId,
-        switchAccount: input.switchAccount ?? false,
+        scope: input.scope ?? "identity",
+        // 旧字段仍要给（schema 有 default，但显式给更清楚"这一档等于什么"）
+        switchAccount: input.scope === "app",
       }),
     ),
   )
@@ -867,18 +875,27 @@ export function useContactAvatars(
    * 群聊里可以不传（有 `groupExternalId` 那条捷径）。
    */
   nickByExternalId?: Readonly<Record<string, string>>,
+  /**
+   * 问**哪个渠道**要头像。不传 = 主渠道（存量调用点）。
+   *
+   * ★★ 它必须进 queryKey：同一个人在两个渠道是两个不同的 external_id，
+   * 而**取法与缓存都按渠道分**。不进 key 的话两个渠道的结果会互相覆盖
+   * ——而覆盖的表现是"头像时对时错"，比一直没有更难查。
+   */
+  channelId?: string,
 ) {
   const queryClient = useQueryClient()
   // key 里用排序后的串：调用方每次渲染都可能传一个新数组
   const idsKey = [...externalIds].sort().join(",")
   const cached = useQuery({
-    queryKey: ["media", "avatars", idsKey, groupExternalId] as const,
+    queryKey: ["media", "avatars", idsKey, groupExternalId, channelId ?? null] as const,
     queryFn: async () =>
       unwrap(
         await window.mycontext.media.avatars({
           externalIds: [...externalIds],
           groupExternalId,
           ...(nickByExternalId === undefined ? {} : { nickByExternalId }),
+          ...(channelId === undefined ? {} : { channelId }),
         }),
       ),
     enabled: externalIds.length > 0,
@@ -923,6 +940,7 @@ export function useContactAvatars(
             externalIds: pending,
             groupExternalId,
             ...(nickByExternalId === undefined ? {} : { nickByExternalId }),
+            ...(channelId === undefined ? {} : { channelId }),
           }),
         )
         // 只在真取到东西时重读：没取到就没有新路径，重读是白刷

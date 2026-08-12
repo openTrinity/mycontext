@@ -32,12 +32,21 @@
     "configure": "配置",
     "collapse": "收起",
     "signOut": "退出授权",
-    "switchAccount": "切换账号",
-    "signOutHint": "清掉这个渠道在本应用里的登录凭据。数据保留；想再用就重新授权。",
-    "switchAccountHint": "清掉登录凭据**与已绑定的应用**，下次授权时可以换成另一个账号。",
+    "switchUser": "换个人登录",
+    "switchApp": "换应用",
+    "signOutHint": "只清掉登录凭据，已绑定的应用保留。数据都在；想再用点「重新授权」即可。",
+    "switchUserHint": "清掉登录凭据（应用保留），下次扫码可以换成另一个人。",
+    "switchAppHint": "连**已绑定的应用**一起清掉 —— 下次授权要重新选一个应用，然后再登录一次。只有确实要换应用时才用。",
     "signOutDone": "已退出授权",
     "signOutFailed": "没能退掉凭据 —— 可能本来就没有登录态",
-    "switchAccountDone": "已清掉凭据与应用绑定，点「开始授权」换账号"
+    "switchAccountDone": "已清掉凭据与应用绑定，点「开始授权」换账号",
+    "switchUserDone": "已退出登录态，点「开始授权」用另一个人扫码",
+    "switchAppDone": "已解除应用绑定，点「开始授权」重新选应用并登录"
+  },
+  "twoStep": {
+    "appLabel": "① 应用",
+    "sessionLabel": "② 登录态",
+    "sessionMissing": "未完成 —— 点「开始授权」登录"
   },
   "scope": {
     "readTitle": "读取工作数据",

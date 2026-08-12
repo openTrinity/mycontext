@@ -47,6 +47,7 @@ import {
   useDashboardTrends,
   useKlGraphBuild,
   useOnboardingSteps,
+  useContactAvatars,
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useTheme } from "../../lib/use-theme.js"
@@ -185,6 +186,46 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
     if (status === undefined) return undefined
     return status.state === "authorized" ? status.userName : null
   })()
+
+  /**
+   * 问候语头像 —— **也要跟着渠道走**（用户要求：各渠道自己的名字和头像）。
+   *
+   * ## ★★ 为什么不能用 app 登录账号那张（原来的做法）
+   *
+   * 原来是 `src={session?.avatarUrl}`，而 `session` 是**应用登录账号**，
+   * 全应用一份、不随渠道变。于是切到飞书仍显示钉钉那张脸 ——
+   * 名字是飞书的、头像是钉钉的，比两个都错更让人困惑。
+   *
+   * ## 做法：拿当前渠道**本人的 openId** 去查那个渠道的头像缓存
+   *
+   * `status.userId` 在已授权分支里就是本人在这个渠道的 openId
+   * （钉钉 `openDingTalkId` / 飞书 `open_id`，见各自 `resolveSelf`）。
+   * `useContactAvatars` 现在收 `channelId` 并把它带进 queryKey 与 IPC，
+   * 于是"用哪个渠道的取法、查哪个渠道的缓存"都对得上。
+   *
+   * ★ `groupExternalId` 传 `null`：**本人不属于任何"共同群"**。
+   * 传一个会话 id 下去会让查询必然空并落一条**终态** miss ——
+   * 那之后这张头像永久取不到（`mediaAvatarsInputSchema` 的注释记了这个坑）。
+   *
+   * ★ 取不到就回落到 app 账号那张、再回落首字母：头像缺失是这个功能的
+   * 正常状态之一（用户可能就是默认头像 —— 实测本机飞书返回的正是
+   * `default-avatar_v3`），不该为它留一块空白。
+   */
+  const selfExternalId = (() => {
+    if (scope.channelId === undefined) return null
+    const status = scope.channels.find((c) => c.id === scope.channelId)?.status
+    return status?.state === "authorized" ? status.userId : null
+  })()
+  const selfAvatars = useContactAvatars(
+    selfExternalId === null ? [] : [selfExternalId],
+    null,
+    undefined,
+    scope.channelId,
+  )
+  const channelAvatarUrl =
+    selfExternalId === null
+      ? null
+      : (selfAvatars.data?.find((entry) => entry.externalId === selfExternalId)?.path ?? null)
 
   /**
    * 联动带当前筛出来多少条。
@@ -409,13 +450,14 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
               `items-center`：64px 头像与 48px 文字居中对齐，
               视觉重心在同一条水平线上。
 
-              ★ 头像的名字兜底用 `accountName`（当前渠道账号名），照片仍用
-              app 登录账号的 `avatarUrl`；未授权时 `accountName===null`，
-              兜底首字母用「未」而不是空。
+              ★ 照片优先用**当前渠道本人**那张（`channelAvatarUrl`，见上面
+              那段说明），取不到才回落 app 登录账号的 `avatarUrl`、
+              再回落首字母。名字兜底用 `accountName`（当前渠道账号名）；
+              未授权时 `accountName===null`，兜底首字母用「未」而不是空。
             */}
             <Avatar
               name={accountName ?? "未授权"}
-              src={session?.avatarUrl ?? null}
+              src={channelAvatarUrl ?? session?.avatarUrl ?? null}
               size="xl"
             />
             <GreetingRow accountName={accountName} />

@@ -146,15 +146,15 @@ export class ChannelService {
    *
    * 与 `logout` 一样**不抛**：失败降级成 `false`，由界面呈现"没退掉"。
    */
-  async resetAuth(channelId: string, switchAccount: boolean): Promise<boolean> {
+  async resetAuth(channelId: string, scope: "identity" | "session" | "app"): Promise<boolean> {
     try {
-      const ok = await this.options.host.resetAuth(channelId, switchAccount)
-      this.options.logger.info("channel auth reset", { channelId, switchAccount, ok })
+      const ok = await this.options.host.resetAuth(channelId, scope)
+      this.options.logger.info("channel auth reset", { channelId, scope, ok })
       return ok
     } catch (error) {
       this.options.logger.warn("channel auth reset failed", {
         channelId,
-        switchAccount,
+        scope,
         detail: error instanceof Error ? error.message : String(error),
       })
       return false

@@ -127,10 +127,17 @@ export class ChannelHost {
    *
    * @returns 是否真的清掉了（渠道不支持 / 本来就没配置 → false，不是错误）
    */
-  async resetAuth(channelId: string, switchAccount: boolean): Promise<boolean> {
+  async resetAuth(channelId: string, scope: "identity" | "session" | "app"): Promise<boolean> {
     const auth = this.registry.get(channelId).auth
+    /**
+     * ★ 只有 `app` 档才动**应用绑定**（`resetForAccountSwitch`）。
+     *
+     * `identity`/`session` 都只清登录态 —— 区别在**语义**（"我要退出" vs
+     * "我要换个人"），动作相同。渠道没实现换应用（钉钉没有 appId 这一层）时
+     * `app` 自然退化成只退登，而不是报错说"不支持"。
+     */
     const ok =
-      switchAccount && auth.resetForAccountSwitch !== undefined
+      scope === "app" && auth.resetForAccountSwitch !== undefined
         ? await auth.resetForAccountSwitch()
         : auth.logout !== undefined
           ? await auth.logout()

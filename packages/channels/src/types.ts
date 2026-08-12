@@ -62,18 +62,60 @@ export interface ChannelCapabilities {
 // ---------------------------------------------------------------
 
 /**
+ * **应用层**的绑定状态 —— 与"人登录了没有"是两件独立的事。
+ *
+ * ## ★★ 为什么需要单独一层（实测：飞书的授权是两步）
+ *
+ * ```
+ * ① config init --new  → 绑定一个 CLI 应用（appId / 应用名）
+ * ② auth login         → 那个应用下的人登录（openId / 姓名）
+ * ```
+ *
+ * 两步各自可以单独重做：换应用（重走 ①②）vs 换人（只重走 ②）。
+ * 而原来的 `AuthStatus` 只有"人"这一层，于是：
+ *
+ * · 界面无法显示"当前绑的是哪个应用"，用户不知道自己在哪；
+ * · 「切换账号」只能是一颗糊在一起的按钮 —— 用户想换人，却把应用
+ *   也清了，下次授权被迫重新选应用（用户报的正是这个）；
+ * · **"应用已绑、人未登录"这个中间态无法表达**（`unauthorized` 会
+ *   把它和"什么都没有"混成一个），于是界面上没法告诉用户
+ *   "第 ① 步已完成，只差第 ② 步"。
+ *
+ * 所以它是 `AuthStatus` 上的**独立字段**而不是 `authorized` 分支里的
+ * 一部分：未登录时它照样可以有值。
+ *
+ * ## ★ 只有需要两步的渠道才有
+ *
+ * 钉钉是一步（没有"先绑应用"这一层），它的这个字段恒为 `undefined`
+ * —— 界面据此**不渲染**应用那一节，而不是渲染一个空的。
+ */
+export interface ChannelAppBinding {
+  /** 应用 id（实测飞书是 `cli_` 前缀 20 字符）。展示用，不是密钥。 */
+  appId: string
+  /**
+   * 应用的名字（实测取自 `identities.bot.appName`，形如「某人的飞书 CLI」）。
+   * 取不到就 `null` —— **不编**一个假名字，界面回落显示 appId。
+   */
+  appName: string | null
+}
+
+/**
  * 授权状态。
  *
  * 用判别联合而不是「一个大对象 + 一堆可选字段」：UI 里就不需要到处判空，
  * 且「未授权却读到了 corpName」这类矛盾状态在类型层面就不可能出现。
+ *
+ * ★ 例外是 `appBinding`：它在三个分支上都可选，因为「应用绑了没有」与
+ * 「人登录了没有」是**正交**的两件事（见 `ChannelAppBinding`）。
  */
 export type AuthStatus =
-  | { state: "unauthorized" }
+  | { state: "unauthorized"; appBinding?: ChannelAppBinding | undefined }
   | {
       /** 有历史登录记录但 refresh token 已过期，需要重新扫码 */
       state: "expired"
       corpName?: string | undefined
       userName?: string | undefined
+      appBinding?: ChannelAppBinding | undefined
     }
   | {
       state: "authorized"
@@ -87,6 +129,7 @@ export type AuthStatus =
       refreshExpiresAt: string | null
       /** 距 refresh 到期还有几天；UI 据此决定是否显示提醒 */
       daysUntilRefreshExpiry: number | null
+      appBinding?: ChannelAppBinding | undefined
     }
 
 /** 授权方式。loopback 自动拉浏览器并回调；device 显示授权码手动输入。 */

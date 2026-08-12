@@ -1,5 +1,6 @@
 import type {
   AuthStatus,
+  ChannelAppBinding,
   ChannelConversationItem,
   ChannelPullPage,
   ParsedConversationLike,
@@ -168,6 +169,28 @@ export function parseLarkIdentity(payload: unknown): LarkIdentity | null {
   }
 }
 
+/**
+ * 应用层绑定 —— 与"人登录了没有"正交，所以**单独解析**，
+ * 且在未授权时也要能返回（见 `ChannelAppBinding` 的说明）。
+ *
+ * ## 实测字段位置（本机，`auth status --json --verify`）
+ *
+ * ```
+ * .appId                      = 'cli_…'（20 字符）   ← 顶层，不在 identities 下
+ * .identities.bot.appName     = '<某人>的飞书 CLI'   ← 应用名只有 bot 这一支有
+ * ```
+ *
+ * ★ `appName` 是**应用**的名字，不是组织名（曾一度想拿它当组织名用 ——
+ * 不对，那会把「某人的飞书 CLI」显示成组织）。
+ */
+function parseLarkAppBinding(payload: unknown): ChannelAppBinding | undefined {
+  const data = record(payload)
+  const appId = str(data["appId"], data["app_id"])
+  if (appId === null || appId.trim() === "") return undefined
+  const bot = record(record(data["identities"])["bot"])
+  return { appId, appName: str(bot["appName"], bot["app_name"]) }
+}
+
 export function parseLarkAuthStatus(payload: unknown, now: Date = new Date()): AuthStatus {
   const data = record(payload)
   const identities = record(data["identities"])
@@ -180,7 +203,18 @@ export function parseLarkAuthStatus(payload: unknown, now: Date = new Date()): A
   const valid =
     rawStatus === "authenticated" || tokenStatus === "valid" || bool(user["authenticated"])
   const hasScopes = LARK_AUTH_SCOPES.every((scope) => scopes.includes(scope))
-  if (identity === null || (!verified && !valid) || !hasScopes) return { state: "unauthorized" }
+  const appBinding = parseLarkAppBinding(payload)
+  /**
+   * ★★ 未授权时**照样带上 appBinding** —— 这正是两步之间那个中间态。
+   *
+   * "应用已绑、人还没登录"与"什么都没有"在界面上是两件完全不同的事：
+   * 前者只差第 ② 步（点「登录」即可），后者要从第 ① 步开始。
+   * 原来两者都返回裸 `{state:"unauthorized"}`，于是界面无法区分，
+   * 只能给一颗含糊的「开始授权」按钮。
+   */
+  if (identity === null || (!verified && !valid) || !hasScopes) {
+    return appBinding === undefined ? { state: "unauthorized" } : { state: "unauthorized", appBinding }
+  }
   /**
    * 两个过期时间。CLI 用 camelCase（`expiresAt`/`refreshExpiresAt`），
    * 但也兜一下 snake_case —— 上游换风格时不至于静默变回「—」。
@@ -193,6 +227,7 @@ export function parseLarkAuthStatus(payload: unknown, now: Date = new Date()): A
   )
   return {
     state: "authorized",
+    ...(appBinding === undefined ? {} : { appBinding }),
     corpId: identity.tenantKey,
     corpName: identity.tenantName,
     userId: identity.openId,
