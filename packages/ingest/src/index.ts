@@ -42,3 +42,18 @@ export {
   VECTOR_CONSUMER_ID,
 } from "./local-index.js"
 export type { Embedder, VectorHandlerOptions } from "./local-index.js"
+
+/**
+ * 数据平面的**拓扑声明**（ODPS 式的显式形状）。
+ *
+ * 生产者/消费者/依赖/路由从"散在构造函数与调用顺序里"变成可查询的数据；
+ * `runCycle` 按依赖序驱动。见 `topology.ts` 文件头。
+ */
+export { PRODUCERS, CONSUMERS, resolveConsumerOrder, runCycle } from "./topology.js"
+export type {
+  DataDomain,
+  ProducerSpec,
+  ConsumerSpec,
+  ConsumerOutcome,
+  CycleRunnable,
+} from "./topology.js"

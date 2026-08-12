@@ -38,6 +38,9 @@ import {
   newId,
   normalize,
   OutboxConsumer,
+  runCycle,
+  type ConsumerOutcome,
+  type CycleRunnable,
   persistBatch,
   persistMinutes,
   persistDocuments,
@@ -2584,25 +2587,48 @@ export class IngestService {
     return totals
   }
 
-  /** Advance the one set of vault-wide FTS/distill/persona consumers. */
-  async runSharedConsumersOnce(): Promise<void> {
-    await this.ftsConsumer.runOnce()
-    try {
-      await this.distillConsumer.runOnce()
-    } catch (error) {
-      this.options.logger.warn("distill consumer failed", {
-        detail: error instanceof Error ? error.message : String(error),
+  /**
+   * 跑一轮 vault 级的消费者（FTS / 蒸馏 / 分身）。
+   *
+   * ## ★★★ 顺序是**算出来的**，不再是手写的三行
+   *
+   * 这里原来是 `fts → distill → persona` 三行连续 `runOnce()`。那个顺序
+   * 恰好满足依赖（蒸馏要在 graph-export 之后），但**没有任何东西保证它继续
+   * 满足** —— 有人调换两行、或在中间插一个新消费者，依赖就悄悄破了，
+   * 而破了的表现是"蒸馏引用了还不存在的 fact"，不报错。
+   *
+   * 改成走 `runCycle`（按 `CONSUMERS` 的 `dependsOn` 拓扑排序）之后：
+   * · 顺序由声明决定，加消费者只需往 `CONSUMERS` 加一行；
+   * · 每个消费者这一轮干了什么会**返回**（含"在等哪个上游"），
+   *   而不是只写日志 —— 状态页因此能显示"蒸馏在等图谱"而不是"没进展"。
+   *
+   * ★ `graph-export` 不在这个 map 里：它由 kl 服务侧推进（外部消费者）。
+   * `runCycle` 对缺席的消费者记 `absent: true` 并继续 —— 而它作为
+   * `distill` 的上游仍然通过 `OutboxConsumer.dependsOn` 那道闸起作用。
+   */
+  async runSharedConsumersOnce(): Promise<readonly ConsumerOutcome[]> {
+    const runnables = new Map<string, CycleRunnable>([
+      [FTS_CONSUMER_ID, this.ftsConsumer],
+      [DISTILL_CONSUMER_ID, this.distillConsumer],
+    ])
+    if (this.personaConsumer !== null) {
+      runnables.set(PERSONA_CONSUMER_ID, this.personaConsumer)
+    }
+    const outcomes = await runCycle(runnables)
+    /**
+     * ★ 只在"真有话说"时记日志：跑空一轮（全 0）每 2 分钟刷一条
+     * 是噪声，而它会把真正的异常淹掉。
+     */
+    for (const outcome of outcomes) {
+      if (outcome.absent || (outcome.processed === 0 && outcome.skipped === 0)) continue
+      this.options.logger.info("consumer cycle", {
+        consumer: outcome.id,
+        processed: outcome.processed,
+        skipped: outcome.skipped,
+        ...(outcome.waitingForUpstream === null ? {} : { waitingFor: outcome.waitingForUpstream }),
       })
     }
-    if (this.personaConsumer !== null) {
-      try {
-        await this.personaConsumer.runOnce()
-      } catch (error) {
-        this.options.logger.warn("persona consumer failed", {
-          detail: error instanceof Error ? error.message : String(error),
-        })
-      }
-    }
+    return outcomes
   }
 
   /**
