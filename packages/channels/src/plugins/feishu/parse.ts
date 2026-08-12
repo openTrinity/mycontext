@@ -170,6 +170,34 @@ export function parseLarkIdentity(payload: unknown): LarkIdentity | null {
 }
 
 /**
+ * 从 `contact +get-user` 的响应里取组织 id（`tenant_key`）。
+ *
+ * ## ★★ 为什么导出（而不是各处一份）
+ *
+ * 组织 id 有**两条**需要它的路：
+ * · `FeishuAuth.status()` —— 界面上显示的组织名走这条；
+ * · `createFeishuIdentity().resolveSelf()` —— 采集侧解析本人身份走这条。
+ *
+ * 上一轮只修了后者，于是界面上仍是「未知组织」而单测全绿
+ * （CDP 探针量出 corpId 长度 27 = 派生值才暴露）。两条路解析同一件事，
+ * 那个解析必须**只有一份** —— 各写一份就会再分叉一次。
+ *
+ * ## 实测层级（本机，飞书已授权）
+ *
+ * `.data.user.tenant_key`（16 字符）。兜 `.user.*` 与顶层是防上游改信封 ——
+ * 那时它至少还能取到，而不是静默回落到派生值。
+ */
+export function readFeishuTenantKey(payload: unknown): string | null {
+  const root = record(payload)
+  const candidates = [record(record(root["data"])["user"]), record(root["user"]), root]
+  for (const user of candidates) {
+    const raw = user["tenant_key"] ?? user["tenantKey"]
+    if (typeof raw === "string" && raw !== "") return raw
+  }
+  return null
+}
+
+/**
  * 应用层绑定 —— 与"人登录了没有"正交，所以**单独解析**，
  * 且在未授权时也要能返回（见 `ChannelAppBinding` 的说明）。
  *

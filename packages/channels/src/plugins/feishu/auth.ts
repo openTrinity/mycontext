@@ -12,7 +12,12 @@ import { AppError, type Logger } from "@mycontext/kernel"
 import type { ProcessRunner } from "@mycontext/runtime-env"
 import type { AuthContext, AuthStatus, ChannelAuth } from "../../types.js"
 import { LarkCli } from "./cli.js"
-import { LARK_AUTH_SCOPES, parseLarkAuthStatus, parseLarkDeviceGrant } from "./parse.js"
+import {
+  LARK_AUTH_SCOPES,
+  parseLarkAuthStatus,
+  parseLarkDeviceGrant,
+  readFeishuTenantKey,
+} from "./parse.js"
 
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 
@@ -46,7 +51,66 @@ export class FeishuAuth implements ChannelAuth {
   async status(): Promise<AuthStatus> {
     try {
       const payload = await this.cli.json<unknown>(["auth", "status", "--json", "--verify"])
-      return parseLarkAuthStatus(payload)
+      const status = parseLarkAuthStatus(payload)
+      /**
+       * ★★★ 组织 id 要**再取一次** —— `auth status` 的响应里没有它。
+       *
+       * ## 这是"修在了另一条路上"的一次真实教训（CDP 端到端抓到的）
+       *
+       * 上一轮我把 `contact +get-user` 加进了 `createFeishuIdentity()`
+       * 的 `resolveSelf()`。那条路是**采集侧**解析本人身份用的。
+       * 而界面上显示的组织名走的是**这里**（`status()` →
+       * `parseLarkAuthStatus`），两条路各自解析同一件事。
+       *
+       * 结果：单测绿、`resolveSelf` 也确实跑过（日志有
+       * `self identity resolved`），而界面上仍是「未知组织」——
+       * 因为界面用的是没修的那一条。CDP 探针量出 `corpId` 长度 27
+       * （= `unknown-tenant:` 15 + openId 前 12 位）才暴露。
+       *
+       * ## 为什么不把两条合并
+       *
+       * 它们的**代价模型**不同：`status()` 在设置页每次渲染都会走
+       * （带 30s TTL 缓存），而 `resolveSelf()` 只在授权后与手动确认时走。
+       * 合并会让便宜的那条变贵。所以这里补一次同样的取值，
+       * 而不是让 `status()` 去调 `resolveSelf()`。
+       *
+       * ★ 只在**已授权**且拿到的是派生值时才去问 —— 派生值的前缀
+       * `unknown-tenant:` 就是"没读到真租户"的标记（见 `parseLarkIdentity`）。
+       * 已经有真值时不多花一次子进程调用。
+       *
+       * ★ 失败**不影响授权态**：拿不到就沿用派生值。这一步失败不该把
+       * "已授权"变成"未授权"。
+       */
+      if (status.state === "authorized" && status.corpId.startsWith("unknown-tenant:")) {
+        try {
+          const user = await this.cli.json<unknown>([
+            "contact",
+            "+get-user",
+            "--as",
+            "user",
+            "--format",
+            "json",
+          ])
+          const tenantKey = readFeishuTenantKey(user)
+          if (tenantKey !== null) {
+            return {
+              ...status,
+              corpId: tenantKey,
+              /**
+               * 组织**名**两条命令都不给（实测：`get-user` 只有 `tenant_key`，
+               * `auth status` 的 `identities.bot.appName` 是**应用**名不是组织名）。
+               * 所以不编一个假名字，显示短码 —— 两个组织至少能分辨。
+               */
+              corpName: `组织 ${tenantKey.slice(0, 8)}`,
+            }
+          }
+        } catch (error) {
+          this.options.logger.debug("lark tenant lookup failed; keeping derived corpId", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+      return status
     } catch (error) {
       this.options.logger.debug("lark auth status unavailable", {
         detail: error instanceof Error ? error.message : String(error),

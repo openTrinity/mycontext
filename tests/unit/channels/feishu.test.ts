@@ -758,3 +758,126 @@ describe("飞书两步授权：实测抓到的三个缺口", () => {
     expect(parseLarkAuthStatus({}).appBinding).toBeUndefined()
   })
 })
+
+/**
+ * ── 组织 id 必须在**界面走的那条路**上也修好 ──────────────────
+ *
+ * 这一组是一次"修在了另一条路上"的记录。上一轮我把 `contact +get-user`
+ * 加进了 `createFeishuIdentity().resolveSelf()`（采集侧解析本人身份那条），
+ * 单测绿、日志里 `self identity resolved` 也确实出现了 —— 而**界面上仍是
+ * 「未知组织」**，因为设置页显示的组织名走的是 `FeishuAuth.status()`。
+ *
+ * 是 CDP 端到端探针量出 `corpId` 长度 27（= `unknown-tenant:` 15 +
+ * openId 前 12 位 = 派生值）才暴露的。两条路解析同一件事却各自实现，
+ * 于是"修好了"这个结论只在其中一条上成立。
+ */
+describe("飞书组织 id：status() 这条路（界面用的就是它）", () => {
+  /** 按 args 分流的 auth：auth status 一种输出、contact 另一种。 */
+  function authWithTenant(tenantKey: string | null) {
+    const authStatusPayload = {
+      // ★ 实测：`auth status` 的响应里**没有** tenantKey（这正是问题的起点）
+      appId: "cli_FAKE00000000000009",
+      verified: true,
+      identities: {
+        bot: { status: "ready", appName: "测试 CLI 应用" },
+        user: {
+          status: "ready",
+          openId: "ou_FAKE0000000000000000000000000001",
+          userName: "Alice",
+          tokenStatus: "valid",
+          scope: LARK_AUTH_SCOPES.join(" "),
+        },
+      },
+    }
+    const processes = {
+      async exec(input: { args: string[] }) {
+        if (input.args[0] === "config") {
+          return { exitCode: 0, stdout: "already downgraded", stderr: "" }
+        }
+        if (input.args[0] === "contact") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(
+              tenantKey === null
+                ? { ok: true, data: { user: {} } }
+                : { ok: true, data: { user: { tenant_key: tenantKey } } },
+            ),
+            stderr: "",
+          }
+        }
+        return { exitCode: 0, stdout: JSON.stringify(authStatusPayload), stderr: "" }
+      },
+    } as unknown as ProcessRunner
+    const options = {
+      processes,
+      logger: noopLogger(),
+      authRoot: () => "/tmp/inklings-feishu-tenant",
+      executable: "/tmp/lark-cli",
+      platform: "darwin" as const,
+      openExternal: async () => undefined,
+    }
+    return new FeishuAuth(options, new LarkCli(options))
+  }
+
+  it("★★ status() 会补一次 get-user，把真 tenant_key 当 corpId", async () => {
+    /**
+     * 反证：删掉 `status()` 里那段 `contact +get-user` 补取，这一条立刻转红
+     * —— 而红之前的状态正是用户截图里的「未知组织」。
+     */
+    const status = await authWithTenant("2ecFAKETENANT001").status()
+    expect(status.state).toBe("authorized")
+    if (status.state !== "authorized") return
+    expect(status.corpId).toBe("2ecFAKETENANT001")
+    // 组织**名**两条命令都不给 → 显示短码，而不是编一个假名字
+    expect(status.corpName).toBe("组织 2ecFAKET")
+  })
+
+  it("★ 取不到 tenant_key → 沿用派生值且**仍然是已授权**（不能因此掉线）", async () => {
+    const status = await authWithTenant(null).status()
+    expect(status.state).toBe("authorized")
+    if (status.state !== "authorized") return
+    // 派生值：跟着 openId 走、带 `unknown-tenant:` 标记（见 parseLarkIdentity）
+    expect(status.corpId.startsWith("unknown-tenant:")).toBe(true)
+    expect(status.corpName).toBe("未知组织")
+  })
+
+  it("★ 已经是真值时不再多问一次（省一次子进程调用）", async () => {
+    const seen: string[][] = []
+    const payload = {
+      appId: "cli_FAKE00000000000009",
+      verified: true,
+      identities: {
+        user: {
+          status: "ready",
+          openId: "ou_FAKE0000000000000000000000000001",
+          userName: "Alice",
+          tokenStatus: "valid",
+          scope: LARK_AUTH_SCOPES.join(" "),
+          // 这次 auth status 自己就带了 tenantKey（上游若某天补上就是这形态）
+          tenantKey: "2ecFAKETENANT002",
+          tenantName: "测试组织",
+        },
+      },
+    }
+    const processes = {
+      async exec(input: { args: string[] }) {
+        seen.push([...input.args])
+        if (input.args[0] === "config") {
+          return { exitCode: 0, stdout: "already downgraded", stderr: "" }
+        }
+        return { exitCode: 0, stdout: JSON.stringify(payload), stderr: "" }
+      },
+    } as unknown as ProcessRunner
+    const options = {
+      processes,
+      logger: noopLogger(),
+      authRoot: () => "/tmp/inklings-feishu-tenant2",
+      executable: "/tmp/lark-cli",
+      platform: "darwin" as const,
+      openExternal: async () => undefined,
+    }
+    const status = await new FeishuAuth(options, new LarkCli(options)).status()
+    expect(status.state === "authorized" && status.corpId).toBe("2ecFAKETENANT002")
+    expect(seen.some((a) => a[0] === "contact")).toBe(false)
+  })
+})

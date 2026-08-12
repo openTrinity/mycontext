@@ -26,7 +26,9 @@ import type {
   ChannelPullSpec,
 } from "../../types.js"
 import type { LarkCli } from "./cli.js"
-import { parseLarkAuthStatus, parseLarkIdentity, parseLarkMessagePage } from "./parse.js"
+import { parseLarkAuthStatus, parseLarkIdentity, parseLarkMessagePage,
+  readFeishuTenantKey,
+} from "./parse.js"
 
 function localIso(ms: number): string {
   const date = new Date(ms)
@@ -301,19 +303,6 @@ export function createFeishuIngest(cli: Pick<LarkCli, "json">): ChannelIngest {
  * 同时兼容"信封已被拆掉"的两种形状，上游改层级时不至于静默变成
  * 「未知组织」（那正是这次要修的症状）。
  */
-function readTenantKey(payload: unknown): string | null {
-  const asRecord = (value: unknown): Record<string, unknown> | null =>
-    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null
-  const root = asRecord(payload)
-  if (root === null) return null
-  const candidates = [asRecord(asRecord(root["data"])?.["user"]), asRecord(root["user"]), root]
-  for (const user of candidates) {
-    if (user === null) continue
-    const raw = user["tenant_key"] ?? user["tenantKey"]
-    if (typeof raw === "string" && raw !== "") return raw
-  }
-  return null
-}
 
 export function createFeishuIdentity(cli: Pick<LarkCli, "json">): ChannelIdentity {
   return {
@@ -357,7 +346,7 @@ export function createFeishuIdentity(cli: Pick<LarkCli, "json">): ChannelIdentit
           "--format",
           "json",
         ])
-        const real = readTenantKey(user)
+        const real = readFeishuTenantKey(user)
         if (real !== null) tenantKey = real
       } catch {
         // 沿用 parseLarkIdentity 的派生值（形如 `unknown-tenant:…`）
