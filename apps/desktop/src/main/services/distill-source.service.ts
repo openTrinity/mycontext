@@ -432,10 +432,70 @@ export class DistillSourceService {
       })),
       at,
     )
+    /**
+     * ★★★ 勾选监听 → **自动并入学习范围**（这一步是必须的，不是可选的）
+     *
+     * 用户原话把两个范围分开，但也说了分身要"看这段时间新消息"。而
+     * `admit()` / `intake` 判"该不该回"要读**历史**：`message_mentions`、
+     * 这个会话之前的往来、对方在触发消息之后有没有又说话。
+     *
+     * 所以"监听了但不采集"这个组合是**坏的**：分身收到消息、却拿不到
+     * 任何上下文，于是它要么不回、要么回得离谱。而用户完全看不出成因
+     * （他明明勾了监听）。
+     *
+     * ## 我上一轮把这件事留给用户决定，那是错的
+     *
+     * 我的顾虑是"一次勾选悄悄改动另一个只增不减的范围"。顾虑本身成立，
+     * 但结论下错了：出路不是**不做**，而是**别悄悄做** ——
+     * 所以这里 ① 只增（并集，不动 since），② 记日志说清并入了几个，
+     * ③ 界面上标 `source: 'learning'` 让用户看到"这是随监听加入的"。
+     *
+     * 反过来（不联动）留下的是一个能配出来的坏状态，而用户没有线索。
+     * 那比"多采一个群"糟得多。
+     *
+     * ★ 只补**会话白名单**，不动 `since`：监听只管实时流，没有理由
+     * 因为勾了监听就把学习的历史下界往回挪（那才是真正的超范围）。
+     */
+    let mergedIntoLearning = 0
+    try {
+      const repo = new DistillSourceRepository(db)
+      const chat = repo.list().find((row) => row.kind === "chat")
+      const current = chat?.scope.conversationIds
+      /**
+       * ★ `undefined` = 不设限（全部会话都在学习范围里）→ 无需并入。
+       * 这里若"贴心地"写成一个具体列表，反而把不设限收窄成那几个 ——
+       * 那正是 `mergeScopeOnlyGrowing` 注释里那个坑。
+       */
+      if (current !== undefined) {
+        const before = new Set(current)
+        const missing = input.conversationExternalIds.filter((id) => !before.has(id))
+        if (missing.length > 0) {
+          repo.upsert(
+            "chat",
+            {
+              enabled: chat?.enabled ?? true,
+              scope: { ...chat?.scope, conversationIds: [...before, ...missing] },
+            },
+            at,
+          )
+          mergedIntoLearning = missing.length
+        }
+      }
+    } catch (error) {
+      /**
+       * 并入失败**不**让整个保存失败：监听范围已经存进去了，
+       * 而这一步是补偿。但必须记 —— 否则用户会遇到"监听了却没上下文"
+       * 而没有任何线索。
+       */
+      this.options.logger.warn("attention scope learning merge failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    }
     this.options.logger.info("attention scope saved", {
       channelId: input.channelId,
       requested: input.conversationExternalIds.length,
       changed,
+      mergedIntoLearning,
     })
     return true
   }

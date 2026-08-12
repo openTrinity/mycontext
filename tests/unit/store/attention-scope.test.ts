@@ -311,3 +311,127 @@ describe("接线：路由挂在 personaFastPath 之前", () => {
     expect(call).toContain("skipped: verdict.routed ? 0 : 1")
   })
 })
+
+/**
+ * ── ★★★ 消费者协同：蒸馏不许跑在图谱前面 ────────────────────────
+ *
+ * 用户原话：「每个消费者都根据当前/当前一些消费者一起干活」
+ * 「forge 蒸馏可能还会引用 kl-graph 第二阶段的 fact 之类的」。
+ *
+ * 判据落在 `OutboxConsumer` 的 `dependsOn`：蒸馏的批次上界被夹到
+ * `graph-export` 的 `acked_seq`。没有这个闸的话蒸馏会跑到图谱前面，
+ * 那段消息的 fact 还不存在 —— 而蒸馏照常"成功"、游标照常推进，
+ * 缺失是**永久且静默**的。
+ */
+describe("接线：消费者依赖（蒸馏 ← 图谱导出）", () => {
+  it("★★★ 蒸馏声明了 dependsOn: ['graph-export']", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
+    const idx = src.indexOf("consumerId: DISTILL_CONSUMER_ID")
+    expect(idx).toBeGreaterThan(0)
+    /**
+     * 反证：把 `dependsOn` 那一行删掉 → 这条转红。
+     * 而红之前的状态正是"蒸馏可以跑在图谱前面"。
+     */
+    const block = src.slice(idx, idx + 2600)
+    expect(block).toContain('dependsOn: ["graph-export"]')
+  })
+
+  it("★★★ 骨架把批次上界夹到上游，而不是「上游没追平就整轮不干活」", async () => {
+    /**
+     * 夹上界 vs 整轮跳过：后者在两个消费者互等时会死锁，也会让一个慢的
+     * 上游把整条链路停死。判据落在"有没有按 seq 过滤批次"。
+     *
+     * 反证：把 `.filter((row) => ... row.seq <= upstreamLimit)` 删掉 → 红。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/ingest/src/consumer.ts", "utf8")
+    expect(src).toContain("row.seq <= upstreamLimit")
+    expect(src).toContain("waitingForUpstream")
+  })
+
+  it("★★★ 上游**没注册**时不夹（否则是一次静默功能回归）", async () => {
+    /**
+     * kl 服务没起时 `graph-export` 不存在。夹成 0 会让蒸馏永久停在原地，
+     * 而用户看到的是"画像一直不更新"，日志里一个错都没有。
+     *
+     * 反证：把 `if (upstream === null) continue` 改成
+     * `upstreamLimit = 0` → 红。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/ingest/src/consumer.ts", "utf8")
+    const idx = src.indexOf("for (const upstreamId of this.options.dependsOn ?? [])")
+    expect(idx).toBeGreaterThan(0)
+    const loop = src.slice(idx, idx + 400)
+    expect(loop).toContain("if (upstream === null) continue")
+  })
+
+  it("★★ 「在等上游」必须能被区分出来（不是报 0 就完事）", async () => {
+    /**
+     * 只返回 `processed: 0` 的话，"没新数据"与"在等图谱"不可区分 ——
+     * 而后者的出路是去看图谱为什么慢。这是本仓库反复出现的那类
+     * "静默 return 让两种情况同形"。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/ingest/src/consumer.ts", "utf8")
+    expect(src).toContain("waitingForUpstream: waitingFor")
+  })
+})
+
+/**
+ * ── ★★★ 勾选监听 → 自动并入学习范围 ───────────────────────────
+ *
+ * 「监听了但不采集」是一个**坏状态**：分身收到消息却拿不到上下文
+ * （`admit()`/`intake` 要读 mentions、历史往来），于是不回或回得离谱，
+ * 而用户完全看不出成因。所以联动是必须的。
+ *
+ * ★ 我上一轮把这个决定推给用户，那是错的：顾虑（悄悄改动只增范围）
+ * 成立，但出路是**别悄悄做**而不是**不做**。
+ */
+describe("接线：监听范围并入学习范围（只增 + 可见）", () => {
+  it("★★★ attentionScopeSave 会把会话补进学习范围的白名单", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/distill-source.service.ts", "utf8")
+    const idx = src.indexOf("attentionScopeSave(input: AttentionScopeSaveInput)")
+    expect(idx).toBeGreaterThan(0)
+    const body = src.slice(idx, idx + 4000)
+    /**
+     * 反证：把那段 merge 删掉 → 这条转红。
+     * 而红之前的状态是"勾了监听但那个群不在学习范围里"。
+     */
+    expect(body).toContain("mergedIntoLearning")
+    expect(body).toContain("conversationIds: [...before, ...missing]")
+  })
+
+  it("★★★ 学习范围「不设限」时**不并入**（否则把全采收窄成几个）", async () => {
+    /**
+     * `conversationIds === undefined` 表示不设限（全部会话都在学习范围里）。
+     * 这时"贴心地"写一个具体列表进去 = 把 92 个会话收窄成勾选的那几个 ——
+     * 而那是本轮开头那个坑的同一形状。
+     *
+     * 反证：把 `if (current !== undefined)` 这个判据删掉 → 红。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/distill-source.service.ts", "utf8")
+    const idx = src.indexOf("mergedIntoLearning")
+    const around = src.slice(Math.max(0, idx - 1200), idx + 800)
+    expect(around).toContain("if (current !== undefined)")
+  })
+
+  it("★★ 并入**不动** since（监听只管实时流，没理由往回挖历史）", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/distill-source.service.ts", "utf8")
+    const idx = src.indexOf("mergedIntoLearning = missing.length")
+    expect(idx).toBeGreaterThan(0)
+    const block = src.slice(Math.max(0, idx - 700), idx)
+    // 只覆盖 conversationIds，其余字段原样展开
+    expect(block).toContain("...chat?.scope")
+    expect(block.includes("since:")).toBe(false)
+  })
+
+  it("★★ 并入失败不让保存失败，但必须记日志（否则无线索）", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/distill-source.service.ts", "utf8")
+    expect(src).toContain("attention scope learning merge failed")
+  })
+})
