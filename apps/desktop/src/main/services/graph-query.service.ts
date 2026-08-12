@@ -194,6 +194,21 @@ export interface GraphQueryOptions {
    */
   factsOfEntity?: (entityId: string) => Promise<ReadonlySet<string>>
   /**
+   * 一个实体的**直连邻居**（kl `/entity` 的 `edges`）—— fact 交集为空时的兜底。
+   *
+   * ## ★★ 为什么需要它（"数据都有、图谱却失败"的第二个成因）
+   *
+   * 实测本机本人那个实体：`mentions=51`、`degree=14`、5 条 `AUTHORED_BY` 边，
+   * 但 `facts` 是**空列表** —— 参与了很多消息、图里也记了边，只是没有以我为
+   * 主语的 ABOUT 类事实。只做 fact 交集时它就是 0 个邻居，而 ego 会说
+   * 「图里还没有你的邻居」，那是假话。
+   *
+   * 不给这个回调 = 保持原行为（只看 fact），不会崩，只是那种实体仍显示空图。
+   */
+  neighborsOfEntity?: (
+    entityId: string,
+  ) => Promise<readonly { id: string; type: string; label: string }[]>
+  /**
    * ego 图最多问多少个候选实体。
    *
    * ★ 有上限是因为这是 N 次 HTTP：618 个是 0.72s，可接受；但实体数会随

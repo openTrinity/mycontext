@@ -2637,12 +2637,105 @@ export class KlServerService {
     if (!response.ok) {
       throw new Error(`读关系失败：HTTP ${response.status}`)
     }
-    const body = (await response.json()) as { facts?: Array<{ id?: string }> }
+    /**
+     * ★★★ 字段名是 **`results`**，不是 `facts` —— 这一行原来读错，
+     * 于是 `factsOfEntity` **恒返回空集**（接口通、有响应、解析出 0 条）。
+     *
+     * 实测 kl `/facts` 的响应（POST，`{entity_id}`）：
+     *
+     * ```
+     * {"results": [...], "count": N}
+     * ```
+     *
+     * 而这里写的是 `body.facts` → 恒 undefined → 空集。后果是一条完整的
+     * 静默降级链：ego 图拿不到任何关系 → 判「图里还没有你的邻居 —— 先同步」
+     * → 用户点同步、图照常建、界面照常说没有邻居。而实体与事实的数字
+     * 一直是对的（那是另一条查询），所以看起来就是"数据都有，图谱失败"。
+     *
+     * 两个名字都收：上游若哪天改回 `facts` 也不会又静默变空。
+     */
+    const body = (await response.json()) as {
+      results?: Array<{ id?: string }>
+      facts?: Array<{ id?: string }>
+    }
     const out = new Set<string>()
-    for (const fact of body.facts ?? []) {
+    for (const fact of body.results ?? body.facts ?? []) {
       if (typeof fact.id === "string" && fact.id !== "") out.add(fact.id)
     }
     return out
+  }
+
+  /**
+   * 一个实体的**直连邻居**（`/entity` 响应里的 `edges`）。
+   *
+   * ## ★★ 为什么光修上面那个字段名还不够
+   *
+   * 修好 `results` 之后 `factsOfEntity` 能拿到 fact 了，但**本人这个实体
+   * 恰好没有 ABOUT 类事实**。实测本机（钉钉图、建图刚跑完）：
+   *
+   * ```
+   * mentions=51   degree=14   edges=5 条 AUTHORED_BY   facts=[]   ← 空
+   * ```
+   *
+   * 也就是"我"参与了很多消息、图里也记了我的边，只是没有以我为主语的
+   * 事实。ego 图只做「fact 集交集」的话，对我仍然是 0 个邻居 —— 而那句
+   * 「图里还没有你的邻居」依然是假话。
+   *
+   * 所以补一条**直连边**的读法，由 `GraphQueryService` 在 fact 交集为空时
+   * 兜底。语义差别要说清：fact 交集是"在同一条事实里一起出现"（共现，更强），
+   * 这些是"图上直接连着"（`AUTHORED_BY`/`INVOLVES` 之类，更粗但真实）。
+   *
+   * ## ★ 为什么不用 `/expand`
+   *
+   * kl 的 skill 文档里它标着 **[DEPRECATED]**，返回的是 `ENTITY_SIMILAR`
+   * —— **向量相似**邻居（"名字/语义像"），不是"真的有关系"。实测它对本人
+   * 只给 1 个 `source:"similarity"` 的邻居。拿它画 ego 图会把陌生人画成
+   * 我的邻居，比空图更糟。
+   *
+   * 失败返回空数组而不是抛（与 `factsOfEntity` 同一纪律：单个实体读不到
+   * 关系不该污染整个服务的状态）。
+   */
+  async neighborsOfEntity(
+    entityId: string,
+  ): Promise<readonly { id: string; type: string; label: string }[]> {
+    if (entityId === "") return []
+    try {
+      const response = await fetch(`http://127.0.0.1:${this.port}/entity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entity_id: entityId }),
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (!response.ok) return []
+      const body = (await response.json()) as {
+        results?: Array<{
+          id?: string
+          edges?: Array<{ target_id?: string; target_label?: string; type?: string }>
+        }>
+      }
+      /**
+       * ★ 按 id 找回自己那一行：`/entity` 是**搜索**接口（同名可能多条，
+       * 实测本机某个名字 count=3），取 `results[0]` 会在同名时挑错人。
+       */
+      const row = (body.results ?? []).find((item) => item.id === entityId)
+      const out: Array<{ id: string; type: string; label: string }> = []
+      for (const edge of row?.edges ?? []) {
+        const id = typeof edge.target_id === "string" ? edge.target_id : ""
+        // 自环丢掉：画出来是一个指向自己的边，纯噪声
+        if (id === "" || id === entityId) continue
+        out.push({
+          id,
+          type: typeof edge.type === "string" ? edge.type : "",
+          label: typeof edge.target_label === "string" ? edge.target_label : "",
+        })
+      }
+      return out
+    } catch (error) {
+      this.options.logger.debug("kl neighborsOfEntity failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return []
+    }
   }
 
   async refreshEdgeCount(): Promise<void> {

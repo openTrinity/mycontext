@@ -2043,3 +2043,100 @@ describe("★★ wipeGraphData 的删除清单", () => {
     expect(body).toContain('"qdrant_data"')
   })
 })
+
+describe("★★★ 关系读取：响应字段名读错就是恒空（静默降级）", () => {
+  /**
+   * ## 这一组锁的是一次真实的"数据都有、图谱可视化失败"
+   *
+   * `factsOfEntity` 原来读 `body.facts`，而 kl `/facts` 实际返回的是
+   * **`results`**（实测：`{"results":[...],"count":N}`）。于是它**恒返回空集**
+   * —— 接口通、HTTP 200、有响应体、解析出 0 条。
+   *
+   * 后果是一条完整的静默降级链：ego 图拿不到任何关系 → 判
+   * 「图里还没有你的邻居 —— 先同步」→ 用户点同步、图照常建、界面照常说
+   * 没有邻居。而实体/事实的**数字一直是对的**（那是另一条查询），
+   * 所以用户看到的就是"数据都有，唯独图谱失败"。
+   *
+   * 这一层原来**零测试覆盖**（`graph-query.test.ts` 直接注入 provider，
+   * 跳过了 HTTP 解析）—— 这正是 bug 能溜进去的原因。
+   */
+  // ★ 与本文件其余用例一致：ManualClock 收毫秒数（Date 形态会让 ready 流程的等待不前进）
+  const clock = new ManualClock(1_000)
+
+  /** 把 fetch 打桩成返回给定 JSON；记录被请求的 path 与 body。 */
+  function stubFetch(payload: unknown) {
+    const seen: { url: string; body: unknown }[] = []
+    vi.stubGlobal("fetch", async (url: string, init?: { body?: string }) => {
+      seen.push({ url, body: init?.body === undefined ? null : JSON.parse(init.body) })
+      return { ok: true, status: 200, json: async () => payload } as unknown as Response
+    })
+    return seen
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("★★★ /facts 的 fact id 从 **results** 里取（读 facts 会恒空）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const runner = fakeRunner()
+    // ★ `factsOfEntity` 前面有 ensureReady 闸（见它的注释：不就绪就抛，
+    //   让上层给"服务还没起来"那句真话）。所以先把服务带到 ready。
+    const service = makeService({ runner, probeHealth: async () => true, clock })
+    await service.ensureReady()
+    // 真机形状：results + count（**没有** facts 这个键）
+    const seen = stubFetch({ results: [{ id: "f1" }, { id: "f2" }], count: 2 })
+
+    const ids = await service.factsOfEntity("e1")
+
+    // 反证：把实现改回 `body.facts` → 这里是空集，这条立刻转红
+    expect([...ids].sort()).toEqual(["f1", "f2"])
+    expect(seen[0]?.url).toContain("/facts")
+    expect(seen[0]?.body).toMatchObject({ entity_id: "e1" })
+  })
+
+  it("★ 上游若改回 facts 字段也能读（两个名字都收，不再静默变空）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const runner = fakeRunner()
+    const service = makeService({ runner, probeHealth: async () => true, clock })
+    await service.ensureReady()
+    stubFetch({ facts: [{ id: "f9" }] })
+    expect([...(await service.factsOfEntity("e1"))]).toEqual(["f9"])
+  })
+
+  it("★★ 直连邻居从 /entity 的 edges 取，且按 id 找回自己那一行", async () => {
+    const runner = fakeRunner()
+    const service = makeService({ clock, runner })
+    /**
+     * `/entity` 是**搜索**接口，同名可能多条（实测某个名字 count=3）。
+     * 取 `results[0]` 会在同名时挑错人 —— 这里放两条、目标在**第二条**。
+     */
+    stubFetch({
+      results: [
+        { id: "other", edges: [{ target_id: "wrong", target_label: "X", type: "AUTHORED_BY" }] },
+        {
+          id: "me",
+          edges: [
+            { target_id: "n1", target_label: "A", type: "AUTHORED_BY" },
+            // 自环：应被丢掉（画出来是指向自己的边）
+            { target_id: "me", target_label: "self", type: "AUTHORED_BY" },
+          ],
+        },
+      ],
+    })
+
+    const neighbors = await service.neighborsOfEntity("me")
+
+    expect(neighbors.map((n) => n.id)).toEqual(["n1"])
+    expect(neighbors[0]?.type).toBe("AUTHORED_BY")
+  })
+
+  it("★ 单个实体读不到关系时返回空，不抛（不该让整块变红字）", async () => {
+    const runner = fakeRunner()
+    const service = makeService({ clock, runner })
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("connect ECONNREFUSED")
+    })
+    await expect(service.neighborsOfEntity("me")).resolves.toEqual([])
+  })
+})

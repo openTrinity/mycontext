@@ -54,21 +54,36 @@ export function SearchModule({ userName, activeSessionId, onSessionCreated }: Se
    * ★ 主渠道排**第一**：SearchView 缺省选第一项，于是"不动这个控件"
    * 就是现有行为（零迁移的另一半，另一半在 `agentHomeFor`）。
    *
-   * ★ 只有一个渠道时**返回空数组** —— 那时"混合"没有意义，
-   * 而 SearchView 少于两项就不渲染选择器。
+   * ## ★★ 单渠道时**仍然给一项**，不再返回空数组
+   *
+   * 原来是 `< 2 → []`（"一个渠道时混合没意义，而 SearchView 少于两项就不渲染
+   * 选择器"）。那个理由本身成立，但它造成一个**静默降级**：
+   *
+   * 用户记得这里有「钉钉 / 飞书 / 混合」三档；某天飞书退了授权（或切换账号
+   * 清了凭据），三档**整个消失**且没有任何解释 —— 他的反应是"功能没了"，
+   * 而真相是"只剩一个渠道可搜"。实测就是这么发生的（飞书 `not_configured`
+   * → 已授权只剩钉钉 → 空数组 → 控件消失）。
+   *
+   * 现在恒给"每个已授权渠道一项"，≥2 个时才追加 `all` 混合档。
+   * `ChannelPicker` 在只有一项时会**退化成静态标识**（见那个组件的文件头），
+   * 所以单渠道下用户看到的是「钉钉」这个当前范围而不是一片空白 ——
+   * "现在搜的是哪里"始终有答案，另一个渠道回来时混合档自动恢复。
    */
   const scopes = useMemo(() => {
     const authorized = (channels.data ?? []).filter(
       (channel) => channel.available && channel.status.state === "authorized",
     )
-    if (authorized.length < 2) return []
+    if (authorized.length === 0) return []
     const primaryFirst = [...authorized].sort((a, b) =>
       a.id === PRIMARY_CHANNEL_ID ? -1 : b.id === PRIMARY_CHANNEL_ID ? 1 : 0,
     )
-    return [
-      ...primaryFirst.map((channel) => ({ id: channel.id, label: t(channel.labelKey) })),
-      { id: "all", label: t("scope.all") },
-    ]
+    const perChannel = primaryFirst.map((channel) => ({
+      id: channel.id,
+      label: t(channel.labelKey),
+    }))
+    // 混合档只有两个以上渠道才有意义（一个渠道的"混合"就是它自己）
+    if (authorized.length < 2) return perChannel
+    return [...perChannel, { id: "all", label: t("scope.all") }]
   }, [channels.data, t])
 
   /**

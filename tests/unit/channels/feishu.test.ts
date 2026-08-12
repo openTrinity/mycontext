@@ -526,3 +526,87 @@ describe("Feishu auth and ingest parsing", () => {
     expect(startArg.startsWith(new Date(start).toISOString().slice(0, 10))).toBe(true)
   })
 })
+
+describe("★★ 退登 / 切换账号是幂等的（「本来就没有」不是失败）", () => {
+  /**
+   * ## 这一组锁的是一次真实的"点了报失败、于是反复点"
+   *
+   * 实测日志（用户连点两次「切换账号」）：
+   * · 第一次 `config remove` 成功 → `channel auth reset ok=true`；
+   * · 第二次 CLI 报 `飞书 CLI 失败（exit 1）：no app configured` → 旧实现
+   *   返回 false → 界面呈现"切换失败"。
+   *
+   * 而那一刻的**实际状态恰恰是目标状态**（配置已空、`auth status` 报
+   * `not_configured`）。把它报成失败，用户唯一的反应就是再点一次，
+   * 而每次都"失败" —— 这就是他说的"切换授权后登录不上"的观感来源。
+   *
+   * 判据用 CLI 自己的两句话（`no app configured` / `not configured`）：
+   * 命中 = 已经是目标状态 = true。其余（网络、占用、权限）才是真失败。
+   */
+  const envelope = (subtype: string) =>
+    JSON.stringify({ ok: false, error: { type: "config", subtype, message: subtype } })
+
+  /** 造一个所有 CLI 命令都回 `ok:false/<subtype>` 的 auth。 */
+  function authWith(subtype: string, onArgs?: (args: string[]) => void) {
+    /**
+     * ★ `json()` 走的是 **exec**（不是 spawn）—— 探针实测确认；
+     * 只桩 spawn 会得到 `this.options.processes.exec is not a function`，
+     * 那个失败与被测行为无关，会让人以为是实现错了（我第一版就掉进去了）。
+     *
+     * `keychain-downgrade` 那条也走 exec，所以按 args 分流：config 那条回
+     * 成功文本，其余回 `ok:false` 信封（真机就是 exit 1 + 这个信封）。
+     */
+    const processes = {
+      async exec(input: { args: string[] }) {
+        onArgs?.(input.args)
+        if (input.args[0] === "config" && input.args[1] === "keychain-downgrade") {
+          return { exitCode: 0, stdout: "already downgraded", stderr: "" }
+        }
+        return { exitCode: 1, stdout: envelope(subtype), stderr: "" }
+      },
+      async spawn(input: { args: string[] }) {
+        onArgs?.(input.args)
+        return {
+          exitCode: 1,
+          stdout: envelope(subtype),
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+          cancelled: false,
+        }
+      },
+    } as unknown as ProcessRunner
+    const options = {
+      processes,
+      logger: noopLogger(),
+      authRoot: () => "/tmp/inklings-feishu-idempotent",
+      executable: "/tmp/lark-cli",
+      platform: "darwin" as const,
+      openExternal: async () => undefined,
+    }
+    return new FeishuAuth(options, new LarkCli(options))
+  }
+
+  it("★ logout：已经退过（not configured）算成功，不是失败", async () => {
+    expect(await authWith("not_configured").logout()).toBe(true)
+  })
+
+  it("★★ 切换账号：已经没有 app（no app configured）算成功", async () => {
+    // 反证：把 resetForAccountSwitch 里那个 /no app configured/ 分支删掉，
+    // 这一条立刻转红 —— 而它对应的正是用户反复点「切换账号」的那个现场。
+    expect(await authWith("no app configured").resetForAccountSwitch()).toBe(true)
+  })
+
+  it("★ 真失败仍然是失败（不能因为幂等就把所有错都吞成成功）", async () => {
+    // 别的 subtype（比如文件占用）必须返回 false，否则界面会谎报"已切换"
+    expect(await authWith("permission_denied").logout()).toBe(false)
+    expect(await authWith("permission_denied").resetForAccountSwitch()).toBe(false)
+  })
+
+  it("★ 切换账号会去清 app 配置（否则下次授权还是同一个账号）", async () => {
+    const seen: string[][] = []
+    await authWith("no app configured", (args) => seen.push([...args])).resetForAccountSwitch()
+    // 必须真的调过 config remove —— 只退 token 换不了 app（这是根因）
+    expect(seen.some((a) => a[0] === "config" && a[1] === "remove")).toBe(true)
+  })
+})

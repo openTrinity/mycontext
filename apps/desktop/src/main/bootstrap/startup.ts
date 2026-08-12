@@ -1476,6 +1476,8 @@ export function bootstrapApp(mainDir: string): AppContext {
          * （不报错，只是答错，且答的是"这个人和谁有往来"）。
          */
         factsOfEntity: (entityId) => channelKl.factsOfEntity(entityId),
+        // 直连边兜底（fact 交集为空时）—— 见 GraphQueryOptions.neighborsOfEntity
+        neighborsOfEntity: (entityId) => channelKl.neighborsOfEntity(entityId),
         /**
          * ★★ 读**这个渠道自己**的身份行。
          *
@@ -1620,6 +1622,8 @@ export function bootstrapApp(mainDir: string): AppContext {
      * `edges: 26558`。不接这条的话「它认识的人与事」永远是空面板。
      */
     factsOfEntity: (entityId) => klServer.factsOfEntity(entityId),
+    // 直连边兜底（fact 交集为空时）—— 见 GraphQueryOptions.neighborsOfEntity
+    neighborsOfEntity: (entityId) => klServer.neighborsOfEntity(entityId),
     sourceChannelId: dingtalk.meta.id,
   })
 

@@ -240,10 +240,21 @@ export class FeishuAuth implements ChannelAuth {
       this.options.logger.info("lark auth logout", { loggedOut })
       return loggedOut
     } catch (error) {
-      // 未配置/已退过都会落到这里（`json()` 对 ok:false 信封抛）——不是错误
-      this.options.logger.warn("lark auth logout failed", {
-        detail: error instanceof Error ? error.message : String(error),
-      })
+      const detail = error instanceof Error ? error.message : String(error)
+      /**
+       * ★ 「本来就没登录」不是失败（与 `resetForAccountSwitch` 同一判断）。
+       *
+       * 实测日志：清过一次之后再点，CLI 报 `not configured` 并 exit 1，
+       * 于是这里返回 false、界面呈现"没退掉"——而那一刻的实际状态
+       * 正是"已经退了"。用户看到失败就会反复点。
+       *
+       * 判据用 CLI 自己的话；其余才是真失败（网络、权限、文件占用…）。
+       */
+      if (/not[ _]configured|no app configured/i.test(detail)) {
+        this.options.logger.info("lark already signed out; nothing to revoke", {})
+        return true
+      }
+      this.options.logger.warn("lark auth logout failed", { detail })
       return false
     }
   }
@@ -280,9 +291,29 @@ export class FeishuAuth implements ChannelAuth {
       this.options.logger.info("lark config removed for account switch", {})
       return true
     } catch (error) {
-      this.options.logger.warn("lark config remove failed", {
-        detail: error instanceof Error ? error.message : String(error),
-      })
+      const detail = error instanceof Error ? error.message : String(error)
+      /**
+       * ★★ **幂等**：本来就没有可清的，不是失败。
+       *
+       * 实测日志（用户连点两次「切换账号」）：
+       * · 第一次 → `config remove` 成功，`ok=true`；
+       * · 第二次 → `飞书 CLI 失败（exit 1）：no app configured`，于是这里
+       *   返回 false，界面把它呈现成"切换失败"。
+       *
+       * 但那一刻的**实际状态恰恰是我们想要的**（配置已经清空、
+       * `auth status` 报 `not_configured`）—— 用户却被告知失败，
+       * 于是他反复点，而每次都"失败"。这与 `logout()` 里
+       * `reason:"not_configured"` 要当成 false 是同一类判断错位：
+       * 那边"本来就没登录"不算错误，这边"本来就没配置"同样不算。
+       *
+       * 判据用 CLI 自己的两句话（`no app configured` / `not configured`）：
+       * 命中就当**已经是目标状态**，返回 true。其余才是真失败。
+       */
+      if (/no app configured|not[ _]configured/i.test(detail)) {
+        this.options.logger.info("lark config already empty; treat as switched", {})
+        return true
+      }
+      this.options.logger.warn("lark config remove failed", { detail })
       return false
     }
   }
