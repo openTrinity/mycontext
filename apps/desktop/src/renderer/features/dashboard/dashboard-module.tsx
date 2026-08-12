@@ -207,9 +207,11 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    * 传一个会话 id 下去会让查询必然空并落一条**终态** miss ——
    * 那之后这张头像永久取不到（`mediaAvatarsInputSchema` 的注释记了这个坑）。
    *
-   * ★ 取不到就回落到 app 账号那张、再回落首字母：头像缺失是这个功能的
-   * 正常状态之一（用户可能就是默认头像 —— 实测本机飞书返回的正是
-   * `default-avatar_v3`），不该为它留一块空白。
+   * ★ 取不到时**只回落到用户手动设的**那张（`avatarSource === "manual"`），
+   * 否则回落首字母。无条件回落 `session.avatarUrl` 会在它是"从某个渠道
+   * 回填"来的时候显示**另一个渠道那张脸** —— 用户报的串台有一半是这个。
+   * 头像缺失本来就是正常状态之一（实测本机飞书返回的正是
+   * `default-avatar_v3`），不该拿别人的脸去填。
    */
   const selfExternalId = (() => {
     if (scope.channelId === undefined) return null
@@ -457,7 +459,15 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
             */}
             <Avatar
               name={accountName ?? "未授权"}
-              src={channelAvatarUrl ?? session?.avatarUrl ?? null}
+              src={
+                /**
+                 * ★★ 回落到账号头像**只在它是用户手动设的** —— 见
+                 * `channel-auth-panel.tsx` 里 `accountAvatarIfManual` 那段。
+                 * 无条件回落会在"当前渠道头像没取到"时显示**另一个渠道**那张脸。
+                 */
+                channelAvatarUrl ??
+                (session?.avatarSource === "manual" ? (session.avatarUrl ?? null) : null)
+              }
               size="xl"
             />
             <GreetingRow accountName={accountName} />

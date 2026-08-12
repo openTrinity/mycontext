@@ -602,13 +602,21 @@ export function registerIpc(deps: IpcDependencies): void {
          * "无论如何都要走完 60 个人"，而它不该依赖被调方的实现细节。
          */
         try {
-          const result = await mediaByChannel.avatar({
-            externalId,
-            ...(nick === undefined || nick === "" ? {} : { nick }),
-            ...(input.groupExternalId === undefined || input.groupExternalId === null
-              ? {}
-              : { groupExternalId: input.groupExternalId }),
-          }, input.channelId)
+          const result = await mediaByChannel.avatar(
+            {
+              externalId,
+              ...(nick === undefined || nick === "" ? {} : { nick }),
+              ...(input.groupExternalId === undefined || input.groupExternalId === null
+                ? {}
+                : { groupExternalId: input.groupExternalId }),
+              /**
+               * ★ 只有「刷新头像」会传 `force` —— 批量补齐那条路绝不传
+               * （那会让几十人每次进页面都重下一遍）。
+               */
+              ...(input.force === true ? { force: true } : {}),
+            },
+            input.channelId,
+          )
           if (result.path === null) failed += 1
           else fetched += 1
         } catch (error) {

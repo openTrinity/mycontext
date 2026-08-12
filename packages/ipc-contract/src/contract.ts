@@ -1156,6 +1156,24 @@ export type MediaSelfAvatarInput = z.input<typeof mediaSelfAvatarInputSchema>
 export const mediaAvatarsInputSchema = z.object({
   externalIds: z.array(z.string().min(1)).max(60),
   /**
+   * 跳过缓存强制重取（**只对 `mediaAvatarsFetch` 有意义**）。
+   *
+   * ## ★★ 为什么"刷新头像"必须走这条路而不是 `mediaSelfAvatar`
+   *
+   * 那个通道除了取图还会**写账号级头像**（`accounts` 表，全应用一份）——
+   * 它是给「从已连接的平台获取」用的，那个动作的语义就是"把平台头像
+   * 设成我的账号头像"。
+   *
+   * 而「刷新头像」只想更新**这个渠道**那张缓存。我一度让两者共用
+   * `mediaSelfAvatar`，于是在飞书点刷新会把飞书头像写进账号 →
+   * 切回钉钉时头部回落到 `session.avatarUrl`，显示的是**飞书那张**
+   * （用户报的串台）。
+   *
+   * 所以：刷新走 `mediaAvatarsFetch`（纯读渠道 + 写 `contact_avatars`，
+   * 不碰账号），只是需要 `force` 才能绕过那张永不过期的缓存。
+   */
+  force: z.boolean().optional(),
+  /**
    * 问**哪个渠道**要头像。
    *
    * ★ 必须有：头像的取法与缓存键都按渠道分（钉钉走共同群搜索、飞书走
@@ -1193,6 +1211,14 @@ export const mediaAvatarsInputSchema = z.object({
    */
   nickByExternalId: z.record(z.string(), z.string()).optional(),
 })
+/**
+ * ★ 从 schema 推导，**不手写字段**。
+ *
+ * `api.ts` 原来手写了 `{externalIds, groupExternalId, nickByExternalId}`
+ * —— 于是契约里加了 `channelId`/`force` 之后那边**编译不过也不会提醒你
+ * 少了什么**，只是渲染层传不进去（我这次就撞上了）。schema 是唯一真源。
+ */
+export type MediaAvatarsInput = z.input<typeof mediaAvatarsInputSchema>
 
 /** 一个人的头像结果。`path` 为 null 时 UI 退回首字母色块。 */
 export const contactAvatarViewSchema = z.object({

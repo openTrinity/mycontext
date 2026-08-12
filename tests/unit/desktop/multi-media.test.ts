@@ -105,3 +105,91 @@ describe("MultiMediaService：头像按渠道路由", () => {
     expect(calls).toEqual(["dingtalk:cache:ou_FAKE01", "feishu:cache:ou_FAKE02"])
   })
 })
+
+/**
+ * ── 「刷新头像」不许写账号级头像（一次真实的串台）────────────────
+ *
+ * 用户报："设置里飞书头像，点了刷新头像，再切换到钉钉就变成飞书的新头像了"。
+ *
+ * 根因是**两个语义不同的动作共用了一条通道**：
+ *
+ * | 动作                   | 该做什么                                  |
+ * |------------------------|-------------------------------------------|
+ * | 从已连接的平台获取     | 取渠道头像 **并写账号头像**（用户就是要这个） |
+ * | 刷新头像               | 只更新**这个渠道**那张缓存                 |
+ *
+ * 我让后者也走 `mediaSelfAvatar`，而那条会 `applyChannelProfile({avatarUrl})`
+ * 写 `accounts` 表（全应用一份）。于是在飞书点刷新 → 账号头像变成飞书那张 →
+ * 切回钉钉时头部回落 `session.avatarUrl` → 显示飞书那张。
+ *
+ * 这里锁住"刷新走的是纯读那条路"：`avatar()` 而不是 `selfAvatar()`。
+ */
+describe("刷新头像：只碰渠道缓存，不碰账号", () => {
+  it("★★ 刷新走 avatar()（纯读 + 写 contact_avatars），**不是** selfAvatar()", async () => {
+    /**
+     * 反证：把渲染层的 `useRefreshChannelAvatar` 改回 `useFetchSelfAvatar`，
+     * 那条路会调 `selfAvatar()` → 这条断言的 `selfCalls` 变成 1 → 红。
+     *
+     * ★ 这一层验的是 `MultiMediaService` 的两个方法**互不代理** ——
+     * 若哪天有人把 `avatar()` 实现成"内部再调一次 selfAvatar"，
+     * 账号头像会重新被写，而串台会悄悄回来。
+     */
+    const calls: string[] = []
+    const media = build(calls)
+    await media.avatar({ externalId: "ou_FAKE01", force: true }, "feishu")
+    expect(calls).toEqual(["feishu:avatar:ou_FAKE01"])
+    // 一次都不该碰 selfAvatar —— 那条会写账号级头像
+    expect(calls.filter((c) => c.endsWith(":self"))).toEqual([])
+  })
+
+  it("★ selfAvatar 仍然可用（「从已连接的平台获取」要的就是它，含写账号）", async () => {
+    // 不能因为修串台就把这条路也堵掉：那个动作的语义**就是**写账号头像
+    const calls: string[] = []
+    const media = build(calls)
+    await media.selfAvatar({ force: true }, "feishu")
+    expect(calls).toEqual(["feishu:self"])
+  })
+})
+
+/**
+ * ── ★★★ 锁住**渲染层用了哪个 hook** ────────────────────────────
+ *
+ * 上面那两条锁的是 `MultiMediaService` 的方法互不代理 —— 但串台的真实
+ * 位置**不在**那里，而在"授权卡那颗按钮调了哪个 hook"。我改错的正是那一行，
+ * 而 `MultiMediaService` 的行为从头到尾都是对的。
+ *
+ * 这就是本仓库反复出现的形状：**两头都锁了、中间那根线是裸的**。
+ * 所以这里直接对源码断言 —— 判据是"那颗按钮的 onClick 走的是纯读那条路"。
+ */
+describe("接线：授权卡的「刷新头像」不许走写账号那条", () => {
+  it("★★ channel-auth-panel 用 useRefreshChannelAvatar，不用 useFetchSelfAvatar", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync(
+      "apps/desktop/src/renderer/features/channels/channel-auth-panel.tsx",
+      "utf8",
+    )
+    /**
+     * 反证：把那一行换回 `useFetchSelfAvatar()` → 这条转红。
+     * 而红之前的状态正是用户报的串台（飞书点刷新，钉钉变飞书头像）。
+     */
+    expect(src).toContain("useRefreshChannelAvatar()")
+    /**
+     * ★ 判据是**调用与 import**，不是"文件里提不提这个名字"。
+     *
+     * 我第一版写成 `!src.includes("useFetchSelfAvatar")` —— 红了，
+     * 而红的原因是**注释里解释了为什么不用它**（那些注释恰恰是有价值的）。
+     * 断言必须只管真正会执行的东西：`useFetchSelfAvatar(` 的调用，
+     * 以及 import 清单里有没有它。
+     */
+    expect(src.includes("useFetchSelfAvatar(")).toBe(false)
+    const importBlock = src.slice(0, src.indexOf('} from "../../lib/queries.js"'))
+    expect(importBlock.includes("useFetchSelfAvatar")).toBe(false)
+  })
+
+  it("★ 而设置页的「从已连接的平台获取」**仍然**用 useFetchSelfAvatar（它就该写账号）", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/renderer/features/settings/identity-panel.tsx", "utf8")
+    // 不能因为修串台就把这条也换掉：那个动作的语义就是"设成我的账号头像"
+    expect(src).toContain("useFetchSelfAvatar")
+  })
+})

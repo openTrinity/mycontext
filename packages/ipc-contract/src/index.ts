@@ -154,6 +154,7 @@ export type {
   MessageMediaView,
   UploadedImageView,
   MediaSaveAsResult,
+  MediaAvatarsInput,
   MediaSelfAvatarInput,
   MediaDownloadForMessagesResult,
   PersonaDraftView,

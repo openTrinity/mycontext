@@ -1070,6 +1070,41 @@ export function useFetchSelfAvatar() {
   })
 }
 
+/**
+ * 刷新**这个渠道**本人的头像缓存 —— **不碰账号头像**。
+ *
+ * ## ★★ 为什么不复用 `useFetchSelfAvatar`（我一开始就是那样，串台了）
+ *
+ * 那个走 `media.selfAvatar()`，而那条通道除了取图还会**写账号级头像**
+ * （`accounts` 表，全应用一份）—— 它是给「从已连接的平台获取」用的，
+ * 那个动作的语义就是"把平台头像设成我的账号头像"。
+ *
+ * 于是在飞书点「刷新头像」会把飞书那张写进账号，切回钉钉时头部回落到
+ * `session.avatarUrl` → 显示的是**飞书**那张。用户报的正是这个串台。
+ *
+ * 这个 hook 走 `avatarsFetch` + `force`：纯粹重取渠道头像、只写
+ * `contact_avatars`（按 `(channel_id, external_id)` 键），账号一个字节不动。
+ */
+export function useRefreshChannelAvatar() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { channelId: string; externalId: string }) =>
+      unwrap(
+        await window.mycontext.media.avatarsFetch({
+          externalIds: [input.externalId],
+          // ★ 本人不属于任何"共同群"：传会话 id 会让查询必然空并落终态 miss
+          groupExternalId: null,
+          channelId: input.channelId,
+          force: true,
+        }),
+      ),
+    onSuccess: () => {
+      // 重下了图 → 那份按 ["media","avatars",…] 缓的结果要重读
+      void queryClient.invalidateQueries({ queryKey: ["media", "avatars"] })
+    },
+  })
+}
+
 export function useUploadImage() {
   return useMutation({
     mutationFn: async (input: { base64: string; purpose: "figure" | "avatar" }) =>

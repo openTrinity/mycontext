@@ -24,7 +24,7 @@ import {
   useSelfIdentity,
   useStartChannelAuth,
   useContactAvatars,
-  useFetchSelfAvatar,
+  useRefreshChannelAvatar,
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
@@ -75,8 +75,14 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * 三颗共用一个 mutation，不记的话点一颗时另外两颗也在转。
    */
   const resetAuth = useResetChannelAuth()
-  /** 刷新这个渠道的本人头像（走 force，跳过那张永不过期的缓存）。 */
-  const refreshAvatar = useFetchSelfAvatar()
+  /**
+   * 刷新**这个渠道**本人的头像缓存。
+   *
+   * ★ 走 `useRefreshChannelAvatar`（`avatarsFetch` + `force`）而**不是**
+   * `useFetchSelfAvatar` —— 后者会连**账号级**头像一起写，于是在飞书点刷新
+   * 之后切回钉钉会看到飞书那张（用户报的串台）。见那个 hook 的说明。
+   */
+  const refreshAvatar = useRefreshChannelAvatar()
   const [resetScope, setResetScope] = useState<"identity" | "session" | "app" | null>(null)
   const [progress, setProgress] = useState<AuthProgress | null>(null)
   /**
@@ -317,7 +323,29 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * 现在用 `selfAvatarUrl`（按渠道查 `contact_avatars`，见它的声明），
    * 取不到才回落 app 账号那张 —— 头像缺失是正常状态之一，不留空白。
    */
-  const selfAvatar = selfAvatarUrl ?? bootstrap.data?.session?.avatarUrl ?? null
+  /**
+   * ★★ 回落到账号头像**只在它是用户手动设的**（`avatarSource === "manual"`）。
+   *
+   * ## 为什么要加这个条件（串台的第二层）
+   *
+   * 无条件回落 `session.avatarUrl` 时：
+   * · 那个值若是**从某个渠道回填**来的（`avatarSource === "channel"`），
+   *   而当前渠道自己的头像还没取到 → 显示的就是**另一个渠道那张脸**。
+   *   用户报的串台有一半是这个（另一半是"刷新写了账号"，已在 hook 层修掉）。
+   * · 而它若是用户**自己上传/填的**，回落是合理的 —— 那是他选定的形象，
+   *   与哪个渠道无关。
+   *
+   * `avatar_source` 这个判据库里本来就有（见它的迁移注释：它是"渠道回填
+   * 能不能覆盖"的判据）。这里复用同一个判据，不新造。
+   *
+   * 都没有 → `null` → `Avatar` 用首字母兜底。头像缺失是这个功能的正常
+   * 状态之一（对方可能就是默认头像），不该拿别人的脸去填。
+   */
+  const accountAvatarIfManual =
+    bootstrap.data?.session?.avatarSource === "manual"
+      ? (bootstrap.data?.session?.avatarUrl ?? null)
+      : null
+  const selfAvatar = selfAvatarUrl ?? accountAvatarIfManual
 
   /**
    * 上一次授权的失败原因。
@@ -530,8 +558,11 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
               size="md"
               variant="secondary"
               loading={refreshAvatar.isPending}
-              disabled={running || refreshAvatar.isPending}
-              onClick={() => refreshAvatar.mutate({ channelId: channel.id })}
+              disabled={running || refreshAvatar.isPending || selfExternalId === null}
+              onClick={() => {
+                if (selfExternalId === null) return
+                refreshAvatar.mutate({ channelId: channel.id, externalId: selfExternalId })
+              }}
             >
               {t("actions.refreshAvatar")}
             </Button>

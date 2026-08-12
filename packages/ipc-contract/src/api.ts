@@ -1,5 +1,6 @@
 import type { Result } from "@mycontext/kernel"
 import type {
+  MediaAvatarsInput,
   MediaSelfAvatarInput,
   ChannelIdentity,
   ChannelIdentitySwitchInput,
@@ -364,21 +365,13 @@ export interface MyContextApi {
      *
      * 返回的每一项带 `needsFetch`，调用方据此决定要不要调 `avatarsFetch`。
      */
-    avatars(input: {
-      externalIds: string[]
-      groupExternalId?: string | null
-      nickByExternalId?: Readonly<Record<string, string>>
-    }): Promise<Result<ContactAvatarView[]>>
+    avatars(input: MediaAvatarsInput): Promise<Result<ContactAvatarView[]>>
     /**
      * 去取还没取到的头像。**慢**（每人 2-3 次 CLI 调用），每人独立成败。
      *
      * 只返回计数 —— 路径由重读 `avatars` 拿（同一份数据不从两条路送）。
      */
-    avatarsFetch(input: {
-      externalIds: string[]
-      groupExternalId?: string | null
-      nickByExternalId?: Readonly<Record<string, string>>
-    }): Promise<Result<AvatarFetchResult>>
+    avatarsFetch(input: MediaAvatarsInput): Promise<Result<AvatarFetchResult>>
     /**
      * 存一张本地图片（数字人形象 / 用户头像）。
      *
