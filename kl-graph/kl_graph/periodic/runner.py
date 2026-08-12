@@ -25,14 +25,66 @@ from kl_graph.periodic.fact_similarity import build_fact_similarity_edges
 
 # Summarization hook (implemented by Task 2; import guarded for forward compat)
 try:
-    from kl_graph.periodic.community_summarizer import run_community_summarization
+    from kl_graph.periodic.community_summarizer import (
+        run_community_summarization,
+        run_gated_summarization,
+    )
 except ImportError:
     run_community_summarization = None  # type: ignore[assignment]
+    run_gated_summarization = None  # type: ignore[assignment]
+# Stable-identity reconciliation (Task 1; guarded for forward compat)
+try:
+    from kl_graph.periodic.community_identity import (
+        CommunityIdentity,
+        invert_assignments,
+    )
+except ImportError:
+    CommunityIdentity = None  # type: ignore[assignment]
+    invert_assignments = None  # type: ignore[assignment]
 from kl_graph.storage.base import KnowledgeStore, create_store
 from kl_graph.storage.vector_store import VectorStore, create_vector_store
 
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
+
+#: Meta key holding the in-flight full-improve reconciliation run id. It is
+#: created once per improve and REUSED across retries (so a crashed+retried run
+#: overwrites its own idempotent identity rows rather than appending a second
+#: run), then cleared on successful completion.
+_RUN_ID_META_KEY = "improve.full.reconcile_run_id"
+
+
+def _durable_run_id(store: KnowledgeStore) -> str:
+    """Return a retry-stable reconciliation run id for the current full improve.
+
+    The id is persisted in ``ingest_meta`` so a re-run of a crashed improve
+    reuses the SAME id (reconciliation is idempotent by run id, so the retry
+    overwrites its partial rows). A fresh id is minted only when none is
+    in-flight. Not derived from wall-clock time, which is neither retry-stable
+    nor collision-safe for runs in the same second.
+    """
+    try:
+        existing = store.get_meta(_RUN_ID_META_KEY)
+    except Exception:  # noqa: BLE001 - meta store optional; fall back to a fresh id
+        existing = None
+    if existing:
+        return str(existing)
+    import uuid as _uuid
+
+    run_id = f"full-{_uuid.uuid4().hex}"
+    try:
+        store.set_meta(_RUN_ID_META_KEY, run_id)
+    except Exception:  # noqa: BLE001, S110 - best-effort persistence; id still usable this run
+        pass
+    return run_id
+
+
+def _clear_durable_run_id(store: KnowledgeStore) -> None:
+    """Clear the in-flight reconciliation run id after a successful improve."""
+    try:
+        store.set_meta(_RUN_ID_META_KEY, "")
+    except Exception:  # noqa: BLE001, S110 - best-effort; a stale marker only costs one id reuse
+        pass
 
 
 def run_periodic_improvement(
@@ -233,8 +285,53 @@ def run_periodic_improvement(
             # Extract assignments for reporting
             assignments = detection_result.get("assignments", {})
 
-            # Run community summarization if enabled
-            if run_summarization and run_community_summarization is not None:
+            # Reconcile the full partition into STABLE community identities
+            # (Task 1) BEFORE summarizing. MANDATORY on the full path — even for
+            # an EMPTY partition, which must still reconcile so every prior
+            # community is recorded as a death (otherwise a full rebuild that
+            # produced no communities would leave stale identities/reports
+            # active). Reconciliation is idempotent by run_id, so a re-run of a
+            # completed improve does not duplicate lineage events.
+            identity = None
+            forced_uuids: set[str] = set()
+            reconcile_run_id = _durable_run_id(store)
+            if CommunityIdentity is not None and invert_assignments is not None:
+                identity = CommunityIdentity(store)
+                current_memberships = (
+                    invert_assignments(assignments) if assignments else {}
+                )
+                identity.reconcile(current_memberships, reconcile_run_id)
+                # Births / split / merge products are forced to (re)summarize.
+                for ev in identity.lineage_events_for(reconcile_run_id):
+                    if ev.event_type in ("birth", "split", "merge") and ev.successor_uuid:
+                        forced_uuids.add(ev.successor_uuid)
+                _lap()
+
+            # Run community summarization if enabled. Prefer the baseline-aware
+            # GATED path (Task 2) when both reconciliation and the gated
+            # summarizer are available, so unchanged communities keep their
+            # reports with zero LLM cost; fall back to the full unconditional
+            # summarizer otherwise (backward compatible).
+            if (
+                run_summarization
+                and identity is not None
+                and run_gated_summarization is not None
+            ):
+                print("\n[Summarize] Running gated community summarization...")
+                gated = run_gated_summarization(
+                    store,
+                    identity,
+                    run_id=reconcile_run_id,
+                    levels=None,
+                    min_members=10,
+                    forced_uuids=forced_uuids,
+                )
+                print(
+                    f"  Regenerated {gated['regenerated']}, kept {gated['kept']}, "
+                    f"retired {gated['retired']}, failed {gated['failed']}"
+                )
+                _lap()
+            elif run_summarization and run_community_summarization is not None:
                 print("\n[Summarize] Running community summarization...")
                 n_summaries = run_community_summarization(
                     store,
@@ -250,6 +347,9 @@ def run_periodic_improvement(
                 checkpoint.mark_done(
                     "improve.communities", params=community_params
                 )
+            # Full improve committed successfully; release the in-flight run id
+            # so the NEXT improve mints a fresh one.
+            _clear_durable_run_id(store)
 
         elapsed = time.time() - t0
         print("\n" + "=" * 60)

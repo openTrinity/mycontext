@@ -172,12 +172,97 @@ class CleanupConfig(_ConfigModel):
     dry_run: bool = True
 
 
+#: Supported ways to turn a community's membership change into the fraction the
+#: re-summarization gate compares against ``resummarize_threshold``. ``added`` /
+#: ``removed`` are measured against the ``baseline`` — the member set captured at
+#: the last *successful* summarization — while ``current`` is the member set now.
+#:
+#: - ``added_over_current``:  ``|added| / |current|``
+#: - ``added_over_baseline``: ``|added| / |baseline|``
+#: - ``churn_over_baseline``: ``(|added| + |removed|) / |baseline|``
+#: - ``one_minus_jaccard``:   ``1 - |baseline ∩ current| / |baseline ∪ current|``
+ResummarizeDenominator = Literal[
+    "added_over_current",
+    "added_over_baseline",
+    "churn_over_baseline",
+    "one_minus_jaccard",
+]
+
+
 class CommunitySummarizationConfig(_ConfigModel):
+    """Community report generation and the re-summarization gate.
+
+    ``resummarize_threshold`` is THE single gate threshold: a community's report
+    is regenerated only when its membership change since the last successful
+    summarization exceeds this fraction, otherwise the existing report is kept
+    with no LLM call.  It replaces (renamed + moved from)
+    ``pipelines.ingestion.incremental.community_summary_threshold``, which
+    approximated staleness as ``1 / member_count``.  There is deliberately only
+    one threshold so the gate cannot be interpreted two different ways, and it
+    lives here rather than under ``incremental`` because both the full and the
+    incremental path summarize through the same gate.
+    """
+
     max_concurrent: int = Field(gt=0)
+    resummarize_threshold: float = Field(ge=0.0, le=1.0)
+    resummarize_denominator: ResummarizeDenominator = "churn_over_baseline"
+
+
+class CommunityIdentityThresholds(_ConfigModel):
+    """Member-set overlap thresholds for cross-run community reconciliation.
+
+    A candidate ``old -> new`` pair is only considered when the intersection
+    reaches ``identity_min_intersection`` members AND clears the overlap
+    thresholds: symmetric Jaccard ``|O∩N| / |O∪N|`` and the directional
+    inclusion ratios ``|O∩N| / |O|`` and ``|O∩N| / |N|``.
+    """
+
+    identity_min_intersection: int = Field(ge=0)
+    identity_jaccard_threshold: float = Field(ge=0.0, le=1.0)
+    identity_inclusion_threshold: float = Field(ge=0.0, le=1.0)
+
+
+class CommunityIdentityLevelThresholds(_ConfigModel):
+    """Overrides for one hierarchy level; ``None`` inherits from ``default``."""
+
+    identity_min_intersection: int | None = Field(default=None, ge=0)
+    identity_jaccard_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    identity_inclusion_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class CommunityIdentityLevelsConfig(_ConfigModel):
+    """Per-level overrides, keyed by hierarchy level (``L0``…``L3``).
+
+    Only the levels the graph actually has are meaningful; an unknown level key
+    is rejected instead of silently ignored.  Levels deeper than ``L3`` (should
+    the hierarchy grow) fall back to the global default.
+    """
+
+    L0: CommunityIdentityLevelThresholds = CommunityIdentityLevelThresholds()
+    L1: CommunityIdentityLevelThresholds = CommunityIdentityLevelThresholds()
+    L2: CommunityIdentityLevelThresholds = CommunityIdentityLevelThresholds()
+    L3: CommunityIdentityLevelThresholds = CommunityIdentityLevelThresholds()
+
+
+class CommunityIdentityConfig(_ConfigModel):
+    """Identity reconciliation tuning: a global default plus per-level overrides.
+
+    Thresholds are per hierarchy level because coarse levels hold large
+    communities (a big stable core masks a small meaningful change) while fine
+    levels hold small ones (a single-member change is a large Jaccard swing).
+    """
+
+    default: CommunityIdentityThresholds
+    levels: CommunityIdentityLevelsConfig = CommunityIdentityLevelsConfig()
 
 
 class IncrementalConfig(_ConfigModel):
-    community_summary_threshold: float
+    """Per-batch improvement strategies.
+
+    The former ``community_summary_threshold`` moved to
+    ``pipelines.ingestion.community_summarization.resummarize_threshold``.
+    """
+
     similarity_strategy: str
     community_strategy: str
 
@@ -195,6 +280,7 @@ class IngestionPipelineConfig(_ConfigModel):
     cleanup: CleanupConfig = CleanupConfig()
     entity_description: EntityDescriptionConfig
     community_summarization: CommunitySummarizationConfig
+    community_identity: CommunityIdentityConfig
     incremental: IncrementalConfig
     similarity: SimilarityConfig
 

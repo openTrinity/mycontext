@@ -141,10 +141,36 @@ def _current_community_ids(
     return touched
 
 
+def _resummarize_threshold() -> float:
+    """Resolve the single churn-gate threshold from config.
+
+    Migrated from the removed
+    ``pipelines.ingestion.incremental.community_summary_threshold`` to the
+    single gate threshold
+    ``pipelines.ingestion.community_summarization.resummarize_threshold``
+    (Task 3). Falls back to ``0.1`` if the key is absent so older configs keep
+    working.
+    """
+    try:
+        return float(
+            cfg.pipelines.ingestion.community_summarization.resummarize_threshold
+        )
+    except Exception:  # noqa: BLE001 - config optional; documented default
+        return 0.1
+
+
 def _invalidate_summaries(
     store: KnowledgeStore, community_ids: set[str], *, threshold: float
 ) -> int:
-    """Mark summaries stale when at least one changed member exceeds the ratio."""
+    """Mark summaries stale when at least one changed member exceeds the ratio.
+
+    NOTE (Task 5): this crude ``1 / member_count`` marker is retained ONLY as a
+    conservative fallback for the incremental path while HIT-Leiden incremental
+    detection is deferred to phase 2. The authoritative, baseline-relative gate
+    now lives in ``community_summarizer.run_gated_summarization`` and runs on the
+    full reconcile path. When the full path reconciles + gates, it supersedes
+    these coarse markers on the next full improve.
+    """
 
     if not community_ids:
         return 0
@@ -303,9 +329,7 @@ def run_incremental_improvement(
         stale_count = _invalidate_summaries(
             store,
             changed,
-            threshold=float(
-                cfg.pipelines.ingestion.incremental.community_summary_threshold
-            ),
+            threshold=_resummarize_threshold(),
         )
         if checkpoint is not None:
             checkpoint.mark_done(

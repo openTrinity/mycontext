@@ -365,40 +365,133 @@ class GlobalSearch:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def _table_columns(self, table: str) -> set[str]:
+        """Return the column names of ``table`` (empty set if it does not exist)."""
+        conn = self._sqlite()
+        try:
+            return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except sqlite3.OperationalError:
+            return set()
+
+    def _current_uuid_resolution(self) -> tuple[dict[tuple[int, int], str], bool]:
+        """Return ``((level, cluster_id) -> community_uuid), map_present``.
+
+        Resolves ONLY the single latest identity run (the max ``rowid`` in
+        ``community_identity_map`` identifies it), so a ``(level, cluster_id)``
+        that is absent from the current partition has NO entry — callers can
+        then exclude a summary bound to an obsolete label. Returns
+        ``({}, False)`` when the identity map is absent (older DBs), signalling
+        the guard should degrade to legacy behavior.
+        """
+        conn = self._sqlite()
+        has_map = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='community_identity_map'"
+        ).fetchone()
+        if not has_map:
+            return {}, False
+        latest = conn.execute(
+            "SELECT run_id FROM community_identity_map ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if not latest:
+            return {}, True
+        latest_run = latest[0]
+        rows = conn.execute(
+            "SELECT level, cluster_id, community_uuid FROM community_identity_map "
+            "WHERE run_id = ?",
+            (latest_run,),
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): r[2] for r in rows}, True
+
     def _read_all_summaries(self, levels: list[int]) -> dict[tuple[int, int], dict[str, Any]]:
-        """Read all summaries into a lookup dict keyed by (level, community_id).
+        """Read valid summaries into a lookup dict keyed by (level, community_id).
+
+        Reports are resolved through the stable ``community_uuid`` (Task 1/2):
+
+        * Rows flagged ``summary_stale`` are skipped (awaiting regeneration).
+        * When the identity map is present, a row whose stored
+          ``community_uuid`` no longer matches the current resolution of its
+          ``(level, community_id)`` is skipped — this is the misattribution
+          guard that prevents a retained summary from being served for a
+          renumbered cluster. Safe omission is always preferred over serving a
+          possibly-wrong report.
+        * Empty summaries are skipped (unchanged behavior).
+
+        Backward compatible: if ``community_uuid`` / ``summary_stale`` columns
+        or the identity map are absent (a DB from the current full pipeline),
+        the guards degrade to the legacy behavior.
 
         Args:
             levels: List of integer levels to read.
 
         Returns:
-            Dict mapping (level_int, community_id_int) → summary dict with
-            keys: level, community_id, member_count, title, summary, tags.
+            Dict mapping (level_int, community_id_int) → summary dict with keys:
+            level, community_id, member_count, title, summary, tags,
+            community_uuid.
         """
         conn = self._sqlite()
+        cols = self._table_columns("community_summaries")
+        has_uuid = "community_uuid" in cols
+        has_stale = "summary_stale" in cols
+        current_resolution, map_present = self._current_uuid_resolution()
+
+        select_cols = "level, community_id, member_count, title, summary, tags"
+        select_cols += ", community_uuid" if has_uuid else ", NULL AS community_uuid"
+        select_cols += ", summary_stale" if has_stale else ", 0 AS summary_stale"
+
         all_summaries: dict[tuple[int, int], dict[str, Any]] = {}
         for level in levels:
             rows = conn.execute(
-                "SELECT level, community_id, member_count, title, summary, tags "
-                "FROM community_summaries WHERE level = ?",
+                f"SELECT {select_cols} FROM community_summaries WHERE level = ?",
                 (level,),
             ).fetchall()
             for r in rows:
+                level_i, cid_i = int(r[0]), int(r[1])
+                stored_uuid = r[6]
+                stale = int(r[7] or 0)
+                if stale:
+                    continue  # deferred / awaiting regeneration
                 summary_text = r[4] if r[4] is not None else ""
                 if not summary_text.strip():
                     continue  # Skip empty summaries
+                # Stable-identity guards, active ONLY when a current identity
+                # map exists (backward compatible: legacy DBs with no map fall
+                # through to legacy serving). Safe OMISSION is always preferred
+                # over serving a possibly-misattributed report (Q10: exclude).
+                if map_present:
+                    current_uuid = current_resolution.get((level_i, cid_i))
+                    if current_uuid is None:
+                        # This label is not in the current partition at all
+                        # (obsolete/renumbered-away) -> exclude entirely.
+                        continue
+                    if stored_uuid is None:
+                        # Report predates identity binding; without a stored
+                        # UUID we cannot prove it belongs to the current
+                        # community -> exclude rather than risk misattribution.
+                        logger.debug(
+                            "global search: omitting UUID-less report L%d-%d "
+                            "while identity map is present", level_i, cid_i,
+                        )
+                        continue
+                    if current_uuid != stored_uuid:
+                        logger.debug(
+                            "global search: omitting misattributed summary L%d-%d "
+                            "(stored uuid %s != current %s)",
+                            level_i, cid_i, stored_uuid, current_uuid,
+                        )
+                        continue
                 tags_str = r[5] if r[5] is not None else "[]"
                 try:
                     tags_list = json.loads(tags_str) if isinstance(tags_str, str) else tags_str
                 except (json.JSONDecodeError, TypeError):
                     tags_list = []
-                all_summaries[(r[0], r[1])] = {
-                    "level": r[0],
-                    "community_id": r[1],
+                all_summaries[(level_i, cid_i)] = {
+                    "level": level_i,
+                    "community_id": cid_i,
                     "member_count": int(r[2] or 0),
                     "title": r[3] if r[3] is not None else "",
                     "summary": summary_text,
                     "tags": tags_list,
+                    "community_uuid": stored_uuid,
                 }
         return all_summaries
 
@@ -407,46 +500,57 @@ class GlobalSearch:
     ) -> tuple[dict[str, tuple[int, int]], dict[str, list[str]]]:
         """Build parent-child link mappings from the communities table.
 
+        Hierarchy traversal uses the ``communities`` table, whose ``id`` /
+        ``parent_id`` are ``community_id_from(level, cluster_id)`` tokens written
+        by the (unchanged) community projection. Task 4 must NOT alter that
+        projection, so traversal is performed in that same token domain: each
+        current summary's ``(level, cluster_id)`` maps to its
+        ``community_id_from`` token, which is exactly what the table stores.
+
+        This is orthogonal to the misattribution guard in
+        :meth:`_read_all_summaries`, which uses the *stable stored*
+        ``community_uuid`` to decide whether a row may be served at all. By the
+        time we build links here, ``all_summaries`` already contains only
+        correctly-attributed rows, so descending in the projection token domain
+        is safe and — unlike joining stable UUIDs against projection tokens —
+        actually matches the table.
+
         Args:
             all_summaries: Dict of (level, community_id) → summary dict.
 
         Returns:
             Tuple of:
-            - uuid_to_key: dict mapping community UUID → (level_int, community_id_int)
-            - parent_to_children: dict mapping parent UUID → list of child UUIDs
+            - token_to_key: dict mapping projection token → (level, community_id)
+            - parent_to_children: dict mapping parent token → list of child tokens
         """
         conn = self._sqlite()
+        # Internal traversal token = community_id_from(level, cid), the SAME
+        # domain the communities table uses. Consistent for every summary.
+        token_to_key: dict[str, tuple[int, int]] = {}
+        for (level, cid) in all_summaries:
+            token = community_id_from(f"L{level}", cid)
+            token_to_key[token] = (level, cid)
+
         has_communities = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'communities'"
         ).fetchone()
         if not has_communities:
-            # No communities table — can't descend, treat all as roots
-            uuid_to_key: dict[str, tuple[int, int]] = {}
-            for (level, cid) in all_summaries:
-                uuid = community_id_from(f"L{level}", cid)
-                uuid_to_key[uuid] = (level, cid)
-            return uuid_to_key, {}
+            # No communities table — can't descend, treat all as roots.
+            return token_to_key, {}
 
-        # Build UUID → key mapping for all summaries
-        uuid_to_key = {}
-        for (level, cid) in all_summaries:
-            uuid = community_id_from(f"L{level}", cid)
-            uuid_to_key[uuid] = (level, cid)
-
-        # Read parent links from communities table
         parent_to_children: dict[str, list[str]] = defaultdict(list)
         try:
             rows = conn.execute(
                 "SELECT id, parent_id FROM communities WHERE parent_id IS NOT NULL"
             ).fetchall()
-            for child_uuid, parent_uuid in rows:
-                if parent_uuid and child_uuid in uuid_to_key:
-                    parent_to_children[parent_uuid].append(child_uuid)
+            for child_token, parent_token in rows:
+                if parent_token and child_token in token_to_key:
+                    parent_to_children[parent_token].append(child_token)
         except sqlite3.OperationalError:
             # parent_id column might not exist in old DBs — gracefully degrade
             logger.debug("communities table missing parent_id column, no descent possible")
 
-        return uuid_to_key, dict(parent_to_children)
+        return token_to_key, dict(parent_to_children)
 
     async def _rate_community(
         self,
@@ -509,7 +613,7 @@ class GlobalSearch:
         if not all_summaries:
             return []
 
-        uuid_to_key, parent_to_children = self._build_parent_links(all_summaries)
+        token_to_key, parent_to_children = self._build_parent_links(all_summaries)
 
         # Determine roots: level-0 communities, or all if no parent links
         if levels and levels[0] == 0:
@@ -539,22 +643,22 @@ class GlobalSearch:
             rating_count += len(batch)
 
             # Keep those >= threshold, add to selected, queue their children
-            kept_uuids: list[str] = []
+            kept_tokens: list[str] = []
             for key, rating in zip(batch, ratings):
                 if rating >= RATE_THRESHOLD:
                     diagnostics["ratings_kept"] += 1
                     selected.append(all_summaries[key])
-                    # Find this community's UUID and queue its children
-                    for uuid, mapped_key in uuid_to_key.items():
+                    # Find this community's projection token and queue children
+                    for token, mapped_key in token_to_key.items():
                         if mapped_key == key:
-                            kept_uuids.append(uuid)
+                            kept_tokens.append(token)
                             break
 
             # Add children of kept communities to next queue
-            for parent_uuid in kept_uuids:
-                children = parent_to_children.get(parent_uuid, [])
-                for child_uuid in children:
-                    child_key = uuid_to_key.get(child_uuid)
+            for parent_token in kept_tokens:
+                children = parent_to_children.get(parent_token, [])
+                for child_token in children:
+                    child_key = token_to_key.get(child_token)
                     if child_key and child_key in all_summaries:
                         queue.append(child_key)
 

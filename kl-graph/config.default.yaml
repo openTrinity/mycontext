@@ -209,11 +209,56 @@ pipelines:
     community_summarization:
       # Maximum community-summary requests allowed in flight at once.
       max_concurrent: ${oc.env:KL_COMMUNITY_SUMMARY_CONCURRENCY,50}
+      # THE re-summarization gate — one threshold, no second parallel knob. A
+      # community's report is regenerated only when its membership change since
+      # the last *successful* summary exceeds this fraction; otherwise the
+      # existing report is kept with no LLM call. Replaces the former
+      # incremental.community_summary_threshold (same 0.1 default), which
+      # approximated staleness as 1/member_count.
+      resummarize_threshold: ${oc.env:KL_COMMUNITY_RESUMMARIZE_THRESHOLD,0.1}
+      # How that membership change becomes a fraction. One of:
+      #   added_over_current | added_over_baseline | churn_over_baseline |
+      #   one_minus_jaccard
+      # Default churn_over_baseline = (|added| + |removed|) / |baseline|, so
+      # removals also trigger regeneration.
+      resummarize_denominator: ${oc.env:KL_COMMUNITY_RESUMMARIZE_DENOMINATOR,churn_over_baseline}
+
+    community_identity:
+      # Member-set overlap thresholds for reconciling communities across
+      # detection runs (stable identity + lineage). `default` applies to every
+      # hierarchy level; `levels.L0`..`levels.L3` override one level, and null
+      # inherits the default. Per-level because coarse levels hold large
+      # communities (a big stable core masks a small change) while fine levels
+      # hold small ones (a single-member change is a large Jaccard swing).
+      # Levels deeper than L3, should the hierarchy grow, use `default`.
+      default:
+        # Absolute support floor: fewer shared members than this is not evidence
+        # of continuity, however favourable the ratios look.
+        identity_min_intersection: ${oc.env:KL_COMMUNITY_IDENTITY_MIN_INTERSECTION,2}
+        # Symmetric overlap |O∩N| / |O∪N|.
+        identity_jaccard_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_JACCARD,0.3}
+        # Directional overlap |O∩N| / |O| and |O∩N| / |N|.
+        identity_inclusion_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_INCLUSION,0.5}
+      levels:
+        L0:
+          identity_min_intersection: ${oc.env:KL_COMMUNITY_IDENTITY_MIN_INTERSECTION_L0,null}
+          identity_jaccard_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_JACCARD_L0,null}
+          identity_inclusion_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_INCLUSION_L0,null}
+        L1:
+          identity_min_intersection: ${oc.env:KL_COMMUNITY_IDENTITY_MIN_INTERSECTION_L1,null}
+          identity_jaccard_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_JACCARD_L1,null}
+          identity_inclusion_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_INCLUSION_L1,null}
+        L2:
+          identity_min_intersection: ${oc.env:KL_COMMUNITY_IDENTITY_MIN_INTERSECTION_L2,null}
+          identity_jaccard_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_JACCARD_L2,null}
+          identity_inclusion_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_INCLUSION_L2,null}
+        L3:
+          identity_min_intersection: ${oc.env:KL_COMMUNITY_IDENTITY_MIN_INTERSECTION_L3,null}
+          identity_jaccard_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_JACCARD_L3,null}
+          identity_inclusion_threshold: ${oc.env:KL_COMMUNITY_IDENTITY_INCLUSION_L3,null}
 
     # Strategies used when improving an existing graph incrementally.
     incremental:
-      # Changed-member ratio at which an existing community summary is invalidated.
-      community_summary_threshold: ${oc.env:KL_INCR_COMMUNITY_SUMMARY_THRESHOLD,0.1}
       # Registered strategy used to add similarity edges for changed nodes.
       similarity_strategy: ${oc.env:KL_INCR_SIMILARITY_STRATEGY,ann_intra_batch}
       # Registered strategy used to update community assignments incrementally.

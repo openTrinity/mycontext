@@ -1,14 +1,22 @@
-"""Default incremental community strategy — GUARDED NO-OP pending incremental rewrite.
+"""Default incremental community strategy — GUARDED NO-OP (detection only).
 
-This strategy is disabled pending the completion of the incremental
-hierarchical Leiden path. The batch full-rebuild already runs hierarchical
-Leiden; only the incremental assignment path is deferred. The class and public
-entry signature are preserved so incremental ingestion does not crash, but the
-run path logs a clear warning and returns an empty/no-change result without
-touching communities.
+The incremental community *detection* path (per-batch local relabeling) is
+deferred to phase 2 (wiring ``kl_graph/hit_leiden/`` HIT-Leiden behind a
+backward-compatible adapter). For v1 the delivery decision is a FULL
+``hierarchical_leiden`` rerun on the periodic path, followed by stable-identity
+reconciliation (``community_identity``) and baseline-aware gated
+re-summarization (``community_summarizer.run_gated_summarization``). That full
+path makes *summaries* incremental (unchanged communities keep their reports)
+without a new detector.
 
-Future work: port incremental community assignment to the hierarchical
-Leiden framework once the full rebuild path is stable.
+This strategy therefore still returns a no-change result on the incremental
+ingest path: it does not itself relabel communities. Identity reconciliation and
+summary gating are performed by the coordinator/periodic runner, not here. The
+class and public entry signature are preserved so incremental ingestion does not
+crash.
+
+Future work (phase 2): port incremental community assignment to HIT-Leiden and
+emit the changed partition scope for the coordinator to reconcile.
 """
 
 from __future__ import annotations
