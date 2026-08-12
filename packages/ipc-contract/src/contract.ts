@@ -54,6 +54,15 @@ export const IPC_CHANNELS = {
    * 保存配置的请求会顺带重算一遍聚合，而两者的刷新时机完全不同。
    */
   chatCoverage: "mycontext:distill/chat-coverage",
+  /**
+   * 数字分身的**监听范围**（关心范围，v28 `attention_scope`）。
+   *
+   * ★ 与 `distillSources` 分开：那是「学它哪些历史」，这是「盯哪些实时消息」。
+   * 用户明确要求这两件事在产品里分开（「至少要分开两个吧」）。
+   */
+  attentionScope: "mycontext:attention/scope",
+  attentionScopeSave: "mycontext:attention/scope-save",
+  attentionScopeDisable: "mycontext:attention/scope-disable",
   /** 会话列表（蒸馏源选择用；走渠道 CLI） */
   channelConversations: "mycontext:channel/conversations",
   /** 蒸馏：进度 / 开跑 / 重来 */
@@ -633,6 +642,59 @@ export const chatCoverageViewSchema = z.object({
 export type ChatCoverageInput = z.infer<typeof chatCoverageInputSchema>
 export type ChatCoverageView = z.infer<typeof chatCoverageViewSchema>
 export type ChatCoverageDayView = z.infer<typeof chatCoverageDaySchema>
+
+/**
+ * ── 数字分身的监听范围 ────────────────────────────────────────────
+ *
+ * 与学习范围的三处**刻意不同**：
+ * · 只有 `enabledAt`（起点），**没有** `until` —— 它只管实时流；
+ * · 加入只增（`enabledAt` 只能变早），但**可以关掉**（那不删任何历史）；
+ * · 覆盖面记 `routed`/`skipped` 两侧，而不是 `drained`（实时流没有"抽干"）。
+ */
+export const attentionScopeItemSchema = z.object({
+  conversationExternalId: z.string(),
+  /** 会话标题（界面显示用；库里没有就回落到 id 前缀） */
+  title: z.string().nullable(),
+  /** 从这一刻起的新消息才算在范围内 */
+  enabledAt: z.number(),
+  active: z.boolean(),
+  /** 'user' = 显式勾的；'learning' = 跟随学习范围自动并入 */
+  source: z.string(),
+})
+
+export const attentionScopeViewSchema = z.object({
+  items: z.array(attentionScopeItemSchema),
+  activeCount: z.number(),
+  /**
+   * 实时流覆盖面。★ 同样**没有**百分比 —— 分母（"本该收到多少"）
+   * 与聊天覆盖面一样拿不到真值。
+   */
+  coverage: z.object({
+    routed: z.number(),
+    skipped: z.number(),
+    days: z.number(),
+  }),
+})
+
+export const attentionScopeSaveInputSchema = z.object({
+  channelId: z.string().min(1),
+  conversationExternalIds: z.array(z.string().min(1)).min(1),
+  /**
+   * 起点。省略时由主进程用**当前时间** —— 那是"从现在开始盯"的语义，
+   * 而让渲染层传 `Date.now()` 会把时钟判据分散到两个进程里。
+   */
+  enabledAt: z.number().optional(),
+})
+
+export const attentionScopeDisableInputSchema = z.object({
+  channelId: z.string().min(1),
+  conversationExternalId: z.string().min(1),
+})
+
+export type AttentionScopeView = z.infer<typeof attentionScopeViewSchema>
+export type AttentionScopeItemView = z.infer<typeof attentionScopeItemSchema>
+export type AttentionScopeSaveInput = z.infer<typeof attentionScopeSaveInputSchema>
+export type AttentionScopeDisableInput = z.infer<typeof attentionScopeDisableInputSchema>
 
 /**
  * 清空当前渠道数据的入参与结果。

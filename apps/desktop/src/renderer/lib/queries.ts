@@ -407,6 +407,50 @@ export function useChatCoverage(
   })
 }
 
+/**
+ * 数字分身的**监听范围**（盯哪些会话的实时消息）+ 它的实时流覆盖面。
+ *
+ * ★ 与 `useDistillSources`（学它哪些历史）分开的 queryKey —— 两者刷新时机
+ * 不同：保存学习范围不该让监听范围那一块闪一下。
+ */
+export function useAttentionScope(channelId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ["attention", "scope", channelId ?? "primary"] as const,
+    queryFn: async () =>
+      unwrap(await window.mycontext.distill.attentionScope({ channelId: channelId ?? "dingtalk" })),
+    enabled: enabled && channelId !== undefined,
+  })
+}
+
+/** 把会话加进监听范围（只增：已有的起点只会变早）。 */
+export function useSaveAttentionScope() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { channelId: string; conversationExternalIds: string[] }) =>
+      unwrap(await window.mycontext.distill.attentionScopeSave(input)),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["attention", "scope"] })
+    },
+  })
+}
+
+/**
+ * 把一个会话从监听范围里关掉。
+ *
+ * ★ 这个动作**允许**存在 —— 监听范围不存历史，关掉它不会让任何已有产出
+ * 变得不自洽。与学习范围的「只增不减」不是同一条规则。
+ */
+export function useDisableAttentionScope() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { channelId: string; conversationExternalId: string }) =>
+      unwrap(await window.mycontext.distill.attentionScopeDisable(input)),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["attention", "scope"] })
+    },
+  })
+}
+
 function useDistillMutation<TInput>(perform: (input: TInput) => Promise<unknown>) {
   const queryClient = useQueryClient()
   return useMutation({

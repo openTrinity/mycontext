@@ -42,6 +42,7 @@ import { VAULT_0024_MINUTES_COVERAGE } from "./migrations/vault/v24-minutes-cove
 import { VAULT_0025_SEARCH_GRAPH_SCOPE } from "./migrations/vault/v25-search-graph-scope.js"
 import { VAULT_0026_CLEAR_PLACEHOLDER_TITLES } from "./migrations/vault/v26-clear-placeholder-titles.js"
 import { VAULT_0027_CHAT_COVERAGE } from "./migrations/vault/v27-chat-coverage.js"
+import { VAULT_0028_ATTENTION_SCOPE } from "./migrations/vault/v28-attention-scope.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -357,6 +358,11 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
    * 同一个版本号跑不同 SQL，那是不可修复的分叉。
    */
   { version: 27, name: "chat-coverage", sql: VAULT_0027_CHAT_COVERAGE },
+  /**
+   * 数字分身的监听范围（关心范围）+ 它的实时流覆盖面。
+   * ★ 只加表；编号全局单调（见 v25 那条注释）。
+   */
+  { version: 28, name: "attention-scope", sql: VAULT_0028_ATTENTION_SCOPE },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */

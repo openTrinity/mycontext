@@ -174,10 +174,6 @@
       "save": "Save scope",
       "savedHint": "Saved. Newly added scope will be backfilled on the next collection pass (minutes).",
       "growOnlyNote": "Scope only grows: unchecking does not delete what it already learned, nor shrink the scope — the graph and profile have already used those messages. To really remove data, use General › Wipe this channel's data.",
-      "listen": {
-        "title": "Persona listening scope (a separate thing)",
-        "note": "Above is what it **learns** from; the listening scope is which conversations the persona **watches** in real time — new messages only, no backfill. Set it per conversation under Persona › Conversations."
-      },
       "coverage": {
         "loading": "Counting what you already have…",
         "empty": "No coverage records for this range yet — once collection runs, per-day counts show up here.",
@@ -186,6 +182,21 @@
         "pending": "{{done}} day(s) fully collected, {{pending}} still backfilling.",
         "clamped": "(Counting the last 90 days only; earlier history is still in the learning scope.)"
       }
+    },
+    "attention": {
+      "title": "Persona listening scope",
+      "count": "Watching {{count}} conversation(s)",
+      "note": "Which conversations the persona **watches** for new messages — real-time only, no backfill. Separate from the learning scope above: you can turn this off any time (nothing gets deleted), because it stores no history.",
+      "coverage": "Last 30 days: {{routed}} routed, {{skipped}} skipped by scope",
+      "coverageEmpty": "No real-time activity in the last 30 days — pick conversations and new messages will show up here.",
+      "empty": "No conversations picked — the persona currently evaluates new messages from **all** authorized conversations.",
+      "unnamed": "Untitled conversation",
+      "fromLearning": " (added with learning scope)",
+      "stop": "Stop watching",
+      "add": "Add conversations",
+      "collapse": "Collapse",
+      "loading": "Loading conversations…",
+      "confirm": "Add to listening scope ({{count}})"
     }
   },
   "advancedAi": {

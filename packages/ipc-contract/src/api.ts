@@ -34,6 +34,9 @@ import type {
   PersonaTraceItem,
   PersonaTraceEvent,
   QuitDecision,
+  AttentionScopeView,
+  AttentionScopeSaveInput,
+  AttentionScopeDisableInput,
   ChatCoverageInput,
   ChatCoverageView,
   DistillSourceId,
@@ -226,6 +229,13 @@ export interface MyContextApi {
      * 顺带重算一遍聚合。
      */
     chatCoverage(input: ChatCoverageInput): Promise<Result<ChatCoverageView>>
+    /**
+     * 数字分身的**监听范围**（盯哪些会话的实时消息）。
+     * ★ 与 `sources()`（学它哪些历史）是两件事，见契约里那段注释。
+     */
+    attentionScope(input: { channelId: string }): Promise<Result<AttentionScopeView>>
+    attentionScopeSave(input: AttentionScopeSaveInput): Promise<Result<true>>
+    attentionScopeDisable(input: AttentionScopeDisableInput): Promise<Result<true>>
     /** 蒸馏进度（引导页第 4 步与设置页都读它） */
     progress(): Promise<Result<DistillProgressView>>
     /** 切窗入队并开始跑。幂等：重复调用不产生重复任务 */

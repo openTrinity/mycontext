@@ -23,15 +23,22 @@ import type { Clock, Logger } from "@mycontext/kernel"
 import { AppError } from "@mycontext/kernel"
 import type { ChannelPlugin } from "@mycontext/channels"
 import {
+  AttentionCoverageRepository,
+  AttentionScopeRepository,
   ChatCoverageRepository,
+  ConversationRepository,
   DistillSourceRepository,
   SettingsRepository,
+  toDayBucket,
   DISTILL_SOURCE_KINDS,
   type DistillScope,
   type DistillSourceKind,
   type SqliteDatabase,
 } from "@mycontext/store"
 import type {
+  AttentionScopeView,
+  AttentionScopeSaveInput,
+  AttentionScopeDisableInput,
   ChatCoverageInput,
   ChatCoverageView,
   ChannelConversationListView,
@@ -354,6 +361,122 @@ export class DistillSourceService {
    * ★ 拿不到那个渠道的库时返回"全部未启用"而不是抛：设置页在管线还没挂上
    * 时也会渲染，抛错会让整页显示错误横幅，而实际只是还没就绪。
    */
+  /**
+   * 读某个渠道的**监听范围**（分身盯哪些会话的实时消息）+ 实时流覆盖面。
+   *
+   * ★ 放在这个服务里的理由与 `chatCoverage` 相同：per-channel 的库解析
+   * 已经在这里，让 IPC 层再学一遍映射就会出现第二处要同步维护的地方 ——
+   * 而那正是那次"保存飞书的范围却写进主库"的成因。
+   */
+  attentionScope(input: { channelId: string }): AttentionScopeView {
+    const db = this.dbForChannel(input.channelId)
+    if (db === null) {
+      return { items: [], activeCount: 0, coverage: { routed: 0, skipped: 0, days: 0 } }
+    }
+    const repo = new AttentionScopeRepository(db)
+    const rows = repo.list(input.channelId)
+    /**
+     * 会话标题从 `conversations` 补 —— 只显示 id 的话用户认不出是哪个群
+     * （而 id 是敏感标识，界面上本来也不该只给它）。
+     */
+    const conversations = new ConversationRepository(db)
+    const items = rows.map((row) => {
+      const conversation = conversations.findByExternalId(
+        input.channelId,
+        row.conversationExternalId,
+      )
+      return {
+        conversationExternalId: row.conversationExternalId,
+        title: conversation?.title ?? null,
+        enabledAt: row.enabledAt,
+        active: row.active,
+        source: row.source,
+      }
+    })
+    /**
+     * 覆盖面窗口取近 30 天：实时流的问题是"最近它收到了多少"，
+     * 而不是"历史上一共"。★ 与 `chatCoverage` 的 90 天不同是刻意的 ——
+     * 那个要回答"这段历史齐不齐"，这个要回答"它现在在干活吗"。
+     */
+    const now = this.options.clock.now()
+    const coverage = new AttentionCoverageRepository(db).summarize(
+      input.channelId,
+      toDayBucket(now - 30 * 86_400_000),
+      toDayBucket(now),
+    )
+    return { items, activeCount: repo.activeCount(input.channelId), coverage }
+  }
+
+  /**
+   * 把会话加进监听范围（**只增**：已有的 `enabledAt` 只会变早）。
+   *
+   * ★ `enabledAt` 缺省用**主进程的时钟**而不是让渲染层传 `Date.now()`：
+   * 时钟判据分散到两个进程里就会出现"界面上是今天、库里是明天"这类
+   * 没人能解释的偏差（渲染进程与主进程的时钟本身一致，但**谁负责**
+   * 这个语义必须只有一处）。
+   */
+  attentionScopeSave(input: AttentionScopeSaveInput): true {
+    const db = this.dbForChannel(input.channelId)
+    if (db === null) {
+      throw new AppError("CHANNEL_UNSUPPORTED", `渠道未就绪：${input.channelId}`, {
+        messageKey: "errors:channel.notReady",
+      })
+    }
+    const at = this.options.clock.now()
+    const changed = new AttentionScopeRepository(db).add(
+      input.channelId,
+      input.conversationExternalIds.map((conversationExternalId) => ({
+        conversationExternalId,
+        enabledAt: input.enabledAt ?? at,
+        source: "user",
+      })),
+      at,
+    )
+    this.options.logger.info("attention scope saved", {
+      channelId: input.channelId,
+      requested: input.conversationExternalIds.length,
+      changed,
+    })
+    return true
+  }
+
+  /**
+   * 把一个会话从监听范围里关掉。
+   *
+   * ★★ 这个动作**是允许的**，与学习范围的「只增不减」不冲突：
+   * 监听范围不存任何历史，关掉它只是"以后别管这个群"，没有已有产出
+   * 会因此不自洽。把两者混成一条规则会让用户永远无法让分身停下来。
+   */
+  attentionScopeDisable(input: AttentionScopeDisableInput): true {
+    const db = this.dbForChannel(input.channelId)
+    if (db === null) {
+      throw new AppError("CHANNEL_UNSUPPORTED", `渠道未就绪：${input.channelId}`, {
+        messageKey: "errors:channel.notReady",
+      })
+    }
+    const ok = new AttentionScopeRepository(db).disable(
+      input.channelId,
+      input.conversationExternalId,
+      this.options.clock.now(),
+    )
+    this.options.logger.info("attention scope disabled", {
+      channelId: input.channelId,
+      changed: ok,
+    })
+    return true
+  }
+
+  /**
+   * per-channel 的库解析 —— 三处（`list`/`chatCoverage`/`attentionScope*`）
+   * 共用。★ 提成一个方法而不是各写一遍：写错渠道就是写错库，
+   * 而那类错误本仓库已经付过一次代价（钉钉白名单被飞书那次保存清空）。
+   */
+  private dbForChannel(channelId: string): SqliteDatabase | null {
+    return channelId === this.options.primaryChannelId
+      ? this.db
+      : (this.sourceDbs.get(channelId) ?? null)
+  }
+
   /**
    * 读某个渠道的聊天覆盖面（「这段日期已有多少 / 齐没齐」）。
    *

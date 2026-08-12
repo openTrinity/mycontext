@@ -30,6 +30,7 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { SourcesStep, type SourcesDraft } from "../onboarding/sources-step.js"
 import { ScopeCoverage } from "./scope-coverage.js"
+import { AttentionScopePanel } from "./attention-scope-panel.js"
 
 /** 主渠道 id —— 它的白名单走 `scope.conversationIds`（存量形状）。 */
 const PRIMARY_CHANNEL_ID = "dingtalk"
@@ -313,30 +314,14 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           不给退路的"只增不减"会变成一个陷阱。
         */}
         {/*
-          ── ★★★ 「分身监听范围」—— 与学习范围**分开表达** ─────────────
-          用户的原话是「至少要分开两个吧，给用户的引导，学习的范围和监听范围」。
+          ── ★★★ 「分身监听范围」—— 与学习范围并列的第二个范围 ─────────
+          用户原话：「至少要分开两个吧，学习的范围和监听范围」。
 
-          底层其实早就是两套（学习走 `distill_sources.scope_json`，监听走
-          `dh_conversation_configs` 的 per-conversation reply/trigger mode），
-          缺的是**在用户面前它们是两件事**：现在这块只在数字分身页里以
-          "会话列表"的形式出现，用户不会把它读成"监听范围"。
-
-          ★ 这里只做**指路 + 说清区别**，不把那个编辑器搬过来：
-          它有自己的一整套模式（自动/草稿/静默 × 触发条件），搬过来会变成
-          同一个编辑器两处实现，而那是本仓库那次"同一件事在两条路各解析一份"
-          的成因（改一条界面照旧）。
+          这里放**真的编辑器**（v28 `attention_scope`）而不是一句指路文案：
+          先前那一版只写了"去数字分身页设"，而那等于把"两个范围"留在
+          文档里而不是产品里 —— 用户仍然只能在一个地方表达两件事。
         */}
-        <div className="flex flex-col gap-1 border-t border-[var(--border-divider-light)] pt-3">
-          <p className="typography-body-small-400 text-[var(--text-base-primary)]">
-            {t("status.scope.listen.title", { defaultValue: "分身监听范围（另一件事）" })}
-          </p>
-          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-            {t("status.scope.listen.note", {
-              defaultValue:
-                "上面是它**学**哪些历史；「监听范围」是分身**盯**哪些会话的实时消息 —— 那个只看新消息、不回溯历史，在「数字分身 › 会话」里按会话设。",
-            })}
-          </p>
-        </div>
+        <AttentionScopePanel channelId={channelId} />
         <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
           {t("status.scope.growOnlyNote", {
             defaultValue:

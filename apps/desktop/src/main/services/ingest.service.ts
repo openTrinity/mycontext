@@ -69,6 +69,9 @@ import {
   type SqliteDatabase,
   ChatCoverageRepository,
   toDayBucket,
+  AttentionScopeRepository,
+  AttentionCoverageRepository,
+  routeToAttention,
 } from "@mycontext/store"
 
 /** L1 探针基础周期。实测探针约 0.7s，15s 是「够快且不浪费」的折中。 */
@@ -1013,7 +1016,68 @@ export class IngestService {
            * 或者慢兜底已经收下了同一条（按 message_id 去重）。
            * 不区分的话每条入库消息都会排一次唤醒 —— 回溯时是几千次空跑。
            */
-          const accepted = this.personaFastPath?.(message.id) ?? false
+          /**
+           * ★★★ 路由：先判「这条消息属于分身的关心范围吗」。
+           *
+           * 用户原话：「消费者是不是得有个路由模块，看这段时间新消息会不会是
+           * 我这个数字分身的设置要关心的」。这里就是那个位置 —— 在消息
+           * 进入管控层**之前**。
+           *
+           * ## 为什么路由与 `admit()` 分开
+           *
+           * `admit()` 问的是"现在该不该回"（kill switch / 自己发的 / 已回过 /
+           * 太旧 / 触发词），而路由问的是"这个会话我管不管"。两者的出路不同：
+           * 范围外要用户去勾选，不该回是时机问题。混成一个 reason 会让
+           * 用户排查时分不清"我没勾"和"暂时不回"。
+           *
+           * ## ★ 范围为空时**放行**（回落到旧行为）
+           *
+           * `attention_scope` 是这一版新加的表，存量用户那张表是空的。
+           * 空表判成"什么都不关心"会让分身**整个静默**，而那是一次
+           * 静默功能回归（用户看到的是"它不理人了"，日志里一个错都没有）。
+           * 所以判据是"名单非空才生效"—— 迁移期的正确一侧。
+           */
+          const scopeRepo = new AttentionScopeRepository(this.options.db)
+          const hasScope = scopeRepo.activeCount(this.options.plugin.meta.id) > 0
+          let routed = true
+          if (hasScope) {
+            const conversation = new ConversationRepository(this.options.db).findById(
+              message.conversationId,
+            )
+            const scopeRow =
+              conversation === null
+                ? null
+                : scopeRepo.get(this.options.plugin.meta.id, conversation.externalId)
+            const verdict = routeToAttention({
+              conversationExternalId: conversation?.externalId ?? "",
+              sentAt: message.sentAt,
+              scope:
+                scopeRow === null
+                  ? null
+                  : { enabledAt: scopeRow.enabledAt, active: scopeRow.active },
+            })
+            routed = verdict.routed
+            /**
+             * ★ 记账 routed / skipped 两侧 —— 只记放行的话，
+             * "范围设窄了"与"那段时间没消息"不可区分。
+             */
+            try {
+              new AttentionCoverageRepository(this.options.db).bump(this.options.plugin.meta.id, {
+                dayBucket: toDayBucket(message.sentAt),
+                routed: verdict.routed ? 1 : 0,
+                skipped: verdict.routed ? 0 : 1,
+                at: this.options.clock.now(),
+              })
+            } catch {
+              // 记账失败不许影响投递（它是派生物，投递是正事）
+            }
+            if (!verdict.routed) {
+              this.options.logger.debug("persona route skipped", {
+                reason: verdict.reason,
+              })
+            }
+          }
+          const accepted = routed ? (this.personaFastPath?.(message.id) ?? false) : false
           if (accepted) this.options.onPersonaDelivered?.()
         } catch (error) {
           /**

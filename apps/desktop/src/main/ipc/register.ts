@@ -18,6 +18,8 @@ import {
   channelIdentitySwitchInputSchema,
   createSearchSessionInputSchema,
   credentialsSchema,
+  attentionScopeSaveInputSchema,
+  attentionScopeDisableInputSchema,
   chatCoverageInputSchema,
   distillSourceResetInputSchema,
   channelDataWipeInputSchema,
@@ -416,6 +418,24 @@ export function registerIpc(deps: IpcDependencies): void {
   )
   ipcMain.handle(IPC_CHANNELS.chatCoverage, (_event, payload: unknown) =>
     attempt(() => distillSources.chatCoverage(parse(chatCoverageInputSchema, payload))),
+  )
+  // 数字分身的监听范围（盯哪些会话的实时消息）—— 与学习范围是两件事
+  ipcMain.handle(IPC_CHANNELS.attentionScope, (_event, payload: unknown) =>
+    attempt(() => {
+      const channelId = (payload as { channelId?: unknown } | null)?.channelId
+      if (typeof channelId !== "string" || channelId === "") {
+        throw new AppError("IPC_BAD_REQUEST", "attentionScope 需要 channelId")
+      }
+      return distillSources.attentionScope({ channelId })
+    }),
+  )
+  ipcMain.handle(IPC_CHANNELS.attentionScopeSave, (_event, payload: unknown) =>
+    attempt(() => distillSources.attentionScopeSave(parse(attentionScopeSaveInputSchema, payload))),
+  )
+  ipcMain.handle(IPC_CHANNELS.attentionScopeDisable, (_event, payload: unknown) =>
+    attempt(() =>
+      distillSources.attentionScopeDisable(parse(attentionScopeDisableInputSchema, payload)),
+    ),
   )
   // 走子进程拿全量会话（约 5s，三路合并）。失败会降级成本地列表而不是报错。
   ipcMain.handle(IPC_CHANNELS.channelConversations, () =>
