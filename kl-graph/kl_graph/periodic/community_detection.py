@@ -284,37 +284,37 @@ def _build_community_graph(
             chunk_entities[cid].add(eid)
 
     # Count co-occurrences and track DISTINCT partner sets for hub guard.
-    comention_counts: dict[tuple[str, str], int] = defaultdict(int)
-    entity_partners: dict[str, set[str]] = defaultdict(set)
-
-    for entities in chunk_entities.values():
-        ent_list = sorted(entities)
-        for i in range(len(ent_list)):
-            for j in range(i + 1, len(ent_list)):
-                pair = (ent_list[i], ent_list[j])
-                comention_counts[pair] += 1
-                entity_partners[ent_list[i]].add(ent_list[j])
-                entity_partners[ent_list[j]].add(ent_list[i])
-
-    n_comention = 0
-    n_comention_skipped = 0
-    for (eid_a, eid_b), count in comention_counts.items():
-        if count >= 2:
-            # Hub guard: skip if either endpoint has too many distinct partners.
-            if (
-                len(entity_partners[eid_a]) > HUB_GUARD_THRESHOLD
-                or len(entity_partners[eid_b]) > HUB_GUARD_THRESHOLD
-            ):
-                n_comention_skipped += 1
-                continue
-            w = min(count / 10.0, 1.0)
-            _add_edge(
-                _make_label("entity", eid_a),
-                _make_label("entity", eid_b),
-                w,
-            )
-            n_comention += 1
-    print(f"    Co-mention edges: {n_comention} (skipped {n_comention_skipped} hub pairs)")
+    # comention_counts: dict[tuple[str, str], int] = defaultdict(int)
+    # entity_partners: dict[str, set[str]] = defaultdict(set)
+    #
+    # for entities in chunk_entities.values():
+    #     ent_list = sorted(entities)
+    #     for i in range(len(ent_list)):
+    #         for j in range(i + 1, len(ent_list)):
+    #             pair = (ent_list[i], ent_list[j])
+    #             comention_counts[pair] += 1
+    #             entity_partners[ent_list[i]].add(ent_list[j])
+    #             entity_partners[ent_list[j]].add(ent_list[i])
+    #
+    # n_comention = 0
+    # n_comention_skipped = 0
+    # for (eid_a, eid_b), count in comention_counts.items():
+    #     if count >= 2:
+    #         # Hub guard: skip if either endpoint has too many distinct partners.
+    #         if (
+    #             len(entity_partners[eid_a]) > HUB_GUARD_THRESHOLD
+    #             or len(entity_partners[eid_b]) > HUB_GUARD_THRESHOLD
+    #         ):
+    #             n_comention_skipped += 1
+    #             continue
+    #         w = min(count / 10.0, 1.0)
+    #         _add_edge(
+    #             _make_label("entity", eid_a),
+    #             _make_label("entity", eid_b),
+    #             w,
+    #         )
+    #         n_comention += 1
+    # print(f"    Co-mention edges: {n_comention} (skipped {n_comention_skipped} hub pairs)")
 
     # Convert to list of triples.
     edges = [(u, v, w) for (u, v), w in edge_weights.items()]

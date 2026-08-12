@@ -450,7 +450,7 @@ FACT RULES:
 - 内容 should be a complete sentence, faithful to the original message language
 - Do NOT infer facts not directly stated or strongly implied by the message
 - 主体 and 客体 must be entity names from the entities list
-- 置信 is [0,1]: 1.0 when explicitly stated, mid-range when implied, near 0.0 when weakly speculative
+- 置信 is [0,1]: 1.0 when explicitly stated, mid-range when implied, near 0.0 when weakly speculative. Use the full continuous [0-1] range; confidence scores need high discriminative power.
 
 QUOTED-REPLY RULES:
 - Quoted replies are read-only context, never extraction targets
@@ -510,7 +510,7 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 - 内容字段写完整语句，忠实于原消息语言
 - 不要推断消息未直接陈述或强烈暗示的事实
 - 主体和客体必须是实体列表中的名称
-- 置信度[0,1]：1.0=明确陈述，0.5=隐含暗示，接近0.0=弱推测
+- 置信度[0,1]：1.0=明确陈述，0.5=隐含暗示，接近0.0=弱推测, 可选范围[0-1]的连续区间, 需要高区分度的置信分数。
 
 引用回复规则：
 - 引用回复只作为只读上下文，绝不是抽取目标

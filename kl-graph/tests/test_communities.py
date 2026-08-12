@@ -453,7 +453,13 @@ def test_hub_guard_skips_high_degree_entity_about() -> None:
 
 
 def test_hub_guard_skips_high_degree_entity_comention_distinct_partners() -> None:
-    """Entity with >HUB_GUARD_THRESHOLD distinct co-mention partners is skipped."""
+    """A high-partner entity contributes no co-mention edge.
+
+    Originally this asserted the hub guard's distinct-partner cap. With the
+    co-mention block commented out the expectation is unchanged (still zero
+    edges) but the *reason* is now that the synthesis never runs — so this no
+    longer exercises the guard itself. Retained as a co-mention-off regression.
+    """
     conn = sqlite3.connect(":memory:")
     store = SQLiteStore(db_path=None, conn=conn)
 
@@ -518,7 +524,18 @@ def test_hub_guard_skips_high_degree_entity_comention_distinct_partners() -> Non
 
 
 def test_hub_guard_allows_two_entities_sharing_many_chunks() -> None:
-    """Two entities sharing 201 chunks are NOT capped (only distinct partners matter)."""
+    """Co-mention synthesis is disabled: shared chunks yield no entity edge.
+
+    Previously two entities sharing 201 chunks were joined by a co-mention edge
+    of weight ``min(201/10, 1.0) == 1.0`` (the hub guard counted *distinct
+    partners*, of which each had only one, so the pair was not capped). The
+    co-mention block in :func:`_build_community_graph` is now commented out, so
+    ``MENTIONS``/``AUTHORED_BY`` co-occurrence no longer reaches the community
+    graph at all and the pair produces no edge.
+
+    Kept (rather than deleted) as the regression that proves the synthesis is
+    off: if co-mention is ever re-enabled, this fails and points at the decision.
+    """
     conn = sqlite3.connect(":memory:")
     store = SQLiteStore(db_path=None, conn=conn)
 
@@ -563,7 +580,8 @@ def test_hub_guard_allows_two_entities_sharing_many_chunks() -> None:
     conn.commit()
     edges, label_map = _build_community_graph(store)
 
-    # Should have a co-mention edge (201 shared chunks, but only 1 distinct partner each)
+    # Co-mention synthesis is disabled, so no entity↔entity edge is emitted for
+    # a pair that merely shares chunks (regardless of how many).
     e1_e2_edges = []
     for u, v, w in edges:
         u_type, u_id = label_map[u]
@@ -571,9 +589,9 @@ def test_hub_guard_allows_two_entities_sharing_many_chunks() -> None:
         if (u_id == "e1" and v_id == "e2") or (u_id == "e2" and v_id == "e1"):
             e1_e2_edges.append((u, v, w))
 
-    # Should have exactly one co-mention edge with weight = min(201/10, 1.0) = 1.0
-    assert len(e1_e2_edges) == 1
-    assert e1_e2_edges[0][2] == pytest.approx(1.0, abs=0.01)
+    assert e1_e2_edges == []
+    # Nothing else can connect them either: no ENTITY_SIMILAR, no ABOUT.
+    assert edges == []
 
     store.close()
 
