@@ -17,6 +17,7 @@ import {
   parseLarkAuthStatus,
   parseLarkDeviceGrant,
   readFeishuTenantKey,
+  readFeishuTenantName,
 } from "./parse.js"
 
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
@@ -81,33 +82,50 @@ export class FeishuAuth implements ChannelAuth {
        * ★ 失败**不影响授权态**：拿不到就沿用派生值。这一步失败不该把
        * "已授权"变成"未授权"。
        */
-      if (status.state === "authorized" && status.corpId.startsWith("unknown-tenant:")) {
-        try {
-          const user = await this.cli.json<unknown>([
-            "contact",
-            "+get-user",
-            "--as",
-            "user",
-            "--format",
-            "json",
-          ])
-          const tenantKey = readFeishuTenantKey(user)
-          if (tenantKey !== null) {
-            return {
-              ...status,
-              corpId: tenantKey,
-              /**
-               * 组织**名**两条命令都不给（实测：`get-user` 只有 `tenant_key`，
-               * `auth status` 的 `identities.bot.appName` 是**应用**名不是组织名）。
-               * 所以不编一个假名字，显示短码 —— 两个组织至少能分辨。
-               */
-              corpName: `组织 ${tenantKey.slice(0, 8)}`,
-            }
+      if (status.state === "authorized") {
+        /**
+         * ★ 两件事分开判，因为它们**各自可能缺**：
+         *
+         * · `corpId` 是派生值（`unknown-tenant:` 前缀）→ 去 `get-user` 补真
+         *   `tenant_key`（那是身份隔离键的一段，见 `parseLarkIdentity`）；
+         * · `corpName` 是「未知组织」或短码 → 去租户接口补**可读的名字**。
+         *
+         * 合成一个 `if` 的话，某天上游给了 tenantKey 却仍不给名字时，
+         * 名字那一支就永远不会去补 —— 界面回到显示短码。
+         * 这正是本轮踩过的形状（判据搭在了另一件事上）。
+         */
+        let corpId = status.corpId
+        let corpName = status.corpName
+        if (corpId.startsWith("unknown-tenant:")) {
+          try {
+            const user = await this.cli.json<unknown>([
+              "contact",
+              "+get-user",
+              "--as",
+              "user",
+              "--format",
+              "json",
+            ])
+            const tenantKey = readFeishuTenantKey(user)
+            if (tenantKey !== null) corpId = tenantKey
+          } catch (error) {
+            this.options.logger.debug("lark tenant key lookup failed; keeping derived corpId", {
+              detail: error instanceof Error ? error.message : String(error),
+            })
           }
-        } catch (error) {
-          this.options.logger.debug("lark tenant lookup failed; keeping derived corpId", {
-            detail: error instanceof Error ? error.message : String(error),
-          })
+        }
+        /**
+         * 组织名：`parseLarkIdentity` 在读不到时给的是「未知组织」——
+         * 那就是"要去补"的标记。拿到真名就用，拿不到才回落 tenant_key 短码
+         * （**不编**一个假名字，两个组织至少能分辨）。
+         */
+        if (corpName === "未知组织") {
+          corpName =
+            (await this.readTenantName()) ??
+            (corpId.startsWith("unknown-tenant:") ? corpName : `组织 ${corpId.slice(0, 8)}`)
+        }
+        if (corpId !== status.corpId || corpName !== status.corpName) {
+          return { ...status, corpId, corpName }
         }
       }
       return status
@@ -116,6 +134,45 @@ export class FeishuAuth implements ChannelAuth {
         detail: error instanceof Error ? error.message : String(error),
       })
       return { state: "unauthorized" }
+    }
+  }
+
+  /**
+   * 可读的**组织名**。
+   *
+   * ## ★★ 为什么单独一次调用（而不是从已有响应里挖）
+   *
+   * 实测把三条都问过了，组织名**都没有**：`auth status --json --verify`
+   * 只有 `appId` 与 `identities.*`；`contact +get-user` 有 `tenant_key`
+   * 但没有名字；`contact --help` 里没有任何 tenant 命令。
+   * 它只在 `GET /open-apis/tenant/v2/tenant/query` 里。
+   *
+   * 我一度据此下结论"拿不到组织名、只能显示 tenant_key 短码"，并把那句
+   * 写进了注释与界面 —— **那个结论是错的**（只查了 shortcut 层没查 API 层），
+   * 是用户看到界面上一串短码时指出来的。所以这里记下判据的来源。
+   *
+   * ## ★ `--as bot`
+   *
+   * 实测用 user 身份打这个接口报 `99991668 user access token not support`
+   * —— 这是**应用**维度的信息，不属于某个人。
+   *
+   * 拿不到返回 `null`（调用点回落短码）：这一步失败不该影响授权态。
+   */
+  private async readTenantName(): Promise<string | null> {
+    try {
+      const payload = await this.cli.json<unknown>([
+        "api",
+        "GET",
+        "/open-apis/tenant/v2/tenant/query",
+        "--as",
+        "bot",
+      ])
+      return readFeishuTenantName(payload)
+    } catch (error) {
+      this.options.logger.debug("lark tenant name unavailable", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return null
     }
   }
 

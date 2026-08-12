@@ -80,10 +80,43 @@ function pickAvatarUrl(payload: unknown): string | null {
   ].filter((c): c is Record<string, unknown> => c !== null)
 
   for (const user of candidates) {
-    // ★ 顺序即优先级：middle 够用、big 更清晰、url/thumb 兜底
+    /**
+     * ★★★ **两种形状都要认** —— 取本人与按 id 取别人的响应不一样。
+     *
+     * ## 实测（同一台机、同一个 CLI 版本，2026-08）
+     *
+     * | 调用                                  | 身份 | avatar 形状                       |
+     * |---------------------------------------|------|-----------------------------------|
+     * | `+get-user`（省略 --user-id，取本人） | user | **平铺** `avatar_middle/big/…`    |
+     * | `+get-user --user-id <open_id>`       | bot  | **嵌套** `avatar.avatar_240/640/…`|
+     *
+     * 而按 id + **user** 身份（这个文件原来的写法）只返回三个字段
+     * （`name` / `i18n_name` / `user_id`）—— **一个 avatar 都没有**。
+     *
+     * ## 这个坑我踩了两次，方向相反
+     *
+     * · 首版按嵌套 `avatar.avatar_240` 写（照开放平台文档），被"实测本人"
+     *   证伪，于是改成只认平铺；
+     * · 而线上跑的是**按 id 取**那条路，于是 `pickAvatarUrl` 恒返回 null →
+     *   每个人都落 `not_set`（**终态、不重试**）→ 头像永远是首字母兜底，
+     *   `contact_avatars` 表里全是 miss。用户报的"头像还是没显示"就是它。
+     *
+     * 教训：**"实测过"要看实测的是不是线上真正走的那条调用**。
+     * 我两次实测都是真的，但都只覆盖了一半的调用形态。
+     * 所以这里不再二选一，两种形状按优先级依次试。
+     */
+    // ① 平铺（本人那条路）：middle 够用、big 更清晰、url/thumb 兜底
     for (const key of ["avatar_middle", "avatar_big", "avatar_url", "avatar_thumb"]) {
       const url = user[key]
       if (typeof url === "string" && url.startsWith("https://")) return url
+    }
+    // ② 嵌套（按 id + bot 那条路）：240 够头像用，依次退到更大/原图/小图
+    const avatar = asRecord(user["avatar"])
+    if (avatar !== null) {
+      for (const key of ["avatar_240", "avatar_640", "avatar_origin", "avatar_72"]) {
+        const url = avatar[key]
+        if (typeof url === "string" && url.startsWith("https://")) return url
+      }
     }
   }
   return null
@@ -106,9 +139,21 @@ export function createFeishuAvatars(cli: Pick<LarkCli, "json">): ChannelAvatars 
             openId,
             "--user-id-type",
             "open_id",
-            // 以本人身份按 id 读 —— 与采集同一条身份，不试探
+            /**
+             * ★★ 按 id 取**必须用 bot 身份**。
+             *
+             * CLI 自己的 help 原文："Self lookup (omit --user-id) needs user
+             * identity; **a bot must pass --user-id**" —— 两条路各自的身份要求
+             * 是对偶的。实测：按 id + user 身份只返回
+             * `name`/`i18n_name`/`user_id` 三个字段（**零 avatar**），
+             * 而 bot 身份返回 22 个字段含嵌套 `avatar` 对象。
+             *
+             * ★ 这**不是**扩大读取面：仍然是"按已经在聊天里见过的 open_id
+             * 取一个人"，没有反查、没有枚举。换的只是这条命令要求的凭据类型
+             * （应用凭据 vs 用户凭据）。
+             */
             "--as",
-            "user",
+            "bot",
             "--format",
             "json",
           ],

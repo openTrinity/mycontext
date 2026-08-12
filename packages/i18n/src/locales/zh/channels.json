@@ -32,20 +32,21 @@
     "configure": "配置",
     "collapse": "收起",
     "signOut": "退出授权",
-    "switchUser": "换个人登录",
-    "switchApp": "换应用",
-    "signOutHint": "只清掉登录凭据，已绑定的应用保留。数据都在；想再用点「重新授权」即可。",
-    "switchUserHint": "清掉登录凭据（应用保留），下次扫码可以换成另一个人。",
-    "switchAppHint": "连**已绑定的应用**一起清掉 —— 下次授权要重新选一个应用，然后再登录一次。只有确实要换应用时才用。",
+    "switchUser": "切换登录账号",
+    "switchApp": "更换应用",
+    "signOutHint": "撤销登录凭据，应用绑定与已采集数据保留 —— 点「重新授权」即可恢复。",
+    "switchUserHint": "撤销当前登录凭据、保留应用绑定 —— 下次授权可用另一个账号登录。",
+    "switchAppHint": "同时解除应用绑定 —— 下次授权需重新选择应用并登录。仅在确实要更换应用时使用。",
     "signOutDone": "已退出授权",
     "signOutFailed": "没能退掉凭据 —— 可能本来就没有登录态",
     "switchAccountDone": "已清掉凭据与应用绑定，点「开始授权」换账号",
-    "switchUserDone": "已退出登录态，点「开始授权」用另一个人扫码",
-    "switchAppDone": "已解除应用绑定，点「开始授权」重新选应用并登录"
+    "switchUserDone": "已撤销登录凭据，点「开始授权」用其他账号登录",
+    "switchAppDone": "已解除应用绑定，点「开始授权」重新选择应用并登录"
   },
   "twoStep": {
-    "appLabel": "① 应用",
-    "sessionLabel": "② 登录态",
+    "appReady": "已绑定应用",
+    "appLabel": "应用",
+    "sessionLabel": "登录态",
     "sessionMissing": "未完成 —— 点「开始授权」登录"
   },
   "scope": {
@@ -76,6 +77,7 @@
     "fromEnv": "当前由环境变量指定：{{path}}（在上面填一个路径可覆盖它）"
   },
   "account": {
+    "app": "应用",
     "user": "账号",
     "userValue": "{{name}}（{{id}}）",
     "accessExpiresAt": "凭证刷新至",

@@ -198,6 +198,39 @@ export function readFeishuTenantKey(payload: unknown): string | null {
 }
 
 /**
+ * 组织（租户）信息 —— 从 `api GET /open-apis/tenant/v2/tenant/query --as bot`。
+ *
+ * ## 实测响应（本机，2026-08）
+ *
+ * ```
+ * .data.tenant.name        = '<组织名>'          ← 这才是可读的组织名
+ * .data.tenant.tenant_key  = 16 字符
+ * .data.tenant.display_id  = 'F…'（组织的公开短号）
+ * .data.tenant.domain      = '<子域>.feishu.cn'
+ * ```
+ *
+ * ★ 我一度断言"组织名两条命令都不给、只能显示 tenant_key 短码" ——
+ * 错在只查了 shortcut 层（`auth status` / `contact +get-user`）没查 API 层。
+ * 界面上那串短码是用户指出来的。
+ *
+ * 只取 `name`：`display_id` 与 `domain` 是组织的公开标识但对用户没意义
+ * （他要的是"这是哪个公司"）；头像暂不用（组织 logo 界面上没有位置）。
+ */
+export function readFeishuTenantName(payload: unknown): string | null {
+  const root = record(payload)
+  const candidates = [
+    record(record(root["data"])["tenant"]),
+    record(root["tenant"]),
+    root,
+  ]
+  for (const tenant of candidates) {
+    const raw = tenant["name"]
+    if (typeof raw === "string" && raw.trim() !== "") return raw
+  }
+  return null
+}
+
+/**
  * 应用层绑定 —— 与"人登录了没有"正交，所以**单独解析**，
  * 且在未授权时也要能返回（见 `ChannelAppBinding` 的说明）。
  *

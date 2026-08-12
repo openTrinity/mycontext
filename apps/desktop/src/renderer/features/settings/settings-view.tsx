@@ -527,8 +527,15 @@ function PersonaSection() {
               而"空数组"与"没配过"在 UI 上无法区分。
             */
             <>
+              {/*
+                ★ 形象与名字**不**带渠道（用户明确说可以复用）：那是"这个分身
+                是谁"，与它在哪个渠道工作无关。而运行参数带渠道 —— 那是
+                "它在这个渠道怎么工作"（工作时间、频率、并发）。
+              */}
               <PersonaFigurePanel />
-              <PersonaRuntimePanel />
+              <PersonaRuntimePanel
+                {...(activeChannelId === null ? {} : { channelId: activeChannelId })}
+              />
             </>
           ) : (
             /*

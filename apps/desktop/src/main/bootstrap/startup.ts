@@ -1536,6 +1536,32 @@ export function bootstrapApp(mainDir: string): AppContext {
         avatars: channelPlugin.avatars ?? null,
         channelId: spec.channelId,
       })
+      /**
+       * ★★★ **必须 attach** —— 漏了它整条取头像的路会抛 `DB_UNAVAILABLE`。
+       *
+       * ## 这是"两套路径漏一处"的又一次复现（CDP 抓到的）
+       *
+       * 主渠道那个 media 单例在 `mountVault` 里 attach（`startup.ts` 那处
+       * `media.attach(handle.db, …)`）。而我给非主渠道**新建**的这些
+       * MediaService 从没被 attach 过 —— `requireDb()` 于是抛
+       * `DB_UNAVAILABLE / 尚未登录`。
+       *
+       * 表现：飞书头像永远是首字母兜底，而 `contact_avatars` 表**零行**
+       * （连一条 miss 都没落）。用户看到的就是"头像还是没显示"。
+       * 单测不会红：那些用的是内存库、且直接构造 MediaService 自己 attach。
+       *
+       * ## ★ 库按渠道分，媒体目录**共用 vault 级**
+       *
+       * 库必须分（`contact_avatars` 按 `(channel_id, external_id)` 查，
+       * 而非主渠道的行本来就在自己那个 `sources/<id>/core.sqlite` 里）。
+       * 而落地目录不分：文件名是**内容/URL 的哈希**，同一张图在两个渠道
+       * 只存一份；按渠道分目录反而会存两份且互不知道。
+       */
+      channelMedia.attach(handle.db, {
+        media: vp.mediaRoot,
+        avatar: vp.avatarRoot,
+        upload: vp.uploadRoot,
+      })
       return {
         parts: {
           channelId: spec.channelId,

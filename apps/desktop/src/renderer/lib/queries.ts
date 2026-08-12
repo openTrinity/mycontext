@@ -655,10 +655,20 @@ export function useSavePersonaConfig() {
  * 存的是"这台机器能同时跑几个 agent"，不是内容 —— 所以 staleTime 给长：
  * 它只在用户自己改的时候变，而那时 mutation 会主动 invalidate。
  */
-export function usePersonaLimits(enabled = true) {
+/**
+ * 运行参数 —— **按渠道**（用户要求：分身设置按渠道拆）。
+ *
+ * ★★ `channelId` 必须进 queryKey：不进的话切渠道后会先显示**上一个渠道**
+ * 缓存里的值，而那个值看起来完全正常 —— 用户以为自己看的是这个渠道的设置，
+ * 改一下就把它写进了当前渠道。这与头像那处是同一类错位。
+ */
+export function usePersonaLimits(enabled = true, channelId?: string) {
   return useQuery({
-    queryKey: QUERY_KEYS.personaLimits,
-    queryFn: async () => unwrap(await window.mycontext.persona.limits()),
+    queryKey: [...QUERY_KEYS.personaLimits, channelId ?? null] as const,
+    queryFn: async () =>
+      unwrap(
+        await window.mycontext.persona.limits(channelId === undefined ? {} : { channelId }),
+      ),
     staleTime: 60_000,
     enabled,
   })
@@ -667,11 +677,15 @@ export function usePersonaLimits(enabled = true) {
 export function useSavePersonaLimits() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async (input: Partial<PersonaRuntimeLimits>) =>
+    mutationFn: async (input: Partial<PersonaRuntimeLimits> & { channelId?: string }) =>
       unwrap(await window.mycontext.persona.limitsSave(input)),
-    onSuccess: (next) => {
-      // 用返回值直接写缓存：再查一次会让"改完立刻显示旧值"闪一下
-      queryClient.setQueryData(QUERY_KEYS.personaLimits, next)
+    onSuccess: (next, input) => {
+      /**
+       * 用返回值直接写缓存：再查一次会让"改完立刻显示旧值"闪一下。
+       * ★ 写的 key 必须**带上这次保存的渠道** —— 否则写进了另一个 key，
+       * 界面上就是"改完没反应"（而库里其实改了）。
+       */
+      queryClient.setQueryData([...QUERY_KEYS.personaLimits, input.channelId ?? null], next)
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.personaSnapshot })
     },
   })

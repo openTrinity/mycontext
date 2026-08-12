@@ -84,6 +84,38 @@ const READ_COMMANDS: readonly string[][] = [
    * 头像 URL（本人跑通），所以"只要 base、不要 basic_profile"那条收窄仍成立。
    */
   ["contact", "+get-user"],
+  /**
+   * 租户（组织）信息 —— **只为拿组织名**。
+   *
+   * ## ★★ 为什么要走 `api` 逃生口
+   *
+   * 组织名不在任何 `+shortcut` 里。实测把三条都问过了：
+   * · `auth status --json --verify` → 只有 `appId` 与 `identities.*`，
+   *   **没有** tenantKey、也没有组织名；
+   * · `contact +get-user` → 有 `tenant_key`（16 字符）但**没有名字**；
+   * · `contact --help` 列出的命令里没有任何 tenant 相关项。
+   *
+   * 而 `GET /open-apis/tenant/v2/tenant/query` 有（实测返回
+   * `tenant.name` / `display_id` / `domain` / `avatar_*`）。
+   *
+   * 我一度据此下结论"组织名拿不到、只能显示 tenant_key 短码" ——
+   * **那个结论是错的**，因为我只查了 shortcut 层没查 API 层。
+   * 用户看到界面上是一串短码时指出了这一点。
+   *
+   * ## ★ 必须 `--as bot`
+   *
+   * 实测用 user 身份打这个接口报
+   * `99991668 user access token not support` —— 这是**应用**维度的信息，
+   * 不是某个人的。所以调用点要显式带 `--as bot`。
+   *
+   * ## ★ 为什么它可以进白名单（只读、零 PII）
+   *
+   * 返回的是**组织自己的**公开标识（名字、域名、logo），不含任何人的
+   * 信息，也不能用来反查人 —— 与 §5 禁掉的 `+search-user` /
+   * `user_profiles batch_query` 是完全不同的读取面。
+   * 且逐条加**完整命令**（含 method 与 path），不是放行整个 `api` 子树。
+   */
+  ["api", "GET", "/open-apis/tenant/v2/tenant/query"],
 ]
 
 /**

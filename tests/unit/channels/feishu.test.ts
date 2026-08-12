@@ -773,7 +773,7 @@ describe("飞书两步授权：实测抓到的三个缺口", () => {
  */
 describe("飞书组织 id：status() 这条路（界面用的就是它）", () => {
   /** 按 args 分流的 auth：auth status 一种输出、contact 另一种。 */
-  function authWithTenant(tenantKey: string | null) {
+  function authWithTenant(tenantKey: string | null, orgName: string | null = null) {
     const authStatusPayload = {
       // ★ 实测：`auth status` 的响应里**没有** tenantKey（这正是问题的起点）
       appId: "cli_FAKE00000000000009",
@@ -801,6 +801,18 @@ describe("飞书组织 id：status() 这条路（界面用的就是它）", () =
               tenantKey === null
                 ? { ok: true, data: { user: {} } }
                 : { ok: true, data: { user: { tenant_key: tenantKey } } },
+            ),
+            stderr: "",
+          }
+        }
+        if (input.args[0] === "api") {
+          // 租户接口：给可读的组织名（实测 `.data.tenant.name`）
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(
+              orgName === null
+                ? { ok: true, data: { tenant: {} } }
+                : { ok: true, data: { tenant: { name: orgName, tenant_key: tenantKey } } },
             ),
             stderr: "",
           }
@@ -879,5 +891,32 @@ describe("飞书组织 id：status() 这条路（界面用的就是它）", () =
     const status = await new FeishuAuth(options, new LarkCli(options)).status()
     expect(status.state === "authorized" && status.corpId).toBe("2ecFAKETENANT002")
     expect(seen.some((a) => a[0] === "contact")).toBe(false)
+  })
+
+  /**
+   * ── 组织名要**可读**，不是 tenant_key 短码 ──────────────────
+   *
+   * 我一度断言"组织名拿不到、只能显示 `组织 <tenant_key 前 8 位>`"，并把那句
+   * 写进了注释、界面与提交信息。**那个结论是错的** —— 我只查了 shortcut 层
+   * （`auth status` / `contact +get-user` / `contact --help`），没查 API 层。
+   * 它在 `GET /open-apis/tenant/v2/tenant/query` 里（要 `--as bot`）。
+   *
+   * 是用户看到界面上一串短码时指出来的。
+   */
+  it("★★ 租户接口给了名字 → 用真名（不是短码）", async () => {
+    /**
+     * 反证：删掉 `status()` 里那句 `await this.readTenantName()`，
+     * 这一条转红并退回 `组织 2ecFAKET` —— 而那正是用户截图里的样子。
+     */
+    const status = await authWithTenant("2ecFAKETENANT003", "示例科技有限公司").status()
+    expect(status.state).toBe("authorized")
+    if (status.state !== "authorized") return
+    expect(status.corpName).toBe("示例科技有限公司")
+    expect(status.corpId).toBe("2ecFAKETENANT003")
+  })
+
+  it("★ 租户接口没给名字 → 回落 tenant_key 短码（**不编**一个假名字）", async () => {
+    const status = await authWithTenant("2ecFAKETENANT004", null).status()
+    expect(status.state === "authorized" && status.corpName).toBe("组织 2ecFAKET")
   })
 })

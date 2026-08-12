@@ -1050,6 +1050,27 @@ export const personaRuntimeLimitsSchema = z.object({
 
 export type PersonaRuntimeLimits = z.infer<typeof personaRuntimeLimitsSchema>
 
+/**
+ * 读运行参数的入参 —— 带**渠道**（用户要求：分身设置按渠道拆）。
+ *
+ * ★ 与 `personaRuntimeLimitsSchema` 分开而不是塞进它：那个是**值**的形状
+ * （工作时间、并发上限…），而渠道是"这份值属于谁"。混在一起会让
+ * `.partial()` 之后 `channelId` 也变可选可缺，于是"没传渠道"与
+ * "要改渠道字段"在类型上不可区分。
+ *
+ * 不传 = 旧的全局那一份（存量调用点行为不变）。
+ */
+export const personaLimitsQuerySchema = z.object({
+  channelId: z.string().min(1).optional(),
+})
+export type PersonaLimitsQuery = z.infer<typeof personaLimitsQuerySchema>
+
+/** 存运行参数：值是部分字段 + 一个渠道。 */
+export const personaLimitsSaveInputSchema = personaRuntimeLimitsSchema
+  .partial()
+  .extend({ channelId: z.string().min(1).optional() })
+export type PersonaLimitsSaveInput = z.input<typeof personaLimitsSaveInputSchema>
+
 // ---------------------------------------------------------------
 // 媒体与头像
 // ---------------------------------------------------------------

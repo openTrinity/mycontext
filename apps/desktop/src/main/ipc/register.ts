@@ -26,7 +26,8 @@ import {
   personaDraftResolveInputSchema,
   personaComposeSendInputSchema,
   personaKillSwitchInputSchema,
-  personaRuntimeLimitsSchema,
+  personaLimitsQuerySchema,
+  personaLimitsSaveInputSchema,
   mediaDownloadInputSchema,
   mediaDownloadForMessagesInputSchema,
   mediaAvatarsInputSchema,
@@ -481,14 +482,17 @@ export function registerIpc(deps: IpcDependencies): void {
     }),
   )
   ipcMain.handle(IPC_CHANNELS.personaTick, () => attempt(() => persona.tick()))
-  ipcMain.handle(IPC_CHANNELS.personaLimits, () => attempt(() => persona.limits()))
+  ipcMain.handle(IPC_CHANNELS.personaLimits, (_event, payload: unknown) =>
+    // ★ 按渠道读（不传 = 旧的全局那一份）。见 `runtimeLimitsKeyFor`。
+    attempt(() => persona.limits(parse(personaLimitsQuerySchema, payload ?? {}).channelId)),
+  )
   ipcMain.handle(IPC_CHANNELS.personaLimitsSave, (_event, payload: unknown) =>
     /**
      * `.partial()`：设置页每次只改一项，全字段必填会让 UI 必须回传
      * 一份完整快照 —— 而那份快照可能是它上次读到的旧值，
      * 于是"改并发"会把别人刚改的 LRU 覆盖回去。
      */
-    attempt(() => persona.limitsSave(parse(personaRuntimeLimitsSchema.partial(), payload))),
+    attempt(() => persona.limitsSave(parse(personaLimitsSaveInputSchema, payload))),
   )
 
   // ---------------- 媒体与头像 ----------------

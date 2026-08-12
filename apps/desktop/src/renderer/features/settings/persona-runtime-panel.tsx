@@ -45,9 +45,20 @@ const OPTIONS: Record<NumericLimitKey, readonly number[]> = {
   maxDraftsPerConversation: [1, 3, 5, 10],
 }
 
-export function PersonaRuntimePanel() {
+export interface PersonaRuntimePanelProps {
+  /**
+   * 这些参数存到**哪个渠道**名下（用户要求：分身设置按渠道拆）。
+   *
+   * ★ 由设置页传当前选中的渠道，而不是这里自己去查"主渠道是谁" ——
+   * 那会造出第二份判据，而设置页头上那枚 picker 才是用户看到的真源。
+   * 不传 = 旧的全局那一份（存量调用点行为不变）。
+   */
+  channelId?: string | undefined
+}
+
+export function PersonaRuntimePanel({ channelId }: PersonaRuntimePanelProps = {}) {
   const { t } = useDynamicTranslation("settings")
-  const limits = usePersonaLimits()
+  const limits = usePersonaLimits(true, channelId)
   const saveLimits = useSavePersonaLimits()
 
   const current = limits.data
@@ -103,7 +114,7 @@ export function PersonaRuntimePanel() {
             <WorkHoursEditor
               value={current.workHours}
               busy={saveLimits.isPending}
-              onChange={(workHours) => saveLimits.mutate({ workHours })}
+              onChange={(workHours) => saveLimits.mutate({ workHours, ...(channelId === undefined ? {} : { channelId }) })}
             />
 
             {/*
@@ -120,7 +131,7 @@ export function PersonaRuntimePanel() {
             <RateLimitRows
               value={current.rateLimit}
               busy={saveLimits.isPending}
-              onChange={(rateLimit) => saveLimits.mutate({ rateLimit })}
+              onChange={(rateLimit) => saveLimits.mutate({ rateLimit, ...(channelId === undefined ? {} : { channelId }) })}
             />
           </div>
         )}
@@ -152,7 +163,7 @@ export function PersonaRuntimePanel() {
                 value={current[key]}
                 options={OPTIONS[key]}
                 busy={saveLimits.isPending}
-                onChange={(next) => saveLimits.mutate({ [key]: next })}
+                onChange={(next) => saveLimits.mutate({ [key]: next, ...(channelId === undefined ? {} : { channelId }) })}
               />
             ))}
           </div>

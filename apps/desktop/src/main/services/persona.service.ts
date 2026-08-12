@@ -81,6 +81,7 @@ import {
   type PersonaRuntimeLimits,
   type MessageMediaView,
 } from "@mycontext/ipc-contract"
+import { parseScopedChannelId } from "@mycontext/channels"
 import type { MediaRunner } from "@mycontext/channels"
 import type { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 import { PersonaAcp } from "./persona-acp.js"
@@ -109,6 +110,36 @@ const RATE_LIMIT_KEY = "rateLimit"
 const BANNED_PHRASES_KEY = "bannedPhrases"
 /** 管控层运行参数（LRU / 并发 / 批次上限 / 空闲回收）。 */
 const RUNTIME_LIMITS_KEY = "runtimeLimits"
+
+/**
+ * 运行参数的 **per-channel** 键（用户要求：分身设置按渠道拆）。
+ *
+ * ## ★★ 为什么加后缀而不是新开一张表
+ *
+ * `dh_settings` 是 `(key, value_json)`，键是自由字符串 —— 所以"每渠道一份"
+ * 只需要一个带渠道的键，不用改 schema、不用写迁移。
+ *
+ * ## ★ 为什么留 `RUNTIME_LIMITS_KEY` 作为回落
+ *
+ * 存量机器上只有那个不带渠道的键。直接改成只读新键 = 用户已经调好的
+ * 工作时间、频率上限**悄悄退回默认** —— 那是静默丢配置，比"暂时共用一份"
+ * 糟得多。所以读的顺序是：**渠道键 → 旧的全局键 → 默认值**，
+ * 而写只写渠道键（旧键不清，理由同 `WORK_HOURS_KEY` 那段：
+ * 清了会让还没写过新键的机器退回默认）。
+ *
+ * ## ★ 形象与名字**不**按渠道拆（用户明确说可以复用）
+ *
+ * 那两个是"这个分身是谁"，与它在哪个渠道工作无关；而工作时间、频率上限、
+ * 并发这些是"它在这个渠道怎么工作"，那才是要分开的。
+ */
+function runtimeLimitsKeyFor(channelId: string | undefined): string {
+  if (channelId === undefined || channelId.trim() === "") return RUNTIME_LIMITS_KEY
+  /**
+   * ★ 剥掉来源段（`dingtalk@src-…` → `dingtalk`）：同一个渠道换了
+   * 自备客户端不该把参数丢掉。与注册表里 `get()` 同一个理由。
+   */
+  return `${RUNTIME_LIMITS_KEY}:${parseScopedChannelId(channelId).channelId}`
+}
 
 /**
  * 兜底调度间隔。
@@ -998,10 +1029,10 @@ export class PersonaService {
   }
 
   /** 管控层运行参数（设置页读它）。 */
-  limits(): PersonaRuntimeLimits {
+  limits(channelId?: string): PersonaRuntimeLimits {
     const db = this.db
     if (db === null) return { ...DEFAULT_LIMITS }
-    return this.readRuntimeLimits(new PersonaConfigRepository(db))
+    return this.readRuntimeLimits(new PersonaConfigRepository(db), channelId)
   }
 
   /**
@@ -1010,9 +1041,17 @@ export class PersonaService {
    * ★ 立刻对在跑的 supervisor 生效（`applyLimits`）而不是"下次重启生效"：
    * 用户把并发从 3 调到 1 通常是因为**现在**在被限流，等重启没有意义。
    */
-  limitsSave(patch: {
-    [K in keyof PersonaRuntimeLimits]?: PersonaRuntimeLimits[K] | undefined
-  }): PersonaRuntimeLimits {
+  limitsSave(
+    patch: {
+      [K in keyof PersonaRuntimeLimits]?: PersonaRuntimeLimits[K] | undefined
+    } & {
+      /**
+       * 存到**哪个渠道**名下（见 `runtimeLimitsKeyFor`）。
+       * 不给 = 写旧的全局键（存量调用点行为不变）。
+       */
+      channelId?: string | undefined
+    },
+  ): PersonaRuntimeLimits {
     const db = this.requireDb()
     const configs = new PersonaConfigRepository(db)
     /**
@@ -1023,7 +1062,7 @@ export class PersonaService {
      * **覆盖成 undefined** —— 落库就是 `{"maxResident": null}`，
      * 下次读出来退回缺省。表现是"我明明把并发调成 1 了，重启又变回 3"。
      */
-    const current = this.readRuntimeLimits(configs)
+    const current = this.readRuntimeLimits(configs, patch.channelId)
     /**
      * ★ workHours 必须整体接受或整体丢弃 —— 三个字段是有关联的。
      *
@@ -1085,7 +1124,11 @@ export class PersonaService {
       workHours: nextHours,
       rateLimit: nextRateLimit,
     }
-    configs.setSetting(RUNTIME_LIMITS_KEY, next, this.options.clock.now())
+    /**
+     * ★ 只写**渠道键**，旧的全局键不动（见 `runtimeLimitsKeyFor` 那段）：
+     * 清了会让还没写过新键的机器把已调好的参数退回默认。
+     */
+    configs.setSetting(runtimeLimitsKeyFor(patch.channelId), next, this.options.clock.now())
     this.supervisor?.applyLimits({
       maxResident: next.maxResident,
       maxConcurrentTurns: next.maxConcurrentTurns,
@@ -2763,8 +2806,24 @@ export class PersonaService {
    * 而一个 `maxConcurrentTurns: 0` 会让调度**永远什么都不做**
    * （表现是"数字人没反应"，日志里也看不出为什么）。
    */
-  private readRuntimeLimits(configs: PersonaConfigRepository): PersonaRuntimeLimits {
-    const raw = configs.getSetting<Partial<PersonaRuntimeLimits>>(RUNTIME_LIMITS_KEY, {})
+  private readRuntimeLimits(
+    configs: PersonaConfigRepository,
+    channelId?: string,
+  ): PersonaRuntimeLimits {
+    /**
+     * ★ 读的顺序：**渠道键 → 旧的全局键 → 默认值**（见 `runtimeLimitsKeyFor`）。
+     *
+     * 两级回落而不是一级：存量机器上只有全局键，只读渠道键会让用户已经
+     * 调好的参数悄悄退回默认 —— 那是静默丢配置。
+     */
+    const scoped = configs.getSetting<Partial<PersonaRuntimeLimits> | null>(
+      runtimeLimitsKeyFor(channelId),
+      null,
+    )
+    const raw =
+      scoped !== null && Object.keys(scoped).length > 0
+        ? scoped
+        : configs.getSetting<Partial<PersonaRuntimeLimits>>(RUNTIME_LIMITS_KEY, {})
     const pick = (value: unknown, fallback: number, min: number, max: number): number =>
       typeof value === "number" && Number.isFinite(value)
         ? Math.min(max, Math.max(min, Math.round(value)))

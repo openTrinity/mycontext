@@ -14,6 +14,8 @@ import type {
   DistillProgressView,
   PersonaConversationView,
   PersonaDraftView,
+  PersonaLimitsQuery,
+  PersonaLimitsSaveInput,
   PersonaRuntimeLimits,
   ContactAvatarView,
   AvatarFetchResult,
@@ -236,8 +238,12 @@ export interface MyContextApi {
       personaNote?: string | null
     }): Promise<Result<true>>
     /** 管控层运行参数（LRU / 并发 / 批次上限） */
-    limits(): Promise<Result<PersonaRuntimeLimits>>
-    limitsSave(input: Partial<PersonaRuntimeLimits>): Promise<Result<PersonaRuntimeLimits>>
+    /**
+     * 运行参数 —— **按渠道**（用户要求：分身设置按渠道拆）。
+     * 不传 = 旧的全局那一份（存量调用点行为不变）。
+     */
+    limits(input?: PersonaLimitsQuery): Promise<Result<PersonaRuntimeLimits>>
+    limitsSave(input: PersonaLimitsSaveInput): Promise<Result<PersonaRuntimeLimits>>
     /** 会话消息（可视化）。带 mentionsSelf 供高亮 */
     messages(input: {
       conversationId: string

@@ -32,11 +32,11 @@
     "configure": "Configure",
     "collapse": "Collapse",
     "signOut": "Sign out",
-    "switchUser": "Switch person",
-    "switchApp": "Switch app",
+    "switchUser": "Switch account",
+    "switchApp": "Change app",
     "signOutHint": "Clear only the credentials; the bound app stays. Your data stays too — hit Re-authorize to resume.",
-    "switchUserHint": "Clear the credentials (the bound app stays), so a different person can sign in next time.",
-    "switchAppHint": "Also clear the **bound app** — next time you authorize you pick an app again, then sign in. Use only when the app itself must change.",
+    "switchUserHint": "Revoke the current credentials and keep the app binding — a different account can sign in next time.",
+    "switchAppHint": "Also release the app binding — next authorization requires picking an app and signing in again. Use only when the app itself must change.",
     "signOutDone": "Signed out",
     "signOutFailed": "Could not clear credentials — there may have been no session",
     "switchAccountDone": "Credentials and app binding cleared; hit Start to authorize another account",
@@ -44,6 +44,7 @@
     "switchAppDone": "App binding cleared. Hit Start to pick an app and sign in."
   },
   "twoStep": {
+    "appReady": "App bound",
     "appLabel": "1 App",
     "sessionLabel": "2 Session",
     "sessionMissing": "Not done — hit Start to sign in"
@@ -76,6 +77,7 @@
     "fromEnv": "Currently set by an environment variable: {{path}} (entering a path above overrides it)"
   },
   "account": {
+    "app": "App",
     "user": "Account",
     "userValue": "{{name}} ({{id}})",
     "accessExpiresAt": "Token refreshes until",

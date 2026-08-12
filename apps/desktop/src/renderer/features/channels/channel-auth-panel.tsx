@@ -23,6 +23,7 @@ import {
   useResetChannelAuth,
   useSelfIdentity,
   useStartChannelAuth,
+  useContactAvatars,
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
@@ -108,6 +109,27 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * 所以这里从 `status` 上直接读，不做 `authorized` 前置判断。
    */
   const appBinding = status.appBinding
+  /**
+   * 本人在**这个渠道**的头像。
+   *
+   * ★ 复用 `useContactAvatars` 并把 `channelId` 传下去 —— 头像的取法与缓存
+   * 都按渠道分（钉钉走共同群、飞书走 `contact +get-user --as bot`）。
+   * 与仪表盘 greeting 用的是同一条路，不另造一个入口。
+   *
+   * ★ `groupExternalId` 传 `null`：本人不属于任何"共同群"，传一个会话 id
+   * 会让查询必然空并落一条**终态** miss（那之后永久取不到）。
+   */
+  const selfExternalId = status.state === "authorized" ? status.userId : null
+  const selfAvatars = useContactAvatars(
+    selfExternalId === null ? [] : [selfExternalId],
+    null,
+    undefined,
+    channel.id,
+  )
+  const selfAvatarUrl =
+    selfExternalId === null
+      ? null
+      : (selfAvatars.data?.find((e) => e.externalId === selfExternalId)?.path ?? null)
   const scopePrefix = channel.id === "feishu" ? "feishuScope" : "scope"
   /**
    * 「本机已有登录态」这句话的 i18n key —— **按渠道分**。
@@ -492,58 +514,38 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   )
 
   /**
-   * ── 两步授权的**当前进度**（只有需要两步的渠道才渲染）─────────
+   * ── 未授权时：**两步进度**（已授权时这些信息在 AccountBlock 里）─────
    *
-   * ## ★★ 为什么要把这一节画出来
+   * ## ★ 为什么只在未授权时才单独画
    *
-   * 用户的原话是"我不知道"—— 他点「授权」时先被要求选一个 CLI 应用、
-   * 紧接着又要授权登录态，而界面上没有任何东西告诉他"这是两步、
-   * 现在在第几步、每步绑的是什么"。
+   * 已授权时"应用 + 人 + 组织"全在身份卡里（见 `AccountBlock`），
+   * 再画一遍是重复。而**未授权**时那张卡不渲染，此时"第 ① 步已完成、
+   * 只差第 ② 步"这个中间态就没有别的地方能表达 —— 用户会以为要从头开始。
    *
-   * 所以这里把两步各自的**已绑对象**如实列出来：
-   *
-   * ```
-   * ① 应用    cli_aaf1…（某人的飞书 CLI）      ← appBinding
-   * ② 登录态  <姓名> · <组织>                   ← status.authorized
-   * ```
-   *
-   * 没绑的那一步显示「未完成」，用户就知道自己差哪一步、
-   * 以及下面三颗按钮各自会重做哪一步。
-   *
-   * ★ `appBinding === undefined` 时整节不渲染 —— 一步授权的渠道
-   * （钉钉）没有"第 ① 步"，画一个空的比不画更让人困惑。
+   * 所以这里只保留一行：应用已绑好了就说出来，并明确指出还差登录。
    */
-  const twoStepBlock =
-    appBinding === undefined ? null : (
-      <div className="flex flex-col gap-1 radius-lg border border-[var(--border-divider-light)] bg-[var(--bg-base-normal)] px-3 py-2">
-        <div className="flex items-baseline gap-2">
-          <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
-            {t("twoStep.appLabel")}
-          </span>
-          <span className="typography-body-small-400 min-w-0 truncate text-[var(--text-base-primary)]">
-            {appBinding.appName ?? appBinding.appId}
-          </span>
-        </div>
-        <div className="flex items-baseline gap-2">
-          <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
-            {t("twoStep.sessionLabel")}
-          </span>
-          <span className="typography-body-small-400 min-w-0 truncate text-[var(--text-base-primary)]">
-            {status.state === "authorized" ? status.userName : t("twoStep.sessionMissing")}
-          </span>
-        </div>
+  const pendingSessionNote =
+    appBinding === undefined || status.state === "authorized" ? null : (
+      <div className="flex items-center gap-2 radius-md bg-[var(--bg-card-z0)] px-3 py-2">
+        <span className="typography-caption-400 shrink-0 text-[var(--text-base-tertiary)]">
+          {t("twoStep.appReady")}
+        </span>
+        <span className="typography-caption-400 min-w-0 truncate text-[var(--text-base-primary)]">
+          {appBinding.appName ?? appBinding.appId}
+        </span>
       </div>
     )
 
   const body = (
     <>
-      {twoStepBlock}
+      {pendingSessionNote}
       {authorized ? (
         <AccountBlock
           status={status}
           adoptable={adoptable.data ?? null}
           adopting={adopt.isPending}
           onAdopt={() => adopt.mutate()}
+          avatarUrl={selfAvatarUrl}
         />
       ) : (
         <div className="flex flex-col gap-0.5">
@@ -856,26 +858,66 @@ function AccountBlock({
   adoptable = null,
   adopting = false,
   onAdopt,
+  avatarUrl = null,
 }: {
   status: Extract<AuthStatus, { state: "authorized" }>
   adoptable?: { corpName: string; userName: string } | null
   adopting?: boolean
   onAdopt?: () => void
+  /** 本人在这个渠道的头像（取不到就首字母兜底）。 */
+  avatarUrl?: string | null
 }) {
   const { t } = useDynamicTranslation("channels")
+  const appBinding = status.appBinding
   return (
-    <div className="flex flex-col gap-1.5 radius-md bg-[var(--bg-card-z0)] px-3 py-2.5">
-      <div className="flex items-center gap-2">
-        <span className="size-2 shrink-0 rounded-full bg-[var(--status-success)]" />
-        <span className="typography-body-small-400 truncate text-[var(--text-base-primary)]">
-          {status.corpName}
-        </span>
+    <div className="flex flex-col gap-3 radius-md bg-[var(--bg-card-z0)] px-3.5 py-3">
+      {/*
+        ── 身份头部：头像 + 人 + 组织 ─────────────────────────────
+
+        ## ★ 为什么重画成这样（用户说"样式重新设计的高级一点"）
+
+        原来是「小绿点 + 组织名」一行，下面 `dl` 里三条 `label: value`
+        —— 那是**表单**的排法，把"我是谁"和"token 什么时候过期"摆成同一
+        重量级。而这块回答的第一个问题是"当前是谁、在哪个组织"。
+
+        所以改成**头像 + 两行文字**的身份卡范式（与侧栏账号行、仪表盘
+        greeting 同一套语言）：主行是人名，次行是组织名。有效期那些降到
+        下面的次要区，用更弱的字色 —— 它们是"需要时才看"的信息。
+
+        绿点也去掉了：整块只在已授权时渲染，"已连接"这件事由内容本身
+        表达（有人、有组织），一个装饰性圆点不增加信息。
+      */}
+      <div className="flex items-center gap-3">
+        <Avatar name={status.userName} src={avatarUrl} size="md" />
+        <div className="flex min-w-0 flex-col">
+          <span className="typography-body-base-500 truncate text-[var(--text-base-primary)]">
+            {status.userName}
+          </span>
+          <span className="typography-caption-400 truncate text-[var(--text-base-tertiary)]">
+            {status.corpName}
+          </span>
+        </div>
       </div>
-      <dl className="flex flex-col gap-0.5 pl-4">
-        <Field
-          label={t("account.user")}
-          value={t("account.userValue", { name: status.userName, id: status.userId })}
-        />
+      {/*
+        ── 连接详情：应用 / 凭据有效期 ────────────────────────────
+
+        ## ★ 应用那一层并进来了（用户说"感觉可以和当前已登陆的人的身份放在一起"）
+
+        上一版把它单独做成一个「① 应用 / ② 登录态」的小卡片摆在最上面 ——
+        两块相邻、都在讲"当前连的是什么"，视觉上却是两个容器。
+        现在合成一块：身份在上（人、组织），连接细节在下（应用、有效期），
+        中间用一条分隔线分层而不是分容器。
+
+        ★ 应用那一行只在**真有应用层**时出现（`appBinding !== undefined`）——
+        钉钉是一步授权，给它一行空的「应用」是凭空造概念。
+      */}
+      <dl className="flex flex-col gap-1 border-t border-[var(--border-divider-light)] pt-2.5">
+        {appBinding === undefined ? null : (
+          <Field
+            label={t("account.app")}
+            value={appBinding.appName ?? appBinding.appId}
+          />
+        )}
         <Field label={t("account.accessExpiresAt")} value={formatTime(status.accessExpiresAt)} />
         <Field label={t("account.refreshExpiresAt")} value={formatTime(status.refreshExpiresAt)} />
       </dl>
