@@ -206,7 +206,12 @@
     "saved": "Saved"
   },
   "title": "Settings",
+  "channelScope": {
+    "label": "Channel",
+    "pickerLabel": "Choose the channel to configure"
+  },
   "groups": {
+    "channel": "Current channel",
     "app": "Application",
     "other": "Other",
     "persona": "Digital twin"
@@ -240,6 +245,7 @@
     "avatarAdvanced": "Enter an image URL manually"
   },
   "dataWipe": {
+    "scopeNote": "Note: the wipe targets the **currently mounted identity**, not the channel selected above.",
     "action": "Clear this channel's signed-in account data",
     "hint": "Reset everything for the **currently signed-in account on this channel**: its corpus, indexes, graph and downloaded files, and sign it out. **Other channels under the same account are untouched.** You'll need to authorize, confirm your identity and pick a learning scope again. Irreversible.",
     "confirmTitle": "Clear this channel's signed-in account data?",
@@ -329,6 +335,7 @@
     "channelUnsupported": "This channel is read-only — its chats feed the graph and search but are never used to reply for you, so there are no persona settings."
   },
   "model": {
+    "appWideNote": "This model configuration applies to **all channels** — it selects the model service, which is independent of any single channel.",
     "description": "Configure the model gateway used to draft replies and organize knowledge. Changes here apply globally.",
     "provider": {
       "baseUrl": "Endpoint",

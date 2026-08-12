@@ -40,7 +40,7 @@
  * 也不挂 hover，直接渲染那行普通文字（本身就是实心黑体）——
  * 前庭敏感的用户不被粒子晃到（与 `count-up.tsx` 同一惯例）。
  */
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { cn } from "@mycontext/design"
 import { useReducedMotion } from "framer-motion"
 
@@ -82,6 +82,40 @@ const ASSEMBLY_MS = 900
 const SOLIDIFY_MS = 420
 
 export function ParticleText({ text, className }: ParticleTextProps) {
+  /**
+   * ★★★ 当前主题 —— **必须进 effect 依赖**，否则暗色下这行字是**黑的**。
+   *
+   * ## 为什么 className 不够
+   *
+   * 颜色是从 `getComputedStyle(probe).color` 读的，而 `className` 里写的是
+   * `text-[var(--text-base-primary)]` —— 切主题时**那个字符串一个字都不变**，
+   * 变的是 CSS 变量的值。于是 effect 不重跑、canvas 保留上一次（亮色）
+   * 画好的黑字，而背景已经变暗 → 几乎看不见。
+   *
+   * 这是"依赖里少了一个真正会变的量"那类错：`className` 代表样式的
+   * **声明**，不代表样式**算出来的值**。
+   *
+   * ## ★ 为什么直接观察 `data-theme` 而不用 `useTheme()`
+   *
+   * `useTheme` 会读 `window.matchMedia`（解析 `system` 偏好），而 jsdom 里
+   * 没有那个 API —— 实测拉进来直接让 5 条既有渲染测试红
+   * （`TypeError: window.matchMedia is not a function`）。
+   *
+   * 而这里需要的只是**一个"主题变了"的信号**，不需要知道偏好是什么。
+   * `documentElement.dataset.theme` 正是那个信号的落点（`use-theme.ts` 写它），
+   * 用 `MutationObserver` 盯属性变化即可 —— 零额外 API、在 jsdom 里也能跑。
+   */
+  const [themeMode, setThemeMode] = useState<string>(
+    () => document.documentElement.dataset["theme"] ?? "",
+  )
+  useEffect(() => {
+    const root = document.documentElement
+    const read = () => setThemeMode(root.dataset["theme"] ?? "")
+    read()
+    const observer = new MutationObserver(read)
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] })
+    return () => observer.disconnect()
+  }, [])
   const reduced = useReducedMotion()
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -269,7 +303,7 @@ export function ParticleText({ text, className }: ParticleTextProps) {
       surface.removeEventListener("pointerleave", onLeave)
       surface.removeEventListener("mouseenter", onEnter)
     }
-  }, [text, className, reduced])
+  }, [text, className, reduced, themeMode])
 
   // reduced-motion：原样渲染那行字（排版 class 生效，本身就是实心黑体），不出现 canvas。
   if (reduced === true) {

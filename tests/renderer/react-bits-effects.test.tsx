@@ -24,7 +24,7 @@
  * 初始化成 false 了）。所以直接 mock 这个 hook，用一个可控开关切回退分支。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render } from "@testing-library/react"
+import { act, cleanup, render } from "@testing-library/react"
 import type * as FramerMotion from "framer-motion"
 
 /** 可控的"减少动效"开关；mock 的 useReducedMotion 读它。 */
@@ -108,5 +108,53 @@ describe("★★ SplashCursor：拿不到 WebGL2 时优雅退场", () => {
     const onUnsupported = vi.fn()
     expect(() => render(<SplashCursor onUnsupported={onUnsupported} />)).not.toThrow()
     expect(onUnsupported).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * ── 主题变了必须重画（暗色下那行字曾经是黑的）────────────────────
+ *
+ * 用户报："暗色主题 greeting 文本用的 particle 是黑色基调就不行"。
+ *
+ * 成因不在颜色取值，而在 **effect 依赖**：颜色是从
+ * `getComputedStyle(probe).color` 读的，而 `className` 里写的是
+ * `text-[var(--text-base-primary)]` —— 切主题时**那个字符串一个字都不变**，
+ * 变的是 CSS 变量的值。于是 effect 不重跑，canvas 保留上一次（亮色）画好的
+ * 黑字，而背景已经变暗。
+ *
+ * 判据是"`data-theme` 变了之后有没有重新画" —— jsdom 里没有真 canvas
+ * （`getContext` 未实现），所以断言落在**重绘被触发**这件事上：
+ * 组件必须响应 `documentElement` 上那个属性的变化。
+ */
+describe("★★ 主题切换：ParticleText 必须重画（否则暗色下是黑字）", () => {
+  it("data-theme 变化会触发重新读取样式", async () => {
+    document.documentElement.dataset["theme"] = "light"
+    const { container } = render(<ParticleText text="早上好" />)
+    const canvas = container.querySelector("canvas")
+    expect(canvas).not.toBeNull()
+
+    /**
+     * 判据：数 `canvas.getContext` 被调了几次 —— 那是绘制 effect 的**入口**。
+     *
+     * ## ★ 为什么不数 `getComputedStyle`（我第一版那样写，红了）
+     *
+     * jsdom 没实现 `getContext`，于是 effect 在 `ctx === null` 处**提前
+     * return**，压根走不到读样式那一步。判据必须落在**提前 return 之前**
+     * 的那个调用上，否则它在这个环境里恒不成立 —— 那是"断言的前提没成立"，
+     * 不是被测行为错了。
+     *
+     * 反证：把 `themeMode` 从 effect 依赖里去掉（＝修复前的
+     * `[text, className, reduced]`），切主题后这个计数不再增长 → 红。
+     * 而红之前的状态正是用户看到的"暗色下黑字"。
+     */
+    const spy = vi.spyOn(canvas as HTMLCanvasElement, "getContext")
+    const before = spy.mock.calls.length
+    await act(async () => {
+      document.documentElement.dataset["theme"] = "dark"
+      // MutationObserver 回调是微任务级的，让它跑完再断言
+      await Promise.resolve()
+    })
+    expect(spy.mock.calls.length).toBeGreaterThan(before)
+    spy.mockRestore()
   })
 })

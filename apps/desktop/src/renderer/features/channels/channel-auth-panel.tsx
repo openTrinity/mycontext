@@ -476,6 +476,52 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         钉钉是一步授权、没有 appId 这一层，给它一颗「换应用」是凭空造概念
         —— 这与"UI 不认识渠道名字"是同一条纪律：按**能力**渲染，不按渠道 id。
       */}
+      {/*
+        ── 刷新**渠道头像** ────────────────────────────────────
+
+        ## ★★ 判据是 `accountConnected`，**不是** `isolatedCredentials`
+
+        这颗按钮原来嵌在下面那个 `isolatedCredentials === true` 的块里，
+        于是**钉钉看不到它**（它是 `false` —— token 在系统钥匙串、与用户
+        自己终端里的 CLI 共用）。用户报："钉钉渠道那边得要有个刷新头像的
+        按钮吧"。
+
+        那个判据管的是"退登会不会影响用户终端里的登录态"，所以退出授权 /
+        换人 / 换应用三颗归它管。而**刷新头像不碰凭据** —— 它只是拿已有的
+        授权重取一张图、写 `contact_avatars`。两件事的门条件搞混了。
+
+        ## 为什么要 `accountConnected`
+
+        没连上时没有"本人"可言（`selfExternalId === null`），按钮点了也
+        只能报错。这与那三颗"没连就没有可退的东西"是同一个理由。
+
+        ## ★ 换了头像后为什么非要它
+
+        缓存命中的判据是"有 local_path 且文件在"，而**那张图永不过期**
+        （`needsFetch` 对已取到的行直接返回 false）。所以在平台上换了头像
+        之后，应用里那张旧图会一直显示下去 —— **重新授权也不管用**
+        （那只换 token，不动 `contact_avatars` 那一行）。
+
+        走 `useRefreshChannelAvatar`（`avatarsFetch` + `force`）而**不是**
+        `useFetchSelfAvatar` —— 后者会连账号级头像一起写，那会让"在飞书点
+        刷新、切回钉钉看到飞书那张"（已修，见那个 hook 的说明）。
+      */}
+      {accountConnected ? (
+        <Tooltip content={t("actions.refreshAvatarHint")} placement="top">
+          <Button
+            size="md"
+            variant="secondary"
+            loading={refreshAvatar.isPending}
+            disabled={running || refreshAvatar.isPending || selfExternalId === null}
+            onClick={() => {
+              if (selfExternalId === null) return
+              refreshAvatar.mutate({ channelId: channel.id, externalId: selfExternalId })
+            }}
+          >
+            {t("actions.refreshAvatar")}
+          </Button>
+        </Tooltip>
+      ) : null}
       {channel.capabilities?.isolatedCredentials === true && accountConnected ? (
         <>
           <Tooltip content={t("actions.signOutHint")} placement="top">
@@ -536,37 +582,6 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
             `ChannelService.resetAuth`），所以 `isError` 永远不会真。
             这正是"两头都锁了、中间那根线是裸的"那类接线错位。
           */}
-          {/*
-            ★★ 刷新**渠道头像** —— 用户在平台上换了头像，这里一直是老的。
-            （用户原话："渠道可能我换了个头像，但现在一直是老的，重新授权也是老的"）
-
-            ## 为什么"重新授权"也不管用
-
-            缓存命中的判据是"有 local_path 且那个文件还在"，而**那张图永不过期**
-            （`needsFetch` 对已取到的行直接返回 false）。重新授权只换 token，
-            不动 `contact_avatars` 里那一行 —— 于是旧图一直显示下去。
-
-            `MediaService.avatar` 早就有 `force`（跳过缓存重取），但**界面上
-            没有任何入口**。这就是那个入口。
-
-            ★ 它同时清 `["media","avatars"]` 那份 react-query 缓存
-            （见 `useFetchSelfAvatar`）—— 不清的话主进程重下了新图、
-            界面还显示旧的，看起来像"点了没反应"。
-          */}
-          <Tooltip content={t("actions.refreshAvatarHint")} placement="top">
-            <Button
-              size="md"
-              variant="secondary"
-              loading={refreshAvatar.isPending}
-              disabled={running || refreshAvatar.isPending || selfExternalId === null}
-              onClick={() => {
-                if (selfExternalId === null) return
-                refreshAvatar.mutate({ channelId: channel.id, externalId: selfExternalId })
-              }}
-            >
-              {t("actions.refreshAvatar")}
-            </Button>
-          </Tooltip>
           {resetAuth.isPending || resetScope === null || !resetAuth.isSuccess ? null : (
             <span
               className={

@@ -70,10 +70,16 @@ describe("★ 滚动条必须紧贴内容（那片空白的根因）", () => {
    * 修法是让滚动容器里的那一层**铺满**（限宽下沉到各 Section 自己）。
    */
   it("滚动容器的直接子元素不再 mx-auto 限宽", () => {
-    // 抓 overflow-y-auto 那一行之后紧跟的那个 div 的 class
-    const m = /overflow-y-auto bg-\[var\(--bg-base-normal\)\]">\s*<div className="([^"]+)"/.exec(
-      view,
-    )
+    /**
+     * 抓 `overflow-y-auto` 那个容器之后紧跟的那个 div 的 class。
+     *
+     * ★ 正则**只锚 `overflow-y-auto`**，不再连着写
+     * `bg-[var(--bg-base-normal)]` —— 那个底色后来搬到了外层容器
+     * （因为顶部那条渠道条也要同一个底色），于是这条断言在**性质没变**的
+     * 情况下红了一次。判据要锁"滚动容器的直接子元素不限宽"这件事，
+     * 而不是锁那一行 class 的具体拼法。
+     */
+    const m = /overflow-y-auto[^">]*">\s*<div className="([^"]+)"/.exec(view)
     expect(m, "应能找到滚动容器的直接子 div").not.toBeNull()
     const cls = m?.[1] ?? ""
     // 这两个同时出现就是那个 bug 的形状

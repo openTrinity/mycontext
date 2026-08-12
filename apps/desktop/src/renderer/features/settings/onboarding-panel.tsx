@@ -38,7 +38,27 @@ const STEP_ORDER: readonly OnboardingStepId[] = [
   "distill",
 ]
 
-export function OnboardingPanel() {
+export interface OnboardingPanelProps {
+  /**
+   * 弹窗顶部选中的渠道 —— **只用于文案**，不改清空的目标。
+   *
+   * ## ★★ 一个必须说清的错位（不在本轮改，但要让用户看见）
+   *
+   * 「清空当前渠道登录用户数据」走的是 `channels.dataWipe`，而那个 IPC
+   * **不带 channelId** —— 主进程按**当前挂载的身份**清
+   * （`ChannelDataWipeService` 读 `currentIdentity()`）。
+   *
+   * 所以它清的可能**不是**你在上面那个选择器里选中的渠道。把入参改成
+   * 按 UI 选的渠道清是一次**破坏性语义变更**（清错了不可逆），
+   * 不该顺手做 —— 那要单独一轮，带上"清哪个 vault"的确认框改造。
+   *
+   * 眼下能做且必须做的是**别让界面暗示它跟着选择器走**：
+   * 确认框里如实写出"将清空当前已挂载的那个身份"。
+   */
+  channelId?: string | null
+}
+
+export function OnboardingPanel({ channelId = null }: OnboardingPanelProps = {}) {
   const { t } = useDynamicTranslation("settings")
   const { t: to } = useDynamicTranslation("onboarding")
   const errorText = useErrorText()
@@ -131,6 +151,21 @@ export function OnboardingPanel() {
         <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
           {to("restartHint")}
         </p>
+        {/*
+          ★★ 如实说明清空的**目标**：它按**当前已挂载的身份**清，
+          不跟着弹窗顶部那个渠道选择器走（`channels.dataWipe` 不带 channelId，
+          主进程读 `currentIdentity()`）。
+
+          不写这一句的后果：用户在顶部切到飞书、点这颗按钮，以为清的是飞书 ——
+          而清掉的是当前挂载的那个。清空不可逆，所以宁可多一句话。
+          真正的修法（让它按选中渠道清）是一次破坏性语义变更，见
+          `OnboardingPanelProps.channelId` 的注释。
+        */}
+        {channelId === null ? null : (
+          <p className="typography-caption-400 text-[var(--status-warning)]">
+            {t("dataWipe.scopeNote")}
+          </p>
+        )}
       </div>
 
       <ChannelDataWipeDialog

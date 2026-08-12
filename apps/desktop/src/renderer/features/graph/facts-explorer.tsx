@@ -89,6 +89,8 @@ export function FactsExplorer({
   channelId,
 }: FactsExplorerProps) {
   const { t } = useDynamicTranslation("graph")
+  /** 渠道名走 i18n（`channels:<id>.label`）—— 不在这里写死「钉钉」/「飞书」。 */
+  const { t: tch } = useDynamicTranslation("channels")
   /**
    * ★ 默认「全部」而不是「近 30 天」。
    *
@@ -371,13 +373,25 @@ export function FactsExplorer({
           {(data?.facts ?? []).map((fact) => (
             <Panel as="li" pad="ms" key={fact.id} className="flex flex-col gap-1.5">
               <div className="flex flex-wrap items-center gap-1.5">
-                {fact.channelId === undefined ? null : (
+                {/*
+                  ── 渠道 tag：**只在混合查询时**才有信息量 ─────────────
+
+                  这个面板通常已经按 `channelId` 筛过（仪表盘那枚取值范围
+                  筹码），那时每一条事实必然来自同一个渠道 —— tag 恒等于
+                  页头筹码上写的那个词，逐条重复一遍是纯噪声
+                  （用户原话："钉钉的仪表盘下面的 fact 为什么会有钉钉的 tag"）。
+
+                  所以判据是**这次查询有没有限定渠道**，而不是"这条事实
+                  知不知道自己来自哪"（后者恒为真）。不限定时（将来的混合
+                  检索）它才回来 —— 那时它是唯一能区分来源的东西。
+
+                  ★ 顺带：原来那三元把渠道名写死成「飞书」/「钉钉」。
+                  真要显示时走 i18n（`channels:<id>.label`），否则加一个
+                  渠道就要来改这里 —— 这批多渠道重构一直在消除这种写法。
+                */}
+                {channelId !== undefined || fact.channelId === undefined ? null : (
                   <span className="typography-caption-400 shrink-0 rounded-full border border-[var(--border-base)] px-2 py-0.5 text-[var(--text-base-secondary)]">
-                    {fact.channelId === "feishu"
-                      ? "飞书"
-                      : fact.channelId === "dingtalk"
-                        ? "钉钉"
-                        : fact.channelId}
+                    {tch(`${fact.channelId}.label`, { defaultValue: fact.channelId })}
                   </span>
                 )}
                 {/* 类型用一个色点 + 文字：色点给扫读，文字给确定性 */}

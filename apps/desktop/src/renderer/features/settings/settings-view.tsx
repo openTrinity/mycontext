@@ -36,7 +36,15 @@ import { IdentityPanel } from "./identity-panel.js"
 import { OnboardingPanel } from "./onboarding-panel.js"
 import { PersonaFigurePanel } from "./persona-figure-panel.js"
 import { PersonaRuntimePanel } from "./persona-runtime-panel.js"
-import { ChecklistIcon, InfoIcon, PlugIcon, SlidersIcon, TuningIcon } from "../shell/icons.js"
+import {
+  ChecklistIcon,
+  GraphIcon,
+  InfoIcon,
+  PersonaIcon,
+  PlugIcon,
+  SlidersIcon,
+  TuningIcon,
+} from "../shell/icons.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { personaCapableChannels } from "../../lib/channel-capability.js"
 import { ChannelPicker } from "../shell/channel-picker.js"
@@ -47,16 +55,30 @@ import { IngestIntervalsPanel } from "./ingest-intervals-panel.js"
 type SectionId =
   | "general"
   | "model"
-  /**
-   * 渠道拆成三个**叶子**（用户要求：层级放在侧栏里，不要页内 tab）。
-   * 父项「渠道」自己不是一个可选中的页面 —— 点它等于点第一个子项。
-   */
   | "channelAuth"
   | "channelCollect"
   | "channelGraph"
   | "persona"
   | "onboarding"
   | "about"
+
+/**
+ * 这一栏**受不受当前渠道管**。
+ *
+ * ## ★★ 为什么要有这个集合（用户明确要求的形状）
+ *
+ * 用户原话：「除了通用和关于的 tab，别的都要区分渠道」+「设置整体有个
+ * 全局的地方记住现在的渠道」。
+ *
+ * 所以渠道选择器提到**弹窗级**（不再由每个分区各自持一份 state），
+ * 而这个集合回答"当前这一栏要不要显示那个选择器、以及它的内容要不要
+ * 跟着渠道走"。
+ *
+ * ★ 只列**不受**渠道管的两个，而不是列出受管的六个 —— 将来加一栏时
+ * 默认落在"受渠道管"那一侧（那是这个应用的常态），忘了改这里不会
+ * 让新栏悄悄变成全局的。
+ */
+const CHANNEL_FREE_SECTIONS = new Set<SectionId>(["general", "about"])
 
 /**
  * 导航分组。
@@ -72,15 +94,37 @@ interface NavItem {
   id: SectionId
   labelKey: string
   icon: ReactNode
-  /**
-   * 子项 —— 侧栏里**缩进一档**显示（用户要求"都在侧边栏、只不过有层级关系"）。
-   *
-   * ★ 有 children 的父项自己**不承载页面**：点它落到第一个子项。
-   * 这样"点父项没反应"不会发生，而层级又是真的（不是把三个平级项硬凑一堆）。
-   */
-  children?: readonly { id: SectionId; labelKey: string }[]
 }
 
+/**
+ * 导航分组 —— 按**受不受当前渠道管**分，而不是按功能相近度。
+ *
+ * ## ★★ 为什么这样分组（用户明确要求的形状）
+ *
+ * 用户原话：「除了通用和关于的 tab，别的都要区分渠道」、「现在的渠道
+ * 一级 tab 不要了，他的二级子 tab 全变成一级 tab」、「数字分身不需要
+ * 归类（现在有个数字分身下面有数字分身和引导流程），显然这都是归属于
+ * 渠道的概念」。
+ *
+ * 于是分两组：
+ *
+ * · **应用**（`groups.app`）：通用 / 关于 —— 与渠道无关，改一次管全局；
+ * · **当前渠道**（`groups.channel`）：授权 / 采集 / 图谱服务 / 模型 /
+ *   数字分身 / 引导流程 —— 全部跟着弹窗顶部那个渠道选择器走。
+ *
+ * 这个分法本身就在回答"改这一项会影响什么"：第二组里任何一项的改动
+ * 只作用于当前那个渠道。上一版按"应用 / 数字分身 / 其他"分，
+ * 而那三个标签**不构成一个统一的判据** —— 用户看不出「模型」为什么
+ * 与「通用」同组、而「数字分身」自己一组。
+ *
+ * ## ★ 不再有父子层级
+ *
+ * 「渠道」那个父项没了：它原来的三个子项升为一级。父项存在的唯一理由是
+ * "把渠道相关的收在一起"，而现在**整个第二组**就是这件事，
+ * 再套一层等于同一个信息说两遍。
+ *
+ * 标题与项名都存 key，渲染时才翻译 —— 模块级常量在 i18n 就绪前就求值了。
+ */
 const NAV_GROUPS: readonly {
   titleKey: string
   items: readonly NavItem[]
@@ -89,46 +133,25 @@ const NAV_GROUPS: readonly {
     titleKey: "groups.app",
     items: [
       { id: "general", labelKey: "sections.general", icon: <SlidersIcon /> },
-      { id: "model", labelKey: "sections.model", icon: <TuningIcon /> },
-      {
-        /**
-         * ★ 渠道是一个**层级**：授权 / 采集 / 图谱服务。
-         *
-         * 上一版做成页内二级 tab（SegmentedControl），用户明确不要 ——
-         * 页内 tab 让"我在哪"有两个来源（侧栏说渠道、页内说采集），
-         * 而侧栏本来就是这个应用的导航语言。放进侧栏之后层级只有一处表达。
-         *
-         * 父项 id 用第一个子项（`channelAuth`）—— 点父项就是进「授权」，
-         * 不会出现"点了没反应"。
-         */
-        id: "channelAuth",
-        labelKey: "sections.channels",
-        icon: <PlugIcon />,
-        children: [
-          { id: "channelAuth", labelKey: "channels.tabs.auth" },
-          { id: "channelCollect", labelKey: "channels.tabs.collect" },
-          { id: "channelGraph", labelKey: "channels.tabs.graph" },
-        ],
-      },
+      { id: "about", labelKey: "sections.about", icon: <InfoIcon /> },
     ],
   },
   {
-    titleKey: "groups.persona",
+    titleKey: "groups.channel",
     items: [
+      { id: "channelAuth", labelKey: "channels.tabs.auth", icon: <PlugIcon /> },
+      { id: "channelCollect", labelKey: "channels.tabs.collect", icon: <ChecklistIcon /> },
+      { id: "channelGraph", labelKey: "channels.tabs.graph", icon: <GraphIcon /> },
       /**
-       * ★ 数字人与引导流程各自独立一栏，不再塞在「通用」里。
-       *
-       * 「通用」原本装的是身份 + 语言 + 主题 + **引导流程** —— 前三个是
-       * "界面怎么显示"，而引导是"我配到哪一步了"，两者放在一页里
-       * 让那一页没有主题，也让引导那块要滚很久才看到。
+       * ★ 「模型」进这一组是**导航上**的归属（它跟着渠道选择器走），
+       * 但它的**存储仍是应用级** —— 那一页上写明了这一点。
+       * 理由见 `ModelSection` 里那段注释：模型配置描述的是"用哪个 LLM 网关"，
+       * 与"哪个 IM 渠道"无关，同一份配置同时服务两个渠道的蒸馏与建图。
        */
-      { id: "persona", labelKey: "sections.persona", icon: <TuningIcon /> },
+      { id: "model", labelKey: "sections.model", icon: <TuningIcon /> },
+      { id: "persona", labelKey: "sections.persona", icon: <PersonaIcon /> },
       { id: "onboarding", labelKey: "sections.onboarding", icon: <ChecklistIcon /> },
     ],
-  },
-  {
-    titleKey: "groups.other",
-    items: [{ id: "about", labelKey: "sections.about", icon: <InfoIcon /> }],
   },
 ]
 
@@ -144,7 +167,43 @@ export interface SettingsViewProps {
 
 export function SettingsView({ title }: SettingsViewProps = {}) {
   const { t } = useDynamicTranslation("settings")
+  const { t: tch } = useDynamicTranslation("channels")
   const [active, setActive] = useState<SectionId>("general")
+  /**
+   * ── ★★★ 弹窗级的「当前渠道」 ────────────────────────────────
+   *
+   * 用户原话：「设置整体有个全局的地方记住现在的渠道」、「设置除了通用和
+   * 关于都要有个全局切换显示当前配置的渠道的地方」。
+   *
+   * ## 为什么必须提到这一层
+   *
+   * 上一版是**每个分区各自持一份** `pickedChannelId`（渠道区一份、
+   * 数字分身区一份）。两个后果：
+   * · 在「授权」里切到飞书、点进「数字分身」又变回钉钉 —— 用户以为自己
+   *   切过了，而看到的是另一个渠道的设置；
+   * · "现在配的是哪个渠道"没有单一真源，两份 state 必然分叉。
+   *
+   * 提到弹窗级之后它只有一份，所有受渠道管的分区都读它。
+   *
+   * ## ★ 默认落在哪
+   *
+   * "选过的 → 第一个已授权的 → 第一个可用的"。不默认注册表第一个
+   * （那是钉钉），否则在只授权了飞书的机器上一进来就显示钉钉的空设置
+   * —— 那个坑在引导页踩过一次（#88）。
+   */
+  const channels = useChannels()
+  const channelList = channels.data ?? []
+  const authorizedChannels = channelList.filter(
+    (c) => c.available && c.status.state === "authorized",
+  )
+  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
+  const activeChannelId =
+    pickedChannelId ??
+    authorizedChannels[0]?.id ??
+    channelList.find((c) => c.available)?.id ??
+    null
+  /** 当前这一栏受渠道管吗 —— 决定顶部那个选择器要不要出现。见 `CHANNEL_FREE_SECTIONS`。 */
+  const sectionUsesChannel = !CHANNEL_FREE_SECTIONS.has(active)
 
   return (
     /**
@@ -178,88 +237,31 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
             <div className="typography-caption-400 px-2 pb-1 text-[var(--text-base-tertiary)]">
               {t(group.titleKey)}
             </div>
-            {group.items.map((section) => {
-              /**
-               * 一个父项**是否处在选中状态** —— 它自己或它任一子项被选中。
-               *
-               * ★ 父项与子项**同时**高亮（父项用弱一档的底色）：那是"你在
-               * 渠道 › 采集"这条路径的视觉表达。只高亮子项的话，层级在扫视时
-               * 就丢了（用户看到的是三个缩进项，不知道它们归谁）。
-               */
-              const childIds = (section.children ?? []).map((child) => child.id)
-              const inSubtree = active === section.id || childIds.includes(active)
-              return (
-                <div key={section.id} className="flex flex-col gap-0.5">
-                  <button
-                    type="button"
-                    aria-current={active === section.id ? "page" : undefined}
-                    // 父项展开态：有子项时永远展开（不做折叠 —— 三项而已，
-                    // 折叠只会多一次点击，且藏起来的东西找不到）
-                    {...(section.children === undefined ? {} : { "aria-expanded": true })}
-                    onClick={() => setActive(section.id)}
-                    className={cn(
-                      "flex h-8 cursor-pointer items-center gap-2 radius-lg px-2 text-left",
-                      "typography-body-small-400 transition-colors duration-150",
-                      // 与主侧栏同一套选中语言（中性加深底色），否则同一屏里
-                      // 出现两种「当前项」的表达方式，看起来像两个不相关的控件。
-                      //
-                      // ★ 父项与子项的选中态**不能用同一个强度**：父项此刻是
-                      //   "路径的上一级"而不是"当前页"，用同样的底色会让人以为
-                      //   有两个当前项。所以父项在子项被选中时只提亮文字
-                      //   （`inSubtree && active !== section.id`），
-                      //   实底色只留给真正落在它自己身上的那一次。
-                      active === section.id
-                        ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
-                        : inSubtree
-                          ? "text-[var(--text-base-primary)] hover:bg-[var(--overlay-on-container-hover)]"
-                          : "text-[var(--text-base-secondary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
-                    )}
-                  >
-                    <span className="flex size-4 shrink-0 items-center justify-center">
-                      {section.icon}
-                    </span>
-                    <span className="min-w-0 truncate">{t(section.labelKey)}</span>
-                  </button>
-                  {section.children === undefined ? null : (
-                    /**
-                     * ★ 子项组挂一条**层级引导线**（左侧 1px），而不是只靠
-                     *   `ml-6` 那点空白暗示父子关系。
-                     *
-                     * 只有缩进的话，三个子项在扫视时是三个"浮着的"条目 ——
-                     * 一条线把它们收成一簇、并明确指回上面那个父项，那才是
-                     * 层级本身的视觉表达（也是用户要的"有层级、更高级"）。
-                     *
-                     * 线画在容器上而不是每个子项上：逐项画会在项与项之间
-                     * 断开（gap-0.5 处有缝），看起来像虚线。
-                     *
-                     * `ml-[15px]` 让线落在父项图标（`px-2` + `size-4`）的
-                     * 中轴上 —— 线指向的是那个图标，而不是文字的左边缘。
-                     */
-                    <div className="ml-[15px] flex flex-col gap-0.5 border-l border-[var(--border-divider-light)] pl-[7px]">
-                      {section.children.map((child) => (
-                        <button
-                          key={child.id}
-                          type="button"
-                          aria-current={active === child.id ? "page" : undefined}
-                          onClick={() => setActive(child.id)}
-                          className={cn(
-                            // 子项不带图标 —— 图标是"这是一类东西"的标记，
-                            // 而子项是同一类里的分面（授权/采集/图谱服务）。
-                            "flex h-7 cursor-pointer items-center radius-lg px-2 text-left",
-                            "typography-caption-400 transition-colors duration-150",
-                            active === child.id
-                              ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
-                              : "text-[var(--text-base-tertiary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
-                          )}
-                        >
-                          <span className="min-w-0 truncate">{t(child.labelKey)}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+            {group.items.map((section) => (
+              <button
+                key={section.id}
+                type="button"
+                aria-current={active === section.id ? "page" : undefined}
+                onClick={() => setActive(section.id)}
+                className={cn(
+                  "flex h-8 cursor-pointer items-center gap-2 radius-lg px-2 text-left",
+                  "typography-body-small-400 transition-colors duration-150",
+                  // 与主侧栏同一套选中语言（中性加深底色）—— 同一屏里不该出现
+                  // 两种「当前项」的表达方式。
+                  active === section.id
+                    ? "bg-[var(--overlay-on-container-selected)] text-[var(--text-base-primary)]"
+                    : "text-[var(--text-base-secondary)] hover:bg-[var(--overlay-on-container-hover)] hover:text-[var(--text-base-primary)]",
+                )}
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center">
+                  {section.icon}
+                </span>
+                <span className="min-w-0 truncate">
+                  {/* 渠道那三项的 key 在 settings 命名空间下（channels.tabs.*） */}
+                  {t(section.labelKey)}
+                </span>
+              </button>
+            ))}
           </div>
         ))}
       </nav>
@@ -287,17 +289,67 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
         `justify-between` 造成的，那要在行组件里解决，不是靠掐整页的宽度
         —— 掐宽度会顺带把**不该窄**的面板也一起掐了。
       */}
-      <div className="min-h-0 flex-1 overflow-y-auto bg-[var(--bg-base-normal)]">
+      <div className="flex min-h-0 flex-1 flex-col bg-[var(--bg-base-normal)]">
+        {/*
+          ── ★★★ 全局的「当前渠道」条 ─────────────────────────────
+
+          用户原话：「设置整体有个全局的地方记住现在的渠道，比如右上角还是
+          你觉得有更好的地方你定」。
+
+          ## 为什么放在**内容区顶部**而不是右上角
+
+          右上角是弹窗的关闭按钮所在（`settings-dialog.tsx`），把渠道选择器
+          塞在它旁边会让"关掉"和"换渠道"两个语义完全不同的控件挨在一起 ——
+          误点的代价不对称（一个只是关窗，一个会换掉你正在看的整页配置）。
+
+          而这里是**内容区的顶栏**：它在左侧导航之外、在页面标题之上，
+          位置上就说明了"它管的是右边这一整页"。与仪表盘把渠道筹码放页头
+          是同一个判断（那也是"这一页的取值范围"）。
+
+          ## ★ 只在受渠道管的栏出现
+
+          通用/关于是全局设置，给它们显示一个渠道选择器等于暗示"这一页也
+          分渠道" —— 那是假的。见 `CHANNEL_FREE_SECTIONS`。
+
+          ## ★ 只有一个渠道时退化成静态标识
+
+          `ChannelPicker` 自己会退化（options 只剩一个时不给下拉），
+          所以这里不必再判一次 —— 但仍然显示，因为"当前配的是哪个渠道"
+          这个事实即使不可切换也该说出来。
+        */}
+        {sectionUsesChannel && activeChannelId !== null ? (
+          <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border-divider-light)] px-6 py-3">
+            <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              {t("channelScope.label")}
+            </span>
+            <ChannelPicker
+              options={channelList
+                .filter((c) => c.available)
+                .map((c) => ({
+                  id: c.id,
+                  label: tch(`${c.id}.label`, { defaultValue: c.id }),
+                  // 未授权的仍可选（授权页本来就是去授权的地方），但标出来
+                  unsupported: c.status.state !== "authorized",
+                }))}
+              activeId={activeChannelId}
+              onChange={setPickedChannelId}
+              ariaLabel={t("channelScope.pickerLabel")}
+              side="bottom"
+            />
+          </div>
+        ) : null}
+        <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="w-full p-6">
           {active === "general" ? (
             <GeneralSection />
           ) : active === "model" ? (
-            <ModelSection />
+            <ModelSection channelId={activeChannelId} />
           ) : active === "channelAuth" ||
             active === "channelCollect" ||
             active === "channelGraph" ? (
             /* ★ 三个叶子共用一个组件，差别只是进来时停在哪一面 */
             <ChannelsSection
+              channelId={activeChannelId}
               tab={
                 active === "channelCollect"
                   ? "collect"
@@ -317,12 +369,13 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
             />
 
           ) : active === "persona" ? (
-            <PersonaSection />
+            <PersonaSection channelId={activeChannelId} />
           ) : active === "onboarding" ? (
-            <OnboardingSection />
+            <OnboardingSection channelId={activeChannelId} />
           ) : (
             <AboutSection />
           )}
+        </div>
         </div>
       </div>
     </div>
@@ -467,9 +520,12 @@ function GeneralSection() {
  * 独立一栏而不是塞在「通用」里：这些是**运行时**参数（同时起几个 agent、
  * 一批带几条消息），与"界面怎么显示"完全是两类东西。
  */
-function PersonaSection() {
+/**
+ * 数字分身 —— 形象与名字共用，运行参数按渠道分（见 `PersonaRuntimePanel`）。
+ * 渠道由弹窗级那一份给，不自己持 state。
+ */
+function PersonaSection({ channelId }: { channelId: string | null }) {
   const { t } = useDynamicTranslation("settings")
-  const { t: tch } = useDynamicTranslation("channels")
   const bootstrap = useBootstrapState()
   const session = bootstrap.data?.session ?? null
   /**
@@ -484,9 +540,17 @@ function PersonaSection() {
   const list = channels.data ?? []
   const authorized = list.filter((c) => c.available && c.status.state === "authorized")
   const personaCapableIds = personaCapableChannels(list).map((c) => c.id)
-  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
-  const activeChannelId =
-    pickedChannelId ?? personaCapableIds[0] ?? authorized[0]?.id ?? null
+  /**
+   * ★★ 渠道用**弹窗级**那一份（`channelId`），不再自己 `useState`。
+   *
+   * 上一版这里持一份、渠道区持另一份，于是在「授权」里切到飞书、
+   * 点进「数字分身」又变回钉钉 —— 两份 state 各自默认、必然分叉。
+   * 用户明确要求"设置整体有个全局的地方记住现在的渠道"。
+   *
+   * `?? personaCapableIds[0] ?? authorized[0]?.id` 仍留着作**回落**：
+   * 弹窗那份在渠道列表还没读到时是 `null`。
+   */
+  const activeChannelId = channelId ?? personaCapableIds[0] ?? authorized[0]?.id ?? null
   const activeSupportsPersona =
     activeChannelId !== null && personaCapableIds.includes(activeChannelId)
 
@@ -499,25 +563,6 @@ function PersonaSection() {
         </p>
       ) : (
         <>
-          {/*
-            渠道选择器 —— 只在**有多个已授权渠道**时出现（一个的时候它就是
-            那一个，摆个下拉是噪声；`ChannelPicker` 自己也会退化成静态标识）。
-            `side="bottom"`：设置弹窗里这一块在上半部，默认 `"top"` 会让浮层
-            往窗口外飞（那个组件的文件头记了这条）。
-          */}
-          {authorized.length > 1 ? (
-            <ChannelPicker
-              options={authorized.map((c) => ({
-                id: c.id,
-                label: tch(`${c.id}.label`, { defaultValue: c.id }),
-                unsupported: !personaCapableIds.includes(c.id),
-              }))}
-              activeId={activeChannelId}
-              onChange={setPickedChannelId}
-              ariaLabel={t("persona.channelPickerLabel")}
-              side="bottom"
-            />
-          ) : null}
           {activeSupportsPersona ? (
             /*
               形象放在运行参数**之前**：它是"这是谁"的问题，
@@ -559,7 +604,8 @@ function PersonaSection() {
  * 独立一栏而不是塞在「通用」里：它回答的是"我配到哪一步了"，
  * 而通用那页回答的是"界面怎么显示" —— 混在一起让两者都不好找。
  */
-function OnboardingSection() {
+/** 引导流程 —— 进度按渠道看（渠道由弹窗级那一份给）。 */
+function OnboardingSection({ channelId }: { channelId: string | null }) {
   const { t } = useDynamicTranslation("settings")
   const bootstrap = useBootstrapState()
   const session = bootstrap.data?.session ?? null
@@ -572,7 +618,7 @@ function OnboardingSection() {
           {t("onboarding.needsLogin")}
         </p>
       ) : (
-        <OnboardingPanel />
+        <OnboardingPanel channelId={channelId} />
       )}
     </Section>
   )
@@ -711,10 +757,42 @@ function SegmentedControl({
  * ★ 标题与说明由 `Section` 给，表单自己不带分区标题
  * （见 model-config-form.tsx 文件头）—— 否则同一件事说三遍。
  */
-function ModelSection() {
+/**
+ * 模型网关。
+ *
+ * ## ★★ 它在导航上归「当前渠道」组，但**存储是应用级**的
+ *
+ * 用户要求"除了通用和关于都要区分渠道"，所以它在侧栏里进了那一组、
+ * 顶部也显示当前渠道。但这一页配的东西是 `llmBaseUrl` / `llmApiKey` /
+ * `modelMain` / `embedModel` + KL 三项 —— 它们描述的是**用哪个 LLM 网关**，
+ * 与"哪个 IM 渠道"没有关系：同一个网关同时给两个渠道的蒸馏与建图用
+ * （实测：`RuntimeConfigService` 读的是控制库的 `SettingsRepository`，
+ * 应用级单份）。
+ *
+ * 硬把存储也拆成按渠道会带来两个真问题：换渠道后模型突然显示"未配置"、
+ * 以及同一个 key 要填两遍。所以这里**如实说明**这一点（页面上一行提示），
+ * 而不是假装它分渠道 —— 那才是 §4 说的"报告事实"。
+ */
+function ModelSection({ channelId }: { channelId: string | null }) {
   const { t } = useDynamicTranslation("settings")
   return (
     <Section title={t("sections.model")} description={t("model.description")}>
+      {/*
+        ★★ 如实说明：这一页的配置是**应用级**的，不随上面那个渠道变。
+
+        用户要求"除了通用和关于都要区分渠道"，导航上照做了（它在「当前渠道」
+        那一组、顶部也显示渠道）。但配的东西是 LLM 网关的 base/key/模型名
+        —— 与"哪个 IM 渠道"无关，同一个网关同时给两个渠道的蒸馏与建图用
+        （`RuntimeConfigService` 读控制库的 `SettingsRepository`，应用级单份）。
+
+        假装它分渠道的代价是真的：换渠道后模型突然显示"未配置"、同一个 key
+        要填两遍。所以这里把事实写出来，而不是让用户自己发现（§4）。
+      */}
+      {channelId === null ? null : (
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("model.appWideNote")}
+        </p>
+      )}
       <ModelConfigForm />
       <WorkLayerRow />
     </Section>
@@ -773,9 +851,13 @@ function WorkLayerRow() {
 type ChannelTab = "auth" | "collect" | "graph"
 
 function ChannelsSection({
+  /** 当前渠道 —— 由弹窗级那一份传入（见上面那段说明）。 */
+  channelId,
   tab,
   onTabChange: _onTabChange,
 }: {
+  /** 当前渠道（弹窗级那一份）。`null` = 还没读到渠道列表。 */
+  channelId: string | null
   /**
    * 当前看渠道的哪一面 —— **由侧栏决定**（受控）。
    *
@@ -789,18 +871,22 @@ function ChannelsSection({
 }) {
   const { t } = useDynamicTranslation("settings")
   const { t: tc } = useDynamicTranslation()
-  const { t: tch } = useDynamicTranslation("channels")
   const errorText = useErrorText()
   const channels = useChannels()
-  const [pickedChannelId, setPickedChannelId] = useState<string | null>(null)
-
   const list = channels.data ?? []
   /**
-   * ★ picker 列**全部可用渠道**（不只已授权的）：没授权的那个恰恰是用户
-   * 要进来点「开始授权」的那个 —— 只列已授权会让他找不到入口。
+   * ★★ 渠道由**弹窗级**的那一份决定（`SettingsView` 的 `activeChannelId`），
+   * 这里**不再自己持 state**。
+   *
+   * 上一版每个分区各持一份，于是在「授权」里切到飞书、点进「数字分身」
+   * 又变回钉钉 —— 用户以为自己切过了，看到的却是另一个渠道的设置。
+   * 用户明确要求"设置整体有个全局的地方记住现在的渠道"。
+   *
+   * 渠道选择器也搬到了弹窗的内容区顶栏（见 `SettingsView` 里那段），
+   * 所以这一节里不再画一个 —— 同一个控件出现两次就有两份"我在哪"。
    */
   const selectable = list.filter((channel) => channel.available)
-  const activeChannel = selectable.find((c) => c.id === pickedChannelId) ?? selectable[0]
+  const activeChannel = selectable.find((c) => c.id === channelId) ?? selectable[0]
   const authorized = activeChannel?.status.state === "authorized"
 
 
@@ -825,22 +911,6 @@ function ChannelsSection({
         </p>
       ) : (
         <div className="flex flex-col gap-4">
-          {/*
-            渠道选择 —— 只有一个可用渠道时 `ChannelPicker` 自己退化成静态标识
-            （见那个组件），所以不必在这里判长度。
-            `side="bottom"`：这一块在弹窗上半部，默认 `"top"` 会让浮层飞出窗口。
-          */}
-          <ChannelPicker
-            options={selectable.map((c) => ({
-              id: c.id,
-              label: tch(`${c.id}.label`, { defaultValue: c.id }),
-            }))}
-            activeId={activeChannel.id}
-            onChange={setPickedChannelId}
-            ariaLabel={t("channels.channelPickerLabel")}
-            side="bottom"
-          />
-
           {tab === "auth" ? (
             <>
               {/*

@@ -186,3 +186,71 @@ describe("★ 产品名一致：数字分身 / Digital twin", () => {
     expect(allValues("en").some((text) => /digital twin/i.test(text))).toBe(true)
   })
 })
+
+/**
+ * ── ★★★ 代码里引用的 key 必须真的存在 ─────────────────────────
+ *
+ * ## 为什么需要这一维（上面那些都锁不住它）
+ *
+ * 已有的断言比对 **zh/en 之间对齐** —— 两边都缺同一个 key 时它是绿的。
+ * 而真实故障是：我在 `settings-view.tsx` 里写了 `t("groups.channel")`，
+ * 而 `settings.json` 的 `groups` 段下**没有** `channel`。
+ *
+ * i18next 对缺失的 key **原样返回那个 key**，所以：
+ * · lint 不报（那只是个字符串字面量）；
+ * · tsc 不报（`t()` 收 string）；
+ * · 单测不报（zh/en 都缺，对齐检查通过）。
+ *
+ * 界面上直接显示 `groups.channel` —— 是 CDP 截图才看到的。
+ *
+ * ## 判据：静态 key 逐个查，动态 key 跳过
+ *
+ * 只检 `t("字面量")` 这种**完全静态**的调用。带模板串的
+ * （`t(\`${id}.label\`)`）跳过 —— 那种运行时才知道，静态查会误报。
+ * 覆盖不到 100%，但能挡住这次这类"我拼错/忘加"的错。
+ */
+describe("★★ 代码引用的 i18n key 必须存在（缺了会在界面上原样显示）", () => {
+  it("settings-view 里的静态 key 全部有译文", async () => {
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync(
+      "apps/desktop/src/renderer/features/settings/settings-view.tsx",
+      "utf8",
+    )
+    const zh = JSON.parse(
+      readFileSync("packages/i18n/src/locales/zh/settings.json", "utf8"),
+    ) as Record<string, unknown>
+
+    /** 按点分路径取值 —— key 形如 `groups.channel` / `channels.tabs.auth`。 */
+    const lookup = (path: string): unknown =>
+      path.split(".").reduce<unknown>((node, seg) => {
+        if (typeof node !== "object" || node === null) return undefined
+        return (node as Record<string, unknown>)[seg]
+      }, zh)
+
+    /**
+     * 抓两种形态 —— **只抓 `t("…")` 是不够的**（我第一版就是那样，反证失败）。
+     *
+     * ① 直接调用：`t("general.title")`；
+     * ② **常量表里的 key**：`titleKey: "groups.channel"` /
+     *    `labelKey: "sections.model"` —— 那些经 `t(group.titleKey)` 传进去，
+     *    正则看不到字面量。而这次真实漏掉的 `groups.channel` 恰恰是这一类，
+     *    所以只抓 ① 的话反证不红（实测：zh/en 都删掉后 30 条全绿）。
+     *
+     * ★ 排除带命名空间前缀的（`channels:…`）—— 那些查的是另一份文件。
+     */
+    const direct = [...src.matchAll(/\bt\("([a-zA-Z][\w.]*)"/g)].map((m) => m[1] ?? "")
+    const fromTable = [...src.matchAll(/\b(?:titleKey|labelKey):\s*"([a-zA-Z][\w.]*)"/g)].map(
+      (m) => m[1] ?? "",
+    )
+    const keys = [...direct, ...fromTable].filter((k) => k !== "" && !k.includes(":"))
+    /**
+     * ★ 判据本身要有区分力，而且**两类各自**都得抓到 ——
+     * 只校验合计数量的话，①抓到十几个就能掩盖②一个都没抓到（我第一版的病）。
+     */
+    expect(direct.length).toBeGreaterThan(10)
+    expect(fromTable.length).toBeGreaterThan(5)
+
+    const missing = [...new Set(keys)].filter((k) => typeof lookup(k) !== "string")
+    expect(missing, `这些 key 在 zh/settings.json 里不存在: ${missing.join(", ")}`).toEqual([])
+  })
+})
