@@ -16,6 +16,9 @@ run:
   output_dir: ../../../../data/longmemeval
   keep_going: true
 
+tracking:
+  database: ../../../../data/evaluation/results.sqlite
+
 convert:
   timezone: Asia/Shanghai
   reconvert: false

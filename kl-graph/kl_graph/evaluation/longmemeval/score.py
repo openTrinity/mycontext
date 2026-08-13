@@ -16,6 +16,7 @@ import os
 import sqlite3
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -27,6 +28,7 @@ from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl, json_l
 from kl_graph.evaluation.longmemeval.convert import message_id
 from kl_graph.evaluation.longmemeval.experiment import (
     ScoreConfig,
+    ScoreExperiment,
     load_score_experiment,
     score_metrics_output,
     score_output,
@@ -42,6 +44,7 @@ from kl_graph.evaluation.longmemeval.kl_graph.build import (
     _resolve_manifest_path,
 )
 from kl_graph.evaluation.longmemeval.source import resolve_source, source_fingerprint
+from kl_graph.evaluation.results import record_score_run, score_run_exists
 
 QUESTION_TYPES = (
     "single-session-user",
@@ -739,6 +742,54 @@ async def _score_one(
     return question_id, question_type, score, scored
 
 
+def _record_tracked_score(
+    experiment: ScoreExperiment,
+    metrics_path: Path,
+    metrics: dict[str, Any],
+    scored_by_id: dict[str, dict[str, Any]],
+    reference_by_id: dict[str, dict[str, Any]],
+    expected_ids: list[str],
+) -> None:
+    if experiment.tracking is None:
+        return
+    turn_recall = experiment.score.retrieval.turn_recall
+    retrieval_metric = _turn_recall_metric(turn_recall.k)
+
+    def cases() -> Iterator[dict[str, Any]]:
+        for question_id in expected_ids:
+            scored = scored_by_id[question_id]
+            label = scored.get("autoeval_label") or {}
+            label_value = label.get("label")
+            if not isinstance(label_value, bool):
+                raise TypeError(f"invalid QA label: {question_id}")
+            retrieval = scored.get("retrieval") or {}
+            yield {
+                "question_id": question_id,
+                "question_type": reference_by_id[question_id]["question_type"],
+                "recall_at_k": retrieval.get(retrieval_metric),
+                "qa_score": int(label_value),
+                "details": scored,
+            }
+
+    run_id = record_score_run(
+        database=Path(experiment.tracking.database),
+        benchmark="longmemeval",
+        backend=experiment.backend,
+        source_sha256=source_fingerprint(experiment.source),
+        config_path=experiment.config_path,
+        resolved_config_path=experiment_output_dir(experiment)
+        / "experiment.resolved.json",
+        artifact_dir=metrics_path.parent,
+        metrics=metrics,
+        recall_k=turn_recall.k if turn_recall.enabled else None,
+        cases=cases(),
+    )
+    print(
+        f"tracked run: {run_id} ({Path(experiment.tracking.database)})",
+        flush=True,
+    )
+
+
 async def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
@@ -776,6 +827,28 @@ async def main(argv: list[str] | None = None) -> int:
             selected_ids=set(expected_ids),
             config=score_config,
         ):
+            if experiment.tracking is not None and not score_run_exists(
+                database=Path(experiment.tracking.database),
+                benchmark="longmemeval",
+                backend=experiment.backend,
+                source_sha256=source_fingerprint(experiment.source),
+                config_path=experiment.config_path,
+                resolved_config_path=experiment_output_dir(experiment)
+                / "experiment.resolved.json",
+                artifact_dir=metrics_path.parent,
+            ):
+                existing_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+                existing_scored = {
+                    str(row["question_id"]): row for row in json_lines(output)
+                }
+                _record_tracked_score(
+                    experiment,
+                    metrics_path,
+                    existing_metrics,
+                    existing_scored,
+                    reference_by_id,
+                    expected_ids,
+                )
             print(f"score complete and compatible; skipped: {output}", flush=True)
             return 0
 
@@ -915,6 +988,14 @@ async def main(argv: list[str] | None = None) -> int:
         if retrieval_metrics is not None:
             metrics["retrieval"] = retrieval_metrics
         atomic_write_json(metrics_path, metrics)
+        _record_tracked_score(
+            experiment,
+            metrics_path,
+            metrics,
+            scored_by_id,
+            reference_by_id,
+            expected_ids,
+        )
         print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
         print(f"scored hypotheses: {output}", flush=True)
         print(f"metrics: {metrics_path}", flush=True)

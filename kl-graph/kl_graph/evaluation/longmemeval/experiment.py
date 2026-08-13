@@ -195,6 +195,10 @@ class ScoreConfig(_StrictModel):
     retrieval: RetrievalConfig
 
 
+class TrackingConfig(_StrictModel):
+    database: NonEmptyText
+
+
 class _IdentityConfig(_StrictModel):
     schema_version: Literal[EXPERIMENT_SCHEMA_VERSION]
     benchmark: Literal[BENCHMARK_NAME]
@@ -218,6 +222,7 @@ _ROOT_KEYS = {
     "ask",
     "generate",
     "score",
+    "tracking",
 }
 
 
@@ -315,6 +320,7 @@ class ScoreExperiment:
     run: RunConfig
     ask_top_k: int | None
     score: ScoreConfig
+    tracking: TrackingConfig | None
 
 
 @dataclass(frozen=True)
@@ -448,6 +454,15 @@ def _section(config: DictConfig, key: str, model: type[_StrictModel]) -> Any:
         raise ValueError(f"experiment config section {key!r} is required")
     data = OmegaConf.to_container(value, resolve=True)
     return model.model_validate(data)
+
+
+def _tracking(config_path: Path, config: DictConfig) -> TrackingConfig | None:
+    if OmegaConf.select(config, "tracking") is None:
+        return None
+    value = _section(config, "tracking", TrackingConfig)
+    return value.model_copy(
+        update={"database": str(_config_path(config_path, value.database))}
+    )
 
 
 def _ragflow_connection(
@@ -621,6 +636,7 @@ def load_score_experiment(path: Path) -> ScoreExperiment:
             score,
             ask_top_k=ask_top_k,
         ),
+        tracking=_tracking(config_path, raw),
     )
 
 

@@ -41,6 +41,7 @@ from kl_graph.evaluation.locomo.source import (
     select_samples,
     source_fingerprint,
 )
+from kl_graph.evaluation.results import record_score_run
 
 CATEGORY_NAMES = {
     1: "Multi Hop",
@@ -607,6 +608,45 @@ def _runtime_options(experiment: ScoreExperiment) -> argparse.Namespace:
     )
 
 
+def _record_tracked_score(
+    experiment: ScoreExperiment,
+    output_dir: Path,
+    report: dict[str, Any],
+    scored_rows: list[dict[str, Any]],
+) -> None:
+    if experiment.tracking is None:
+        return
+    recall_k = experiment.score.recall_k
+    run_id = record_score_run(
+        database=Path(experiment.tracking.database),
+        benchmark="locomo",
+        backend=experiment.backend,
+        source_sha256=source_fingerprint(experiment.source),
+        config_path=experiment.config_path,
+        resolved_config_path=Path(experiment.run.output_dir)
+        / "experiment.resolved.json",
+        artifact_dir=output_dir,
+        metrics=report,
+        recall_k=recall_k,
+        cases=(
+            {
+                "question_id": row["id"],
+                "question_type": CATEGORY_NAMES.get(
+                    int(row["category"]), str(row["category"])
+                ),
+                "recall_at_k": row.get("global_evidence_recall"),
+                "qa_score": row.get("answer_score"),
+                "details": row,
+            }
+            for row in scored_rows
+        ),
+    )
+    print(
+        f"tracked run: {run_id} ({Path(experiment.tracking.database)})",
+        flush=True,
+    )
+
+
 def _score_kl(experiment: ScoreExperiment, args: argparse.Namespace) -> int:
     ask_dir = args.ask_dir.expanduser().resolve()
     answers_dir = args.answers_dir.expanduser().resolve() if args.answers_dir else None
@@ -719,6 +759,7 @@ def _score_kl(experiment: ScoreExperiment, args: argparse.Namespace) -> int:
             "metrics_path": "metrics.json",
         },
     )
+    _record_tracked_score(experiment, output_dir, report, scored_rows)
     print(json.dumps(report.get("overall") or {}, ensure_ascii=False, sort_keys=True))
     print(f"Results: {output_dir}")
     return 0
@@ -1421,6 +1462,7 @@ def _score_remote(
             "metrics_path": "metrics.json",
         },
     )
+    _record_tracked_score(experiment, output_dir, report, scored_rows)
     print(json.dumps(report.get("overall") or {}, ensure_ascii=False, sort_keys=True))
     print(f"Results: {output_dir}")
     return 0
@@ -1448,6 +1490,7 @@ def main(argv: list[str] | None = None) -> int:
         TypeError,
         ValueError,
         RuntimeError,
+        sqlite3.Error,
         json.JSONDecodeError,
         OmegaConfBaseException,
     ) as exc:

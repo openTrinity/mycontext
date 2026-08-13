@@ -16,6 +16,9 @@ run:
   output_dir: ../../../../data/longmemeval-khoj/ask
   keep_going: true
 
+tracking:
+  database: ../../../../data/evaluation/results.sqlite
+
 khoj:
   base_url: ${oc.env:KHOJ_BASE_URL}
   max_retries: 2

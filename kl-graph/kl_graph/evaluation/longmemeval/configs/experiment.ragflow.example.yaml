@@ -16,6 +16,9 @@ run:
   output_dir: ../../../../data/longmemeval-ragflow/ask
   keep_going: true
 
+tracking:
+  database: ../../../../data/evaluation/results.sqlite
+
 ragflow:
   python: ../../../../.venv-ragflow/bin/python
   base_url: ${oc.env:RAGFLOW_BASE_URL}

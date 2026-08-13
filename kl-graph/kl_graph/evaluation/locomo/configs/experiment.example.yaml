@@ -16,6 +16,9 @@ run:
   output_dir: ../../../../data/locomo-run/ask
   keep_going: true
 
+tracking:
+  database: ../../../../data/evaluation/results.sqlite
+
 convert:
   reconvert: false
 

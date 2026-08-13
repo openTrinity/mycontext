@@ -189,6 +189,10 @@ class ScoreConfig(_StrictModel):
     recall_k: PositiveInt
 
 
+class TrackingConfig(_StrictModel):
+    database: NonEmptyText
+
+
 class _IdentityConfig(_StrictModel):
     schema_version: Literal[EXPERIMENT_SCHEMA_VERSION]
     benchmark: Literal[BENCHMARK_NAME]
@@ -288,6 +292,7 @@ class ScoreExperiment:
     ask_top_k: int
     generate_output_dir: Path
     score: ScoreConfig
+    tracking: TrackingConfig | None
 
 
 @dataclass(frozen=True)
@@ -353,6 +358,7 @@ _ROOT_KEYS = {
     "ask",
     "generate",
     "score",
+    "tracking",
 }
 
 
@@ -454,6 +460,15 @@ def _score(config_path: Path, config: DictConfig) -> ScoreConfig:
     value = _section(config, "score", ScoreConfig)
     return value.model_copy(
         update={"output_dir": str(_config_path(config_path, value.output_dir))}
+    )
+
+
+def _tracking(config_path: Path, config: DictConfig) -> TrackingConfig | None:
+    if OmegaConf.select(config, "tracking") is None:
+        return None
+    value = _section(config, "tracking", TrackingConfig)
+    return value.model_copy(
+        update={"database": str(_config_path(config_path, value.database))}
     )
 
 
@@ -613,6 +628,7 @@ def load_score_experiment(path: Path) -> ScoreExperiment:
         ask_top_k=ask_top_k,
         generate_output_dir=Path(generate.output_dir),
         score=score,
+        tracking=_tracking(config_path, raw),
     )
 
 
