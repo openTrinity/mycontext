@@ -1,8 +1,8 @@
 # LongMemEval evaluation
 
-这个目录用于用 KL Graph 跑 LongMemEval。当前采用“一条 LongMemEval case
-对应一张独立图”的方案：每个 case 都有自己的 `KL_DATA_DIR`，SQLite、Qdrant、
-LadybugDB 和 ingestion checkpoint 不会在 case 之间共享。
+这个目录用于用 KL Graph、Khoj 或 RAGFlow 跑 LongMemEval。KL Graph 采用“一条
+LongMemEval case 对应一张独立图”的方案：每个 case 都有自己的 `KL_DATA_DIR`，
+SQLite、Qdrant、LadybugDB 和 ingestion checkpoint 不会在 case 之间共享。
 
 完整流程由一次数据准备和四个评估阶段组成：
 
@@ -41,6 +41,8 @@ set +a
   的环境变量读取。
 - 评分：judge 模型、URL 和请求参数写在 YAML；Key 使用 `OPENAI_API_KEY`、
   `KL_LLM_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
+- RAGFlow：服务 URL 和独立解释器写在 YAML；服务 token 只从
+  `RAGFLOW_API_KEY` 读取。
 
 所有阶段都只读取当前进程环境，不会主动加载 `.env`；因此每个新 shell 都需要先
 执行上面的导出命令。
@@ -52,10 +54,10 @@ set +a
 ```text
 KL Graph: Convert → Build → Ask → Generate → Score
 Khoj:               Build → Ask → Generate → Score
+RAGFlow:             Build → Ask → Generate → Score
 ```
 
-YAML 流水线通过必填的 `backend: kl_graph|khoj` 选择后端。RAGFlow 尚未接入完整
-流水线，只能在自行生成 `hypotheses.jsonl` 后复用下面的 Score 阶段。
+YAML 流水线通过必填的 `backend: kl_graph|khoj|ragflow` 选择后端。
 
 推荐通过 OmegaConf YAML 保存实验参数：
 
@@ -294,43 +296,43 @@ data/longmemeval/
 RAGFlow runner 直接读取 LongMemEval 原生 JSON，不需要先运行 `convert.py`。每个
 question case 对应一个独立 RAGFlow Dataset；该 case 的所有 `role=user` turn 按
 session/date/turn 标记拼成一个 TXT，问题、Gold answer 和 assistant turn 都不会
-上传。Dataset 固定使用 `naive`、换行 delimiter 和 `chunk_token_num=512`，切块、
-embedding 与 GraphRAG 都由 RAGFlow 服务负责。
+上传。Dataset 的 chunk method、delimiter、token 数、embedding 和 GraphRAG 开关都在
+YAML 中显式设置，实际切块、embedding 与 GraphRAG 由 RAGFlow 服务负责。
 
 由于官方 `ragflow-sdk==0.26.4` 需要 Python 3.13，build/ask 使用独立环境；生成和
 评分继续使用 KL 主环境。该依赖不加入 KL Graph 的 `pyproject.toml`，安装方式为：
 
 ```bash
 uv venv --python 3.13 .venv-ragflow
-uv pip install --python .venv-ragflow/bin/python ragflow-sdk==0.26.4
+uv pip install --python .venv-ragflow/bin/python \
+  ragflow-sdk==0.26.4 'omegaconf>=2.3' 'pydantic>=2.0'
 ```
+
+`ragflow.python` 保存该解释器路径。`pipeline.py` 只在 Build/Ask 阶段切换到这个
+环境，Generate/Score 自动回到启动 pipeline 的 KL 主环境，不需要手动 activate。
 
 运行方式：
 
 ```bash
-# 一 case 一 Dataset，parse 后构建 GraphRAG
-.venv-ragflow/bin/python -m \
-  kl_graph.evaluation.longmemeval.ragflow.build \
-  /path/to/longmemeval_s_sample100.json \
-  --case 00ca467f --graph
+export LONGMEMEVAL_SOURCE=/path/to/longmemeval_s_sample100.json
+export RAGFLOW_BASE_URL=http://127.0.0.1:9380
+export RAGFLOW_API_KEY=your-api-key
 
-# 每个问题只调用一次 retrieve；--rerank-id 也可由 RAGFLOW_RERANK_ID 提供
-.venv-ragflow/bin/python -m \
-  kl_graph.evaluation.longmemeval.ragflow.ask \
-  /path/to/longmemeval_s_sample100.json \
-  --case 00ca467f --use-kg --rerank-id RERANK_MODEL_ID
+# 完整 Build → Ask → Generate → Score
+.venv/bin/python -m kl_graph.evaluation.longmemeval.pipeline \
+  --config kl_graph/evaluation/longmemeval/experiment.ragflow.example.yaml
 
-# 使用 RAGFlow 自己的生成流程产出 hypotheses 后，可复用统一 Score
-.venv/bin/python -m kl_graph.evaluation.longmemeval.score \
-  --config /path/to/ragflow-experiment.yaml
+# 也可以单独运行 RAGFlow 阶段；仍只接受同一份 YAML
+.venv-ragflow/bin/python -m kl_graph.evaluation.longmemeval.ragflow.build \
+  --config kl_graph/evaluation/longmemeval/experiment.ragflow.example.yaml
+.venv-ragflow/bin/python -m kl_graph.evaluation.longmemeval.ragflow.ask \
+  --config kl_graph/evaluation/longmemeval/experiment.ragflow.example.yaml
 ```
 
-默认 build 状态位于 `data/longmemeval-ragflow/cases/QUESTION_ID/ragflow.json`。
-单 case 的 ask 默认输出到同一 case 下的
-`benchmark/longmemeval-ragflow-ask/{graph|vector}/RUN_TIME/`；多 case ask 则位于
-`data/longmemeval-ragflow/benchmark/...`。KL 的 YAML `generate.py` 不接受 RAGFlow
-ask run；复用 Score 时需在单独 YAML 中显式设置 `hypotheses`、两个 score 输出路径，
-并关闭 KL turn recall。
+Build 状态位于 YAML `artifact_root` 下的 `cases/QUESTION_ID/ragflow.json`，Ask 固定
+写到 `run.output_dir`。Generate 直接使用 GraphRAG 合成文本和普通 chunk 生成答案；
+Score 计算 `turn_recall@K` 时只取前 K 个普通 vector chunks，GraphRAG 合成项不参与
+召回排名，也不占用 K。
 
 ## 使用 Khoj 跑 LongMemEval
 

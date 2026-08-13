@@ -8,6 +8,7 @@ interpolation used only by Generate or Ask.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
@@ -28,8 +29,9 @@ EXPERIMENT_SCHEMA_VERSION = 2
 BENCHMARK_NAME = "longmemeval"
 PROMPT_RESERVE_TOKENS = 1_000
 
-BackendName: TypeAlias = Literal["kl_graph", "khoj"]
+BackendName: TypeAlias = Literal["kl_graph", "khoj", "ragflow"]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
 
 
 class _StrictModel(BaseModel):
@@ -108,6 +110,44 @@ class KhojAskConfig(_StrictModel):
         return self
 
 
+class RagflowConnectionConfig(_StrictModel):
+    python: NonEmptyText
+    base_url: NonEmptyText
+
+
+class RagflowBuildConfig(_StrictModel):
+    case_concurrency: PositiveInt
+    dataset_prefix: NonEmptyText
+    embedding_model: NonEmptyText | None
+    graph: bool
+    chunk_method: Literal["naive"]
+    chunk_token_num: PositiveInt
+    delimiter: NonEmptyString
+    parse_timeout_seconds: PositiveFloat
+    graph_timeout_seconds: PositiveFloat
+    poll_seconds: PositiveFloat
+
+
+class RagflowAskConfig(_StrictModel):
+    use_kg: bool
+    top_k: PositiveInt
+    candidate_count: PositiveInt
+    similarity_threshold: NonNegativeFloat
+    vector_similarity_weight: NonNegativeFloat
+    rerank_id: NonEmptyText | None
+    concurrency: PositiveInt
+    checkpoint_every: PositiveInt
+
+    @model_validator(mode="after")
+    def _validate_retrieval(self) -> RagflowAskConfig:
+        if self.candidate_count < self.top_k:
+            raise ValueError("candidate_count cannot be smaller than top_k")
+        for name in ("similarity_threshold", "vector_similarity_weight"):
+            if getattr(self, name) > 1:
+                raise ValueError(f"{name} must be between 0 and 1")
+        return self
+
+
 class GenerateConfig(_StrictModel):
     concurrency: PositiveInt
     provider: NonEmptyText
@@ -173,6 +213,7 @@ _ROOT_KEYS = {
     "run",
     "convert",
     "khoj",
+    "ragflow",
     "build",
     "ask",
     "generate",
@@ -226,6 +267,28 @@ class KhojAskExperiment:
     run: RunConfig
     khoj: KhojConnectionConfig
     ask: KhojAskConfig
+
+
+@dataclass(frozen=True)
+class RagflowBuildExperiment:
+    config_path: Path
+    source: Path
+    artifact_root: Path
+    selection: SelectionConfig
+    run: RunConfig
+    ragflow: RagflowConnectionConfig
+    build: RagflowBuildConfig
+
+
+@dataclass(frozen=True)
+class RagflowAskExperiment:
+    config_path: Path
+    source: Path
+    artifact_root: Path
+    selection: SelectionConfig
+    run: RunConfig
+    ragflow: RagflowConnectionConfig
+    ask: RagflowAskConfig
 
 
 @dataclass(frozen=True)
@@ -286,7 +349,23 @@ class KhojExperiment:
     score: ScoreConfig
 
 
-Experiment: TypeAlias = KLExperiment | KhojExperiment
+@dataclass(frozen=True)
+class RagflowExperiment:
+    backend: Literal["ragflow"]
+    config_path: Path
+    source: Path
+    artifact_root: Path
+    hypotheses: Path
+    selection: SelectionConfig
+    run: RunConfig
+    ragflow: RagflowConnectionConfig
+    build: RagflowBuildConfig
+    ask: RagflowAskConfig
+    generate: GenerateConfig
+    score: ScoreConfig
+
+
+Experiment: TypeAlias = KLExperiment | KhojExperiment | RagflowExperiment
 
 
 def _load_raw(path: Path) -> tuple[Path, DictConfig, BackendName]:
@@ -322,9 +401,11 @@ def _reject_keys(config: DictConfig, backend: BackendName, keys: set[str]) -> No
 
 def _validate_backend_keys(config: DictConfig, backend: BackendName) -> None:
     if backend == "kl_graph":
-        _reject_keys(config, backend, {"artifact_root", "khoj"})
+        _reject_keys(config, backend, {"artifact_root", "khoj", "ragflow"})
+    elif backend == "khoj":
+        _reject_keys(config, backend, {"case_set", "convert", "ragflow"})
     else:
-        _reject_keys(config, backend, {"case_set", "convert"})
+        _reject_keys(config, backend, {"case_set", "convert", "khoj"})
 
 
 def _required_text(config: DictConfig, key: str) -> str:
@@ -343,6 +424,14 @@ def _config_path(config_path: Path, value: str) -> Path:
     return path.resolve()
 
 
+def _executable_path(config_path: Path, value: str) -> Path:
+    """Resolve a configured executable without dereferencing its venv symlink."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return Path(os.path.abspath(path))
+
+
 def _path(config_path: Path, config: DictConfig, key: str) -> Path:
     return _config_path(config_path, _required_text(config, key))
 
@@ -359,6 +448,15 @@ def _section(config: DictConfig, key: str, model: type[_StrictModel]) -> Any:
         raise ValueError(f"experiment config section {key!r} is required")
     data = OmegaConf.to_container(value, resolve=True)
     return model.model_validate(data)
+
+
+def _ragflow_connection(
+    config_path: Path, config: DictConfig
+) -> RagflowConnectionConfig:
+    value = _section(config, "ragflow", RagflowConnectionConfig)
+    return value.model_copy(
+        update={"python": str(_executable_path(config_path, value.python))}
+    )
 
 
 def _ask_top_k(config: DictConfig) -> int:
@@ -458,6 +556,36 @@ def load_khoj_ask_experiment(path: Path) -> KhojAskExperiment:
     )
 
 
+def load_ragflow_build_experiment(path: Path) -> RagflowBuildExperiment:
+    config_path, raw, backend = _load_raw(path)
+    _require_backend(backend, "ragflow")
+    _validate_backend_keys(raw, backend)
+    return RagflowBuildExperiment(
+        config_path=config_path,
+        source=_path(config_path, raw, "source"),
+        artifact_root=_path(config_path, raw, "artifact_root"),
+        selection=_section(raw, "selection", SelectionConfig),
+        run=_section(raw, "run", RunConfig),
+        ragflow=_ragflow_connection(config_path, raw),
+        build=_section(raw, "build", RagflowBuildConfig),
+    )
+
+
+def load_ragflow_ask_experiment(path: Path) -> RagflowAskExperiment:
+    config_path, raw, backend = _load_raw(path)
+    _require_backend(backend, "ragflow")
+    _validate_backend_keys(raw, backend)
+    return RagflowAskExperiment(
+        config_path=config_path,
+        source=_path(config_path, raw, "source"),
+        artifact_root=_path(config_path, raw, "artifact_root"),
+        selection=_section(raw, "selection", SelectionConfig),
+        run=_section(raw, "run", RunConfig),
+        ragflow=_ragflow_connection(config_path, raw),
+        ask=_section(raw, "ask", RagflowAskConfig),
+    )
+
+
 def load_generate_experiment(path: Path) -> GenerateExperiment:
     config_path, raw, backend = _load_raw(path)
     _validate_backend_keys(raw, backend)
@@ -526,17 +654,40 @@ def load_experiment(path: Path) -> Experiment:
             ),
         )
 
-    ask = _section(raw, "ask", KhojAskConfig)
-    return KhojExperiment(
-        backend="khoj",
+    if backend == "khoj":
+        ask = _section(raw, "ask", KhojAskConfig)
+        return KhojExperiment(
+            backend="khoj",
+            config_path=config_path,
+            source=source,
+            artifact_root=_path(config_path, raw, "artifact_root"),
+            hypotheses=hypotheses,
+            selection=selection,
+            run=run,
+            khoj=_section(raw, "khoj", KhojConnectionConfig),
+            build=_section(raw, "build", KhojBuildConfig),
+            ask=ask,
+            generate=generate,
+            score=_validate_score_config(
+                score,
+                ask_top_k=ask.top_k,
+            ),
+        )
+
+    ask = _section(raw, "ask", RagflowAskConfig)
+    build = _section(raw, "build", RagflowBuildConfig)
+    if ask.use_kg and not build.graph:
+        raise ValueError("ask.use_kg=true requires build.graph=true")
+    return RagflowExperiment(
+        backend="ragflow",
         config_path=config_path,
         source=source,
         artifact_root=_path(config_path, raw, "artifact_root"),
         hypotheses=hypotheses,
         selection=selection,
         run=run,
-        khoj=_section(raw, "khoj", KhojConnectionConfig),
-        build=_section(raw, "build", KhojBuildConfig),
+        ragflow=_ragflow_connection(config_path, raw),
+        build=build,
         ask=ask,
         generate=generate,
         score=_validate_score_config(
@@ -565,6 +716,8 @@ def output_dir(
     | AskExperiment
     | KhojBuildExperiment
     | KhojAskExperiment
+    | RagflowBuildExperiment
+    | RagflowAskExperiment
     | GenerateExperiment
     | ScoreExperiment
     | Experiment,

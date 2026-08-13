@@ -263,10 +263,12 @@ def _retrieved_user_turn_ids(
     return retrieved
 
 
-def _retrieved_khoj_user_turn_ids(
+def _retrieved_native_user_turn_ids(
     items: list[dict[str, Any]],
     question_id: str,
     source_roles: dict[str, str],
+    *,
+    backend: str,
 ) -> list[str]:
     retrieved: list[str] = []
     seen: set[str] = set()
@@ -278,18 +280,18 @@ def _retrieved_khoj_user_turn_ids(
             or not all(isinstance(value, str) and value for value in turn_ids)
         ):
             raise ValueError(
-                f"case {question_id}: Khoj item {rank} has no source_turn_ids"
+                f"case {question_id}: {backend} item {rank} has no source_turn_ids"
             )
         for turn_id in turn_ids:
             role = source_roles.get(turn_id)
             if role is None:
                 raise ValueError(
-                    f"case {question_id}: Khoj source turn is absent from "
+                    f"case {question_id}: {backend} source turn is absent from "
                     f"evaluation chats: {turn_id}"
                 )
             if role != "user":
                 raise ValueError(
-                    f"case {question_id}: Khoj source turn is not a user turn: "
+                    f"case {question_id}: {backend} source turn is not a user turn: "
                     f"{turn_id}"
                 )
             if turn_id not in seen:
@@ -399,9 +401,11 @@ def _aggregate_retrieval_rows(
         "metric": metric,
         "k": k,
         "definition": (
-            f"unique Gold user turns covered by the first {k} retrieved items "
+            f"unique Gold user turns covered by the first {k} scoreable retrieved "
+            "Facts or Chunks "
             "divided by all unique Gold user turns; backend adapters map each "
-            "retrieved Fact or Chunk to its contributing source user turns"
+            "item to its contributing source user turns; synthesized GraphRAG "
+            "items are excluded"
         ),
         "counts": {
             "total_cases": len(rows),
@@ -444,73 +448,111 @@ def _score_retrieval_rows(
     ]
 
 
-def _read_khoj_retrieval_items(
+def _read_native_retrieval_items(
     ask_dir: Path,
     source: Path,
     question_ids: list[str],
     k: int,
     artifact_top_k: int,
+    *,
+    backend: str,
 ) -> dict[str, list[dict[str, Any]]]:
+    label = "RAGFlow" if backend == "ragflow" else "Khoj"
     ask_dir = ask_dir.expanduser().resolve()
     run = json.loads((ask_dir / "run.json").read_text(encoding="utf-8"))
     if not isinstance(run, dict):
-        raise TypeError(f"Khoj ask run is not an object: {ask_dir}")
-    if run.get("backend") != "khoj" or run.get("benchmark") != "longmemeval":
-        raise ValueError(f"not a LongMemEval Khoj ask run: {ask_dir}")
+        raise TypeError(f"{label} ask run is not an object: {ask_dir}")
+    if run.get("backend") != backend or run.get("benchmark") != "longmemeval":
+        raise ValueError(f"not a LongMemEval {label} ask run: {ask_dir}")
     if run.get("status") != "complete":
-        raise ValueError(f"Khoj ask run is not complete: {ask_dir}")
-    if run.get("source_turn_mapping") != "uploaded_document_character_spans_v1":
-        raise ValueError(f"Khoj ask run has no compatible source-turn mapping: {ask_dir}")
+        raise ValueError(f"{label} ask run is not complete: {ask_dir}")
+    expected_mapping = (
+        "uploaded_document_normalized_character_spans_v1"
+        if backend == "ragflow"
+        else "uploaded_document_character_spans_v1"
+    )
+    if run.get("source_turn_mapping") != expected_mapping:
+        raise ValueError(
+            f"{label} ask run has no compatible source-turn mapping: {ask_dir}"
+        )
+    if backend == "ragflow" and run.get("top_k_semantics") != (
+        "vector_chunks_excluding_graph_items"
+    ):
+        raise ValueError(f"RAGFlow ask run has incompatible Top-K semantics: {ask_dir}")
     if run.get("source_sha256") != source_fingerprint(source):
-        raise ValueError("native LongMemEval source changed after the Khoj ask run")
+        raise ValueError(
+            f"native LongMemEval source changed after the {label} ask run"
+        )
     if run.get("question_ids") != question_ids:
-        raise ValueError("Khoj ask question IDs/order differ from Score selection")
+        raise ValueError(f"{label} ask question IDs/order differ from Score selection")
     if run.get("top_k") != artifact_top_k:
-        raise ValueError("Khoj ask artifact Top-K differs from experiment config")
+        raise ValueError(f"{label} ask artifact Top-K differs from experiment config")
 
     results = list(json_lines(ask_dir / "results.jsonl"))
     if [row.get("question_id") for row in results] != question_ids:
-        raise ValueError("Khoj result IDs/order do not match run.json")
+        raise ValueError(f"{label} result IDs/order do not match run.json")
     items_by_id: dict[str, list[dict[str, Any]]] = {}
     for result in results:
         question_id = str(result["question_id"])
         if result.get("status") != "completed":
-            raise ValueError(f"Khoj retrieval did not complete: {question_id}")
+            raise ValueError(f"{label} retrieval did not complete: {question_id}")
         relative = Path(str(result.get("response_path") or ""))
         response_path = relative if relative.is_absolute() else ask_dir / relative
         response_path = response_path.resolve()
         if not response_path.is_relative_to(ask_dir):
-            raise ValueError(f"Khoj response path escapes ask directory: {relative}")
+            raise ValueError(f"{label} response path escapes ask directory: {relative}")
         response = json.loads(response_path.read_text(encoding="utf-8"))
         if not isinstance(response, dict) or response.get("question_id") != question_id:
-            raise ValueError(f"Khoj response question ID mismatch: {question_id}")
+            raise ValueError(f"{label} response question ID mismatch: {question_id}")
         items = response.get("items")
         if (
             not isinstance(items, list)
             or not items
             or not all(isinstance(item, dict) for item in items)
         ):
-            raise ValueError(f"Khoj retrieval returned invalid items: {question_id}")
-        if len(items) > artifact_top_k:
-            raise ValueError(f"Khoj retrieval exceeded configured Top-K: {question_id}")
-        items_by_id[question_id] = items[:k]
+            raise ValueError(f"{label} retrieval returned invalid items: {question_id}")
+        if backend == "ragflow":
+            unknown_types = sorted(
+                {
+                    str(item.get("type"))
+                    for item in items
+                    if item.get("type") not in {"chunk", "graph"}
+                }
+            )
+            if unknown_types:
+                raise ValueError(
+                    f"RAGFlow retrieval returned unknown item types for "
+                    f"{question_id}: {unknown_types}"
+                )
+            scoring_items = [item for item in items if item.get("type") == "chunk"]
+        else:
+            scoring_items = items
+        if len(scoring_items) > artifact_top_k:
+            top_k_label = "vector Top-K" if backend == "ragflow" else "Top-K"
+            raise ValueError(
+                f"{label} retrieval exceeded configured {top_k_label}: {question_id}"
+            )
+        items_by_id[question_id] = scoring_items[:k]
     return items_by_id
 
 
-def _score_khoj_retrieval_rows(
+def _score_native_retrieval_rows(
     ask_dir: Path,
     source: Path,
     references: dict[str, dict[str, Any]],
     question_ids: list[str],
     k: int,
     artifact_top_k: int,
+    *,
+    backend: str,
 ) -> list[dict[str, Any]]:
-    items_by_id = _read_khoj_retrieval_items(
+    items_by_id = _read_native_retrieval_items(
         ask_dir,
         source,
         question_ids,
         k,
         artifact_top_k,
+        backend=backend,
     )
     rows: list[dict[str, Any]] = []
     for question_id in question_ids:
@@ -530,8 +572,11 @@ def _score_khoj_retrieval_rows(
             k=k,
         )
         if row["eligible"]:
-            retrieved_turn_ids = _retrieved_khoj_user_turn_ids(
-                items_by_id[question_id], question_id, source_roles
+            retrieved_turn_ids = _retrieved_native_user_turn_ids(
+                items_by_id[question_id],
+                question_id,
+                source_roles,
+                backend=backend,
             )
             row = _score_retrieved_turns(row, retrieved_turn_ids, k)
         rows.append(row)
@@ -752,14 +797,19 @@ async def main(argv: list[str] | None = None) -> int:
                     turn_recall.k,
                     experiment.ask_top_k,
                 )
-            else:
-                retrieval_rows = _score_khoj_retrieval_rows(
+            elif experiment.backend in {"khoj", "ragflow"}:
+                retrieval_rows = _score_native_retrieval_rows(
                     experiment_output_dir(experiment),
                     reference_path,
                     reference_by_id,
                     hypothesis_ids,
                     turn_recall.k,
                     experiment.ask_top_k,
+                    backend=experiment.backend,
+                )
+            else:  # pragma: no cover - BackendName is exhaustive
+                raise RuntimeError(
+                    f"unsupported retrieval backend: {experiment.backend}"
                 )
             retrieval_by_id = {str(row["question_id"]): row for row in retrieval_rows}
             retrieval_metrics = _aggregate_retrieval_rows(

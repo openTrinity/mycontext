@@ -5,129 +5,88 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import time
+import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kl_graph.config import PROJECT_ROOT
+from omegaconf.errors import OmegaConfBaseException
+
 from kl_graph.evaluation.io import (
     artifact_stem,
     atomic_write_json,
     atomic_write_jsonl,
     json_lines,
 )
+from kl_graph.evaluation.longmemeval.experiment import (
+    RagflowAskExperiment,
+    load_ragflow_ask_experiment,
+    select_entries,
+)
+from kl_graph.evaluation.longmemeval.experiment import (
+    output_dir as experiment_output_dir,
+)
 from kl_graph.evaluation.longmemeval.source import (
-    DEFAULT_SOURCE,
     case_root,
     load_cases,
-    select_cases,
+    render_document_turns,
     source_fingerprint,
 )
 from kl_graph.evaluation.ragflow import RagflowEvaluationClient
 
-from .build import DEFAULT_ARTIFACT_ROOT, DEFAULT_BASE_URL, load_state
-
-DEFAULT_TOP_K = 5
-DEFAULT_CANDIDATE_COUNT = 1024
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return parsed
-
-
-def _unit_float(value: str) -> float:
-    parsed = float(value)
-    if not 0 <= parsed <= 1:
-        raise argparse.ArgumentTypeError("must be between 0 and 1")
-    return parsed
+from .build import load_state
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", nargs="?", type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument(
-        "--case", dest="case_ids", action="append", metavar="QUESTION_ID"
-    )
-    selection.add_argument("--first", type=_positive_int, metavar="N")
-    selection.add_argument("--all", action="store_true")
-    parser.add_argument("--use-kg", action="store_true")
-    parser.add_argument("--top-k", type=_positive_int, default=DEFAULT_TOP_K)
     parser.add_argument(
-        "--candidate-count",
-        type=_positive_int,
-        default=DEFAULT_CANDIDATE_COUNT,
+        "--config", type=Path, required=True, help="LongMemEval RAGFlow experiment YAML"
     )
-    parser.add_argument("--similarity-threshold", type=_unit_float, default=0.2)
-    parser.add_argument("--vector-similarity-weight", type=_unit_float, default=0.3)
-    parser.add_argument(
-        "--rerank-id", default=os.environ.get("RAGFLOW_RERANK_ID") or None
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args(argv)
+
+
+def _runtime_options(experiment: RagflowAskExperiment) -> argparse.Namespace:
+    """Adapt typed YAML values to the existing ask worker boundary."""
+    return argparse.Namespace(
+        artifact_root=experiment.artifact_root,
+        base_url=experiment.ragflow.base_url,
+        candidate_count=experiment.ask.candidate_count,
+        checkpoint_every=experiment.ask.checkpoint_every,
+        max_concurrent=experiment.ask.concurrency,
+        output_dir=experiment_output_dir(experiment),
+        overwrite=experiment.run.mode == "overwrite",
+        rerank_id=experiment.ask.rerank_id,
+        resume=experiment.run.mode == "resume",
+        similarity_threshold=experiment.ask.similarity_threshold,
+        top_k=experiment.ask.top_k,
+        use_kg=experiment.ask.use_kg,
+        vector_similarity_weight=experiment.ask.vector_similarity_weight,
     )
-    parser.add_argument("--max-concurrent", type=_positive_int, default=4)
-    parser.add_argument("--checkpoint-every", type=_positive_int, default=10)
-    parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--run-id", default=None)
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument(
-        "--base-url", default=os.environ.get("RAGFLOW_BASE_URL", DEFAULT_BASE_URL)
-    )
-    args = parser.parse_args(argv)
-    if args.run_id and not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):
-        parser.error(
-            "--run-id may contain only letters, digits, dot, underscore, and hyphen"
-        )
-    if args.output_dir is not None and args.run_id is not None:
-        parser.error("--output-dir and --run-id are mutually exclusive")
-    if args.candidate_count < args.top_k:
-        parser.error("--candidate-count cannot be smaller than --top-k")
-    return args
 
 
 def _resolve_output_dir(
     args: argparse.Namespace, selected: list[dict[str, Any]]
 ) -> Path:
-    if args.output_dir is not None:
-        candidate = args.output_dir.expanduser().resolve()
-    else:
-        mode = "graph" if args.use_kg else "vector"
-        if len(selected) == 1:
-            root = case_root(args.artifact_root, str(selected[0]["question_id"]))
-        else:
-            root = args.artifact_root.expanduser().resolve()
-        root = root / "benchmark" / "longmemeval-ragflow-ask" / mode
-        if args.resume and args.run_id is None:
-            candidates = (
-                sorted(
-                    path
-                    for path in root.iterdir()
-                    if path.is_dir() and (path / "run.json").is_file()
-                )
-                if root.is_dir()
-                else []
-            )
-            if not candidates:
-                raise FileNotFoundError(f"no RAGFlow ask run to resume under {root}")
-            return candidates[-1]
-        run_id = args.run_id or datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-        candidate = root / run_id
-        if not args.resume and args.run_id is None:
-            suffix = 1
-            while candidate.exists():
-                candidate = root / f"{run_id}-{suffix:02d}"
-                suffix += 1
+    del selected  # the YAML output directory is explicit for every selection
+    candidate = args.output_dir.expanduser().resolve()
     if args.resume:
-        if not (candidate / "run.json").is_file():
-            raise FileNotFoundError(f"RAGFlow ask run does not exist: {candidate}")
-    elif candidate.exists():
-        raise FileExistsError(f"output directory exists: {candidate}; use --resume")
+        run_path = candidate / "run.json"
+        if candidate.exists() and not run_path.is_file():
+            unexpected = [
+                path.name
+                for path in candidate.iterdir()
+                if path.name != "experiment.resolved.json"
+            ]
+            if unexpected:
+                raise FileNotFoundError(
+                    f"RAGFlow ask run is incomplete at {candidate}: {unexpected}"
+                )
+    elif candidate.exists() and not args.overwrite:
+        raise FileExistsError(f"output directory exists: {candidate}")
     return candidate
 
 
@@ -159,6 +118,7 @@ def _normalise_items(
 ) -> tuple[list[dict[str, Any]], int]:
     items: list[dict[str, Any]] = []
     graph_count = 0
+    chunk_count = 0
     for rank, chunk in enumerate(chunks, 1):
         content = str(chunk.get("content") or "").strip()
         if not content:
@@ -171,6 +131,10 @@ def _normalise_items(
             "Related content in Knowledge Graph"
         )
         graph_count += int(is_graph)
+        if not is_graph:
+            if chunk_count >= top_k:
+                continue
+            chunk_count += 1
         items.append(
             {
                 "id": str(chunk.get("id") or f"ragflow-rank-{rank}"),
@@ -183,9 +147,54 @@ def _normalise_items(
                 "document_name": document_name or None,
             }
         )
-        if len(items) >= top_k:
-            break
     return items, graph_count
+
+
+def _source_turn_ids(case: dict[str, Any], content: str) -> list[str]:
+    """Map one RAGFlow vector chunk back to contributing native user turns."""
+
+    def normalise(value: str) -> str:
+        return " ".join(unicodedata.normalize("NFKC", value).split())
+
+    body = normalise(content)
+    if not body:
+        raise ValueError("RAGFlow chunk contains no document text")
+
+    rendered_turns = render_document_turns(case)
+    normalised_turns = [(turn_id, normalise(text)) for turn_id, text in rendered_turns]
+    document = " ".join(text for _, text in normalised_turns)
+    starts: list[int] = []
+    offset = 0
+    for _, text in normalised_turns:
+        starts.append(offset)
+        offset += len(text) + 1
+
+    matches: list[int] = []
+    start = document.find(body)
+    while start >= 0:
+        matches.append(start)
+        start = document.find(body, start + 1)
+    if not matches:
+        raise ValueError("RAGFlow chunk cannot be located in the uploaded document")
+
+    candidates: list[list[str]] = []
+    for chunk_start in matches:
+        chunk_end = chunk_start + len(body)
+        ids = [
+            turn_id
+            for (turn_id, text), turn_start in zip(
+                normalised_turns, starts, strict=True
+            )
+            if turn_start < chunk_end and turn_start + len(text) > chunk_start
+        ]
+        if ids and ids not in candidates:
+            candidates.append(ids)
+    if len(candidates) != 1:
+        raise ValueError(
+            "RAGFlow chunk has an ambiguous source-turn mapping: "
+            f"candidates={candidates}"
+        )
+    return candidates[0]
 
 
 def _ask_one(
@@ -210,6 +219,8 @@ def _ask_one(
         chunks = client.retrieve(
             dataset_id=str(state["dataset_id"]),
             question=str(case["question"]),
+            # RAGFlow returns the synthesized GraphRAG item in addition to the
+            # requested page size, so Ask Top-K remains the vector chunk count.
             result_count=args.top_k,
             candidate_count=args.candidate_count,
             similarity_threshold=args.similarity_threshold,
@@ -218,6 +229,11 @@ def _ask_one(
             use_kg=args.use_kg,
         )
         items, graph_count = _normalise_items(chunks, top_k=args.top_k)
+        if not items:
+            raise RuntimeError(f"RAGFlow returned no usable items for {question_id}")
+        for item in items:
+            if item["type"] == "chunk":
+                item["source_turn_ids"] = _source_turn_ids(case, str(item["content"]))
         relative = Path("responses") / f"{artifact_stem(question_id)}.json"
         atomic_write_json(
             output_dir / relative,
@@ -228,7 +244,10 @@ def _ask_one(
                 "items": items,
                 "retrieval": {
                     "returned_by_sdk": len(chunks),
-                    "persisted_top_k": len(items),
+                    "persisted_items": len(items),
+                    "persisted_vector_top_k": sum(
+                        item["type"] == "chunk" for item in items
+                    ),
                     "graph_items_returned": graph_count,
                     "candidate_count": args.candidate_count,
                     "rerank_id": args.rerank_id,
@@ -310,6 +329,9 @@ def _write_run(
             "rerank_id": args.rerank_id,
             "use_kg": args.use_kg,
             "max_concurrent": args.max_concurrent,
+            "base_url": args.base_url.rstrip("/"),
+            "source_turn_mapping": "uploaded_document_normalized_character_spans_v1",
+            "top_k_semantics": "vector_chunks_excluding_graph_items",
             "protocol": "one_ragflow_sdk_retrieve_per_question_case",
         },
     )
@@ -323,7 +345,10 @@ def _validate_resume(
 ) -> None:
     if not args.resume:
         return
-    run = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+    run_path = output_dir / "run.json"
+    if not run_path.is_file():
+        return
+    run = json.loads(run_path.read_text(encoding="utf-8"))
     expected = {
         "source_sha256": source_sha256,
         "question_ids": [str(case["question_id"]) for case in selected],
@@ -334,6 +359,9 @@ def _validate_resume(
         "vector_similarity_weight": args.vector_similarity_weight,
         "rerank_id": args.rerank_id,
         "use_kg": args.use_kg,
+        "base_url": args.base_url.rstrip("/"),
+        "source_turn_mapping": "uploaded_document_normalized_character_spans_v1",
+        "top_k_semantics": "vector_chunks_excluding_graph_items",
     }
     mismatch = {
         key: {"recorded": run.get(key), "requested": value}
@@ -348,13 +376,27 @@ def _validate_resume(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
     try:
-        source, cases = load_cases(args.source)
-        selected = select_cases(cases, case_ids=args.case_ids, first=args.first)
+        cli = parse_args(argv)
+        experiment = load_ragflow_ask_experiment(cli.config)
+        args = _runtime_options(experiment)
+    except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
+        print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
+        return 2
+    try:
+        source, cases = load_cases(experiment.source)
+        selected = select_entries(cases, experiment.selection)
         source_sha256 = source_fingerprint(source)
-        states = _validate_states(args, source_sha256, selected)
         output_dir = _resolve_output_dir(args, selected)
+        if cli.dry_run:
+            print(
+                f"RAGFlow questions: {len(selected)}; "
+                f"concurrency={args.max_concurrent}; use_kg={args.use_kg}; "
+                f"vector_top_k={args.top_k}; output={output_dir}",
+                flush=True,
+            )
+            return 0
+        states = _validate_states(args, source_sha256, selected)
         _validate_resume(output_dir, args, source_sha256, selected)
         client = RagflowEvaluationClient(
             os.environ.get("RAGFLOW_API_KEY", ""), args.base_url

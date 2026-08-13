@@ -617,20 +617,28 @@ def _configured_generation_inputs(
     *,
     max_retrieval_length: int,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
-    if experiment.backend == "khoj":
-        ask_root, question_ids, prompts = _khoj_generation_inputs(
-            output_dir(experiment),
-            max_retrieval_length=max_retrieval_length,
+    if experiment.backend in {"khoj", "ragflow"}:
+        loader = (
+            _khoj_generation_inputs
+            if experiment.backend == "khoj"
+            else _ragflow_generation_inputs
+        )
+        ask_root, question_ids, prompts = loader(
+            output_dir(experiment), max_retrieval_length=max_retrieval_length
         )
         run = json.loads((ask_root / "run.json").read_text(encoding="utf-8"))
         configured_sha256 = source_fingerprint(experiment.source)
         if run.get("source_sha256") != configured_sha256:
-            raise ValueError("Khoj ask source differs from experiment source")
+            raise ValueError(
+                f"{experiment.backend} ask source differs from experiment source"
+            )
         _, cases = load_cases(experiment.source)
         selected = select_entries(cases, experiment.selection)
         expected_ids = [str(case["question_id"]) for case in selected]
         if question_ids != expected_ids:
-            raise ValueError("Khoj ask question IDs/order differ from selection")
+            raise ValueError(
+                f"{experiment.backend} ask question IDs/order differ from selection"
+            )
         return ask_root, question_ids, prompts
 
     if experiment.case_set is None:  # pragma: no cover - schema invariant

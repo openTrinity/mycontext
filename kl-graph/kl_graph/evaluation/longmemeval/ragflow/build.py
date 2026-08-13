@@ -14,77 +14,57 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kl_graph.config import PROJECT_ROOT
+from omegaconf.errors import OmegaConfBaseException
+
 from kl_graph.evaluation.io import atomic_write_json
+from kl_graph.evaluation.longmemeval.experiment import (
+    RagflowBuildExperiment,
+    load_ragflow_build_experiment,
+    select_entries,
+)
 from kl_graph.evaluation.longmemeval.source import (
-    DEFAULT_SOURCE,
     case_root,
     document_fingerprint,
     load_cases,
     render_document,
-    select_cases,
     source_fingerprint,
 )
 from kl_graph.evaluation.ragflow import RagflowEvaluationClient
 
-DEFAULT_BASE_URL = "http://127.0.0.1:9380"
-DEFAULT_ARTIFACT_ROOT = PROJECT_ROOT / "data" / "longmemeval-ragflow"
-DEFAULT_PARSE_TIMEOUT = 3600.0
-DEFAULT_GRAPH_TIMEOUT = 10800.0
-CHUNK_METHOD = "naive"
-CHUNK_TOKEN_NUM = 512
-CHUNK_DELIMITER = "\n"
 _OUTPUT_LOCK = threading.Lock()
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return parsed
-
-
-def _positive_float(value: str) -> float:
-    parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", nargs="?", type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument(
-        "--case", dest="case_ids", action="append", metavar="QUESTION_ID"
+    parser.add_argument(
+        "--config", type=Path, required=True, help="LongMemEval RAGFlow experiment YAML"
     )
-    selection.add_argument("--first", type=_positive_int, metavar="N")
-    selection.add_argument("--all", action="store_true")
-    parser.add_argument("--graph", action="store_true")
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--keep-going", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--case-concurrency", type=_positive_int, default=1)
-    parser.add_argument("--dataset-prefix", default="longmemeval")
-    parser.add_argument(
-        "--embedding-model",
-        default=os.environ.get("RAGFLOW_EMBEDDING_MODEL") or None,
+    return parser.parse_args(argv)
+
+
+def _runtime_options(
+    experiment: RagflowBuildExperiment, *, dry_run: bool
+) -> argparse.Namespace:
+    """Adapt typed YAML values to the existing build worker boundary."""
+    return argparse.Namespace(
+        artifact_root=experiment.artifact_root,
+        base_url=experiment.ragflow.base_url,
+        case_concurrency=experiment.build.case_concurrency,
+        chunk_method=experiment.build.chunk_method,
+        chunk_token_num=experiment.build.chunk_token_num,
+        dataset_prefix=experiment.build.dataset_prefix,
+        delimiter=experiment.build.delimiter,
+        dry_run=dry_run,
+        embedding_model=experiment.build.embedding_model,
+        graph=experiment.build.graph,
+        graph_timeout=experiment.build.graph_timeout_seconds,
+        keep_going=experiment.run.keep_going,
+        parse_timeout=experiment.build.parse_timeout_seconds,
+        poll_seconds=experiment.build.poll_seconds,
+        # A compatible remote Dataset is immutable and always reusable.
+        resume=True,
     )
-    parser.add_argument(
-        "--base-url", default=os.environ.get("RAGFLOW_BASE_URL", DEFAULT_BASE_URL)
-    )
-    parser.add_argument(
-        "--parse-timeout", type=_positive_float, default=DEFAULT_PARSE_TIMEOUT
-    )
-    parser.add_argument(
-        "--graph-timeout", type=_positive_float, default=DEFAULT_GRAPH_TIMEOUT
-    )
-    parser.add_argument("--poll-seconds", type=_positive_float, default=2.0)
-    args = parser.parse_args(argv)
-    if not args.dataset_prefix.strip():
-        parser.error("--dataset-prefix must be non-empty")
-    return args
 
 
 def _utc_now() -> str:
@@ -135,9 +115,9 @@ def _new_state(
         "config": {
             "base_url": args.base_url.rstrip("/"),
             "embedding_model": args.embedding_model,
-            "chunk_method": CHUNK_METHOD,
-            "chunk_token_num": CHUNK_TOKEN_NUM,
-            "delimiter": CHUNK_DELIMITER,
+            "chunk_method": args.chunk_method,
+            "chunk_token_num": args.chunk_token_num,
+            "delimiter": args.delimiter,
             "graph": bool(args.graph),
             "document_policy": "one_user_only_transcript_per_question_case",
         },
@@ -276,7 +256,7 @@ def _build_one(
         _print(
             f"  dataset={expected['dataset_name']}",
             f"  document={expected['document_name']}",
-            f"  chunking={CHUNK_METHOD}/{CHUNK_TOKEN_NUM}/newline",
+            f"  chunking={args.chunk_method}/{args.chunk_token_num}/{args.delimiter!r}",
             f"  graph={args.graph}",
         )
         return
@@ -307,10 +287,10 @@ def _build_one(
                     "one document containing only user turns"
                 ),
                 embedding_model=args.embedding_model,
-                chunk_method=CHUNK_METHOD,
+                chunk_method=args.chunk_method,
                 parser_config={
-                    "chunk_token_num": CHUNK_TOKEN_NUM,
-                    "delimiter": CHUNK_DELIMITER,
+                    "chunk_token_num": args.chunk_token_num,
+                    "delimiter": args.delimiter,
                 },
             )
             state["dataset_id"] = str(dataset.id)
@@ -390,10 +370,16 @@ def _print(*lines: str, file=None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
     try:
-        source, cases = load_cases(args.source)
-        selected = select_cases(cases, case_ids=args.case_ids, first=args.first)
+        cli = parse_args(argv)
+        experiment = load_ragflow_build_experiment(cli.config)
+        args = _runtime_options(experiment, dry_run=cli.dry_run)
+    except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
+        print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
+        return 2
+    try:
+        source, cases = load_cases(experiment.source)
+        selected = select_entries(cases, experiment.selection)
         source_sha256 = source_fingerprint(source)
         client = (
             None
@@ -402,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                 os.environ.get("RAGFLOW_API_KEY", ""), args.base_url
             )
         )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

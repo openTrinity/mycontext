@@ -35,7 +35,7 @@ class RagflowEvaluationClient:
             except ModuleNotFoundError as exc:
                 raise RagflowEvaluationError(
                     "ragflow-sdk is not installed; v0.26.4 requires Python "
-                    "3.13 (install the kl-graph 'ragflow' extra)"
+                    "3.13 (install the dedicated .venv-ragflow environment)"
                 ) from exc
             sdk = RAGFlow(api_key=api_key, base_url=self.base_url)
         self.sdk = sdk

@@ -5,6 +5,7 @@ retrieval, generation, and QA judging remain owned by their existing modules:
 
     KL Graph: convert -> build -> ask -> generate -> score
     Khoj:             build -> ask -> generate -> score
+    RAGFlow:           build -> ask -> generate -> score
 
 Run behavior and every experiment value come from one required YAML file.
 """
@@ -108,7 +109,7 @@ def _resolved_experiment(
                 },
             }
         )
-    else:
+    elif experiment.backend == "khoj":
         resolved.update(
             {
                 "artifact_root": str(experiment.artifact_root),
@@ -120,6 +121,21 @@ def _resolved_experiment(
                     "content_type": "plaintext",
                     "document_filter": "exact_filename",
                     "source_turn_mapping": "uploaded_document_character_spans_v1",
+                },
+            }
+        )
+    else:
+        resolved.update(
+            {
+                "artifact_root": str(experiment.artifact_root),
+                "ragflow": experiment.ragflow.model_dump(),
+                "ask": {
+                    **experiment.ask.model_dump(),
+                    "requested_result_count": experiment.ask.top_k,
+                    "source_turn_mapping": (
+                        "uploaded_document_normalized_character_spans_v1"
+                    ),
+                    "top_k_semantics": "vector_chunks_excluding_graph_items",
                 },
             }
         )
@@ -174,10 +190,13 @@ def _conversion_is_compatible(
 
 def _stage_command(stage: str, experiment: Experiment) -> list[str]:
     module = stage
-    if experiment.backend == "khoj" and stage in {"build", "ask"}:
-        module = f"khoj.{stage}"
+    executable = sys.executable
+    if experiment.backend in {"khoj", "ragflow"} and stage in {"build", "ask"}:
+        module = f"{experiment.backend}.{stage}"
+    if experiment.backend == "ragflow" and stage in {"build", "ask"}:
+        executable = experiment.ragflow.python
     return [
-        sys.executable,
+        executable,
         "-m",
         f"kl_graph.evaluation.longmemeval.{module}",
         "--config",
@@ -277,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"experiment={experiment_path}", flush=True)
 
-        if experiment.backend == "khoj":
+        if experiment.backend != "kl_graph":
             _run_stage(
                 "build",
                 _stage_command("build", experiment),
