@@ -36,6 +36,7 @@ from kl_graph.utils.litellm_config import (
     provider_api_key,
     provider_model,
 )
+from kl_graph.utils.litellm_lifecycle import run_litellm_coro
 
 if TYPE_CHECKING:
     from kl_graph.periodic.community_identity import CommunityIdentity
@@ -988,7 +989,7 @@ def run_community_summarization(
     print("COMMUNITY SUMMARIZATION")
     print("=" * 60)
 
-    reports, llm_stats = asyncio.run(
+    reports, llm_stats = run_litellm_coro(
         generate_community_reports(
             sqlite,
             levels=levels,
@@ -1288,7 +1289,7 @@ def run_gated_summarization(
 
     include_only = plan["regenerate"]
     if include_only:
-        reports, llm_stats = asyncio.run(
+        reports, llm_stats = run_litellm_coro(
             generate_community_reports(
                 sqlite,
                 levels=levels,

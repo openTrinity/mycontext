@@ -22,8 +22,12 @@ from kl_graph.ingest.improvement import (
     run_improvement,
     validate_improve_mode,
 )
-from kl_graph.ingest.pipeline import KEEP_EXTRACTION_CACHE, IngestionPipeline
 from kl_graph.ingest.llm_extractor import ExtractionFailure
+from kl_graph.ingest.pipeline import KEEP_EXTRACTION_CACHE, IngestionPipeline
+from kl_graph.utils.litellm_lifecycle import (
+    run_litellm_coro,
+    stop_litellm_logging_worker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -310,8 +314,12 @@ async def run_ingestion(
         # Give it a worker-owned event loop so the server loop remains responsive;
         # SQLiteStore supplies per-thread handles, and _init_stores deliberately
         # does not move the extraction-cache connection across this boundary.
+        # Stop litellm's logging worker on THIS loop first: the worker task is
+        # bound to whichever loop logged last, and the loop switch below would
+        # otherwise abandon it ("Task was destroyed but it is pending").
+        await stop_litellm_logging_worker()
         await asyncio.to_thread(
-            lambda: asyncio.run(
+            lambda: run_litellm_coro(
                 pipeline.run_graph_build(progress_callback=graph_progress)
             )
         )

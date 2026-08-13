@@ -34,6 +34,7 @@ from kl_graph.utils.litellm_config import (
     provider_api_key,
     provider_model,
 )
+from kl_graph.utils.litellm_lifecycle import run_litellm_coro
 
 
 @dataclass
@@ -459,9 +460,9 @@ def _run_coro_sync(coro):
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return run_litellm_coro(coro)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+        return pool.submit(run_litellm_coro, coro).result()
 
 
 def run_llm_judge(
