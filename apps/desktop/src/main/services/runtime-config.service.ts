@@ -322,10 +322,10 @@ export class RuntimeConfigService {
     const key = (input.apiKey ?? "").trim() !== "" ? input.apiKey!.trim() : resolved.llmApiKey
 
     if (base.trim() === "") {
-      return { ok: false, reason: "unreachable", provider: null, detail: null, models: [] }
+      return this.probeFail("unreachable", null)
     }
     if (key.trim() === "") {
-      return { ok: false, reason: "noKey", provider: null, detail: null, models: [] }
+      return this.probeFail("noKey", null)
     }
 
     // base 可能带或不带 /v1（两种都有人填）—— 规范化，不让用户去记。
@@ -344,13 +344,14 @@ export class RuntimeConfigService {
         const parsed = await this.parseModels(openai, "openai")
         if (parsed !== null) {
           this.options.logger.info("gateway probe ok", {
+            providers: parsed.providers,
             provider: parsed.provider,
             models: parsed.models.length,
           })
           return { ok: true, reason: null, ...parsed, detail: null }
         }
         // 200 但形状不对：多半 URL 填到了控制台首页（返回 HTML）。
-        return { ok: false, reason: "badResponse", provider: null, detail: null, models: [] }
+        return this.probeFail("badResponse", null)
       }
 
       // 401/403 = 地址对、密钥不对：换协议也没用，直接归类。
@@ -360,13 +361,7 @@ export class RuntimeConfigService {
           status: openai.status,
           reason: "unauthorized",
         })
-        return {
-          ok: false,
-          reason: "unauthorized",
-          provider: null,
-          detail: detail === "" ? null : detail,
-          models: [],
-        }
+        return this.probeFail("unauthorized", detail === "" ? null : detail)
       }
 
       // ── 第 2 试：Anthropic 口（仅在 OpenAI 口报「传输不对」信号时）──
@@ -379,12 +374,13 @@ export class RuntimeConfigService {
         const parsed = await this.parseModels(anthropic, "anthropic")
         if (parsed !== null) {
           this.options.logger.info("gateway probe ok", {
+            providers: parsed.providers,
             provider: parsed.provider,
             models: parsed.models.length,
           })
           return { ok: true, reason: null, ...parsed, detail: null }
         }
-        return { ok: false, reason: "badResponse", provider: null, detail: null, models: [] }
+        return this.probeFail("badResponse", null)
       }
 
       // 两种口都没通：按 Anthropic 口的状态归类（401/403 → 密钥问题，其余 → 地址不像模型服务）。
@@ -396,45 +392,82 @@ export class RuntimeConfigService {
         anthropicStatus: anthropic.status,
         reason,
       })
-      return {
-        ok: false,
-        reason,
-        provider: null,
-        detail: detail === "" ? null : detail,
-        models: [],
-      }
+      return this.probeFail(reason, detail === "" ? null : detail)
     } catch (error) {
       // 超时 / DNS / 拒连都归 unreachable —— 对用户是同一个下一步（检查地址）
       const detail = error instanceof Error ? error.message.slice(0, 300) : null
       this.options.logger.info("gateway probe unreachable", { detail })
-      return { ok: false, reason: "unreachable", provider: null, detail, models: [] }
+      return this.probeFail("unreachable", detail)
+    }
+  }
+
+  /** 探测失败的统一形状（各字段空着）。 */
+  private probeFail(
+    reason: RuntimeConfigProbe["reason"],
+    detail: string | null,
+  ): RuntimeConfigProbe {
+    return {
+      ok: false,
+      reason,
+      provider: null,
+      providers: [],
+      modelProviders: {},
+      detail,
+      models: [],
     }
   }
 
   /**
-   * 从 `/v1/models` 响应体解析出 `{provider, models}`；形状不对返回 null。
+   * 从 `/v1/models` 响应体解析出 `{provider, providers, modelProviders, models}`。
+   * 形状不对返回 null。
    *
-   * `viaHeader` 是这次请求用的头风格（openai / anthropic）作为兜底判定 ——
-   * 但**响应形状优先**：Anthropic 的条目带 `type:"model"` / `display_name`，
-   * OpenAI 的带 `object:"model"` / `owned_by`。有 Anthropic 标记就判 anthropic，
-   * 否则用 `viaHeader`（毕竟能用哪种头连通本身就是最强的协议信号）。
+   * ## ★★ 协议识别以 `supported_endpoint_types` 为准，不靠信封形状猜
+   *
+   * 之前这里只看响应信封是 OpenAI 形（`{data:[{id}]}`）还是 Anthropic 形
+   * （`{data:[{type:"model"}]}`）来定一个协议 —— 但很多网关（如本机 mulerun）
+   * 的 `/v1/models` 会**逐模型**标 `supported_endpoint_types`，多数 claude/glm/kimi
+   * 都是 `["anthropic","openai"]` 两者都支持。只看信封会把这种网关一律报成
+   * "openai 单一"，于是 anthropic chip 永远点不亮 —— 那正是本次要修的 bug。
+   *
+   * 所以：优先聚合每个模型的 `supported_endpoint_types`（只认我们支持的
+   * anthropic/openai 两种）得到网关支持的协议全集；网关不给这个字段时（老网关）
+   * 才回退到 `viaHeader`（能用哪种头连通就至少支持那个），不假装支持没验证过的。
+   *
+   * `provider`（推荐默认）：网关支持 anthropic 就优先 anthropic（claude 类走原生
+   * 协议信息更全），否则 openai。
    */
   private async parseModels(
     response: Response,
     viaHeader: ModelProvider,
-  ): Promise<{ provider: ModelProvider; models: string[] } | null> {
+  ): Promise<{
+    provider: ModelProvider
+    providers: ModelProvider[]
+    modelProviders: Record<string, ModelProvider[]>
+    models: string[]
+  } | null> {
     const body = (await response.json().catch(() => null)) as { data?: unknown } | null
     if (body === null || !Array.isArray(body.data)) return null
 
     const items = body.data as unknown[]
-    const looksAnthropic = items.some(
-      (item) =>
-        typeof item === "object" &&
-        item !== null &&
-        ((item as { type?: unknown }).type === "model" ||
-          typeof (item as { display_name?: unknown }).display_name === "string"),
-    )
-    const provider: ModelProvider = looksAnthropic ? "anthropic" : viaHeader
+    const modelProviders: Record<string, ModelProvider[]> = {}
+    const gatewayProviders = new Set<ModelProvider>()
+
+    for (const item of items) {
+      if (typeof item !== "object" || item === null) continue
+      const id = (item as { id?: unknown }).id
+      if (typeof id !== "string") continue
+      const rawTypes = (item as { supported_endpoint_types?: unknown }).supported_endpoint_types
+      if (Array.isArray(rawTypes)) {
+        // 只留我们支持的两种协议（网关可能还标 gemini/image-generation 等，忽略）。
+        const supported = rawTypes.filter(
+          (t): t is ModelProvider => t === "anthropic" || t === "openai",
+        )
+        if (supported.length > 0) {
+          modelProviders[id] = supported
+          for (const p of supported) gatewayProviders.add(p)
+        }
+      }
+    }
 
     const models = items
       .map((item) =>
@@ -447,7 +480,14 @@ export class RuntimeConfigService {
       .filter((id): id is string => id !== null)
       .sort((a, b) => a.localeCompare(b))
 
-    return { provider, models }
+    // 网关没给 supported_endpoint_types（老网关）→ 回退到连通的那个协议。
+    if (gatewayProviders.size === 0) gatewayProviders.add(viaHeader)
+
+    const providers = [...gatewayProviders].sort()
+    // 推荐默认：支持 anthropic 就优先它（原生协议信息更全），否则 openai。
+    const provider: ModelProvider = gatewayProviders.has("anthropic") ? "anthropic" : "openai"
+
+    return { provider, providers, modelProviders, models }
   }
 
   /**

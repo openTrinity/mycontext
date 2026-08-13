@@ -329,6 +329,8 @@ function installApi(steps: OnboardingStepView[]): Recorded {
               ok: true,
               reason: null,
               provider: "openai" as const,
+              providers: ["openai" as const],
+              modelProviders: {} as Record<string, ("openai" | "anthropic")[]>,
               detail: null,
               models: ["gateway-only-model", "glm-5.2"],
             })
@@ -336,6 +338,8 @@ function installApi(steps: OnboardingStepView[]): Recorded {
               ok: false,
               reason: recorded.probeReason,
               provider: null,
+              providers: [] as ("openai" | "anthropic")[],
+              modelProviders: {} as Record<string, ("openai" | "anthropic")[]>,
               detail: "Invalid token (request id: test)",
               models: [] as string[],
             }),

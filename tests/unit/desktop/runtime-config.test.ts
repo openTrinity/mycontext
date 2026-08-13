@@ -362,6 +362,45 @@ describe("网关探测", () => {
     const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
     expect(result.ok).toBe(true)
     expect(result.provider).toBe("openai")
+    // 没给 supported_endpoint_types 的老网关：回退到连通的那个协议（openai）
+    expect(result.providers).toEqual(["openai"])
+    ctx.close()
+  })
+
+  /**
+   * ★★ 这条锁的是"明明两种协议都支持却被报成 openai 单一"那个 bug。
+   *
+   * 真实网关（本机 mulerun）的 `/v1/models` 会逐模型标 `supported_endpoint_types`，
+   * 多数 claude/glm 是 `["anthropic","openai"]`。探测必须据此汇总出**两个**协议、
+   * 并给出每模型的支持集，而不是只按信封形状猜一个。
+   */
+  it("★★ supported_endpoint_types 决定支持集（两个协议都要亮）", async () => {
+    const { impl } = fakeFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          {
+            id: "claude-opus-4-8",
+            object: "model",
+            supported_endpoint_types: ["anthropic", "openai"],
+          },
+          { id: "qwen-plus", object: "model", supported_endpoint_types: ["openai"] },
+          // 网关还可能标别的口（gemini/图像）——只保留我们认的两种
+          { id: "gemini-x", object: "model", supported_endpoint_types: ["gemini", "openai"] },
+        ],
+      },
+    }))
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
+    expect(result.ok).toBe(true)
+    // 网关支持集含两个（不再是单一 openai）
+    expect([...result.providers].sort()).toEqual(["anthropic", "openai"])
+    // 推荐默认优先 anthropic（网关支持它时）
+    expect(result.provider).toBe("anthropic")
+    // 每模型支持集：claude 两个、qwen 只 openai、gemini 里只留 openai
+    expect(result.modelProviders["claude-opus-4-8"]).toEqual(["anthropic", "openai"])
+    expect(result.modelProviders["qwen-plus"]).toEqual(["openai"])
+    expect(result.modelProviders["gemini-x"]).toEqual(["openai"])
     ctx.close()
   })
 

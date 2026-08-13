@@ -210,6 +210,13 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const effectiveMainProvider: ModelProvider =
     mainProvider ?? (result?.ok === true ? result.provider : null) ?? current.mainProvider.value
 
+  /**
+   * 探测识别到的网关**支持的协议集**。没探过（或探测没给协议信息）时两个都摆出来
+   * —— 让用户仍能手选，只是没有"这个网关支持哪些"的确证。探到了就据它标注/限制。
+   */
+  const supportedProviders: readonly ModelProvider[] =
+    result?.ok === true && result.providers.length > 0 ? result.providers : ["openai", "anthropic"]
+
   return (
     <div className="flex flex-col gap-[var(--gap-section-lg)]">
       <section className="flex flex-col gap-[var(--gap-section-sm)]">
@@ -266,11 +273,11 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
                 {t("model.probe.fromGateway", { count: result.models.length })}
               </Tag>
             )}
-            {/* 探测识别到的网关协议 —— 让用户看见「这个地址是 OpenAI 兼容还是 Anthropic」 */}
-            {result?.ok === true && (
+            {/* 探测识别到的网关**支持的协议集** —— 让用户看见这网关到底支持哪些 */}
+            {result?.ok === true && result.providers.length > 0 && (
               <Tag size="sm" status="default">
                 {t("model.probe.detectedProtocol", {
-                  provider: t(`model.provider.${result.provider}`),
+                  provider: result.providers.map((p) => t(`model.provider.${p}`)).join(" / "),
                 })}
               </Tag>
             )}
@@ -315,30 +322,19 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
           ★ 主模型协议选择器 —— 现在可切（去掉了原来那句"不可切换"）。
           opencode 子进程按它选 @ai-sdk/anthropic / @ai-sdk/openai-compatible 内联
           provider，直连 LlmClient 按它走 /v1/messages / /v1/chat/completions。
-          测试连接后自动选中识别值（effectiveMainProvider），点击可覆盖。
+          两个 chip 亮不亮由探测到的 `supportedProviders` 决定（读网关每模型的
+          supported_endpoint_types），不再靠"用哪种头连通"猜一个。
         */}
-        <div className="flex flex-col gap-[var(--gap-component-sm)]">
-          <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
-            {t("model.provider.protocol")}
-          </span>
-          <div className="flex flex-wrap gap-1.5">
-            <Chip
-              selected={effectiveMainProvider === "openai"}
-              onClick={() => setMainProvider("openai")}
-            >
-              {t("model.provider.openai")}
-            </Chip>
-            <Chip
-              selected={effectiveMainProvider === "anthropic"}
-              onClick={() => setMainProvider("anthropic")}
-            >
-              {t("model.provider.anthropic")}
-            </Chip>
-          </div>
-          <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-            {t("model.provider.mainProtocolHint")}
-          </span>
-        </div>
+        <ProviderPicker
+          label={t("model.provider.protocol")}
+          hint={t("model.provider.mainProtocolHint")}
+          value={effectiveMainProvider}
+          supported={supportedProviders}
+          onPick={setMainProvider}
+          openaiLabel={t("model.provider.openai")}
+          anthropicLabel={t("model.provider.anthropic")}
+          unsupportedLabel={t("model.provider.unsupported")}
+        />
 
         <div className="flex flex-col gap-[var(--gap-component-sm)]">
           <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
@@ -381,31 +377,19 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
 
           {/*
             ★ 协议选择器 —— 知识库那一路真能切协议（传给 kl 的 KL_LLM_PROVIDER）。
-            测试连接后自动选中识别值（effectiveKlProvider），点击可覆盖。
+            两个 chip 亮不亮由探测到的 supportedProviders 决定，点击可覆盖。
             这就是「OpenAI 兼容网关被当 Anthropic 发 → 404」那个报错的用户侧修复。
           */}
-          <div className="flex flex-col gap-[var(--gap-component-sm)]">
-            <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
-              {t("model.provider.protocol")}
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              <Chip
-                selected={effectiveKlProvider === "openai"}
-                onClick={() => setKlProvider("openai")}
-              >
-                {t("model.provider.openai")}
-              </Chip>
-              <Chip
-                selected={effectiveKlProvider === "anthropic"}
-                onClick={() => setKlProvider("anthropic")}
-              >
-                {t("model.provider.anthropic")}
-              </Chip>
-            </div>
-            <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-              {t("model.kl.protocolHint")}
-            </span>
-          </div>
+          <ProviderPicker
+            label={t("model.provider.protocol")}
+            hint={t("model.kl.protocolHint")}
+            value={effectiveKlProvider}
+            supported={supportedProviders}
+            onPick={setKlProvider}
+            openaiLabel={t("model.provider.openai")}
+            anthropicLabel={t("model.provider.anthropic")}
+            unsupportedLabel={t("model.provider.unsupported")}
+          />
 
           <div className="flex flex-col gap-[var(--gap-component-sm)]">
             <div className="flex items-center gap-2">
@@ -522,6 +506,65 @@ function ProbeResult({
     >
       {t(`model.probe.reason.${result.reason ?? "unreachable"}`)}
     </span>
+  )
+}
+
+/**
+ * 协议选择器（openai / anthropic 两个 chip）。
+ *
+ * ★ 两个 chip 都**始终显示**，但网关探测确认不支持的那个标灰、点了给一行提示 ——
+ * 而不是把它藏掉。藏掉的话用户会以为"这网关只有一个协议"，而这正是之前那个
+ * 误导性 bug 的另一种形态。显示 + 标注既诚实又不挡手（没探过时两个都可点）。
+ */
+function ProviderPicker({
+  label,
+  hint,
+  value,
+  supported,
+  onPick,
+  openaiLabel,
+  anthropicLabel,
+  unsupportedLabel,
+}: {
+  label: string
+  hint: string
+  value: ModelProvider
+  /** 探测确认网关支持的协议集（没探过时传两个都在，等于不限制）。 */
+  supported: readonly ModelProvider[]
+  onPick: (next: ModelProvider) => void
+  openaiLabel: string
+  anthropicLabel: string
+  /** 选了一个网关不支持的协议时的提示文案。 */
+  unsupportedLabel: string
+}) {
+  const options: { id: ModelProvider; label: string }[] = [
+    { id: "openai", label: openaiLabel },
+    { id: "anthropic", label: anthropicLabel },
+  ]
+  // 当前选中的协议不在网关支持集里 → 给一行警告（与 modelNotListed 同一个防法）。
+  const pickedUnsupported = supported.length > 0 && !supported.includes(value)
+  return (
+    <div className="flex flex-col gap-[var(--gap-component-sm)]">
+      <span className="typography-body-small-400 text-[var(--text-base-secondary)]">{label}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((option) => {
+          const isSupported = supported.length === 0 || supported.includes(option.id)
+          return (
+            <Chip key={option.id} selected={value === option.id} onClick={() => onPick(option.id)}>
+              {/* 网关明确不支持的那个：标一个「!」提示它没被验证过，但仍可点 */}
+              {isSupported ? option.label : `${option.label} !`}
+            </Chip>
+          )
+        })}
+      </div>
+      {pickedUnsupported ? (
+        <span className="typography-caption-400 text-[var(--status-warning)]">
+          {unsupportedLabel}
+        </span>
+      ) : (
+        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">{hint}</span>
+      )}
+    </div>
   )
 }
 

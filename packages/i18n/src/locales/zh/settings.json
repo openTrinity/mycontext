@@ -370,6 +370,7 @@
       "protocol": "协议",
       "openai": "OpenAI 兼容",
       "anthropic": "Anthropic",
+      "unsupported": "测试连接时没验到这个网关支持所选协议 —— 仍可保存，但请确认网关确实支持。",
       "mainProtocolHint": "主模型（数字分身回消息、搜索、蒸馏、直连）访问网关用哪种协议；测试连接后自动识别，也可手动改。"
     },
     "kl": {

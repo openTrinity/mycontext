@@ -62,6 +62,8 @@ function installApi(): void {
           ok: true,
           reason: null,
           provider: "openai" as const,
+          providers: ["openai" as const],
+          modelProviders: {} as Record<string, ("openai" | "anthropic")[]>,
           detail: null,
           models: ["gateway-only-model", "glm-5.2"],
         }),

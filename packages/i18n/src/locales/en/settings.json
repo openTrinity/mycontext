@@ -370,6 +370,7 @@
       "protocol": "Protocol",
       "openai": "OpenAI-compatible",
       "anthropic": "Anthropic",
+      "unsupported": "Testing didn't confirm this gateway supports the selected protocol — you can still save, but make sure the gateway actually supports it.",
       "mainProtocolHint": "Which protocol the main model (digital-twin replies, search, distillation, direct calls) uses to reach the gateway. Auto-detected after testing; overridable."
     },
     "kl": {

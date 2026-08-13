@@ -3531,13 +3531,30 @@ export const runtimeConfigProbeSchema = z.object({
    */
   reason: z.enum(["unauthorized", "unreachable", "badResponse", "noKey"]).nullable(),
   /**
-   * 识别到的网关协议（成功时非 null）。UI 据此把知识库那一路的协议 chip 自动选好，
-   * 也顺带告诉用户「这个地址是 OpenAI 兼容还是 Anthropic」。
+   * **推荐/主**协议（成功时非 null）。UI 据此把协议 chip 自动选好。
    *
-   * 一次探测只认一个协议（先试 openai、传输不对再试 anthropic），所以这是**网关级**
-   * 的判定，而不是 per-model —— `models` 里的每个 id 都走这同一个协议。
+   * ★ 这是"建议默认选哪个"，**不是**"只支持这一个" —— 具体支持哪些看 `providers`。
+   * 取值优先 anthropic（若网关支持）：claude 类模型走原生 Anthropic 协议信息更全。
    */
   provider: modelProviderSchema.nullable(),
+  /**
+   * 网关**实际支持**的协议集合（成功时非空）。
+   *
+   * ★ 这条修的是"明明两种协议都支持却被报成 openai 单一"那个 bug：许多网关的
+   * `/v1/models` 会给每个模型标 `supported_endpoint_types`（如
+   * `["anthropic","openai"]`）。我们据此汇总出网关支持的协议全集，让两个协议
+   * chip 都能亮起来，而不是靠"用哪种头连通"猜一个。
+   *
+   * 网关不给 `supported_endpoint_types` 时（老网关）：回退到"能连通的那个协议"
+   * —— 至少不假装支持没验证过的那个。
+   */
+  providers: z.array(modelProviderSchema),
+  /**
+   * 每个模型各自支持的协议（`模型 id → 协议集`）。UI 据此在"选了 anthropic 却挑了
+   * 一个只支持 openai 的模型"时当场警告 —— 与 model_not_found 那类静默失效同一个
+   * 防法。网关不给该字段的模型不出现在这里（UI 那时不妄断）。
+   */
+  modelProviders: z.record(z.string(), z.array(modelProviderSchema)),
   /** 网关原文（截断）。放在折叠区里给会看的人，不直接怼到界面上 */
   detail: z.string().nullable(),
   /** 探到的模型 id 列表（成功时非空）。UI 用它做模型选择器 */
