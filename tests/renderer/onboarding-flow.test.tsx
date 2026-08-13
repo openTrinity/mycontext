@@ -1348,6 +1348,8 @@ describe("★★ 会话全选：标签与行为同源；列表不嵌套滚动", 
       chatKinds: ["direct", "group"],
       conversationIds: [...(options.selectedIds ?? [])],
       enabledSources: ["chat"],
+      /** 监听范围（v29 这一轮新加）。这一组用例不验它 → 空数组。 */
+      attentionConversationIds: [],
     }
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
@@ -1385,8 +1387,13 @@ describe("★★ 会话全选：标签与行为同源；列表不嵌套滚动", 
   it("★★ 有搜索词时：全选按钮的标签跟着**可见集合**变，不是全量", async () => {
     // 20 个里已选中 2 个（下标 3 与 7，正是那两个「目标」）
     renderSources({ items: manyConversations(20), selectedIds: ["cid-3", "cid-7"] })
+    /**
+     * ★ 用 `getAllByText` 等列表加载：被勾选的会话现在会出现**两次** ——
+     * 学习范围列表一次、「分身监听范围」的候选一次（候选就是已勾选的那些）。
+     * `getByText` 在多命中时抛错，而那与"列表没加载出来"是两种完全不同的失败。
+     */
     await waitFor(() => {
-      expect(screen.getByText("目标甲")).toBeTruthy()
+      expect(screen.getAllByText("目标甲").length).toBeGreaterThan(0)
     })
     /**
      * 未搜索时：20 个里选了 2 个 → 可见集合没全选 → 标签是「全选」。
@@ -1407,8 +1414,13 @@ describe("★★ 会话全选：标签与行为同源；列表不嵌套滚动", 
       items: manyConversations(20),
       selectedIds: ["cid-1", "cid-3", "cid-7"],
     })
+    /**
+     * ★ 用 `getAllByText` 等列表加载：被勾选的会话现在会出现**两次** ——
+     * 学习范围列表一次、「分身监听范围」的候选一次（候选就是已勾选的那些）。
+     * `getByText` 在多命中时抛错，而那与"列表没加载出来"是两种完全不同的失败。
+     */
     await waitFor(() => {
-      expect(screen.getByText("目标甲")).toBeTruthy()
+      expect(screen.getAllByText("目标甲").length).toBeGreaterThan(0)
     })
     fireEvent.change(screen.getByPlaceholderText("搜索会话名…"), { target: { value: "目标" } })
     fireEvent.click(screen.getByRole("button", { name: "全不选" }))

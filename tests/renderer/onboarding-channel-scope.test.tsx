@@ -179,6 +179,8 @@ const SOURCES_DRAFT = {
   chatKinds: ["direct", "group"] as ("direct" | "group")[],
   conversationIds: [],
   enabledSources: [],
+  /** 监听范围（v29 这一轮新加）。这一组用例不验它 → 空数组。 */
+  attentionConversationIds: [],
 }
 
 describe("★★★ 第 4 步列的是「已连渠道」的会话", () => {
@@ -280,8 +282,16 @@ describe("★★★ 第 4 步列的是「已连渠道」的会话", () => {
         channelFilter={new Set([SOURCE_CHANNEL_ID])}
       />,
     )
+    /**
+     * ★ 用 `getAllByText` 等列表加载。
+     *
+     * 一个被勾选的会话现在会出现**两次**：学习范围列表一次、
+     * 「分身监听范围」的候选一次（候选就是已勾选的那些，见
+     * `attentionCandidates`）。`getByText` 在多命中时抛错 ——
+     * 而那与"列表没加载出来"是两种完全不同的失败。
+     */
     await waitFor(() => {
-      expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
+      expect(screen.getAllByText(SOURCE_TITLE).length).toBeGreaterThan(0)
     })
     // 三个勾选里只有 ocFAKE0001 属于飞书 → 顶部应当是 1，不是 3
     expect(screen.getByText(/已选\s*1\s*个/)).toBeTruthy()
@@ -299,8 +309,9 @@ describe("★★★ 第 4 步列的是「已连渠道」的会话", () => {
         channelFilter={new Set([SOURCE_CHANNEL_ID])}
       />,
     )
+    // ★ 同上：被勾选的会话在监听候选里也会出现一次
     await waitFor(() => {
-      expect(screen.getByText(SOURCE_TITLE)).toBeTruthy()
+      expect(screen.getAllByText(SOURCE_TITLE).length).toBeGreaterThan(0)
     })
     const clear = screen.getAllByRole("button").find((b) => /清空/.test(b.textContent ?? ""))
     expect(clear, "找不到清空按钮").toBeDefined()

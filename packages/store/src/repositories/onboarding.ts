@@ -6,8 +6,26 @@
  */
 import type { SqliteDatabase } from "../database.js"
 
-/** 引导的五步。顺序即展示顺序。 */
-export const ONBOARDING_STEPS = ["channel", "model", "persona", "sources", "distill"] as const
+/**
+ * 引导的步骤。顺序即展示顺序。
+ *
+ * ★ `attention`（分身监听范围）在 `sources`（学习范围）之后、`distill`
+ * （开始学习）之前 —— 语义顺序是"先选学哪些历史 → 再选盯哪些实时消息
+ * → 再开始学"。它与 `sources` **刻意分成两步**（用户原话「在 onboarding
+ * 也应该加一个步骤，不和学习范围放一起」）：两者语义相反（只增不减 vs
+ * 可随时关掉），合在一步会让用户以为是一件事。
+ *
+ * ★ 加一步无需迁移：`step` 是无 CHECK 的 TEXT 主键，`list()` 对缺失的 step
+ * 合成 `pending` 行（见下）。存量库升级后新步骤自然显示为"待办"。
+ */
+export const ONBOARDING_STEPS = [
+  "channel",
+  "model",
+  "persona",
+  "sources",
+  "attention",
+  "distill",
+] as const
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number]
 
 /**

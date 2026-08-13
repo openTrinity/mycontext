@@ -51,6 +51,7 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { personaCapableChannels } from "../../lib/channel-capability.js"
 import { ChannelPicker } from "../shell/channel-picker.js"
 import { CollectionScopePanel } from "../shell/collection-scope-panel.js"
+import { AttentionScopePanel } from "../shell/attention-scope-panel.js"
 import { KlPanel } from "../shell/status-panel.js"
 import { IngestIntervalsPanel } from "./ingest-intervals-panel.js"
 
@@ -1065,9 +1066,17 @@ function ChannelsSection({
             </p>
           ) : tab === "collect" ? (
             <>
-              {/* ① 采什么 —— 按渠道 */}
+              {/* ① 学它哪些历史 —— 按渠道，只增不减 */}
               <CollectionScopePanel channelId={activeChannel.id} />
-              {/* ② 多久采一次 —— **全局**，见本组件文件头那段 */}
+              {/*
+                ② 分身盯哪些实时消息 —— **独立一张卡**，与学习范围平级。
+
+                用户原话：「不应该放在学习范围钉钉里，放在独立的…一个部分」。
+                它与学习范围语义相反（只增不减 vs 可随时关掉），塞在同一张卡里
+                会让"学历史"与"盯实时"混成一件事。`standalone` 让它自带卡壳。
+              */}
+              <AttentionScopePanel channelId={activeChannel.id} standalone />
+              {/* ③ 多久采一次 —— **全局**，见本组件文件头那段 */}
               <IngestIntervalsPanel />
               <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
                 {t("channelData.intervalsGlobalNote")}

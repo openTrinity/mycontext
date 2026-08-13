@@ -22,7 +22,7 @@
  * 的代价在这里只是"以后不盯了"，没有任何数据后果。
  */
 import { useMemo, useState } from "react"
-import { Button } from "@mycontext/design"
+import { Button, Disclosure } from "@mycontext/design"
 import {
   useAttentionScope,
   useDisableAttentionScope,
@@ -31,7 +31,28 @@ import {
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
-export function AttentionScopePanel({ channelId }: { channelId: string | null }) {
+/**
+ * 分身监听范围面板。
+ *
+ * ## ★ `standalone` —— 独立成卡 vs 嵌在别的卡里
+ *
+ * 它有两个落点，视觉外壳不同：
+ *
+ * · **设置页 collect tab**（`standalone`）：与「学习范围」平级的一张独立
+ *   `Disclosure` 卡。用户原话「不应该放在学习范围钉钉里，放在独立的…
+ *   一个部分」—— 所以这里自带完整卡壳、标题带渠道，不再有那条把它粘在
+ *   上一块底部的 `border-t`；
+ * · **内嵌**（默认）：作为别的容器里的一段内容（保留 `border-t` 分隔）。
+ *
+ * 只差外壳，内部编辑器完全一样 —— 抽一个 `Body` 复用，不复制两份。
+ */
+export function AttentionScopePanel({
+  channelId,
+  standalone = false,
+}: {
+  channelId: string | null
+  standalone?: boolean
+}) {
   const { t } = useDynamicTranslation("settings")
   const scope = useAttentionScope(channelId ?? undefined, channelId !== null)
   const save = useSaveAttentionScope()
@@ -45,20 +66,10 @@ export function AttentionScopePanel({ channelId }: { channelId: string | null })
 
   if (channelId === null) return null
 
-  return (
-    <div className="flex flex-col gap-2 border-t border-[var(--border-divider-light)] pt-3">
-      <div className="flex items-center gap-2">
-        <p className="typography-body-small-400 text-[var(--text-base-primary)]">
-          {t("status.attention.title", { defaultValue: "分身监听范围" })}
-        </p>
-        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-          {t("status.attention.count", {
-            defaultValue: "正在盯 {{count}} 个会话",
-            count: scope.data?.activeCount ?? 0,
-          })}
-        </span>
-      </div>
+  const activeCount = scope.data?.activeCount ?? 0
 
+  const body = (
+    <>
       <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
         {t("status.attention.note", {
           defaultValue:
@@ -143,6 +154,44 @@ export function AttentionScopePanel({ channelId }: { channelId: string | null })
           }}
         />
       ) : null}
+    </>
+  )
+
+  /**
+   * ★ 独立卡：`Disclosure` 外壳 + 标题带渠道（与「学习范围」那张卡一致）。
+   * 标题里的会话数原来在头部那一行，现在提到 `summary` —— 收起时也可见。
+   */
+  if (standalone) {
+    const label = t("status.attention.title", { defaultValue: "分身监听范围" })
+    return (
+      <Disclosure
+        title={`${label}·${t(`status.kl.channel.${channelId}`, { defaultValue: channelId })}`}
+        summary={t("status.attention.count", {
+          defaultValue: "正在盯 {{count}} 个会话",
+          count: activeCount,
+        })}
+        defaultOpen={false}
+      >
+        <div className="flex flex-col gap-2">{body}</div>
+      </Disclosure>
+    )
+  }
+
+  /** 内嵌：作为别的容器里的一段（保留 border-t 分隔 + 自带标题行）。 */
+  return (
+    <div className="flex flex-col gap-2 border-t border-[var(--border-divider-light)] pt-3">
+      <div className="flex items-center gap-2">
+        <p className="typography-body-small-400 text-[var(--text-base-primary)]">
+          {t("status.attention.title", { defaultValue: "分身监听范围" })}
+        </p>
+        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("status.attention.count", {
+            defaultValue: "正在盯 {{count}} 个会话",
+            count: activeCount,
+          })}
+        </span>
+      </div>
+      {body}
     </div>
   )
 }

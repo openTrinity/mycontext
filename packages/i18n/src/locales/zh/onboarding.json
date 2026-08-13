@@ -7,6 +7,8 @@
     "personaDesc": "给它一个名字和形象",
     "sources": "学习范围",
     "sourcesDesc": "选时间范围、会话与资料源",
+    "attention": "监听范围",
+    "attentionDesc": "选让数字分身盯着的会话（只看新消息）",
     "distill": "开始学习",
     "distillDesc": "可以关掉页面，后台会继续",
     "comingSoonSuffix": "（即将开放）",
@@ -164,6 +166,12 @@
     "sectionSources": "资料源",
     "sectionRangeHint": "往前取多久的聊天记录",
     "sectionSourcesHint": "除聊天消息外，还要读哪几类数据",
+    "sectionAttention": "数字分身监听范围",
+    "attentionHint": "分身只处理这些会话从现在起的新消息。与上面的学习范围不同：它不看历史，也可以随时关掉。",
+    "attentionSelected": "盯 {{count}} 个会话",
+    "attentionClear": "取消全部监听",
+    "attentionEmpty": "先在上面勾选要学习的会话，然后从中挑出让分身盯着的那些。",
+    "attentionEmptyMeaning": "一个都不勾 = 分身会盯上面所有已勾选的会话（可稍后在设置里收窄）。",
     "expandAll": "展开其余 {{count}} 个",
     "collapseList": "收起",
     "sourcesReady": "现在可用",
@@ -173,6 +181,14 @@
     "sourceCannotEnumerate": "这个渠道暂时列不出会话，这一步不用为它做选择 —— 读过一轮之后它的会话会出现在这里。",
     "sourceNotReady": "{{channel}} 还在准备中，稍等一下这里会自己刷新。",
     "sourceFailed": "{{channel}} 这次没读到会话：{{reason}}"
+  },
+  "attentionStep": {
+    "title": "数字分身监听范围",
+    "hint": "分身只处理这些会话从现在起的新消息。与上一步的学习范围不同：它不看历史，也可以随时关掉。",
+    "selected": "盯 {{count}} 个会话",
+    "clear": "取消全部监听",
+    "empty": "上一步还没勾选要学习的会话 —— 先选好学习范围，再从中挑出让分身盯着的那些。",
+    "emptyMeaning": "一个都不勾 = 分身会盯上一步所有已勾选的会话（可稍后在设置里收窄）。"
   },
   "distillStep": {
     "phasesTitle": "学习进度",

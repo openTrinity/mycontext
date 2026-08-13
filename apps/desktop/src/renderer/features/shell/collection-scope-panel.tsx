@@ -30,7 +30,6 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { SourcesStep, type SourcesDraft } from "../onboarding/sources-step.js"
 import { ScopeCoverage } from "./scope-coverage.js"
-import { AttentionScopePanel } from "./attention-scope-panel.js"
 
 /** 主渠道 id —— 它的白名单走 `scope.conversationIds`（存量形状）。 */
 const PRIMARY_CHANNEL_ID = "dingtalk"
@@ -73,6 +72,15 @@ function toDraft(
     chatKinds: [...((scope?.chatKinds ?? ["direct", "group"]) as ("direct" | "group")[])],
     conversationIds: [...(scope?.conversationIds ?? [])],
     enabledSources: [...enabledSources],
+    /**
+     * ★★ 这个面板**不管**监听范围（它下面挂着独立的 `AttentionScopePanel`）。
+     *
+     * 给空数组是因为 `SourcesStep` 的 draft 形状要求这个字段，而不是
+     * "这里的监听范围是空的"。★ 所以保存时也**不能**用它去写
+     * `attention_scope` —— 那会把用户在下面那个面板里配好的名单清掉。
+     * 判据：这一处只 `saveSource`（学习范围），从不调 `attentionScopeSave`。
+     */
+    attentionConversationIds: [],
   }
 }
 
@@ -314,14 +322,17 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           不给退路的"只增不减"会变成一个陷阱。
         */}
         {/*
-          ── ★★★ 「分身监听范围」—— 与学习范围并列的第二个范围 ─────────
-          用户原话：「至少要分开两个吧，学习的范围和监听范围」。
+          ★★ 监听范围**不再**挂在这里了（这是一次刻意的拆分）。
 
-          这里放**真的编辑器**（v28 `attention_scope`）而不是一句指路文案：
-          先前那一版只写了"去数字分身页设"，而那等于把"两个范围"留在
-          文档里而不是产品里 —— 用户仍然只能在一个地方表达两件事。
+          用户原话：「数字分身监听范围在设置里不应该放在学习范围钉钉里，
+          放在独立的数字分身监听范围的一个部分」。
+
+          它原来嵌在学习范围这张卡内部 —— 于是"学它哪些历史"与"盯哪些实时
+          消息"这两件**语义相反**的事（一个只增不减、一个可随时关掉）挤在
+          同一张卡里，用户要点进「学习范围·钉钉」才找得到监听设置。现在它
+          在 collect tab 里与本卡**平级**成一张独立卡（见 `settings-view` 的
+          collect 分支）。这一层只管学习范围，不再引用 `AttentionScopePanel`。
         */}
-        <AttentionScopePanel channelId={channelId} />
         <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
           {t("status.scope.growOnlyNote", {
             defaultValue:

@@ -100,6 +100,36 @@ export interface SourcesDraft {
   conversationIds: string[]
   /** 勾选了哪些资料源 */
   enabledSources: DistillSourceId[]
+  /**
+   * ── 数字分身的**监听范围** ────────────────────────────────────
+   *
+   * ## ★★★ 为什么它必须在这一步，而不是另开一步或只留在设置页
+   *
+   * 改动前监听范围**只在运行状态页能配**。于是走完引导的用户
+   * `attention_scope` 是空表 → 路由走"名单为空则放行"那一档
+   * → 分身对**所有**会话的新消息起草。那不是用户选的，是缺省值替他选的。
+   *
+   * 而它与上面的学习范围是**同一个决定的两面**（"学它什么" / "让它盯什么"），
+   * 所以放在同一步、上下两块：
+   *
+   * · 另开一步的话，用户要对着同一份会话列表勾第二遍，而两次勾选不一致时
+   *   没人知道哪个对；
+   * · 只留在设置页的话，绝大多数用户永远不会去配它。
+   *
+   * ## ★★ 与 `conversationIds`（学习范围）的三处**刻意不同**
+   *
+   * | | 学习范围 | 监听范围 |
+   * |---|---|---|
+   * | 管什么 | 往回挖多少历史 | 盯哪些会话的**新**消息 |
+   * | 时间 | `since` 往回 | `enabledAt` 从保存那刻往后 |
+   * | 能不能收回 | **不能**（图谱已消费） | **能**（不存历史，关掉无副作用） |
+   *
+   * ★ 勾这里会**自动并入**学习范围（`attentionScopeSave` 那侧做的）：
+   * 「监听了但不采集」是一个能配出来的坏状态 —— 分身收到消息却拿不到上下文
+   * （`admit()` 要读 `message_mentions` 与这个会话之前的往来），
+   * 于是它不回或回得离谱，而用户完全看不出成因。
+   */
+  attentionConversationIds: string[]
 }
 
 export interface SourcesStepProps {
@@ -490,7 +520,15 @@ export function SourcesStep({
         )}
       </StepSection>
 
-      {/* 资料源勾选 */}
+      {/*
+        ★★ 监听范围**不再**在这一步了（拆成了独立的引导步骤 `attention`）。
+
+        用户原话：「在 onboarding 也应该加一个步骤，不和学习范围放一起」。
+        它原来作为这一步的下半块 —— 而学习范围（只增不减）与监听范围
+        （可随时关掉）语义相反，同屏会让用户以为是一件事。现在它是
+        `AttentionStep`（独立组件），排在本步之后（候选来自本步的勾选）。
+      */}
+
       <StepSection
         title={t("sourcesStep.sectionSources")}
         hint={t("sourcesStep.sectionSourcesHint")}

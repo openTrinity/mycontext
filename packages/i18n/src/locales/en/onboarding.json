@@ -7,6 +7,8 @@
     "personaDesc": "Give it a name and a look",
     "sources": "Learning scope",
     "sourcesDesc": "Pick the time range, conversations and sources",
+    "attention": "Watch scope",
+    "attentionDesc": "Pick which conversations your persona watches (new messages only)",
     "distill": "Start learning",
     "distillDesc": "You can close this page; it keeps running",
     "comingSoonSuffix": " (coming soon)",
@@ -164,6 +166,12 @@
     "sectionSources": "Data sources",
     "sectionRangeHint": "How far back to read chat history",
     "sectionSourcesHint": "Which kinds of data beyond chat messages",
+    "sectionAttention": "What your persona watches",
+    "attentionHint": "Your persona only handles new messages in these conversations, from now on. Unlike the learning scope above, it never looks at history — and you can turn it off any time.",
+    "attentionSelected": "watching {{count}}",
+    "attentionClear": "Stop watching all",
+    "attentionEmpty": "Pick the conversations to learn from above first, then choose which ones your persona should watch.",
+    "attentionEmptyMeaning": "Selecting none means your persona watches every conversation chosen above (you can narrow this later in settings).",
     "expandAll": "Show {{count}} more",
     "collapseList": "Show less",
     "sourcesReady": "Available now",
@@ -173,6 +181,14 @@
     "sourceCannotEnumerate": "This channel can't list conversations yet — nothing to pick for it here. Its conversations show up after the first read.",
     "sourceNotReady": "{{channel}} is still getting ready. This will refresh on its own in a moment.",
     "sourceFailed": "Couldn't read conversations from {{channel}}: {{reason}}"
+  },
+  "attentionStep": {
+    "title": "What your persona watches",
+    "hint": "Your persona only handles new messages in these conversations, from now on. Unlike the previous learning-scope step, it never looks at history — and you can turn it off any time.",
+    "selected": "watching {{count}}",
+    "clear": "Stop watching all",
+    "empty": "No conversations were selected to learn from in the previous step — set the learning scope first, then pick which ones your persona should watch.",
+    "emptyMeaning": "Selecting none means your persona watches every conversation chosen in the previous step (you can narrow this later in settings)."
   },
   "distillStep": {
     "phasesTitle": "Learning progress",

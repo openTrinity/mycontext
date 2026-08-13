@@ -39,6 +39,7 @@ import {
   useIngestSnapshot,
   useOnboardingSteps,
   useSaveDistillSource,
+  useSaveAttentionScope,
   usePersonaSnapshot,
   useSkipOnboarding,
   useSkipStep,
@@ -53,6 +54,7 @@ import { readPersonaIdentity } from "../persona/persona-identity.js"
 import { DistillStep } from "./distill-step.js"
 import { PersonaStep, type PersonaDraft } from "./persona-step.js"
 import { SourcesStep, type SourcesDraft } from "./sources-step.js"
+import { AttentionStep } from "./attention-step.js"
 import { ModelConfigForm } from "../settings/model-config-form.js"
 import { canRunPersona, personaCapableChannels } from "../../lib/channel-capability.js"
 import { ChannelPicker } from "../shell/channel-picker.js"
@@ -62,15 +64,17 @@ const STEP_ORDER: readonly OnboardingStepId[] = [
   "model",
   "persona",
   "sources",
+  "attention",
   "distill",
 ]
 
-/** 各步是否已实装。五步都通了（第 5 步是真进度，不是占位）。 */
+/** 各步是否已实装。 */
 const IMPLEMENTED: Record<OnboardingStepId, boolean> = {
   channel: true,
   model: true,
   persona: true,
   sources: true,
+  attention: true,
   distill: true,
 }
 
@@ -80,6 +84,19 @@ const DEFAULT_SOURCES: SourcesDraft = {
   conversationIds: [],
   // 缺省只勾**已接入**的两个：勾上未接入的等于给一个不会兑现的承诺
   enabledSources: ["chat", "minutes"],
+  /**
+   * ★★ 缺省**不勾任何监听会话**，而它的含义是"盯全部已学习的会话"。
+   *
+   * 判据在 `AttentionRouter.route()`：名单为空 → 放行（迁移期的正确一侧，
+   * 否则存量用户的分身会整个静默）。所以这个空数组不是"关掉分身"，
+   * 而是"不收窄"—— 界面上必须把这句话说出来（见 `AttentionSection` 里那段
+   * `attentionEmptyMeaning`），否则用户会以为不勾就等于不启用。
+   *
+   * ★ 为什么不缺省勾全部：那样保存时会写一份**具体的**名单进
+   * `attention_scope`，而 `enabled_at` 只能变早、名单只增 ——
+   * 等于替用户做了一个比"不收窄"更难撤回的决定。
+   */
+  attentionConversationIds: [],
 }
 
 /**
@@ -120,6 +137,8 @@ function readSources(row: OnboardingStepView | undefined): SourcesDraft {
     chatKinds?: unknown
     conversationIds?: unknown
     enabledSources?: unknown
+    /** 监听会话（v29 这一轮新加；旧 payload 里没有 → `strings()` 给空数组） */
+    attentionConversationIds?: unknown
   }
   const strings = (value: unknown): string[] =>
     Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
@@ -151,6 +170,12 @@ function readSources(row: OnboardingStepView | undefined): SourcesDraft {
     ),
     conversationIds: strings(record.conversationIds),
     enabledSources: strings(record.enabledSources) as DistillSourceId[],
+    /**
+     * ★ 回填监听勾选。旧的 payload 里没有这个键 → 空数组（= 不收窄），
+     * 与 `DEFAULT_SOURCES` 一致。给一个"全选"会让重进引导时凭空多出一批
+     * 监听会话，而用户没有做过那个选择。
+     */
+    attentionConversationIds: strings(record.attentionConversationIds),
   }
 }
 
@@ -185,6 +210,8 @@ export function OnboardingView() {
   const completeStep = useCompleteStep()
   const skipStep = useSkipStep()
   const saveSource = useSaveDistillSource()
+  /** 监听范围（分身盯哪些会话的新消息）。见 `advance()` 里那段顺序注释。 */
+  const saveAttention = useSaveAttentionScope()
   const complete = useCompleteOnboarding()
   const skip = useSkipOnboarding()
   /** 只为拿 `agentAvailable`（是否配了模型）—— 第 4 步要据此提前提示。 */
@@ -515,6 +542,48 @@ export function OnboardingView() {
         }
       }
       completeStep.mutate({ step: "sources", payload: sources })
+    } else if (activeId === "attention") {
+      /**
+       * ★★★ 监听范围：**独立一步**保存（不再夹在 sources 分支里）。
+       *
+       * ## 顺序仍然重要：attention 排在 sources 之后
+       *
+       * `attentionScopeSave` 会把勾中的会话**并入学习范围的白名单**
+       * （`source: 'learning'`）—— 消灭"监听了但不采集"这个坏状态（分身收到
+       * 消息却拿不到上下文，于是不回或回得离谱，而用户看不出成因）。
+       *
+       * 步骤顺序保证了 sources 的 `saveSource` 已经先跑过（上一步），
+       * 所以这里的并入不会被它覆盖。
+       *
+       * ## ★★ 空数组时**不调**这个接口
+       *
+       * 契约要求 `conversationExternalIds` 至少一个（`.min(1)`）。
+       * 语义上空 = "不收窄"（名单为空 → 路由放行全部）。调一次空的保存
+       * 既会报错，也会让人以为"存了一个空名单"（而表本就是空的）。
+       *
+       * ## ★ 按渠道分桶
+       *
+       * `attention_scope` 是 per-channel 表，勾选列表混着多个渠道。整批塞给
+       * 一个渠道 = 写进一批**不存在的 id**，路由永远命中不了且不报错。
+       */
+      if (sources.attentionConversationIds.length > 0) {
+        const channelOf = new Map(
+          (conversationList.data?.items ?? []).map((item) => [item.externalId, item.channelId]),
+        )
+        const attentionBuckets = new Map<string, string[]>()
+        for (const id of sources.attentionConversationIds) {
+          const channelId = channelOf.get(id) ?? PRIMARY_CHANNEL_ID
+          attentionBuckets.set(channelId, [...(attentionBuckets.get(channelId) ?? []), id])
+        }
+        for (const [channelId, ids] of attentionBuckets) {
+          /**
+           * ★ 不传 `enabledAt` —— 让**主进程的时钟**决定"从现在开始"
+           * （见 `attentionScopeSave` 的注释）。
+           */
+          saveAttention.mutate({ channelId, conversationExternalIds: ids })
+        }
+      }
+      completeStep.mutate({ step: "attention", payload: { ids: sources.attentionConversationIds } })
     } else if (activeId === "channel") {
       completeStep.mutate({ step: "channel" })
     } else if (activeId === "model") {
@@ -790,6 +859,19 @@ export function OnboardingView() {
                  */
                 channelFilter={authorizedChannelIds}
                 readOnlyChannelIds={readOnlyChannelIds}
+              />
+            ) : null}
+
+            {activeId === "attention" ? (
+              /**
+               * ★ 独立步骤：分身监听范围。候选来自上一步（sources）的勾选 ——
+               * 所以 `value` 就是同一份 `sources` 草稿（它带 `conversationIds`
+               * 与 `attentionConversationIds`）。`channelFilter` 与上一步一致。
+               */
+              <AttentionStep
+                value={sources}
+                onChange={setSources}
+                channelFilter={authorizedChannelIds}
               />
             ) : null}
 
