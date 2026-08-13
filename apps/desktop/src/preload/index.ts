@@ -62,6 +62,10 @@ const api: MyContextApi = {
     conversations: () => ipcRenderer.invoke(IPC_CHANNELS.channelConversations),
     dataWipe: (input) => ipcRenderer.invoke(IPC_CHANNELS.channelDataWipe, input ?? {}),
   },
+  storage: {
+    usage: () => ipcRenderer.invoke(IPC_CHANNELS.storageUsage),
+    clearCaches: (input) => ipcRenderer.invoke(IPC_CHANNELS.clearCaches, input ?? {}),
+  },
   onboarding: {
     complete: () => ipcRenderer.invoke(IPC_CHANNELS.onboardingComplete),
     skip: () => ipcRenderer.invoke(IPC_CHANNELS.onboardingSkip),

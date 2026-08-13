@@ -77,6 +77,16 @@ export const IPC_CHANNELS = {
    * `ChannelDataWipeService` 的文件头（清什么、留什么、为什么要停服务）。
    */
   channelDataWipe: "mycontext:channel/data-wipe",
+  /**
+   * 存储占用与缓存清理（应用级）。
+   *
+   * `storageUsage` 只读各类占用；`clearCaches` 清**可安全重建**的那几类
+   * （日志 / Electron 缓存 / agent 的 npm 缓存），**绝不碰** vaults 与
+   * control.sqlite —— 那是真数据，走 `channelDataWipe` 那条独立入口。
+   * 见 `StorageMaintenanceService` 的文件头（清什么、留什么、为什么安全）。
+   */
+  storageUsage: "mycontext:storage/usage",
+  clearCaches: "mycontext:storage/clear-caches",
   /** 数字人：状态 / 会话配置 / 草稿 / 运行日志 / kill switch */
   personaSnapshot: "mycontext:persona/snapshot",
   personaConversations: "mycontext:persona/conversations",
@@ -730,6 +740,56 @@ export const channelDataWipeResultSchema = z.object({
 
 export type ChannelDataWipeInput = z.infer<typeof channelDataWipeInputSchema>
 export type ChannelDataWipeResult = z.infer<typeof channelDataWipeResultSchema>
+
+/**
+ * 存储占用视图（应用级，`storageUsage` 的返回）。
+ *
+ * ★ 分成"可清"与"不可清"两半，因为它俩要的下一步动作完全不同：
+ * · `clearable`（日志 / Electron 缓存 / agent npm 缓存）—— 点一下就能释放、会自动重建；
+ * · `vaults` / `control`（真数据）—— 只能走「清空渠道数据」那条带确认的入口，
+ *   不该混进"清缓存"按钮里。所以这里把它们单列成只读的展示项。
+ *
+ * 每一项都给字节数（`bytes`），UI 自己格式化成 MB/GB —— 不在主进程拼字符串
+ * （那样 UI 想换单位/精度就得改主进程）。
+ */
+export const storageCategorySchema = z.object({
+  /** 稳定的类别键（UI 据它取本地化标签）。 */
+  key: z.enum(["logs", "electronCache", "agentNpmCache", "vaults", "control", "other"]),
+  bytes: z.number(),
+})
+
+export const storageUsageSchema = z.object({
+  /** 当前 userData 根（诚实告诉用户数据到底在哪 —— 也回答"为啥还叫 Inklings"）。 */
+  userDataDir: z.string(),
+  totalBytes: z.number(),
+  /** 一键「清理」能释放的那几类合计。 */
+  clearableBytes: z.number(),
+  categories: z.array(storageCategorySchema),
+})
+
+export type StorageUsage = z.infer<typeof storageUsageSchema>
+
+/**
+ * 清理缓存与日志（`clearCaches`）。
+ *
+ * ★ 与 `channelDataWipe` 同一个安全姿态：`dryRun` 默认 true —— 先算"能释放多少"，
+ * 用户确认后再真删。真删的只有白名单那几类（见服务文件头），**绝不递归删
+ * userData 根**，也不碰 vaults/control。
+ */
+export const clearCachesInputSchema = z.object({
+  dryRun: z.boolean().default(true),
+})
+
+export const clearCachesResultSchema = z.object({
+  dryRun: z.boolean(),
+  /** 释放（或将释放）的字节数。 */
+  freedBytes: z.number(),
+  /** 逐类：清了哪些、各释放多少（UI 可展开看明细，也用于回归断言）。 */
+  byCategory: z.array(storageCategorySchema),
+})
+
+export type ClearCachesInput = z.infer<typeof clearCachesInputSchema>
+export type ClearCachesResult = z.infer<typeof clearCachesResultSchema>
 
 /** 会话列表项（蒸馏源选择用）。 */
 export const channelConversationSchema = z.object({
@@ -2077,6 +2137,98 @@ export const ingestSnapshotSchema = z.object({
   /** 心跳超期的消费者：状态页要**告警**，不能静默跳过 */
   staleConsumers: z.array(z.string()),
   /**
+   * ── 数据平面拓扑：**每个**消费者这一轮的状态 ────────────────────
+   *
+   * ## ★★★ 为什么光有 `ftsLag` + `staleConsumers` 不够
+   *
+   * 改动前快照里只有 **FTS 一个**消费者的 lag，加一个
+   * `staleConsumers: string[]`（只有 id，没有落后多少、在等谁）。于是：
+   *
+   * · `distill` 落后 8000 条 —— **读不到**；
+   * · `distill` 正**被 graph-export 夹住**（依赖闸）—— 读不到，而它与
+   *   "蒸馏卡住了"在界面上完全同形，出路却相反（前者要去看图谱为什么慢，
+   *   后者要去看蒸馏本身）；
+   * · `graph-export` 在没起 kl 服务的部署里**压根没注册** —— 那时它既不
+   *   `stale` 也没有 lag，界面无法区分"它追平了"与"它不存在"。
+   *
+   * 而 `runCycle()` 本来就**返回**这些（`ConsumerOutcome`，含
+   * `waitingForUpstream` / `absent`），只是那个返回值原先只进了日志。
+   * 这一项就是把它接到界面上。
+   *
+   * ## ★★ 声明部分（`purpose` / `required` / `dependsOn`）也一起给
+   *
+   * 它们来自 `PRODUCERS`/`CONSUMERS` 那份静态声明。透出来的理由是
+   * 状态页要能解释"这个消费者是干什么的、它落后了要紧吗" ——
+   * `required: true` 落后意味着**历史不能裁**（丢了补不回来），
+   * `false` 意味着可以裁。这个区别决定用户该不该着急。
+   */
+  consumers: z.array(
+    z.object({
+      id: z.string(),
+      /** 一句话说明它干什么（来自 `ConsumerSpec.purpose`） */
+      purpose: z.string(),
+      /** 消费哪些域；空数组 = 全部（FTS 就是全部） */
+      domains: z.array(z.enum(["chat", "doc", "minutes", "contact"])),
+      /**
+       * 落后时能不能裁历史。`true` = 不能（丢了补不回来，如蒸馏语料）。
+       * 界面据此决定"落后 8000 条"要不要标红。
+       */
+      required: z.boolean(),
+      /** 不许跑在这些消费者前面（DAG 的边） */
+      dependsOn: z.array(z.string()),
+      /** 游标推进到哪 */
+      ackedSeq: z.number(),
+      /** 落后多少条（`outboxHead - ackedSeq`） */
+      lag: z.number(),
+      /**
+       * 在等哪个上游；`null` = 没在等。
+       *
+       * ★★★ 这一项必须存在：「蒸馏没进展」与「蒸馏在等图谱」在数字上
+       * 完全一样（lag 都在涨、processed 都是 0），而出路完全不同。
+       */
+      waitingForUpstream: z.string().nullable(),
+      /**
+       * 这个消费者**没注册**（这套部署里没有它）。
+       *
+       * ★ 与 `lag: 0` 必须分开：`graph-export` 由 kl 服务侧推进，
+       * 没起服务时它压根不注册。此时报 `lag: 0` 会让界面说"已追平"，
+       * 而事实是"它不存在"。
+       */
+      absent: z.boolean(),
+      /** 心跳超期（与 `staleConsumers` 同源，这里按消费者摊开） */
+      stale: z.boolean(),
+      /** 需要全量重建（历史已被裁剪过） */
+      needsFullRebuild: z.boolean(),
+      /** 最近一次错误；null = 没出错过 */
+      lastError: z.string().nullable(),
+    }),
+  ),
+  /**
+   * 数据域的声明 + 水位。
+   *
+   * ## ★★ 为什么要带 `producedBy`
+   *
+   * `contact` 域在 `CHANGELOG_DOMAINS` 里声明了，但**没有任何生产者往它投**
+   * （通讯录属 PII，相关渠道命令不在白名单内）。不带这个标记的话，界面会
+   * 显示"通讯录 0 条" —— 读起来像坏了，而事实是我们不采。
+   *
+   * 「没做」与「做了没数据」必须能区分，这与 `DistillSourceView.status`
+   * 那个字段是同一个问题、同一个解法。
+   */
+  domains: z.array(
+    z.object({
+      id: z.enum(["chat", "doc", "minutes", "contact"]),
+      purpose: z.string(),
+      /** `absent` = 当前没有生产者往这个域投 */
+      producedBy: z.enum(["active", "absent"]),
+      /** `absent` 时说清**为什么**（否则界面只能显示"空"，与"坏了"同形） */
+      absentReason: z.string().nullable(),
+      /** 这个域的 changelog 水位；0 = 还没有任何条目 */
+      head: z.number(),
+    }),
+  ),
+
+  /**
    * 「用户选的采集范围 vs 库里实际覆盖的范围」。
    *
    * ★ 必须暴露给 UI。这个落差过去是**完全静默**的：引导页选 180 天，
@@ -2128,6 +2280,42 @@ export const ingestSnapshotSchema = z.object({
       .nullable(),
     /** 已采集的消息总数（该渠道）。进度条的分子。 */
     messages: z.number(),
+  }),
+  /**
+   * 采集**范围闸**的工作量。
+   *
+   * ## ★★★ 这个字段原来**只在主进程那份类型里有，契约里没有**
+   *
+   * `IngestService.snapshot()` 一直在填它，而契约（也就是渲染层读的那份
+   * 类型）里没有声明 —— 于是它是一个**只存在于主进程内存里**的字段：
+   * IPC 传过去了，但渲染层的类型看不见它，任何人想显示它都会以为
+   * "主进程没给"。
+   *
+   * 成因是主进程曾有一份**手写的** `IngestSnapshot` 接口与这份 schema 并行
+   * （见 `ingest.service.ts` 里那段注释）。两份声明只能靠人同步，
+   * 而漂了不报错 —— 这就是漂移的产物。收敛（主进程改成从契约派生）时
+   * 它立刻显形。
+   *
+   * ## 为什么这个数必须可见
+   *
+   * 全局窗（`list-all`）没有会话过滤参数，所以"只采勾选的会话"只能靠
+   * **落库前丢弃**实现。而丢弃如果不可见，"越界被挡住了"与"这段时间
+   * 本来没消息"在界面上完全同形 —— 用户无法确认自己的勾选真的生效了。
+   */
+  scope: z.object({
+    /** 是否设了会话白名单。false = 用户没配过范围（不设限） */
+    restricted: z.boolean(),
+    /**
+     * 许可的会话数；`null` = 不限。
+     *
+     * ★ 不限时报 null 而不是 0：0 会被读成"许可零个会话"，
+     * 而那是完全相反的状态（一个都不采 vs 全都采）。
+     */
+    allowed: z.number().nullable(),
+    /** 本进程累计丢弃的越界消息条数 */
+    droppedOutOfScope: z.number(),
+    /** 最近一次丢弃的时刻；null = 本进程还没丢过 */
+    lastDroppedAt: z.number().nullable(),
   }),
   /**
    * 实时事件通路（长连接推送）的健康状态。渠道不支持 / 未起时为 null。

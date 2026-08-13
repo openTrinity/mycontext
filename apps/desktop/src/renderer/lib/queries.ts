@@ -41,6 +41,7 @@ export const QUERY_KEYS = {
   advancedAi: ["advanced-ai"] as const,
   dwsSource: ["dws-source"] as const,
   runtimeConfig: ["runtime-config"] as const,
+  storageUsage: ["storage", "usage"] as const,
   onboardingSteps: ["onboarding", "steps"] as const,
   distillSources: ["distill", "sources"] as const,
   channelConversations: ["channel", "conversations"] as const,
@@ -499,6 +500,31 @@ export function useWipeChannelData() {
       // 预演不改库 —— 那时作废缓存只会白刷一遍（snapshot 有全表 COUNT）
       if (variables.dryRun) return
       void queryClient.invalidateQueries()
+    },
+  })
+}
+
+/** 存储占用（只读）。用户点开设置就看得到，所以缺省即取。 */
+export function useStorageUsage() {
+  return useQuery({
+    queryKey: QUERY_KEYS.storageUsage,
+    queryFn: async () => unwrap(await window.mycontext.storage.usage()),
+  })
+}
+
+/**
+ * 清理缓存与日志。`dryRun` 预演不改任何东西；真清之后**只失效存储占用**
+ * （它只删缓存/日志，不动 vaults/control，所以消息数/图谱那些不受影响，
+ * 无需全量作废）。
+ */
+export function useClearCaches() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { dryRun: boolean }) =>
+      unwrap(await window.mycontext.storage.clearCaches(input)),
+    onSuccess: (_result, variables) => {
+      if (variables.dryRun) return
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.storageUsage })
     },
   })
 }

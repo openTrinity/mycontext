@@ -13,6 +13,8 @@ import type {
   ChannelAuthProgressEvent,
   ChannelConversationListView,
   ChannelDataWipeResult,
+  StorageUsage,
+  ClearCachesResult,
   DistillProgressView,
   PersonaConversationView,
   PersonaDraftView,
@@ -183,6 +185,19 @@ export interface MyContextApi {
      * 契约层就偏向安全的那一侧。UI 应当先预演、把数字给用户看、再确认。
      */
     dataWipe(input?: { dryRun?: boolean }): Promise<Result<ChannelDataWipeResult>>
+  }
+  /**
+   * 存储占用与缓存清理（应用级）。回答"数据存哪、为啥这么大、怎么清"。
+   */
+  storage: {
+    /** 读各类占用（只读，不改任何东西）。 */
+    usage(): Promise<Result<StorageUsage>>
+    /**
+     * 清理可安全重建的缓存与日志（日志 / Electron 缓存 / agent npm 缓存）。
+     * **不碰** vaults 与 control.sqlite。`dryRun` 默认 true：先算能释放多少，
+     * 确认后再真删。
+     */
+    clearCaches(input?: { dryRun?: boolean }): Promise<Result<ClearCachesResult>>
   }
   onboarding: {
     complete(): Promise<Result<true>>

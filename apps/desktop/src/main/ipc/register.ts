@@ -23,6 +23,7 @@ import {
   chatCoverageInputSchema,
   distillSourceResetInputSchema,
   channelDataWipeInputSchema,
+  clearCachesInputSchema,
   distillSourceSaveInputSchema,
   distillStartInputSchema,
   personaConfigSaveInputSchema,
@@ -90,6 +91,7 @@ import type { DashboardTrendsService } from "../services/dashboard-trends.servic
 import type { AdvancedAiService } from "../services/advanced-ai.service.js"
 import type { DwsSourceService } from "../services/dws-source.service.js"
 import type { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
+import type { StorageMaintenanceService } from "../services/storage-maintenance.service.js"
 import type { RuntimeConfigService } from "../services/runtime-config.service.js"
 
 export interface IpcDependencies {
@@ -146,6 +148,7 @@ export interface IpcDependencies {
   runtimeConfig: RuntimeConfigService
   /** 清空当前渠道数据（不可逆，默认只预演）。见那个服务的文件头 */
   channelDataWipe: ChannelDataWipeService
+  storageMaintenance: StorageMaintenanceService
   logger: Logger
 }
 
@@ -188,6 +191,7 @@ export function registerIpc(deps: IpcDependencies): void {
     dwsSource,
     runtimeConfig,
     channelDataWipe,
+    storageMaintenance,
     logger,
   } = deps
 
@@ -448,6 +452,16 @@ export function registerIpc(deps: IpcDependencies): void {
    */
   ipcMain.handle(IPC_CHANNELS.channelDataWipe, (_event, payload: unknown) =>
     attempt(() => channelDataWipe.wipe(parse(channelDataWipeInputSchema, payload))),
+  )
+
+  // ---------------- 存储占用 / 缓存清理 ----------------
+  ipcMain.handle(IPC_CHANNELS.storageUsage, () => attempt(() => storageMaintenance.usage()))
+  /**
+   * 清缓存与日志。`dryRun` 默认 true（先算能释放多少，确认后再删）——
+   * 与 channelDataWipe 同一个安全姿态。只碰白名单缓存，绝不动 vaults/control。
+   */
+  ipcMain.handle(IPC_CHANNELS.clearCaches, (_event, payload: unknown) =>
+    attempt(() => storageMaintenance.clearCaches(parse(clearCachesInputSchema, payload))),
   )
 
   // ---------------- 蒸馏执行 ----------------

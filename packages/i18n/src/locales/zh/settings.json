@@ -26,6 +26,24 @@
     "quitConfirmDescription": "按 ⌘Q 时弹出提示，避免误退出中断在途工作。",
     "quitConfirmToggle": "开启退出确认"
   },
+  "storage": {
+    "title": "存储占用",
+    "location": "数据目录：{{dir}}",
+    "total": "合计",
+    "category": {
+      "logs": "运行日志",
+      "electronCache": "界面缓存",
+      "agentNpmCache": "Agent 依赖缓存",
+      "vaults": "会话与知识库数据",
+      "control": "账号与设置",
+      "other": "其它"
+    },
+    "clearHint": "可清理日志与缓存（会自动重建，不删聊天记录/知识库），预计释放 {{size}}。要删聊天记录请用「渠道数据」里的清空。",
+    "clear": "清理缓存与日志",
+    "confirmClear": "确认清理（释放约 {{size}}）",
+    "cancel": "取消",
+    "cleared": "已释放 {{size}}"
+  },
   "channels": {
     "title": "渠道",
     "description": "连接 IM 渠道后，MyContext 才能读取会话并生成回复。授权以你本人的身份进行。",
@@ -132,6 +150,18 @@
         "dingtalk": "钉钉",
         "feishu": "飞书"
       }
+    },
+    "topology": {
+      "title": "数据平面",
+      "subtitle": "生产者投变更、消费者按依赖序消费",
+      "absent": "未注册（这套部署里没有它）",
+      "rebuild": "需要全量重建（历史已裁剪）",
+      "waiting": "在等 {{upstream}}",
+      "caughtUp": "已追平",
+      "lag": "落后 {{lag}} 条",
+      "required": "不可裁剪",
+      "noProducer": "无生产者",
+      "head": "水位 {{head}}"
     },
     "kl": {
       "serverTitle": "图谱服务",

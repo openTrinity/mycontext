@@ -26,6 +26,24 @@
     "quitConfirmDescription": "Show a prompt on ⌘Q so an accidental quit doesn't interrupt in-flight work.",
     "quitConfirmToggle": "Ask before quitting"
   },
+  "storage": {
+    "title": "Storage usage",
+    "location": "Data directory: {{dir}}",
+    "total": "Total",
+    "category": {
+      "logs": "Logs",
+      "electronCache": "UI cache",
+      "agentNpmCache": "Agent dependency cache",
+      "vaults": "Conversation & knowledge data",
+      "control": "Accounts & settings",
+      "other": "Other"
+    },
+    "clearHint": "Clears logs and caches (rebuilt automatically; no chat history or knowledge base is deleted). About {{size}} can be freed. To delete chat history, use the wipe under Channel data.",
+    "clear": "Clear caches & logs",
+    "confirmClear": "Confirm (free ~{{size}})",
+    "cancel": "Cancel",
+    "cleared": "Freed {{size}}"
+  },
   "channels": {
     "title": "Channels",
     "description": "MyContext can only read conversations and draft replies once a channel is connected. Authorization happens as you.",
@@ -132,6 +150,18 @@
         "dingtalk": "DingTalk",
         "feishu": "Feishu"
       }
+    },
+    "topology": {
+      "title": "Data plane",
+      "subtitle": "Producers append changes; consumers run in dependency order",
+      "absent": "Not registered (absent in this deployment)",
+      "rebuild": "Needs a full rebuild (history was pruned)",
+      "waiting": "Waiting on {{upstream}}",
+      "caughtUp": "Caught up",
+      "lag": "{{lag}} behind",
+      "required": "Cannot prune",
+      "noProducer": "No producer",
+      "head": "head {{head}}"
     },
     "kl": {
       "serverTitle": "Graph service",

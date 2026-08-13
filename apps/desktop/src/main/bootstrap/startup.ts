@@ -51,6 +51,7 @@ import { ChannelRuntimeRegistry } from "./channel-runtime.js"
 import { teardownVault } from "./vault-teardown.js"
 import { DwsSourceService } from "../services/dws-source.service.js"
 import { ChannelDataWipeService } from "../services/channel-data-wipe.service.js"
+import { StorageMaintenanceService } from "../services/storage-maintenance.service.js"
 import { runShutdownStep } from "./shutdown.js"
 import { AuthService } from "../services/auth.service.js"
 import { ChannelService } from "../services/channel.service.js"
@@ -2734,6 +2735,16 @@ export function bootstrapApp(mainDir: string): AppContext {
     },
   })
 
+  /**
+   * 存储占用 / 缓存清理（应用级）。只碰白名单缓存，绝不碰 vaults/control
+   * （那是真数据，走 `channelDataWipe`）。见 `StorageMaintenanceService` 文件头。
+   */
+  const storageMaintenance = new StorageMaintenanceService({
+    logger: logger.child("Storage"),
+    userDataDir: paths.userData,
+    logFile: paths.logFile,
+  })
+
   const status = new StatusService({
     paths,
     config,
@@ -2858,6 +2869,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     runtimeConfig,
     dwsSource,
     channelDataWipe,
+    storageMaintenance,
     logger: logger.child("Ipc"),
   })
 

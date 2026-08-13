@@ -7,7 +7,7 @@
  * 本阶段只有「通用」「渠道」「关于」三个分类有内容；模型、数字人、数据等分类
  * 留到对应能力落地时再加——先放占位入口只会得到点了没反应的死链。
  */
-import { Button, Switch, cn } from "@mycontext/design"
+import { Button, Switch, Tag, cn } from "@mycontext/design"
 import { useState } from "react"
 import type { ReactNode } from "react"
 import { languageNames, LANGUAGES } from "@mycontext/i18n"
@@ -15,10 +15,12 @@ import type { LanguagePreference } from "@mycontext/ipc-contract"
 import {
   useBootstrapState,
   useChannels,
+  useClearCaches,
   useSetLanguage,
   useSetQuitConfirmSuppressed,
   useSetWorkLayerEnabled,
   useStatusReport,
+  useStorageUsage,
 } from "../../lib/queries.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import {
@@ -517,7 +519,123 @@ function GeneralSection() {
           />
         </Row>
       </div>
+
+      <StoragePanel />
     </Section>
+  )
+}
+
+/** 字节 → 人类可读（在 UI 侧格式化，主进程只给字节数）。 */
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return "0 MB"
+  const gb = bytes / 1024 ** 3
+  if (gb >= 1) return `${gb.toFixed(1)} GB`
+  const mb = bytes / 1024 ** 2
+  if (mb >= 1) return `${mb.toFixed(0)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
+}
+
+/**
+ * 存储占用 + 一键清理缓存/日志。
+ *
+ * ## 回答用户的三个问题：数据存哪、为啥这么大、怎么清
+ *
+ * · 显示当前 userData 目录（诚实告诉用户数据在哪 —— 也解释"为啥目录名是那个"）；
+ * · 逐类占用（可清的几类 + vaults/control 只读展示）；
+ * · 「清理」按钮先**预演**（dryRun）算出能释放多少、给用户看，再确认真清。
+ *   只清日志/Electron 缓存/agent npm 缓存 —— vaults/control 那是真数据，
+ *   要清走「清空当前渠道数据」那条独立入口（见 StorageMaintenanceService）。
+ */
+function StoragePanel() {
+  const { t } = useDynamicTranslation("settings")
+  const usage = useStorageUsage()
+  const clear = useClearCaches()
+  const [preview, setPreview] = useState<number | null>(null)
+
+  const data = usage.data
+  if (data === undefined) return null
+
+  // 预演：算能释放多少，先给用户看再确认
+  const runPreview = (): void => {
+    clear.mutate({ dryRun: true }, { onSuccess: (r) => setPreview(r.freedBytes) })
+  }
+  const confirmClear = (): void => {
+    clear.mutate({ dryRun: false }, { onSuccess: () => setPreview(null) })
+  }
+
+  return (
+    <div className="flex flex-col gap-[var(--gap-section-sm)]">
+      <div className="flex flex-col gap-1">
+        <h2 className="typography-title-small-500 text-[var(--text-base-primary)]">
+          {t("storage.title")}
+        </h2>
+        <p className="typography-caption-400 break-all text-[var(--text-base-tertiary)]">
+          {t("storage.location", { dir: data.userDataDir })}
+        </p>
+      </div>
+
+      {/* 逐类占用 */}
+      <div className="flex flex-col gap-1">
+        {data.categories
+          .filter((c) => c.bytes > 0)
+          .map((c) => (
+            <div
+              key={c.key}
+              className="typography-body-small-400 flex items-center justify-between"
+            >
+              <span className="text-[var(--text-base-secondary)]">
+                {t(`storage.category.${c.key}`)}
+              </span>
+              <span className="text-[var(--text-base-primary)]">{formatBytes(c.bytes)}</span>
+            </div>
+          ))}
+        <div className="typography-body-small-500 mt-1 flex items-center justify-between border-t border-[var(--border-divider-light)] pt-1">
+          <span className="text-[var(--text-base-secondary)]">{t("storage.total")}</span>
+          <span className="text-[var(--text-base-primary)]">{formatBytes(data.totalBytes)}</span>
+        </div>
+      </div>
+
+      {/*
+        清理按钮：先预演给出可释放量，再确认。可清的是缓存/日志（会自动重建），
+        不碰真数据 —— 文案里说清这件事，免得用户以为会删聊天记录。
+      */}
+      <div className="flex flex-col gap-[var(--gap-component-sm)]">
+        <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("storage.clearHint", { size: formatBytes(data.clearableBytes) })}
+        </span>
+        <div className="flex items-center gap-3">
+          {preview === null ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={clear.isPending || data.clearableBytes === 0}
+              onClick={runPreview}
+            >
+              {t("storage.clear")}
+            </Button>
+          ) : (
+            <>
+              <Button size="sm" disabled={clear.isPending} onClick={confirmClear}>
+                {t("storage.confirmClear", { size: formatBytes(preview) })}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={clear.isPending}
+                onClick={() => setPreview(null)}
+              >
+                {t("storage.cancel")}
+              </Button>
+            </>
+          )}
+          {clear.isSuccess && clear.data?.dryRun === false && preview === null && (
+            <Tag size="sm" status="success" showIndicator>
+              {t("storage.cleared", { size: formatBytes(clear.data.freedBytes) })}
+            </Tag>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
