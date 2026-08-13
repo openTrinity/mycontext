@@ -180,6 +180,12 @@ def compute_topic_features(facts: list[StanceFact]) -> TopicFeatures:
     ordered = sorted(facts, key=lambda fact: fact.timestamp, reverse=True)
     confidences = [fact.confidence for fact in ordered]
     return TopicFeatures(
+        # NOTE (refactor requested): counting distinct source_unit_id as
+        # "evidence" assumes per-message attribution. source_unit_id is a
+        # best-effort, non-interface signal that is NULL under whole-chunk
+        # extraction, so chunk-extracted facts collapse to a single {None}
+        # bucket here. Rebuild this metric from raw ego messages instead of fact
+        # lineage; do not depend on source_unit_id as an interface.
         evidence_count=len({fact.source_unit_id for fact in ordered}),
         stance_fact_ids=[fact.fact_id for fact in ordered[:10]],
         opinion_recency=max((fact.timestamp for fact in ordered), default=0),

@@ -61,12 +61,14 @@ derived from a source unit or stored chunk and records source-unit identity,
 source-specific strategy version, and read-only context. Its stable identity is
 based on source/unit identity and extraction policy, not accidentally on the
 retrieval chunk containing it. Extraction granularity is independent from
-retrieval granularity:
+retrieval granularity and is chosen by the extraction axis (see below):
 
-- chat session slices remain stored/retrieval Chunks, while each member message
-  is an extraction target and nearby messages are context only; an inlined
-  quoted reply remains in the stored Chunk but is moved to read-only extraction
-  context so it is not asserted again as a new claim;
+- by default chat session slices remain stored/retrieval Chunks, while each
+  member message is an extraction target and nearby messages are context only;
+  an inlined quoted reply remains in the stored Chunk but is moved to read-only
+  extraction context so it is not asserted again as a new claim. Selecting
+  whole-`chunk` extraction instead makes each session slice a single extraction
+  target;
 - wiki, mail, and other document sources initially extract one semantic stored
   Chunk at a time with source-appropriate context and rules;
 - unknown source types extract the stored Chunk itself.
@@ -81,26 +83,81 @@ the fact. `MENTIONS` should target chunks whose own text contains the evidence;
 source strategies may refine this with name/span matching. Extraction items
 never appear as graph edge endpoints.
 
-The built-in session-chat strategy extracts each complete message once while
-storing session slices. The optional fixed-size chat strategy stores
-overlapping character-budget windows within each chat session. A window may
-contain parts of multiple messages and one message may span multiple windows;
-every `chunk_units` row records the exact source-relative half-open span
-`[start_offset, end_offset)`. Fixed-size windows never cross a session break.
-They inherit complete-message extraction and project each extraction item to
-every window containing part of that message, so storage boundaries do not
-duplicate facts. Extracting isolated halves is reserved for an explicit
-over-context-limit fallback and must use distinct extraction-item identities.
+A source-processing strategy is the composition of two orthogonal axes rather
+than a single fused policy:
 
-Extraction strategy selection is explicit configuration keyed by `source_type`.
-The current strategy vocabulary is `chat_message`, `fixed_size_chat`,
-`document_chunk`, and `stored_chunk`, with a configured default for unknown
-sources. `fixed_size_chat` uses the configured positive character budget and a
-non-negative overlap smaller than that budget; both values form part of its
-strategy version and deterministic chunk identity. Each extraction item records
-its prompt and strategy versions. Prompt language is also explicit (`zh` or
-`en`); the configured language selects the matching system prompt and forms
-part of the prompt version used for cache identity.
+- **chunking** decides how source records become persistent, retrievable chunks
+  and how those chunks map back to source units (the recall unit): `session`
+  slices, overlapping `fixed_size` character windows, or `none` (each record is
+  stored as-is);
+- **extraction** decides what the LLM extracts from: one item per chat
+  `message` (with read-only neighbor context), one item per stored `chunk`
+  (whole-chunk extraction, verbatim body), or one item per stored `document`
+  chunk (whole-chunk extraction wrapped with its title as context). `chunk` and
+  `document` are both whole-chunk; they differ only in context and fingerprint.
+
+Any valid pairing is a configuration choice, so the new "extract-and-recall in
+chunks" behavior (session-slice storage with whole-slice extraction) is a
+`chat_processing` spec with `{chunking: session, extraction: chunk}` rather than
+a new class.
+
+The `session` + `message` pairing extracts each complete message once while
+storing session slices. The `fixed_size` + `message` pairing stores overlapping
+character-budget windows within each chat session. A window may contain parts of
+multiple messages and one message may span multiple windows; every `chunk_units`
+row records the exact source-relative half-open span `[start_offset,
+end_offset)`. Fixed-size windows never cross a session break. They inherit
+complete-message extraction and project each extraction item to every window
+containing part of that message, so storage boundaries do not duplicate facts.
+Extracting isolated halves is reserved for an explicit over-context-limit
+fallback and must use distinct extraction-item identities.
+
+Under whole-`chunk` extraction, one item covers the entire stored chunk and its
+`source_unit_id` is left NULL because a chunk (a session slice, an overlapping
+window) can span several source units, so per-unit attribution is undefined.
+`source_unit_id` is therefore a best-effort, non-interface attribution signal,
+not a contract other layers may depend on.
+
+Selection is explicit configuration keyed by `source_type`. Each value is either
+a bare preset name or a name-tagged registry spec `{name: ..., **params}` (a
+bare string is sugar for `{name: <string>}`). The registry has one parametric
+strategy, `chat_processing`, for chat sources; it takes the two axes above:
+`message: {name: chat_processing, chunking: session, extraction: chunk}`. The
+two-axis composition is an implementation detail of that one family, not a
+promise the top-level grammar makes about every source type — a future source
+paradigm registers its own `name` with its own params. Document sources use the
+presets (their chunking is always `none`).
+
+The preset names remain valid and map to fixed strategies so their deterministic
+chunk ids and per-item strategy versions stay byte-identical (no forced
+re-extraction):
+
+| preset | chunking | extraction | notes |
+|---|---|---|---|
+| `chat_message` | `session` | `message` | default for chat; alias of `chat_processing(session, message)` |
+| `fixed_size_chat` | `fixed_size` | `message` | overlapping windows |
+| `document_chunk` | `none` | whole chunk + title context | documents |
+| `stored_chunk` | `none` | whole chunk, verbatim | verbatim body; default fallback |
+
+`document_chunk` and `stored_chunk` are distinct whole-chunk extractors chosen by
+the configured preset (never by a hard-coded source-type list), so a custom
+override such as `wiki: stored_chunk` keeps the plain stored-chunk fingerprint.
+Title-context document extraction is reachable through the `document_chunk`
+preset; the parametric `chat_processing` extraction axis is `message` | `chunk`
+only (documents do not route through the chat family).
+Invalid pairings fail fast: `chat_processing` with `fixed_size` + `chunk`
+(double-extracts overlapping windows); `message` extraction on a non-chat source
+(message extraction reads `message` units, so a document source would yield zero
+items); and chat chunking (`session` / `fixed_size`) on a non-chat source (same
+empty result). Note that `chat_processing` with `none` + `message` on a genuine
+chat source is valid — `none` chunking stores each record and builds `message`
+memberships, so message items project onto them. `fixed_size_chat` uses the
+configured positive character budget and a non-negative overlap smaller than
+that budget; both values form part of its strategy version and deterministic
+chunk identity.
+Each extraction item records its prompt and strategy versions. Prompt language is
+also explicit (`zh` or `en`); the configured language selects the matching system
+prompt and forms part of the prompt version used for cache identity.
 
 The extraction output contract uses canonical nested entity/fact field names.
 Compatibility aliases may be accepted at the parser boundary, but each result

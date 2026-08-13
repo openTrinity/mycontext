@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -155,6 +155,58 @@ class FixedSizeChatConfig(_ConfigModel):
         return self
 
 
+class _StrategyArm(_ConfigModel):
+    """Base for every registry arm. ``name`` is the discriminator."""
+
+
+class ChatProcessingStrategySpec(_StrategyArm):
+    """The one parametric strategy: chat message processing over two axes.
+
+    Two-axis composition (how chat records are chunked/stored × what the LLM
+    extracts from) is an implementation detail of *this* family, not a promise
+    the top-level config makes about every source type. A future source
+    paradigm registers its own ``name`` with its own params instead of being
+    forced into these axes.
+
+    Only chat sources (``source_type == "message"``) route here: the ``session``
+    / ``fixed_size`` chunkers and ``message`` extraction all require message
+    units. Document sources use the preset arms below (chunking is always
+    ``none`` for them).
+
+    ``extra="forbid"`` (inherited) + the ``Literal`` axes reject typos and
+    unknown keys at config-validation time rather than deep inside a pipeline.
+    Forbidden axis pairings (``fixed_size`` + ``chunk``) fail fast in the
+    resolver, which is where the chat-source requirement is also enforced.
+    """
+
+    name: Literal["chat_processing"]
+    chunking: Literal["session", "fixed_size", "none"]
+    extraction: Literal["message", "chunk"]
+
+
+class PresetStrategySpec(_StrategyArm):
+    """A legacy fused name expressed as the dict form ``{name: <preset>}``.
+
+    Presets take no params: each maps to one fixed strategy with byte-identical
+    chunk ids and per-item ``strategy_version`` stamps (no forced
+    re-extraction). ``chat_message`` is the preset alias of
+    ``chat_processing(session, message)``; documents use ``document_chunk`` /
+    ``stored_chunk``. A bare string value is sugar for this arm.
+    """
+
+    name: Literal["chat_message", "fixed_size_chat", "document_chunk", "stored_chunk"]
+
+
+#: A registry value is a bare preset string, or a tagged dict discriminated on
+#: ``name``. Pydantic picks the arm by the ``name`` field; ``extra="forbid"`` on
+#: each arm fails fast on unknown keys. The two-axis model lives inside
+#: ``chat_processing`` — it is not part of the top-level grammar.
+StrategySpec = Annotated[
+    ChatProcessingStrategySpec | PresetStrategySpec,
+    Field(discriminator="name"),
+]
+
+
 class ExtractionConfig(_ConfigModel):
     batch_size: int
     batch_timeout: int
@@ -163,7 +215,10 @@ class ExtractionConfig(_ConfigModel):
     cache_max_entries: int = Field(gt=0)
     prompt_language: Literal["zh", "en"] = "zh"
     fixed_size_chat: FixedSizeChatConfig
-    strategies: dict[str, str] = Field(default_factory=dict)
+    # Each value is a bare preset name (str) or a name-tagged registry spec
+    # ({name, **params}). Pydantic v2 smart-union keeps a bare string as str and
+    # routes a mapping to the StrategySpec discriminated union (keyed on `name`).
+    strategies: dict[str, str | StrategySpec] = Field(default_factory=dict)
 
 
 class CleanupConfig(_ConfigModel):

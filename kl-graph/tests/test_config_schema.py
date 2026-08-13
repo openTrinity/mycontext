@@ -381,3 +381,105 @@ def test_default_yaml_loads_end_to_end() -> None:
     )
     assert reloaded.community_identity.default.identity_min_intersection == 2
     assert OmegaConf.to_container(config_module.cfg, resolve=True) == before
+
+
+def test_strategies_accepts_nested_spec() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["strategies"]["message"] = {
+        "name": "chat_processing",
+        "chunking": "session",
+        "extraction": "chunk",
+    }
+
+    validated = AppConfig.model_validate(value)
+    spec = validated.pipelines.ingestion.extraction.strategies["message"]
+    assert spec.name == "chat_processing"
+    assert spec.chunking == "session"
+    assert spec.extraction == "chunk"
+
+
+def test_strategies_keeps_legacy_string_values() -> None:
+    strategies = cfg.pipelines.ingestion.extraction.strategies
+    assert strategies["message"] == "chat_message"
+    assert strategies["default"] == "stored_chunk"
+
+
+def test_strategies_accepts_preset_dict_form() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["strategies"]["default"] = {
+        "name": "stored_chunk",
+    }
+
+    validated = AppConfig.model_validate(value)
+    spec = validated.pipelines.ingestion.extraction.strategies["default"]
+    assert spec.name == "stored_chunk"
+
+
+def test_strategies_rejects_axes_on_a_preset_arm() -> None:
+    # Presets take no params; axes belong to chat_processing only.
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["strategies"]["default"] = {
+        "name": "stored_chunk",
+        "chunking": "none",
+    }
+
+    with pytest.raises(ValidationError, match="chunking"):
+        AppConfig.model_validate(value)
+
+
+def test_strategies_rejects_unknown_registry_name() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["strategies"]["message"] = {
+        "name": "mystery_strategy",
+    }
+
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(value)
+
+
+def test_strategies_rejects_invalid_axis_value() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["strategies"]["message"] = {
+        "name": "chat_processing",
+        "chunking": "bogus",
+        "extraction": "chunk",
+    }
+
+    with pytest.raises(ValidationError, match="chunking"):
+        AppConfig.model_validate(value)
+
+
+def test_strategies_rejects_unknown_spec_key() -> None:
+    value = deepcopy(_config_dict())
+    value["pipelines"]["ingestion"]["extraction"]["strategies"]["message"] = {
+        "name": "chat_processing",
+        "chunking": "session",
+        "extraction": "chunk",
+        "mystery": True,
+    }
+
+    with pytest.raises(ValidationError, match="mystery"):
+        AppConfig.model_validate(value)
+
+
+def test_nested_spec_survives_omegaconf_resolve_and_validate(tmp_path) -> None:
+    from kl_graph.config import _build_config
+
+    extra = tmp_path / "config.yaml"
+    extra.write_text(
+        "pipelines:\n"
+        "  ingestion:\n"
+        "    extraction:\n"
+        "      strategies:\n"
+        "        message:\n"
+        "          name: chat_processing\n"
+        "          chunking: session\n"
+        "          extraction: chunk\n",
+        encoding="utf-8",
+    )
+
+    built = _build_config(extra_yaml=extra)
+    message = built.pipelines.ingestion.extraction.strategies.message
+    assert message.name == "chat_processing"
+    assert message.chunking == "session"
+    assert message.extraction == "chunk"

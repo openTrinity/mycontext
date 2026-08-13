@@ -165,10 +165,61 @@ pipelines:
         chunk_size_chars: ${oc.env:KL_FIXED_SIZE_CHAT_CHUNK_CHARS,1200}
         # Characters repeated from the preceding window; must be less than size.
         overlap_chars: ${oc.env:KL_FIXED_SIZE_CHAT_OVERLAP_CHARS,200}
-      # Map each source type to its extraction-item construction strategy.
+      # Map each source type to its source-processing strategy — how records of
+      # that type are chunked/stored (the recall unit) and how the LLM extracts
+      # from them (the extraction unit).
+      #
+      # HOW TO CONFIGURE. Each value takes one of two forms:
+      #   1. A bare preset name (a string), e.g. `wiki: document_chunk`.
+      #   2. A name-tagged spec `{name: <name>, **params}`, e.g.
+      #      `message: {name: chat_processing, chunking: session, extraction: chunk}`.
+      #      A bare string is just sugar for `{name: <string>}` with no params.
+      # The value is validated at load time (typed schema in kl_graph/config.py):
+      # an unknown `name`, a bad axis value, or a stray key fails fast here rather
+      # than silently degrading deep inside the pipeline.
+      #
+      # Unmapped source types fall back to the `default` entry below.
+      #
+      # THE ONE PARAMETRIC STRATEGY — `chat_processing` (chat sources only, i.e.
+      # source_type == message). It takes two independent axes:
+      #   chunking:   session     one stored chunk per conversation session slice
+      #               fixed_size  overlapping character windows (uses the
+      #                           fixed_size_chat budget above)
+      #               none        store each message as its own chunk
+      #   extraction: message     one LLM item per chat message (+ neighbor context)
+      #               chunk       one LLM item per stored chunk, whole slice verbatim
+      # Valid / invalid combinations (invalid ones raise at load time):
+      #   session     + message   OK  (= chat_message preset)
+      #   session     + chunk     OK  "extract-and-recall in chunks"
+      #   fixed_size  + message   OK  (= fixed_size_chat preset)
+      #   fixed_size  + chunk     NO  overlapping windows would double-extract
+      #   none        + message   OK  per-message extraction, each stored 1:1
+      #   none        + chunk     OK  (equivalent to stored_chunk on a chat source)
+      # The two-axis model is internal to THIS family only — it is not a promise
+      # every source type must fit two axes. A future source paradigm registers
+      # its own `name` with its own params. `chat_processing` is chat-only because
+      # its chunkers and `message` extraction all require message units; using it
+      # (or any chat chunking / message extraction) on a non-chat source is
+      # rejected at load time.
+      #
+      # THE PRESETS (no params; document sources always chunk with `none`). Each
+      # maps to one fixed strategy and keeps its extraction-cache fingerprint
+      # byte-identical, so switching a source to/from its equivalent preset forces
+      # no LLM re-extraction:
+      #   chat_message      session chunking + per-message extraction
+      #                     (alias of chat_processing{session, message}; chat default)
+      #   fixed_size_chat   fixed_size chunking + per-message extraction
+      #                     (alias of chat_processing{fixed_size, message})
+      #   document_chunk    whole chunk extracted WITH its title as context
+      #                     (documents; title-context extraction is reachable ONLY
+      #                     through this preset — it is not a chat_processing axis)
+      #   stored_chunk      whole chunk extracted verbatim, no title wrapper
+      #                     (default fallback for unmapped source types)
       strategies:
-        # Extract each chat message with read-only context. Set this to
-        # fixed_size_chat to store the configured overlapping character windows.
+        # Chat messages. Default extracts each message with read-only neighbor
+        # context. Alternatives: `fixed_size_chat` to store overlapping character
+        # windows, or `{name: chat_processing, chunking: session, extraction: chunk}`
+        # to extract whole session slices ("extract-and-recall in chunks").
         message: chat_message
         # Extract each stored semantic document chunk.
         wiki: document_chunk

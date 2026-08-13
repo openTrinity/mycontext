@@ -232,7 +232,17 @@ class PersonaCorpusReader:
         return list(accumulated.values())
 
     def stance_facts(self) -> list[StanceFact]:
-        """Return ego-authored stance facts using fact-to-source-unit lineage."""
+        """Return ego-authored stance facts using fact-to-source-unit lineage.
+
+        NOTE (refactor requested): this join treats ``f.source_unit_id`` as
+        precise per-message attribution, but that is a best-effort, non-interface
+        signal — under whole-chunk extraction (chunking × extraction = *×chunk)
+        a fact spans a session slice and ``source_unit_id`` is NULL, so the
+        ``IS NOT NULL`` filter below silently drops every chunk-extracted fact.
+        Do not build new behavior on this column as an interface. Persona should
+        derive topic/stance evidence from raw ego messages (``self.messages()``)
+        rather than from fact lineage; rework this query accordingly.
+        """
 
         rows = self.store.sql_conn.execute(
             """
