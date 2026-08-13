@@ -3391,6 +3391,21 @@ export const runtimeConfigFieldSchema = z.object({
   source: z.enum(["user", "env", "dotenv", "default"]),
 })
 
+/**
+ * 模型网关协议（litellm 传输）。
+ *
+ * · `openai` —— `/chat/completions`（LLM）/ `/embeddings`（向量），`Authorization: Bearer`；
+ * · `anthropic` —— `/v1/messages`，`x-api-key` + `anthropic-version`。
+ *
+ * ★ 只有**知识库抽取**（kl-graph）这一路真能切协议 —— 它由 kl 侧的 litellm 按 provider
+ * 规整 base（anthropic 剥 `/v1`、openai 补一个 `/v1`）。主模型走 opencode 子进程，
+ * 那条路**只能** openai 兼容（见 agent-runtime/spawn-hardening.ts：anthropic provider
+ * 依赖被墙的 models.dev、静默 0 token），所以主模型没有这个选项。embedding 恒 openai。
+ */
+export const modelProviderSchema = z.enum(["openai", "anthropic"])
+
+export type ModelProvider = z.infer<typeof modelProviderSchema>
+
 export const runtimeConfigSecretFieldSchema = z.object({
   configured: z.boolean(),
   /** 已配置时给后 4 位，未配置为 null */
@@ -3413,11 +3428,22 @@ export const runtimeConfigViewSchema = z.object({
   klLlmBaseUrl: runtimeConfigFieldSchema,
   klLlmApiKey: runtimeConfigSecretFieldSchema,
   klModelMain: runtimeConfigFieldSchema,
+  /**
+   * 知识库抽取用的协议。自成一格（不是 `runtimeConfigFieldSchema` 的自由串）——
+   * 它只有两个合法值。有默认层（kernel 的 `MYCONTEXT_KL_PROVIDER`，默认 openai），
+   * 所以 `source` 与其它字段同一套来源标记。
+   */
+  klProvider: z.object({
+    value: modelProviderSchema,
+    source: z.enum(["user", "env", "dotenv", "default"]),
+  }),
   /** KL 回退解析后**实际生效**的三项（明文 base/model，key 只给 configured） */
   klEffective: z.object({
     baseUrl: z.string(),
     model: z.string(),
     apiKeyConfigured: z.boolean(),
+    /** 实际生效的协议（默认层 ?? 用户覆盖） */
+    provider: modelProviderSchema,
   }),
 })
 
@@ -3439,6 +3465,8 @@ export const saveRuntimeConfigInputSchema = z.object({
   klLlmBaseUrl: z.string().max(2000).optional(),
   klLlmApiKey: z.string().max(500).nullable().optional(),
   klModelMain: z.string().max(200).optional(),
+  /** 知识库协议。undefined = 不改；两个枚举值之一 = 覆盖 */
+  klProvider: modelProviderSchema.optional(),
 })
 
 export type SaveRuntimeConfigInput = z.infer<typeof saveRuntimeConfigInputSchema>
@@ -3489,6 +3517,14 @@ export const runtimeConfigProbeSchema = z.object({
    * · `noKey` —— 还没填 key
    */
   reason: z.enum(["unauthorized", "unreachable", "badResponse", "noKey"]).nullable(),
+  /**
+   * 识别到的网关协议（成功时非 null）。UI 据此把知识库那一路的协议 chip 自动选好，
+   * 也顺带告诉用户「这个地址是 OpenAI 兼容还是 Anthropic」。
+   *
+   * 一次探测只认一个协议（先试 openai、传输不对再试 anthropic），所以这是**网关级**
+   * 的判定，而不是 per-model —— `models` 里的每个 id 都走这同一个协议。
+   */
+  provider: modelProviderSchema.nullable(),
   /** 网关原文（截断）。放在折叠区里给会看的人，不直接怼到界面上 */
   detail: z.string().nullable(),
   /** 探到的模型 id 列表（成功时非空）。UI 用它做模型选择器 */

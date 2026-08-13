@@ -129,6 +129,7 @@ export {
   runtimeConfigApplySchema,
   probeRuntimeConfigInputSchema,
   runtimeConfigProbeSchema,
+  modelProviderSchema,
 } from "./contract.js"
 
 export type {
@@ -222,6 +223,7 @@ export type {
   RuntimeConfigApply,
   ProbeRuntimeConfigInput,
   RuntimeConfigProbe,
+  ModelProvider,
 } from "./contract.js"
 
 export type { MyContextApi } from "./api.js"

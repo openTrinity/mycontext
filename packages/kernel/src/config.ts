@@ -89,13 +89,23 @@ const DEFINITIONS = {
   /**
    * KL（知识图谱）建索引专用的网关。留空则回退主配置（见 RuntimeConfigService）。
    *
-   * ★ 单独一路的理由：kl 的抽取走 Anthropic 模式（extractor 硬编码 `anthropic/`
-   * 前缀），历史上只有部分模型能在中文上抽出 facts —— 换主模型时不该顺带把
-   * kl 抽取也换坏。默认全空（回退主配置），高级用户要单独指网关/模型时才填。
+   * ★ 单独一路的理由：换主模型时不该顺带把 kl 的抽取也换坏（历史上只有部分模型能在
+   * 中文上抽出 facts）。默认全空（回退主配置），高级用户要单独指网关/模型时才填。
    */
   klLlmBaseUrl: { env: "MYCONTEXT_KL_LLM_BASE_URL", default: "", sensitive: false },
   klLlmApiKey: { env: "MYCONTEXT_KL_LLM_API_KEY", default: "", sensitive: true },
   klModelMain: { env: "MYCONTEXT_KL_MODEL_MAIN", default: "", sensitive: false },
+  /**
+   * KL 抽取访问网关用的协议（litellm 传输）。
+   *
+   * ★ 默认 `openai` —— 这是本项目与 kl-graph 自身默认（`anthropic`）**故意的分歧**：
+   * kl-graph 给上游用户保守默认成 anthropic，而 MyContext 随包/常见网关是 OpenAI 兼容
+   * 口（如 `…/compatible-mode/v1`）。桌面端不设这个值时，kl 会用它自己的默认 `anthropic`
+   * 去发 `/v1/messages` → 对 OpenAI 兼容网关 404（真实踩过的报错）。所以这里默认断言
+   * openai，并经 `KlGatewayConfig.llmProvider` → `KL_LLM_PROVIDER` 传给 kl；用户要走
+   * anthropic 网关时在设置里改，或用 `MYCONTEXT_KL_PROVIDER=anthropic` 覆盖。
+   */
+  klProvider: { env: "MYCONTEXT_KL_PROVIDER", default: "openai", sensitive: false },
 } satisfies Record<string, ConfigDefinition>
 
 export type ConfigKey = keyof typeof DEFINITIONS
@@ -118,6 +128,9 @@ export const appConfigSchema = z.object({
   klLlmApiKey: z.string(),
   // KL 三项都可留空（回退主配置），所以模型这项**不**加 min(1)。
   klModelMain: z.string(),
+  // 协议只有两个合法值。内联写死不引 ipc-contract（那是错误的依赖方向）——
+  // 两个 2 值枚举保持一致，漂移风险低。
+  klProvider: z.enum(["openai", "anthropic"]),
 })
 
 export type AppConfig = z.infer<typeof appConfigSchema>

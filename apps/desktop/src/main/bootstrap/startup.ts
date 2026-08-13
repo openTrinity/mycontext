@@ -1219,8 +1219,11 @@ export function bootstrapApp(mainDir: string): AppContext {
         // litellm_base_url 会按传输规整（见 kl_graph/utils/litellm_config.py）。
         // 裸模型名（kl 自己拼 provider 前缀）。见 kl_graph/config.py。
         llmBaseUrl: base,
-        // ★ kl 抽取模型：默认回退主模型（glm-5.2，实测 anthropic 模式可抽中文 facts）。
-        // 想给 kl 单独指一个模型就在设置里填 KL 模型，或用 KL_LLM_MODEL env 覆盖。
+        // ★ 协议：用户在设置里声明/测试连接识别到的。默认 openai（见 config.ts 的长注释）
+        // —— 这是「OpenAI 兼容网关被当 Anthropic 发 → 404」那个报错的修复。
+        llmProvider: r.klProvider,
+        // ★ kl 抽取模型：默认回退主模型（glm-5.2）。想给 kl 单独指一个模型就在设置里
+        // 填 KL 模型，或用 KL_LLM_MODEL env 覆盖。
         llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
         // ★ embedding 走 OpenAI 兼容：base 要带恰好一个 /v1（litellm 直接 POST
         // {base}/embeddings；用户配好带 /v1 的 URL 时不能再拼，否则 /v1/v1 → 404）。
@@ -1327,6 +1330,8 @@ export function bootstrapApp(mainDir: string): AppContext {
         : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
     return {
       llmBaseUrl: base,
+      // ★ 协议与主 gateway() 同源（改一处两边都变）：默认 openai，修那个 404 报错。
+      llmProvider: r.klProvider,
       llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
       embedBaseUrl: openAiEmbedBaseUrl(base),
       embedModel: r.embedModel,

@@ -337,6 +337,13 @@ export interface KlServerServiceOptions {
 export interface KlGatewayConfig {
   llmBaseUrl?: string
   llmModel?: string
+  /**
+   * LLM 抽取访问网关用的协议（litellm 传输）。**唯一真能切的 provider** ——
+   * kl 侧按它规整 base（anthropic 剥 `/v1` 发 `/v1/messages`；openai 补一个 `/v1`
+   * 发 `/chat/completions`）。不给时 kl 用它自己的默认 `anthropic`，对 OpenAI 兼容
+   * 网关会 404（同事踩过）。见 `buildEnv` 里 KL_LLM_PROVIDER 的注释。
+   */
+  llmProvider?: "openai" | "anthropic"
   embedBaseUrl?: string
   embedModel?: string
   /** 出网密钥（embedding + LLM 共用网关时同一个）。 */
@@ -2664,11 +2671,24 @@ export class KlServerService {
 
     const gw = this.options.gateway?.()
     if (gw !== undefined) {
-      // LLM：kl 的 llm_extractor 自己拼 `anthropic/` 前缀，这里传**裸模型名**
-      // 与不含 /v1 的 base（见 kl_graph/config.py 的注释）。
+      // LLM：传**裸模型名**与 base，协议由 KL_LLM_PROVIDER 声明 —— kl 侧的
+      // litellm_config.py 按 provider 规整 base（anthropic 剥 /v1、openai 补一个 /v1）
+      // 并拼出对的 provider 前缀。见下面 KL_LLM_PROVIDER 的注释。
       if (gw.llmBaseUrl !== undefined && gw.llmBaseUrl !== "")
         env["KL_LLM_BASE_URL"] = gw.llmBaseUrl
       if (gw.llmModel !== undefined && gw.llmModel !== "") env["KL_LLM_MODEL"] = gw.llmModel
+      /**
+       * ★★ 协议：这是「OpenAI 兼容网关被当 Anthropic 发 → 404」那个报错的修复点。
+       *
+       * kl 的 config.default.yaml 从 `KL_LLM_FLASH_PROVIDER` → `KL_LLM_PROVIDER` →
+       * 默认 `anthropic` 读协议。桌面端从前**两个都不设**，于是 kl 恒走 anthropic
+       * 传输，对 `…/compatible-mode/v1` 这类 OpenAI 兼容口 POST `/v1/messages` → 404。
+       * 现在把用户声明/探测到的协议传下去；两个名都设（yaml 先查 FLASH）。
+       */
+      if (gw.llmProvider !== undefined) {
+        env["KL_LLM_PROVIDER"] = gw.llmProvider
+        env["KL_LLM_FLASH_PROVIDER"] = gw.llmProvider
+      }
       if (gw.embedBaseUrl !== undefined && gw.embedBaseUrl !== "")
         env["KL_EMBED_BASE_URL"] = gw.embedBaseUrl
       if (gw.embedModel !== undefined && gw.embedModel !== "") env["KL_EMBED_MODEL"] = gw.embedModel

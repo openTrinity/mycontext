@@ -352,4 +352,99 @@ describe("网关探测", () => {
     expect(seenAuth).toBe("Bearer sk-stored-9999")
     ctx.close()
   })
+
+  it("OpenAI 形状 → provider openai", async () => {
+    const { impl } = fakeFetch(() => ({
+      status: 200,
+      body: { data: [{ id: "glm-5.2", object: "model", owned_by: "system" }] },
+    }))
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
+    expect(result.ok).toBe(true)
+    expect(result.provider).toBe("openai")
+    ctx.close()
+  })
+
+  /**
+   * ★★ 双协议探测：纯 Anthropic 网关对 Bearer 头返 404（不认这个口），
+   * 探测必须换 `x-api-key` + `anthropic-version` 头再试一次，并从
+   * `{data:[{type:"model", display_name}]}` 的形状识别出 anthropic。
+   *
+   * 这条锁的正是同事那个报错的另一面：给了 Anthropic 网关时也要能识别对，
+   * 而不是笼统报 badResponse。
+   */
+  it("Anthropic 网关：Bearer 404 → 换 x-api-key 重试 → provider anthropic", async () => {
+    const seenHeaders: Array<Record<string, string> | undefined> = []
+    const { impl, urls } = fakeFetch((_url, init) => {
+      const headers = init?.headers as Record<string, string> | undefined
+      seenHeaders.push(headers)
+      // 第 1 次（Bearer）：这个口不认 → 404；第 2 次（x-api-key）：200
+      if (headers?.["Authorization"] !== undefined) return { status: 404, body: "not found" }
+      return {
+        status: 200,
+        body: {
+          data: [{ id: "claude-opus-4-6", type: "model", display_name: "Claude Opus 4.6" }],
+          has_more: false,
+        },
+      }
+    })
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://anthropic.example", apiKey: "sk-a" })
+    expect(result.ok).toBe(true)
+    expect(result.provider).toBe("anthropic")
+    expect(result.models).toEqual(["claude-opus-4-6"])
+    // 两次请求：先 openai 口、后 anthropic 口
+    expect(urls.length).toBe(2)
+    expect(seenHeaders[1]?.["x-api-key"]).toBe("sk-a")
+    expect(seenHeaders[1]?.["anthropic-version"]).toBe("2023-06-01")
+    ctx.close()
+  })
+
+  it("401 不触发换协议重试（地址对、密钥不对）", async () => {
+    const { impl, urls } = fakeFetch(() => ({ status: 401, body: { error: "bad key" } }))
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-bad" })
+    expect(result.reason).toBe("unauthorized")
+    // 只打一次网络：401 是密钥问题，换协议也没用
+    expect(urls.length).toBe(1)
+    ctx.close()
+  })
+})
+
+/**
+ * KL 抽取协议（`klProvider`）。
+ *
+ * ★★ 锁的是那个 404 报错的根因：桌面端从前不给 kl 传协议，kl 默认 anthropic，
+ * 把 OpenAI 兼容网关当 Anthropic 发。现在：默认 openai、可存覆盖、可 env 覆盖，
+ * 并经 `resolved().klProvider` → `KlGatewayConfig.llmProvider` 传给 kl。
+ */
+describe("KL 抽取协议", () => {
+  it("默认 openai（与 kl-graph 自身默认 anthropic 故意分歧）", () => {
+    const ctx = makeService()
+    expect(ctx.service.resolved().klProvider).toBe("openai")
+    const v = ctx.service.view()
+    expect(v.klProvider.value).toBe("openai")
+    expect(v.klProvider.source).toBe("default")
+    expect(v.klEffective.provider).toBe("openai")
+    ctx.close()
+  })
+
+  it("save 覆盖为 anthropic", () => {
+    const ctx = makeService()
+    ctx.service.save({ klProvider: "anthropic" }, NOW)
+    expect(ctx.service.resolved().klProvider).toBe("anthropic")
+    const v = ctx.service.view()
+    expect(v.klProvider.value).toBe("anthropic")
+    expect(v.klProvider.source).toBe("user")
+    expect(v.klEffective.provider).toBe("anthropic")
+    ctx.close()
+  })
+
+  it("env 层可覆盖（MYCONTEXT_KL_PROVIDER）", () => {
+    const defaults = loadConfig({ env: { MYCONTEXT_KL_PROVIDER: "anthropic" } })
+    const ctx = makeService(defaults)
+    expect(ctx.service.resolved().klProvider).toBe("anthropic")
+    expect(ctx.service.view().klProvider.source).toBe("env")
+    ctx.close()
+  })
 })

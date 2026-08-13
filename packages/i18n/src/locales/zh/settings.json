@@ -366,12 +366,17 @@
       "apiKey": "API Key",
       "apiKeyPlaceholder": "留空表示不修改",
       "modelMain": "主模型",
-      "embedModel": "向量模型"
+      "embedModel": "向量模型",
+      "protocol": "协议",
+      "openai": "OpenAI 兼容",
+      "anthropic": "Anthropic",
+      "mainProtocolNote": "主模型固定走 OpenAI 兼容协议（数字分身子进程限制），不可切换。"
     },
     "kl": {
       "title": "知识库单独用别的模型",
       "hint": "留空则和上面主配置一样。只有想给知识库单独指一个网关或模型时才填。",
-      "inherited": "跟随主配置"
+      "inherited": "跟随主配置",
+      "protocolHint": "知识库抽取用哪种协议访问网关；测试连接后自动识别，也可手动改。"
     },
     "save": "保存",
     "saveAndNext": "保存并继续",
@@ -385,6 +390,7 @@
       "testing": "正在测试…",
       "ok": "连接正常 · {{count}} 个模型可用",
       "fromGateway": "来自网关 · {{count}} 个",
+      "detectedProtocol": "识别为 {{provider}}",
       "reason": {
         "unauthorized": "密钥不对，换一把再试",
         "unreachable": "连不上这个地址，检查一下",

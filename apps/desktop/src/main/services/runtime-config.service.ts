@@ -25,6 +25,7 @@
  */
 import type { LoadedConfig, Logger } from "@mycontext/kernel"
 import type {
+  ModelProvider,
   RuntimeConfigView,
   RuntimeConfigApply,
   RuntimeConfigProbe,
@@ -38,6 +39,8 @@ interface StoredOverrides {
   embedModel?: string
   klLlmBaseUrl?: string
   klModelMain?: string
+  /** 知识库协议覆盖。缺省 = 走默认层（kernel 默认 openai）。 */
+  klProvider?: ModelProvider
 }
 
 /** 进程内消费者要的明文解析结果。 */
@@ -50,6 +53,8 @@ export interface ResolvedRuntimeConfig {
   klBaseUrl: string
   klApiKey: string
   klModel: string
+  /** KL 抽取协议（默认层 ?? 用户覆盖）。传给 kl 的 `KL_LLM_PROVIDER`。 */
+  klProvider: ModelProvider
 }
 
 /** 保存输入：字符串三态见 contract 的 saveRuntimeConfigInputSchema。 */
@@ -61,6 +66,8 @@ export interface SaveRuntimeConfigPatch {
   klLlmBaseUrl?: string | undefined
   klLlmApiKey?: string | null | undefined
   klModelMain?: string | undefined
+  /** 知识库协议。undefined = 不改。 */
+  klProvider?: ModelProvider | undefined
 }
 
 export interface RuntimeConfigServiceOptions {
@@ -119,6 +126,12 @@ export class RuntimeConfigService {
     const klBaseRaw = pick(stored.klLlmBaseUrl, d.klLlmBaseUrl)
     const klApiRaw = this.options.secretStore.read(KL_API_KEY_SECRET) ?? d.klLlmApiKey
     const klModelRaw = pick(stored.klModelMain, d.klModelMain)
+    /**
+     * ★ 协议独立于 base/model/key 的「回退主配置」逻辑：主模型那条路（opencode）
+     * 只能 openai 兼容、没有可切协议，所以这里不跟主配置走，而是
+     * `用户存的 ?? 默认层`（kernel 默认 openai，见 config.ts 的长注释）。
+     */
+    const klProvider: ModelProvider = stored.klProvider ?? d.klProvider
 
     return {
       llmBaseUrl,
@@ -128,6 +141,7 @@ export class RuntimeConfigService {
       klBaseUrl: klBaseRaw.trim() !== "" ? klBaseRaw : llmBaseUrl,
       klApiKey: klApiRaw.trim() !== "" ? klApiRaw : llmApiKey,
       klModel: klModelRaw.trim() !== "" ? klModelRaw : modelMain,
+      klProvider,
     }
   }
 
@@ -175,10 +189,16 @@ export class RuntimeConfigService {
       klLlmBaseUrl: plain(stored.klLlmBaseUrl, "klLlmBaseUrl"),
       klLlmApiKey: secret(KL_API_KEY_SECRET, "klLlmApiKey"),
       klModelMain: plain(stored.klModelMain, "klModelMain"),
+      klProvider: {
+        value: resolved.klProvider,
+        // 存了就是用户覆盖，否则来源同其它默认层字段（env/dotenv/default）。
+        source: stored.klProvider !== undefined ? "user" : this.defaultSource("klProvider"),
+      },
       klEffective: {
         baseUrl: resolved.klBaseUrl,
         model: resolved.klModel,
         apiKeyConfigured: resolved.klApiKey !== "",
+        provider: resolved.klProvider,
       },
     }
   }
@@ -190,7 +210,9 @@ export class RuntimeConfigService {
   save(patch: SaveRuntimeConfigPatch, nowIso: string): RuntimeConfigApply {
     const stored = this.readStored()
 
-    const merge = (key: keyof StoredOverrides, value: string | undefined): void => {
+    // 只作用于**自由串**字段（klProvider 是枚举，单独处理，见下）。
+    type StringKey = Exclude<keyof StoredOverrides, "klProvider">
+    const merge = (key: StringKey, value: string | undefined): void => {
       if (value === undefined) return
       // 空串 = 清空这一项（回退默认层）；非空 = 覆盖
       if (value.trim() === "") delete stored[key]
@@ -201,6 +223,9 @@ export class RuntimeConfigService {
     merge("embedModel", patch.embedModel)
     merge("klLlmBaseUrl", patch.klLlmBaseUrl)
     merge("klModelMain", patch.klModelMain)
+    // 协议是枚举而非自由串，不走 trim-and-delete 的 merge：undefined = 不改，
+    // 给了就覆盖（两个合法值之一，由 contract 的 schema 保证）。
+    if (patch.klProvider !== undefined) stored.klProvider = patch.klProvider
 
     this.options.settings.set(SETTING_KEY, JSON.stringify(stored), nowIso)
 
@@ -246,6 +271,35 @@ export class RuntimeConfigService {
    * 失败一律**归类**（见 contract 的 reason 枚举）而不是把原文怼给用户：
    * 401 与 DNS 失败要给出的下一步动作完全不同。
    */
+  /**
+   * 探测网关并**识别协议**：先试 OpenAI 兼容口，传输不对再试 Anthropic 口。
+   *
+   * ## ★ 为什么要有这个动作
+   *
+   * 模型名/密钥填错**不会当场报错** —— 它在几小时后的蒸馏或建图里表现为
+   * `model_not_found` / 401，而那些错是静默的（日志一行，界面无声）。
+   * 这正是本项目最怕的失效形态。一次探测把它变成「现在当场告诉你」。
+   *
+   * 同一次请求顺带给出**可选模型列表** + **识别到的协议** —— 于是模型名可以从
+   * "猜着填"变成"从列表里挑"，协议也不用用户去猜（同事踩过的坑：给了
+   * OpenAI 兼容 URL 却被当 Anthropic 发 → 404）。
+   *
+   * ## 为什么先 openai 后 anthropic
+   *
+   * 应用侧网关基本都是 OpenAI 兼容口（`/chat/completions`、`/embeddings`）。所以
+   * 先用 `Authorization: Bearer` 试 OpenAI 形态；只有当它以**传输不对**的信号
+   * （404 / 非 401·403 的 4xx）失败时，才换 `x-api-key` + `anthropic-version`
+   * 头再试一次 Anthropic 口。401/403 是「地址对、密钥不对」，不该触发换协议重试。
+   * 网络层失败（超时/DNS/拒连）两种协议都会一样失败，所以不重试，直接 unreachable。
+   *
+   * ## 用草稿值而不是已存配置
+   *
+   * 用户是在"还没保存"的状态下点测试的（先测通再存才是自然顺序）。
+   * `apiKey` 省略时回退到已存的那把 —— 「不改 key、只测地址」要能表达。
+   *
+   * 失败一律**归类**（见 contract 的 reason 枚举）而不是把原文怼给用户：
+   * 401 与 DNS 失败要给出的下一步动作完全不同。
+   */
   async probe(input: {
     baseUrl?: string | undefined
     apiKey?: string | undefined
@@ -255,10 +309,10 @@ export class RuntimeConfigService {
     const key = (input.apiKey ?? "").trim() !== "" ? input.apiKey!.trim() : resolved.llmApiKey
 
     if (base.trim() === "") {
-      return { ok: false, reason: "unreachable", detail: null, models: [] }
+      return { ok: false, reason: "unreachable", provider: null, detail: null, models: [] }
     }
     if (key.trim() === "") {
-      return { ok: false, reason: "noKey", detail: null, models: [] }
+      return { ok: false, reason: "noKey", provider: null, detail: null, models: [] }
     }
 
     // base 可能带或不带 /v1（两种都有人填）—— 规范化，不让用户去记。
@@ -266,50 +320,121 @@ export class RuntimeConfigService {
     const url = `${root}/v1/models`
 
     try {
-      const response = await this.fetchImpl(url, {
+      // ── 第 1 试：OpenAI 兼容口 ──
+      const openai = await this.fetchImpl(url, {
         headers: { Authorization: `Bearer ${key}` },
         // 8 秒：探测是用户**在等**的动作，不能像后台请求那样给 90 秒
         signal: AbortSignal.timeout(8_000),
       })
 
-      if (!response.ok) {
-        const detail = (await response.text().catch(() => "")).slice(0, 300)
-        const reason =
-          response.status === 401 || response.status === 403 ? "unauthorized" : "badResponse"
-        this.options.logger.info("gateway probe failed", { status: response.status, reason })
-        return { ok: false, reason, detail: detail === "" ? null : detail, models: [] }
+      if (openai.ok) {
+        const parsed = await this.parseModels(openai, "openai")
+        if (parsed !== null) {
+          this.options.logger.info("gateway probe ok", {
+            provider: parsed.provider,
+            models: parsed.models.length,
+          })
+          return { ok: true, reason: null, ...parsed, detail: null }
+        }
+        // 200 但形状不对：多半 URL 填到了控制台首页（返回 HTML）。
+        return { ok: false, reason: "badResponse", provider: null, detail: null, models: [] }
       }
 
-      const body = (await response.json()) as { data?: unknown }
-      /**
-       * 只认 OpenAI 兼容的 `{data:[{id}]}`。
-       *
-       * 形状不对说明连上的**不是**模型网关（常见：URL 填成了控制台首页，
-       * 那会 200 返回一段 HTML）。报 badResponse 而不是"成功但 0 个模型"
-       * —— 后者会让用户以为网关没模型可用。
-       */
-      if (!Array.isArray(body.data)) {
-        return { ok: false, reason: "badResponse", detail: null, models: [] }
+      // 401/403 = 地址对、密钥不对：换协议也没用，直接归类。
+      if (openai.status === 401 || openai.status === 403) {
+        const detail = (await openai.text().catch(() => "")).slice(0, 300)
+        this.options.logger.info("gateway probe failed", {
+          status: openai.status,
+          reason: "unauthorized",
+        })
+        return {
+          ok: false,
+          reason: "unauthorized",
+          provider: null,
+          detail: detail === "" ? null : detail,
+          models: [],
+        }
       }
-      const models = body.data
-        .map((item) =>
-          typeof item === "object" &&
-          item !== null &&
-          typeof (item as { id?: unknown }).id === "string"
-            ? (item as { id: string }).id
-            : null,
-        )
-        .filter((id): id is string => id !== null)
-        .sort((a, b) => a.localeCompare(b))
 
-      this.options.logger.info("gateway probe ok", { models: models.length })
-      return { ok: true, reason: null, detail: null, models }
+      // ── 第 2 试：Anthropic 口（仅在 OpenAI 口报「传输不对」信号时）──
+      const anthropic = await this.fetchImpl(url, {
+        headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+        signal: AbortSignal.timeout(8_000),
+      })
+
+      if (anthropic.ok) {
+        const parsed = await this.parseModels(anthropic, "anthropic")
+        if (parsed !== null) {
+          this.options.logger.info("gateway probe ok", {
+            provider: parsed.provider,
+            models: parsed.models.length,
+          })
+          return { ok: true, reason: null, ...parsed, detail: null }
+        }
+        return { ok: false, reason: "badResponse", provider: null, detail: null, models: [] }
+      }
+
+      // 两种口都没通：按 Anthropic 口的状态归类（401/403 → 密钥问题，其余 → 地址不像模型服务）。
+      const detail = (await anthropic.text().catch(() => "")).slice(0, 300)
+      const reason =
+        anthropic.status === 401 || anthropic.status === 403 ? "unauthorized" : "badResponse"
+      this.options.logger.info("gateway probe failed", {
+        openaiStatus: openai.status,
+        anthropicStatus: anthropic.status,
+        reason,
+      })
+      return {
+        ok: false,
+        reason,
+        provider: null,
+        detail: detail === "" ? null : detail,
+        models: [],
+      }
     } catch (error) {
       // 超时 / DNS / 拒连都归 unreachable —— 对用户是同一个下一步（检查地址）
       const detail = error instanceof Error ? error.message.slice(0, 300) : null
       this.options.logger.info("gateway probe unreachable", { detail })
-      return { ok: false, reason: "unreachable", detail, models: [] }
+      return { ok: false, reason: "unreachable", provider: null, detail, models: [] }
     }
+  }
+
+  /**
+   * 从 `/v1/models` 响应体解析出 `{provider, models}`；形状不对返回 null。
+   *
+   * `viaHeader` 是这次请求用的头风格（openai / anthropic）作为兜底判定 ——
+   * 但**响应形状优先**：Anthropic 的条目带 `type:"model"` / `display_name`，
+   * OpenAI 的带 `object:"model"` / `owned_by`。有 Anthropic 标记就判 anthropic，
+   * 否则用 `viaHeader`（毕竟能用哪种头连通本身就是最强的协议信号）。
+   */
+  private async parseModels(
+    response: Response,
+    viaHeader: ModelProvider,
+  ): Promise<{ provider: ModelProvider; models: string[] } | null> {
+    const body = (await response.json().catch(() => null)) as { data?: unknown } | null
+    if (body === null || !Array.isArray(body.data)) return null
+
+    const items = body.data as unknown[]
+    const looksAnthropic = items.some(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        ((item as { type?: unknown }).type === "model" ||
+          typeof (item as { display_name?: unknown }).display_name === "string"),
+    )
+    const provider: ModelProvider = looksAnthropic ? "anthropic" : viaHeader
+
+    const models = items
+      .map((item) =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as { id?: unknown }).id === "string"
+          ? (item as { id: string }).id
+          : null,
+      )
+      .filter((id): id is string => id !== null)
+      .sort((a, b) => a.localeCompare(b))
+
+    return { provider, models }
   }
 
   /**

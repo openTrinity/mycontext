@@ -366,12 +366,17 @@
       "apiKey": "API Key",
       "apiKeyPlaceholder": "Leave blank to keep unchanged",
       "modelMain": "Main model",
-      "embedModel": "Embedding model"
+      "embedModel": "Embedding model",
+      "protocol": "Protocol",
+      "openai": "OpenAI-compatible",
+      "anthropic": "Anthropic",
+      "mainProtocolNote": "The main model always uses the OpenAI-compatible protocol (digital-twin subprocess limitation); it can't be switched."
     },
     "kl": {
       "title": "Use a different model for the knowledge base",
       "hint": "Leave blank to reuse the main settings above. Fill these in only to point the knowledge base at its own gateway or model.",
-      "inherited": "Follows main settings"
+      "inherited": "Follows main settings",
+      "protocolHint": "Which protocol the knowledge base uses to reach the gateway. Auto-detected after testing the connection; overridable."
     },
     "save": "Save",
     "saveAndNext": "Save and continue",
@@ -385,6 +390,7 @@
       "testing": "Testing…",
       "ok": "Connected · {{count}} models available",
       "fromGateway": "From gateway · {{count}}",
+      "detectedProtocol": "Detected: {{provider}}",
       "reason": {
         "unauthorized": "Key rejected — try another one",
         "unreachable": "Can't reach this endpoint — check it",

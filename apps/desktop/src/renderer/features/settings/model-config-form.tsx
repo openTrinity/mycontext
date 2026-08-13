@@ -50,6 +50,7 @@
 import { useState } from "react"
 import { Button, Disclosure, Field, Input, Tag, cn } from "@mycontext/design"
 import type {
+  ModelProvider,
   RuntimeConfigProbe,
   RuntimeConfigView,
   SaveRuntimeConfigInput,
@@ -90,6 +91,8 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const [klBaseUrl, setKlBaseUrl] = useState<string | null>(null)
   const [klModel, setKlModel] = useState<string | null>(null)
   const [klApiKey, setKlApiKey] = useState("")
+  /** 知识库协议草稿。null = 未编辑（用探测识别值或已存值）。 */
+  const [klProvider, setKlProvider] = useState<ModelProvider | null>(null)
   /** 模型名手输模式（探测列表里没有想要的那个时） */
   const [customModel, setCustomModel] = useState(false)
   /**
@@ -123,6 +126,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     embedModel !== null ||
     klBaseUrl !== null ||
     klModel !== null ||
+    klProvider !== null ||
     apiKey !== "" ||
     klApiKey !== ""
 
@@ -136,6 +140,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     if (klBaseUrl !== null) patch.klLlmBaseUrl = klBaseUrl
     if (klModel !== null) patch.klModelMain = klModel
     if (klApiKey !== "") patch.klLlmApiKey = klApiKey
+    if (klProvider !== null) patch.klProvider = klProvider
     save.mutate(patch, {
       onSuccess: () => {
         // 草稿清空 → dirty 回到 false（保存后按钮自然禁掉）
@@ -146,6 +151,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
         setEmbedModel(null)
         setKlBaseUrl(null)
         setKlModel(null)
+        setKlProvider(null)
         onSaved?.()
       },
     })
@@ -181,6 +187,16 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     result?.ok === true && result.models.length > 0
       ? result.models.filter((id) => /embed/i.test(id))
       : (SUGGESTED_EMBED as readonly string[])
+
+  /**
+   * 知识库那一路**实际会用**的协议：
+   * 用户手动改的 > 新鲜探测识别到的 > 已存值。
+   *
+   * 与 `probeFresh` 同一条原则：只在探测结果仍对应当前输入时才拿它去自动填，
+   * 否则会用"上一次网关"的识别值覆盖"这一次地址"。
+   */
+  const effectiveKlProvider: ModelProvider =
+    klProvider ?? (result?.ok === true ? result.provider : null) ?? current.klEffective.provider
 
   return (
     <div className="flex flex-col gap-[var(--gap-section-lg)]">
@@ -238,6 +254,14 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
                 {t("model.probe.fromGateway", { count: result.models.length })}
               </Tag>
             )}
+            {/* 探测识别到的网关协议 —— 让用户看见「这个地址是 OpenAI 兼容还是 Anthropic」 */}
+            {result?.ok === true && (
+              <Tag size="sm" status="default">
+                {t("model.probe.detectedProtocol", {
+                  provider: t(`model.provider.${result.provider}`),
+                })}
+              </Tag>
+            )}
           </div>
           <ChipPicker
             options={modelOptions}
@@ -273,6 +297,15 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
                 {t("model.probe.modelNotListed")}
               </span>
             )}
+          {/*
+            ★ 如实标注（CLAUDE.md §4）：主模型这条路（opencode 子进程）**只能** OpenAI
+            兼容协议——走 anthropic provider 会依赖被墙的 models.dev、静默 0 token
+            （见 agent-runtime/spawn-hardening.ts）。所以主模型**没有**协议选择器，
+            只声明这个事实，不假装能切。真能切协议的是下面的知识库那一路。
+          */}
+          <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("model.provider.mainProtocolNote")}
+          </span>
         </div>
 
         <div className="flex flex-col gap-[var(--gap-component-sm)]">
@@ -297,7 +330,9 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
       <Disclosure
         title={t("model.kl.title")}
         hint={t("model.kl.hint")}
-        summary={current.klEffective.model || "—"}
+        summary={`${current.klEffective.model || "—"} · ${t(
+          `model.provider.${current.klEffective.provider}`,
+        )}`}
       >
         <div className="flex flex-col gap-[var(--gap-section-sm)]">
           <Field label={t("model.provider.baseUrl")}>
@@ -311,6 +346,34 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
               />
             )}
           </Field>
+
+          {/*
+            ★ 协议选择器 —— 知识库那一路真能切协议（传给 kl 的 KL_LLM_PROVIDER）。
+            测试连接后自动选中识别值（effectiveKlProvider），点击可覆盖。
+            这就是「OpenAI 兼容网关被当 Anthropic 发 → 404」那个报错的用户侧修复。
+          */}
+          <div className="flex flex-col gap-[var(--gap-component-sm)]">
+            <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+              {t("model.provider.protocol")}
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              <Chip
+                selected={effectiveKlProvider === "openai"}
+                onClick={() => setKlProvider("openai")}
+              >
+                {t("model.provider.openai")}
+              </Chip>
+              <Chip
+                selected={effectiveKlProvider === "anthropic"}
+                onClick={() => setKlProvider("anthropic")}
+              >
+                {t("model.provider.anthropic")}
+              </Chip>
+            </div>
+            <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              {t("model.kl.protocolHint")}
+            </span>
+          </div>
 
           <div className="flex flex-col gap-[var(--gap-component-sm)]">
             <div className="flex items-center gap-2">

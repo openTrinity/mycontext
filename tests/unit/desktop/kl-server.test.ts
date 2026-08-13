@@ -359,6 +359,7 @@ describe("KlServerService · 网关出网边界", () => {
       clock: new ManualClock(1_000),
       gateway: () => ({
         llmBaseUrl: "https://gw/anthropic",
+        llmProvider: "openai",
         llmModel: "claude-sonnet-4-6",
         embedBaseUrl: "https://gw/v1",
         embedModel: "text-embedding-v4",
@@ -372,6 +373,10 @@ describe("KlServerService · 网关出网边界", () => {
     const env = runner.getSpec()!.env
     expect(env["KL_LLM_BASE_URL"]).toBe("https://gw/anthropic")
     expect(env["KL_LLM_MODEL"]).toBe("claude-sonnet-4-6")
+    // ★★ 协议：两个名都设（kl 的 yaml 先查 FLASH）。这是「OpenAI 兼容网关被当
+    // Anthropic 发 → 404」那个报错的修复点 —— 桌面端从前两个都不设。
+    expect(env["KL_LLM_PROVIDER"]).toBe("openai")
+    expect(env["KL_LLM_FLASH_PROVIDER"]).toBe("openai")
     expect(env["KL_EMBED_BASE_URL"]).toBe("https://gw/v1")
     expect(env["KL_EMBED_API_KEY"]).toBe("sk-x")
     // ★ 维度必须注入（网关返回 2048，kl 默认建 4096 集合会崩）——见 KlServerService 注释。
