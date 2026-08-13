@@ -268,373 +268,448 @@ export function SplashCursor({ className, onUnsupported }: SplashCursorProps) {
     const canvas = canvasRef.current
     if (canvas === null) return
 
-    const gl = canvas.getContext("webgl2", {
-      alpha: true,
-      depth: false,
-      stencil: false,
-      antialias: false,
-      premultipliedAlpha: false,
-    })
-    // WebGL2 + 浮点渲染目标是这套模拟的硬前提。拿不到就诚实退回静态底色。
-    if (gl === null || gl.getExtension("EXT_color_buffer_float") === null) {
-      onUnsupported?.()
-      return
-    }
+    let teardown: (() => void) | undefined
+    let disposed = false
 
-    // ── 编译所有 program ────────────────────────────────────
-    const vertex = compile(gl, gl.VERTEX_SHADER, BASE_VERTEX)
-    if (vertex === null) {
-      onUnsupported?.()
-      return
-    }
-    const copyP = program(gl, vertex, COPY_SHADER)
-    const clearP = program(gl, vertex, CLEAR_SHADER)
-    const splatP = program(gl, vertex, SPLAT_SHADER)
-    const advectionP = program(gl, vertex, ADVECTION_SHADER)
-    const divergenceP = program(gl, vertex, DIVERGENCE_SHADER)
-    const curlP = program(gl, vertex, CURL_SHADER)
-    const vorticityP = program(gl, vertex, VORTICITY_SHADER)
-    const pressureP = program(gl, vertex, PRESSURE_SHADER)
-    const gradientP = program(gl, vertex, GRADIENT_SUBTRACT_SHADER)
-    const displayP = program(gl, vertex, DISPLAY_SHADER)
-    const programs = [
-      copyP,
-      clearP,
-      splatP,
-      advectionP,
-      divergenceP,
-      curlP,
-      vorticityP,
-      pressureP,
-      gradientP,
-      displayP,
-    ]
-    if (programs.some((p) => p === null)) {
-      onUnsupported?.()
-      return
-    }
-
-    // ── 全屏三角/四边形 ──────────────────────────────────────
-    const quad = gl.createBuffer()
-    gl.bindBuffer(gl.ARRAY_BUFFER, quad)
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]), gl.STATIC_DRAW)
-    const indexBuffer = gl.createBuffer()
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 0, 2, 3]), gl.STATIC_DRAW)
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
-    gl.enableVertexAttribArray(0)
-
-    const blit = (target: FBO | null): void => {
-      if (target === null) {
-        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-      } else {
-        gl.viewport(0, 0, target.width, target.height)
-        gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
+    /**
+     * 一次完整的 GL 初始化 + 主循环，返回它自己的 `stop`（停 raf + 解绑指针，
+     * 但**不** loseContext）。
+     *
+     * ★★★ 可重入是这次修复的核心：`webglcontextrestored` 之后再调一次，
+     * 就重新 `getContext` + 重建全部 FBO/program。context restored 后原来的
+     * `gl` 对象已作废，所有句柄（program/texture/fbo）都失效 —— 只有整段
+     * 重来才能恢复，所以整个初始化必须包在这里、而不是散在 effect 顶层。
+     */
+    const boot = (): (() => void) | undefined => {
+      const gl = canvas.getContext("webgl2", {
+        alpha: true,
+        depth: false,
+        stencil: false,
+        antialias: false,
+        premultipliedAlpha: false,
+      })
+      // WebGL2 + 浮点渲染目标是这套模拟的硬前提。拿不到就诚实退回静态底色。
+      if (gl === null || gl.getExtension("EXT_color_buffer_float") === null) {
+        onUnsupported?.()
+        return
       }
-      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0)
-    }
 
-    // ── FBO 工厂 ─────────────────────────────────────────────
-    const RGBA16F = gl.RGBA16F
-    const RG16F = gl.RG16F
-    const R16F = gl.R16F
-    const RG = gl.RG
-    const RED = gl.RED
-    const HALF = gl.HALF_FLOAT
-
-    function createFBO(
-      w: number,
-      h: number,
-      internalFormat: number,
-      format: number,
-      type: number,
-      filter: number,
-    ): FBO {
-      const texture = gl!.createTexture()!
-      gl!.bindTexture(gl!.TEXTURE_2D, texture)
-      gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MIN_FILTER, filter)
-      gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MAG_FILTER, filter)
-      gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_S, gl!.CLAMP_TO_EDGE)
-      gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_T, gl!.CLAMP_TO_EDGE)
-      gl!.texImage2D(gl!.TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, null)
-      const fbo = gl!.createFramebuffer()!
-      gl!.bindFramebuffer(gl!.FRAMEBUFFER, fbo)
-      gl!.framebufferTexture2D(gl!.FRAMEBUFFER, gl!.COLOR_ATTACHMENT0, gl!.TEXTURE_2D, texture, 0)
-      gl!.viewport(0, 0, w, h)
-      gl!.clear(gl!.COLOR_BUFFER_BIT)
-      const texelSizeX = 1 / w
-      const texelSizeY = 1 / h
-      return {
-        texture,
-        fbo,
-        width: w,
-        height: h,
-        texelSizeX,
-        texelSizeY,
-        attach(id: number) {
-          gl!.activeTexture(gl!.TEXTURE0 + id)
-          gl!.bindTexture(gl!.TEXTURE_2D, texture)
-          return id
-        },
+      // ── 编译所有 program ────────────────────────────────────
+      const vertex = compile(gl, gl.VERTEX_SHADER, BASE_VERTEX)
+      if (vertex === null) {
+        onUnsupported?.()
+        return
       }
-    }
-
-    function createDoubleFBO(
-      w: number,
-      h: number,
-      internalFormat: number,
-      format: number,
-      type: number,
-      filter: number,
-    ): DoubleFBO {
-      let fbo1 = createFBO(w, h, internalFormat, format, type, filter)
-      let fbo2 = createFBO(w, h, internalFormat, format, type, filter)
-      return {
-        width: w,
-        height: h,
-        texelSizeX: fbo1.texelSizeX,
-        texelSizeY: fbo1.texelSizeY,
-        get read() {
-          return fbo1
-        },
-        set read(v: FBO) {
-          fbo1 = v
-        },
-        get write() {
-          return fbo2
-        },
-        set write(v: FBO) {
-          fbo2 = v
-        },
-        swap() {
-          const tmp = fbo1
-          fbo1 = fbo2
-          fbo2 = tmp
-        },
+      const copyP = program(gl, vertex, COPY_SHADER)
+      const clearP = program(gl, vertex, CLEAR_SHADER)
+      const splatP = program(gl, vertex, SPLAT_SHADER)
+      const advectionP = program(gl, vertex, ADVECTION_SHADER)
+      const divergenceP = program(gl, vertex, DIVERGENCE_SHADER)
+      const curlP = program(gl, vertex, CURL_SHADER)
+      const vorticityP = program(gl, vertex, VORTICITY_SHADER)
+      const pressureP = program(gl, vertex, PRESSURE_SHADER)
+      const gradientP = program(gl, vertex, GRADIENT_SUBTRACT_SHADER)
+      const displayP = program(gl, vertex, DISPLAY_SHADER)
+      const programs = [
+        copyP,
+        clearP,
+        splatP,
+        advectionP,
+        divergenceP,
+        curlP,
+        vorticityP,
+        pressureP,
+        gradientP,
+        displayP,
+      ]
+      if (programs.some((p) => p === null)) {
+        onUnsupported?.()
+        return
       }
-    }
 
-    // 分辨率：按面板长宽比取网格。
-    function getResolution(resolution: number): { width: number; height: number } {
-      let aspect = gl!.drawingBufferWidth / gl!.drawingBufferHeight
-      if (aspect < 1) aspect = 1 / aspect
-      const min = Math.round(resolution)
-      const max = Math.round(resolution * aspect)
-      return gl!.drawingBufferWidth > gl!.drawingBufferHeight
-        ? { width: max, height: min }
-        : { width: min, height: max }
-    }
+      // ── 全屏三角/四边形 ──────────────────────────────────────
+      const quad = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad)
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]), gl.STATIC_DRAW)
+      const indexBuffer = gl.createBuffer()
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 0, 2, 3]), gl.STATIC_DRAW)
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+      gl.enableVertexAttribArray(0)
 
-    // ── 初始化画布尺寸 ───────────────────────────────────────
-    const resize = (): boolean => {
-      const dpr = Math.min(globalThis.devicePixelRatio || 1, 2)
-      const w = Math.floor(canvas.clientWidth * dpr)
-      const h = Math.floor(canvas.clientHeight * dpr)
-      if (w === 0 || h === 0) return false
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w
-        canvas.height = h
+      const blit = (target: FBO | null): void => {
+        if (target === null) {
+          gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        } else {
+          gl.viewport(0, 0, target.width, target.height)
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
+        }
+        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0)
       }
-      return true
-    }
-    if (!resize()) {
-      // 面板还没布局出尺寸：等下一帧由 rAF 再试（resize 里已幂等）。
-    }
 
-    const simRes = getResolution(SIM_RESOLUTION)
-    const dyeRes = getResolution(DYE_RESOLUTION)
-    const LINEAR = gl.LINEAR
-    const NEAREST = gl.NEAREST
+      // ── FBO 工厂 ─────────────────────────────────────────────
+      const RGBA16F = gl.RGBA16F
+      const RG16F = gl.RG16F
+      const R16F = gl.R16F
+      const RG = gl.RG
+      const RED = gl.RED
+      const HALF = gl.HALF_FLOAT
 
-    const dye = createDoubleFBO(dyeRes.width, dyeRes.height, RGBA16F, gl.RGBA, HALF, LINEAR)
-    const velocity = createDoubleFBO(simRes.width, simRes.height, RG16F, RG, HALF, LINEAR)
-    const divergence = createFBO(simRes.width, simRes.height, R16F, RED, HALF, NEAREST)
-    const curlFBO = createFBO(simRes.width, simRes.height, R16F, RED, HALF, NEAREST)
-    const pressure = createDoubleFBO(simRes.width, simRes.height, R16F, RED, HALF, NEAREST)
+      function createFBO(
+        w: number,
+        h: number,
+        internalFormat: number,
+        format: number,
+        type: number,
+        filter: number,
+      ): FBO {
+        const texture = gl!.createTexture()!
+        gl!.bindTexture(gl!.TEXTURE_2D, texture)
+        gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MIN_FILTER, filter)
+        gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MAG_FILTER, filter)
+        gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_S, gl!.CLAMP_TO_EDGE)
+        gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_T, gl!.CLAMP_TO_EDGE)
+        gl!.texImage2D(gl!.TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, null)
+        const fbo = gl!.createFramebuffer()!
+        gl!.bindFramebuffer(gl!.FRAMEBUFFER, fbo)
+        gl!.framebufferTexture2D(gl!.FRAMEBUFFER, gl!.COLOR_ATTACHMENT0, gl!.TEXTURE_2D, texture, 0)
+        gl!.viewport(0, 0, w, h)
+        gl!.clear(gl!.COLOR_BUFFER_BIT)
+        const texelSizeX = 1 / w
+        const texelSizeY = 1 / h
+        return {
+          texture,
+          fbo,
+          width: w,
+          height: h,
+          texelSizeX,
+          texelSizeY,
+          attach(id: number) {
+            gl!.activeTexture(gl!.TEXTURE0 + id)
+            gl!.bindTexture(gl!.TEXTURE_2D, texture)
+            return id
+          },
+        }
+      }
 
-    // ── 溅射 ────────────────────────────────────────────────
-    const splat = (x: number, y: number, dx: number, dy: number): void => {
-      // 速度场：把指针方向的冲量打进去
-      gl.useProgram(splatP!.prog)
-      gl.uniform1i(splatP!.uniforms["uTarget"] ?? null, velocity.read.attach(0))
-      gl.uniform1f(splatP!.uniforms["aspectRatio"] ?? null, canvas.width / canvas.height)
-      gl.uniform2f(splatP!.uniforms["point"] ?? null, x, y)
-      gl.uniform3f(splatP!.uniforms["color"] ?? null, dx, dy, 0)
-      gl.uniform1f(
-        splatP!.uniforms["radius"] ?? null,
-        SPLAT_RADIUS / 100 / (canvas.width / canvas.height),
-      )
-      blit(velocity.write)
-      velocity.swap()
-      // dye 场：打进固定紫色
-      gl.uniform1i(splatP!.uniforms["uTarget"] ?? null, dye.read.attach(0))
-      gl.uniform3f(splatP!.uniforms["color"] ?? null, SPLAT_COLOR.r, SPLAT_COLOR.g, SPLAT_COLOR.b)
-      blit(dye.write)
-      dye.swap()
-    }
+      function createDoubleFBO(
+        w: number,
+        h: number,
+        internalFormat: number,
+        format: number,
+        type: number,
+        filter: number,
+      ): DoubleFBO {
+        let fbo1 = createFBO(w, h, internalFormat, format, type, filter)
+        let fbo2 = createFBO(w, h, internalFormat, format, type, filter)
+        return {
+          width: w,
+          height: h,
+          texelSizeX: fbo1.texelSizeX,
+          texelSizeY: fbo1.texelSizeY,
+          get read() {
+            return fbo1
+          },
+          set read(v: FBO) {
+            fbo1 = v
+          },
+          get write() {
+            return fbo2
+          },
+          set write(v: FBO) {
+            fbo2 = v
+          },
+          swap() {
+            const tmp = fbo1
+            fbo1 = fbo2
+            fbo2 = tmp
+          },
+        }
+      }
 
-    // ── 一步模拟 ────────────────────────────────────────────
-    const step = (dt: number): void => {
-      gl.disable(gl.BLEND)
-      // curl
-      gl.useProgram(curlP!.prog)
-      gl.uniform2f(curlP!.uniforms["texelSize"] ?? null, velocity.texelSizeX, velocity.texelSizeY)
-      gl.uniform1i(curlP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
-      blit(curlFBO)
-      // vorticity
-      gl.useProgram(vorticityP!.prog)
-      gl.uniform2f(
-        vorticityP!.uniforms["texelSize"] ?? null,
-        velocity.texelSizeX,
-        velocity.texelSizeY,
-      )
-      gl.uniform1i(vorticityP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
-      gl.uniform1i(vorticityP!.uniforms["uCurl"] ?? null, curlFBO.attach(1))
-      gl.uniform1f(vorticityP!.uniforms["curl"] ?? null, CURL)
-      gl.uniform1f(vorticityP!.uniforms["dt"] ?? null, dt)
-      blit(velocity.write)
-      velocity.swap()
-      // divergence
-      gl.useProgram(divergenceP!.prog)
-      gl.uniform2f(
-        divergenceP!.uniforms["texelSize"] ?? null,
-        velocity.texelSizeX,
-        velocity.texelSizeY,
-      )
-      gl.uniform1i(divergenceP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
-      blit(divergence)
-      // clear pressure（按 PRESSURE 衰减上一帧压力，作为迭代初值）
-      gl.useProgram(clearP!.prog)
-      gl.uniform1i(clearP!.uniforms["uTexture"] ?? null, pressure.read.attach(0))
-      gl.uniform1f(clearP!.uniforms["value"] ?? null, PRESSURE)
-      blit(pressure.write)
-      pressure.swap()
-      // pressure Jacobi 迭代
-      gl.useProgram(pressureP!.prog)
-      gl.uniform2f(
-        pressureP!.uniforms["texelSize"] ?? null,
-        velocity.texelSizeX,
-        velocity.texelSizeY,
-      )
-      gl.uniform1i(pressureP!.uniforms["uDivergence"] ?? null, divergence.attach(0))
-      for (let i = 0; i < PRESSURE_ITERATIONS; i++) {
-        gl.uniform1i(pressureP!.uniforms["uPressure"] ?? null, pressure.read.attach(1))
+      // 分辨率：按面板长宽比取网格。
+      function getResolution(resolution: number): { width: number; height: number } {
+        let aspect = gl!.drawingBufferWidth / gl!.drawingBufferHeight
+        if (aspect < 1) aspect = 1 / aspect
+        const min = Math.round(resolution)
+        const max = Math.round(resolution * aspect)
+        return gl!.drawingBufferWidth > gl!.drawingBufferHeight
+          ? { width: max, height: min }
+          : { width: min, height: max }
+      }
+
+      // ── 初始化画布尺寸 ───────────────────────────────────────
+      const resize = (): boolean => {
+        const dpr = Math.min(globalThis.devicePixelRatio || 1, 2)
+        const w = Math.floor(canvas.clientWidth * dpr)
+        const h = Math.floor(canvas.clientHeight * dpr)
+        if (w === 0 || h === 0) return false
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w
+          canvas.height = h
+        }
+        return true
+      }
+      if (!resize()) {
+        // 面板还没布局出尺寸：等下一帧由 rAF 再试（resize 里已幂等）。
+      }
+
+      const simRes = getResolution(SIM_RESOLUTION)
+      const dyeRes = getResolution(DYE_RESOLUTION)
+      const LINEAR = gl.LINEAR
+      const NEAREST = gl.NEAREST
+
+      const dye = createDoubleFBO(dyeRes.width, dyeRes.height, RGBA16F, gl.RGBA, HALF, LINEAR)
+      const velocity = createDoubleFBO(simRes.width, simRes.height, RG16F, RG, HALF, LINEAR)
+      const divergence = createFBO(simRes.width, simRes.height, R16F, RED, HALF, NEAREST)
+      const curlFBO = createFBO(simRes.width, simRes.height, R16F, RED, HALF, NEAREST)
+      const pressure = createDoubleFBO(simRes.width, simRes.height, R16F, RED, HALF, NEAREST)
+
+      // ── 溅射 ────────────────────────────────────────────────
+      const splat = (x: number, y: number, dx: number, dy: number): void => {
+        // 速度场：把指针方向的冲量打进去
+        gl.useProgram(splatP!.prog)
+        gl.uniform1i(splatP!.uniforms["uTarget"] ?? null, velocity.read.attach(0))
+        gl.uniform1f(splatP!.uniforms["aspectRatio"] ?? null, canvas.width / canvas.height)
+        gl.uniform2f(splatP!.uniforms["point"] ?? null, x, y)
+        gl.uniform3f(splatP!.uniforms["color"] ?? null, dx, dy, 0)
+        gl.uniform1f(
+          splatP!.uniforms["radius"] ?? null,
+          SPLAT_RADIUS / 100 / (canvas.width / canvas.height),
+        )
+        blit(velocity.write)
+        velocity.swap()
+        // dye 场：打进固定紫色
+        gl.uniform1i(splatP!.uniforms["uTarget"] ?? null, dye.read.attach(0))
+        gl.uniform3f(splatP!.uniforms["color"] ?? null, SPLAT_COLOR.r, SPLAT_COLOR.g, SPLAT_COLOR.b)
+        blit(dye.write)
+        dye.swap()
+      }
+
+      // ── 一步模拟 ────────────────────────────────────────────
+      const step = (dt: number): void => {
+        gl.disable(gl.BLEND)
+        // curl
+        gl.useProgram(curlP!.prog)
+        gl.uniform2f(curlP!.uniforms["texelSize"] ?? null, velocity.texelSizeX, velocity.texelSizeY)
+        gl.uniform1i(curlP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
+        blit(curlFBO)
+        // vorticity
+        gl.useProgram(vorticityP!.prog)
+        gl.uniform2f(
+          vorticityP!.uniforms["texelSize"] ?? null,
+          velocity.texelSizeX,
+          velocity.texelSizeY,
+        )
+        gl.uniform1i(vorticityP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
+        gl.uniform1i(vorticityP!.uniforms["uCurl"] ?? null, curlFBO.attach(1))
+        gl.uniform1f(vorticityP!.uniforms["curl"] ?? null, CURL)
+        gl.uniform1f(vorticityP!.uniforms["dt"] ?? null, dt)
+        blit(velocity.write)
+        velocity.swap()
+        // divergence
+        gl.useProgram(divergenceP!.prog)
+        gl.uniform2f(
+          divergenceP!.uniforms["texelSize"] ?? null,
+          velocity.texelSizeX,
+          velocity.texelSizeY,
+        )
+        gl.uniform1i(divergenceP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
+        blit(divergence)
+        // clear pressure（按 PRESSURE 衰减上一帧压力，作为迭代初值）
+        gl.useProgram(clearP!.prog)
+        gl.uniform1i(clearP!.uniforms["uTexture"] ?? null, pressure.read.attach(0))
+        gl.uniform1f(clearP!.uniforms["value"] ?? null, PRESSURE)
         blit(pressure.write)
         pressure.swap()
+        // pressure Jacobi 迭代
+        gl.useProgram(pressureP!.prog)
+        gl.uniform2f(
+          pressureP!.uniforms["texelSize"] ?? null,
+          velocity.texelSizeX,
+          velocity.texelSizeY,
+        )
+        gl.uniform1i(pressureP!.uniforms["uDivergence"] ?? null, divergence.attach(0))
+        for (let i = 0; i < PRESSURE_ITERATIONS; i++) {
+          gl.uniform1i(pressureP!.uniforms["uPressure"] ?? null, pressure.read.attach(1))
+          blit(pressure.write)
+          pressure.swap()
+        }
+        // gradient subtract
+        gl.useProgram(gradientP!.prog)
+        gl.uniform2f(
+          gradientP!.uniforms["texelSize"] ?? null,
+          velocity.texelSizeX,
+          velocity.texelSizeY,
+        )
+        gl.uniform1i(gradientP!.uniforms["uPressure"] ?? null, pressure.read.attach(0))
+        gl.uniform1i(gradientP!.uniforms["uVelocity"] ?? null, velocity.read.attach(1))
+        blit(velocity.write)
+        velocity.swap()
+        // advect velocity
+        gl.useProgram(advectionP!.prog)
+        gl.uniform2f(
+          advectionP!.uniforms["texelSize"] ?? null,
+          velocity.texelSizeX,
+          velocity.texelSizeY,
+        )
+        gl.uniform1i(advectionP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
+        gl.uniform1i(advectionP!.uniforms["uSource"] ?? null, velocity.read.attach(0))
+        gl.uniform1f(advectionP!.uniforms["dt"] ?? null, dt)
+        gl.uniform1f(advectionP!.uniforms["dissipation"] ?? null, VELOCITY_DISSIPATION)
+        blit(velocity.write)
+        velocity.swap()
+        // advect dye
+        gl.uniform1i(advectionP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
+        gl.uniform1i(advectionP!.uniforms["uSource"] ?? null, dye.read.attach(1))
+        gl.uniform1f(advectionP!.uniforms["dissipation"] ?? null, DENSITY_DISSIPATION)
+        blit(dye.write)
+        dye.swap()
       }
-      // gradient subtract
-      gl.useProgram(gradientP!.prog)
-      gl.uniform2f(
-        gradientP!.uniforms["texelSize"] ?? null,
-        velocity.texelSizeX,
-        velocity.texelSizeY,
-      )
-      gl.uniform1i(gradientP!.uniforms["uPressure"] ?? null, pressure.read.attach(0))
-      gl.uniform1i(gradientP!.uniforms["uVelocity"] ?? null, velocity.read.attach(1))
-      blit(velocity.write)
-      velocity.swap()
-      // advect velocity
-      gl.useProgram(advectionP!.prog)
-      gl.uniform2f(
-        advectionP!.uniforms["texelSize"] ?? null,
-        velocity.texelSizeX,
-        velocity.texelSizeY,
-      )
-      gl.uniform1i(advectionP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
-      gl.uniform1i(advectionP!.uniforms["uSource"] ?? null, velocity.read.attach(0))
-      gl.uniform1f(advectionP!.uniforms["dt"] ?? null, dt)
-      gl.uniform1f(advectionP!.uniforms["dissipation"] ?? null, VELOCITY_DISSIPATION)
-      blit(velocity.write)
-      velocity.swap()
-      // advect dye
-      gl.uniform1i(advectionP!.uniforms["uVelocity"] ?? null, velocity.read.attach(0))
-      gl.uniform1i(advectionP!.uniforms["uSource"] ?? null, dye.read.attach(1))
-      gl.uniform1f(advectionP!.uniforms["dissipation"] ?? null, DENSITY_DISSIPATION)
-      blit(dye.write)
-      dye.swap()
-    }
 
-    const render = (): void => {
-      gl.enable(gl.BLEND)
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
-      gl.useProgram(displayP!.prog)
-      gl.uniform1i(displayP!.uniforms["uTexture"] ?? null, dye.read.attach(0))
-      blit(null)
-    }
-
-    // ── 指针 & 空闲自发溅射 ──────────────────────────────────
-    //
-    // ★ 监听挂在**父容器**上而不是 canvas 自己：canvas 是
-    // `pointer-events-none`（好让它身后的「建图」按钮仍可点），
-    // 于是它自己收不到 pointer 事件。父容器（整块空态面板）能收到，
-    // 指针划过面板任意位置都驱动流体，而按钮照旧可点。
-    const surface = canvas.parentElement ?? canvas
-    let lastPointerAt = 0
-    let lastAutoAt = 0
-    let prev: { x: number; y: number } | null = null
-    const onMove = (e: PointerEvent): void => {
-      const rect = canvas.getBoundingClientRect()
-      const x = (e.clientX - rect.left) / rect.width
-      const y = 1 - (e.clientY - rect.top) / rect.height
-      if (prev !== null) {
-        const dx = (x - prev.x) * SPLAT_FORCE
-        const dy = (y - prev.y) * SPLAT_FORCE
-        if (dx !== 0 || dy !== 0) splat(x, y, dx, dy)
+      const render = (): void => {
+        gl.enable(gl.BLEND)
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+        gl.useProgram(displayP!.prog)
+        gl.uniform1i(displayP!.uniforms["uTexture"] ?? null, dye.read.attach(0))
+        blit(null)
       }
-      prev = { x, y }
-      lastPointerAt = performance.now()
-    }
-    const onLeave = (): void => {
-      prev = null
-    }
-    surface.addEventListener("pointermove", onMove as EventListener)
-    surface.addEventListener("pointerleave", onLeave)
 
-    /** 自发溅射：从随机边缘朝内打一股，模拟"活着的等待态"。用索引化的伪随机。 */
-    let autoSeed = 1
-    const autoRandom = (): number => {
-      autoSeed = (autoSeed * 1103515245 + 12345) & 0x7fffffff
-      return autoSeed / 0x7fffffff
-    }
-    const autoSplat = (): void => {
-      const x = autoRandom()
-      const y = autoRandom()
-      const dx = (autoRandom() - 0.5) * SPLAT_FORCE * 0.7
-      const dy = (autoRandom() - 0.5) * SPLAT_FORCE * 0.7
-      splat(x, y, dx, dy)
-    }
-
-    // 起手先打两股，别让首帧空白。
-    autoSplat()
-    autoSplat()
-
-    // ── 主循环 ──────────────────────────────────────────────
-    let raf = 0
-    let lastTime = performance.now()
-    const loop = (now: number): void => {
-      resize()
-      let dt = (now - lastTime) / 1000
-      dt = Math.min(dt, 0.016666) // 卡顿时钳住，避免爆炸
-      lastTime = now
-      // 空闲一段时间没有指针 → 定时自发溅射
-      if (now - lastPointerAt > IDLE_AFTER_MS && now - lastAutoAt > AUTO_SPLAT_EVERY_MS) {
-        autoSplat()
-        lastAutoAt = now
+      // ── 指针 & 空闲自发溅射 ──────────────────────────────────
+      //
+      // ★ 监听挂在**父容器**上而不是 canvas 自己：canvas 是
+      // `pointer-events-none`（好让它身后的「建图」按钮仍可点），
+      // 于是它自己收不到 pointer 事件。父容器（整块空态面板）能收到，
+      // 指针划过面板任意位置都驱动流体，而按钮照旧可点。
+      const surface = canvas.parentElement ?? canvas
+      let lastPointerAt = 0
+      let lastAutoAt = 0
+      let prev: { x: number; y: number } | null = null
+      const onMove = (e: PointerEvent): void => {
+        const rect = canvas.getBoundingClientRect()
+        const x = (e.clientX - rect.left) / rect.width
+        const y = 1 - (e.clientY - rect.top) / rect.height
+        if (prev !== null) {
+          const dx = (x - prev.x) * SPLAT_FORCE
+          const dy = (y - prev.y) * SPLAT_FORCE
+          if (dx !== 0 || dy !== 0) splat(x, y, dx, dy)
+        }
+        prev = { x, y }
+        lastPointerAt = performance.now()
       }
-      step(dt)
-      render()
+      const onLeave = (): void => {
+        prev = null
+      }
+      surface.addEventListener("pointermove", onMove as EventListener)
+      surface.addEventListener("pointerleave", onLeave)
+
+      /** 自发溅射：从随机边缘朝内打一股，模拟"活着的等待态"。用索引化的伪随机。 */
+      let autoSeed = 1
+      const autoRandom = (): number => {
+        autoSeed = (autoSeed * 1103515245 + 12345) & 0x7fffffff
+        return autoSeed / 0x7fffffff
+      }
+      const autoSplat = (): void => {
+        const x = autoRandom()
+        const y = autoRandom()
+        const dx = (autoRandom() - 0.5) * SPLAT_FORCE * 0.7
+        const dy = (autoRandom() - 0.5) * SPLAT_FORCE * 0.7
+        splat(x, y, dx, dy)
+      }
+
+      // 起手先打两股，别让首帧空白。
+      autoSplat()
+      autoSplat()
+
+      // ── 主循环 ──────────────────────────────────────────────
+      let raf = 0
+      let lastTime = performance.now()
+      const loop = (now: number): void => {
+        resize()
+        let dt = (now - lastTime) / 1000
+        dt = Math.min(dt, 0.016666) // 卡顿时钳住，避免爆炸
+        lastTime = now
+        // 空闲一段时间没有指针 → 定时自发溅射
+        if (now - lastPointerAt > IDLE_AFTER_MS && now - lastAutoAt > AUTO_SPLAT_EVERY_MS) {
+          autoSplat()
+          lastAutoAt = now
+        }
+        step(dt)
+        render()
+        raf = requestAnimationFrame(loop)
+      }
       raf = requestAnimationFrame(loop)
+
+      /**
+       * `boot` 的 `stop`：停 raf + 解绑指针。★ **不** loseContext ——
+       * context restored 后要 re-boot，那时上一轮的 GL 句柄本就随旧上下文
+       * 一起作废了，不需要（也不能）再 loseContext。真正的 loseContext
+       * 只在**最终卸载**时做一次（见外层 return）。
+       */
+      return () => {
+        cancelAnimationFrame(raf)
+        surface.removeEventListener("pointermove", onMove as EventListener)
+        surface.removeEventListener("pointerleave", onLeave)
+      }
     }
-    raf = requestAnimationFrame(loop)
+
+    /**
+     * ── ★★★ context-lost / restored 接线（这次修复的主体）────────────
+     *
+     * ## 病症（实测确证）
+     *
+     * 空态那层流体的 canvas `gl.isContextLost() === true` —— 而画面停在
+     * 丢失前的最后一帧，Chromium 把它画成一个碎图（😞）。console 里**一个
+     * 错都没有**：context lost 不抛 JS 异常，只让后续 GL 调用静默变 no-op。
+     * 这正是 CLAUDE.md §4 说的那类静默降级。
+     *
+     * ## 触发路径（都在真机上发生）
+     *
+     * · **建图占 GPU**：kl-server + Python 抽取阶段满载时，Chromium 在 GPU
+     *   压力下会主动回收 WebGL 上下文 —— 而空态流体恰好在"正在建图"时显示，
+     *   两件事必然同时发生；
+     * · 快速重挂载：上一个 effect 的 loseContext 与新 effect 的 getContext 竞争。
+     *
+     * ## 为什么原来永远不自愈
+     *
+     * 原实现**没有** `webglcontextlost` / `webglcontextrestored` 监听，
+     * 且丢失后那个 rAF 循环仍在对死上下文发 GL 调用（no-op）。于是 canvas
+     * 永久停在碎图。
+     *
+     * ## 修法
+     *
+     * · `lost`：`preventDefault()`（**必需** —— 不 prevent 浏览器就不会派发
+     *   restored 事件，那样即使能恢复也永远收不到），并停掉当前这轮 `boot`；
+     * · `restored`：重新 `boot()` —— 整段 GL 初始化可重入，见 `boot` 注释。
+     */
+    const onLost = (event: Event): void => {
+      event.preventDefault()
+      teardown?.()
+      teardown = undefined
+    }
+    const onRestored = (): void => {
+      if (disposed) return
+      teardown = boot()
+    }
+    canvas.addEventListener("webglcontextlost", onLost)
+    canvas.addEventListener("webglcontextrestored", onRestored)
+
+    teardown = boot()
 
     return () => {
-      cancelAnimationFrame(raf)
-      surface.removeEventListener("pointermove", onMove as EventListener)
-      surface.removeEventListener("pointerleave", onLeave)
-      // 释放 GL 资源（面板会反复挂载/卸载）
-      const ext = gl.getExtension("WEBGL_lose_context")
-      ext?.loseContext()
+      disposed = true
+      canvas.removeEventListener("webglcontextlost", onLost)
+      canvas.removeEventListener("webglcontextrestored", onRestored)
+      teardown?.()
+      teardown = undefined
+      /**
+       * 释放 GL 资源（面板会反复挂载/卸载）。★ 只在**最终卸载**这一处
+       * loseContext —— 放进 `boot` 的 stop 里会让 context-restored 的
+       * re-boot 立刻又把自己 lose 掉，陷入死循环。
+       */
+      const finalGl = canvas.getContext("webgl2")
+      finalGl?.getExtension("WEBGL_lose_context")?.loseContext()
     }
   }, [reduceMotion, onUnsupported])
 
