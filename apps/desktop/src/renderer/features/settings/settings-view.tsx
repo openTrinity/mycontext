@@ -285,8 +285,19 @@ export function SettingsView({ title }: SettingsViewProps = {}) {
         原注释担心的"控件靠右、中间一大片空白"是 `SettingRow` 的
         `justify-between` 造成的，那要在行组件里解决，不是靠掐整页的宽度
         —— 掐宽度会顺带把**不该窄**的面板也一起掐了。
+
+        ★★ `min-w-0` 不能少 —— 这是「授权页右侧被切掉」那个 bug 的根因。
+
+        这个内容列是弹窗（960px）横向 flex 里的伸缩项，而 flex 项的默认
+        `min-width:auto` 意味着它**拒绝缩到比内容更窄**。授权面板那一行有
+        5 颗按钮（重新授权/用授权码/退出/换人/换应用）+ dws 路径输入，
+        它们的固有宽度超过可用宽度时，这一列不是让子元素换行，而是**自己
+        撑过 960px**，多出的部分被弹窗的 `overflow-hidden` 直接裁掉 ——
+        于是按钮、`使用自有 dws` 链接、路径框全在右缘消失，且没有横向滚动
+        条能够到（下面那层只有 `overflow-y-auto`）。加 `min-w-0` 让它能缩到
+        可用宽度，子元素便在界内换行（`ChannelAuthPanel` 那行本就 `flex-wrap`）。
       */}
-      <div className="flex min-h-0 flex-1 flex-col bg-[var(--bg-base-normal)]">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--bg-base-normal)]">
         {/*
           ── ★★★ 全局的「当前渠道」条 ─────────────────────────────
 
