@@ -27,7 +27,12 @@ from typing import TYPE_CHECKING, Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
+from kl_graph.utils.litellm_config import (
+    litellm,
+    litellm_base_url,
+    provider_api_key,
+    provider_model,
+)
 
 # Ensure Unicode-safe stdout/stderr on all platforms.  On Windows the console
 # defaults to GBK / cp1252, which crashes print()/logging on emoji or non-ASCII.
@@ -1585,7 +1590,7 @@ async def global_search(req: GlobalSearchRequest):
                 )
 
             async def _acomplete(system_prompt: str, user_prompt: str) -> str:
-                """litellm Anthropic-mode wrapper mirroring engine._aphase2."""
+                """litellm wrapper mirroring engine._aphase2 (provider from config)."""
                 resp = await litellm.acompletion(
                     model=provider_model(
                         cfg.services.llm_flash.provider,
@@ -1595,7 +1600,10 @@ async def global_search(req: GlobalSearchRequest):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    api_base=cfg.services.llm_flash.base_url or "",
+                    api_base=litellm_base_url(
+                        cfg.services.llm_flash.provider,
+                        cfg.services.llm_flash.base_url or "",
+                    ),
                     api_key=provider_api_key(cfg.services.llm_flash.provider),
                     max_tokens=max(
                         int(cfg.pipelines.query.global_search.map_max_tokens),

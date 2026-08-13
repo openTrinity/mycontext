@@ -206,6 +206,25 @@ export function resolveKlCredentials(runtimeConfig: RuntimeConfigService): {
   return { base: base.trim(), key: key.trim() }
 }
 
+/**
+ * embedding 网关 base 规整成 OpenAI 兼容形态：**恰好以一个 `/v1` 结尾**。
+ *
+ * litellm 把 base 原样交给 OpenAI SDK，SDK 视其为 API 根并拼 `/embeddings`；
+ * SDK 自己的默认根是 `https://api.openai.com/v1` —— `/v1` 属于根本身。
+ * DashScope 只提供 `…/compatible-mode/v1/embeddings`，所以：
+ * - 缺 `/v1` → 404（litellm.NotFoundError: OpenAIException - Error code: 404）
+ * - 用户配的 URL 已带 `/v1` 而这里再拼一个 → `/v1/v1` 同样 404（实测事故）
+ *
+ * 于是把结尾任意个 `/v1` 收敛成一个，缺则补一个。与 kl 侧
+ * `kl_graph/utils/litellm_config.py` 的 `openai_base_url` 同口径
+ * （kl 侧对一切入口做防御性兜底，这里是源头修正）。
+ */
+export function openAiEmbedBaseUrl(base: string): string {
+  const trimmed = base.trim().replace(/\/+$/, "")
+  if (trimmed === "") return ""
+  return `${trimmed.replace(/(\/v1)+$/, "")}/v1`
+}
+
 export function bootstrapApp(mainDir: string): AppContext {
   const packaged = app.isPackaged
   // 配置要先于 paths：dataDir 覆盖项来自配置。
@@ -1195,14 +1214,17 @@ export function bootstrapApp(mainDir: string): AppContext {
       const { base, key } = resolveKlCredentials(runtimeConfig)
       const r = runtimeConfig.resolved()
       return {
-        // ★ LLM 走 Anthropic 模式：base 不含 /v1（litellm 自己拼 /v1/messages），
-        // 裸模型名（kl 的 extractor 自己拼 anthropic/ 前缀）。见 kl_graph/config.py。
+        // ★ LLM 传输由 kl 侧 provider 决定（anthropic 拼 /v1/messages、openai 拼
+        // /chat/completions），base 照原样传 —— 带不带 /v1 都行，kl 的
+        // litellm_base_url 会按传输规整（见 kl_graph/utils/litellm_config.py）。
+        // 裸模型名（kl 自己拼 provider 前缀）。见 kl_graph/config.py。
         llmBaseUrl: base,
         // ★ kl 抽取模型：默认回退主模型（glm-5.2，实测 anthropic 模式可抽中文 facts）。
         // 想给 kl 单独指一个模型就在设置里填 KL 模型，或用 KL_LLM_MODEL env 覆盖。
         llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-        // ★ embedding 走 OpenAI 兼容：base 要带 /v1（litellm 直接 POST {base}/embeddings）。
-        embedBaseUrl: base === "" ? "" : `${base.replace(/\/$/, "")}/v1`,
+        // ★ embedding 走 OpenAI 兼容：base 要带恰好一个 /v1（litellm 直接 POST
+        // {base}/embeddings；用户配好带 /v1 的 URL 时不能再拼，否则 /v1/v1 → 404）。
+        embedBaseUrl: openAiEmbedBaseUrl(base),
         embedModel: r.embedModel,
         apiKey: key,
         // ★ 网关（DashScope 兼容）的 text-embedding-v4 默认返回 1024 维，而 kl 默认
@@ -1306,7 +1328,7 @@ export function bootstrapApp(mainDir: string): AppContext {
     return {
       llmBaseUrl: base,
       llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-      embedBaseUrl: base === "" ? "" : `${base.replace(/\/$/, "")}/v1`,
+      embedBaseUrl: openAiEmbedBaseUrl(base),
       embedModel: r.embedModel,
       apiKey: key,
       embeddingDim: 2048,

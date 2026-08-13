@@ -28,7 +28,12 @@ from kl_graph.config import cfg
 from kl_graph.models.types import Edge, EdgeType
 from kl_graph.storage.base import KnowledgeStore
 from kl_graph.storage.vector_store import VectorStore
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
+from kl_graph.utils.litellm_config import (
+    litellm,
+    litellm_base_url,
+    provider_api_key,
+    provider_model,
+)
 
 
 @dataclass
@@ -582,7 +587,10 @@ async def _judge_batch(
                     cfg.services.llm_flash.model,
                 ),
                 messages=[{"role": "user", "content": prompt}],
-                api_base=cfg.services.llm_flash.base_url or "",
+                api_base=litellm_base_url(
+                    cfg.services.llm_flash.provider,
+                    cfg.services.llm_flash.base_url or "",
+                ),
                 api_key=api_key,
                 temperature=0.1,
                 max_tokens=1024,

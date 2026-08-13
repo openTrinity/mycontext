@@ -11,11 +11,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 from kl_graph.config import cfg
-from kl_graph.utils.litellm_config import litellm
+from kl_graph.utils.litellm_config import litellm, litellm_base_url
 
 # Service-level constants (endpoint identity, not behavioral params)
 EMBED_API_KEY = cfg.services.embedding.api_key or ""
-EMBED_BASE_URL = cfg.services.embedding.base_url or ""
+# Embeddings always ride litellm's OpenAI-compatible transport (see Embedder
+# below), so the base URL is normalized to the OpenAI contract regardless of
+# which provider serves chat completions.
+EMBED_BASE_URL = litellm_base_url("openai", cfg.services.embedding.base_url or "")
 EMBED_MODEL = cfg.services.embedding.model
 EMBED_SEND_DIMENSIONS = bool(cfg.services.embedding.send_dimensions)
 EMBEDDING_DIM = int(cfg.services.embedding.dim)

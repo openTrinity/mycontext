@@ -11,14 +11,21 @@ from dataclasses import dataclass, field
 
 from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, cfg
 from kl_graph.ingest.embedder import Embedder
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
+from kl_graph.utils.litellm_config import (
+    litellm,
+    litellm_base_url,
+    provider_api_key,
+    provider_model,
+)
 
 # Derived constants from OmegaConf config
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 GRAPH_BACKEND = cfg.storage.graph.backend
 LLM_PROVIDER = cfg.services.llm_flash.provider
-LLM_BASE_URL = cfg.services.llm_flash.base_url or ""
+LLM_BASE_URL = litellm_base_url(
+    cfg.services.llm_flash.provider, cfg.services.llm_flash.base_url or ""
+)
 LLM_MODEL = cfg.services.llm_flash.model
 CONFIDENCE_HIGH = float(cfg.pipelines.query.confidence.high)
 RRF_K = int(cfg.pipelines.query.fusion.rrf_k)

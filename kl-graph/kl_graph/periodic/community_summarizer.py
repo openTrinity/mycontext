@@ -28,7 +28,12 @@ from kl_graph.config import DATA_DIR, cfg
 from kl_graph.ingest.chunker import num_tokens_from_string
 from kl_graph.models.types import community_id_from
 from kl_graph.storage.sqlite_store import SQLiteStore
-from kl_graph.utils.litellm_config import litellm, provider_api_key, provider_model
+from kl_graph.utils.litellm_config import (
+    litellm,
+    litellm_base_url,
+    provider_api_key,
+    provider_model,
+)
 
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 
@@ -416,7 +421,10 @@ async def _summarize_community(
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    api_base=cfg.services.llm_flash.base_url or "",
+                    api_base=litellm_base_url(
+                        cfg.services.llm_flash.provider,
+                        cfg.services.llm_flash.base_url or "",
+                    ),
                     api_key=api_key,
                     temperature=0.3,
                     max_tokens=MAX_REPORT_LENGTH,
