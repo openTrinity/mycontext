@@ -207,6 +207,23 @@ export function resolveKlCredentials(runtimeConfig: RuntimeConfigService): {
 }
 
 /**
+ * 自动建图**能不能开** —— 纯判据，导出成函数好测（与 `resolveKlCredentials` 同一个
+ * 理由：真正会漂的是判据本身，闭包要整套装配才能测）。
+ *
+ * 两个前提缺一不可：
+ * · **有凭证**（`base`/`key` 都非空）—— 没凭证时 kl 的 LLM 调用必然失败、反复刷屏；
+ * · **当前已绑主渠道身份**（`identityBound`）—— 建图处理库里的**存量语料**，与采不采
+ *   新消息无关，所以 graphSync 定时器是无条件起的（挂库是解析身份的前置，见 startup
+ *   里 `dataFlowsAllowed` 那段）。于是登出/未绑身份时，只要 env 里有凭证它照样触发
+ *   建图 → 起 kl-server → 每个抽取 batch 刷 "Missing credentials" 报错，而那个库此刻
+ *   并不对应任何登录着的身份。加上身份门后，"没连的时候什么都不跑"与 `ensureReady`/
+ *   persona/采集那三者同一个前提。手动点建图走 `rebuildGraph()`、不经过这里。
+ */
+export function autoBuildAllowed(base: string, key: string, identityBound: boolean): boolean {
+  return base !== "" && key !== "" && identityBound
+}
+
+/**
  * embedding 网关 base 规整成 OpenAI 兼容形态：**恰好以一个 `/v1` 结尾**。
  *
  * litellm 把 base 原样交给 OpenAI SDK，SDK 视其为 API 根并拼 `/embeddings`；
@@ -486,9 +503,27 @@ export function bootstrapApp(mainDir: string): AppContext {
          * 到底配没配 —— 而这不是配置问题，是我们两处判据不一致。
          *
          * 现在两处都走 `resolveKlCredentials()`：一处兜底，一处判断，同一个源。
+         *
+         * ★★ 除了凭证，还必须**当前已绑主渠道(钉钉)身份**才建图。
+         *
+         * ## 为什么（用户报的"没登录也在刷 LLM 报错"）
+         *
+         * `feed.attach` 的 graphSync 定时器是**无条件**起的（挂库是解析身份的前置，
+         * 不能等身份，见 startup 里 `dataFlowsAllowed` 那段）。而建图处理的是库里
+         * **已有的存量语料**，与"要不要采新消息"无关 —— 于是登出/未绑身份时，
+         * 只要 `.env` 里有网关凭证，它照样触发建图 → 起 kl-server → 每个抽取 batch
+         * 刷屏。而那个库此刻并不对应任何登录着的身份。
+         *
+         * 加上 `currentProfile("dingtalk") !== undefined`（= 当前这个 vault 绑着钉钉
+         * 身份、命令能带 `--profile`）之后：未绑身份时自动建图关闭，与 `ensureReady`/
+         * persona/采集那三者的 `dataFlowsAllowed` 门同一个前提，"没连的时候什么都不跑"
+         * 这件事就齐了。手动点建图仍走 `rebuildGraph()`、不经过这里（那是明确的用户意图）。
+         *
+         * ★ 非主渠道走各自管线，它们本就是**登录后**才 mount 的，天然已门控。
          */
         const { base, key } = resolveKlCredentials(runtimeConfig)
-        return base !== "" && key !== ""
+        const identityBound = activeIdentity.currentProfile(dingtalk.meta.id) !== undefined
+        return autoBuildAllowed(base, key, identityBound)
       },
       /**
        * ★ 两次建图之间至少隔多久（默认 1h，设置里可配 15min–6h）。

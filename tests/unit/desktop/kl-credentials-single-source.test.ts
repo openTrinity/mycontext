@@ -27,7 +27,7 @@
  * 是导出的纯函数，这也正是这次改动做的事。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { resolveKlCredentials } from "@main/bootstrap/startup.js"
+import { autoBuildAllowed, resolveKlCredentials } from "@main/bootstrap/startup.js"
 
 /** 只给这个函数用到的两个字段（其余 resolved() 项与判据无关）。 */
 function fakeRuntimeConfig(klBaseUrl: string, klApiKey: string) {
@@ -142,5 +142,30 @@ describe("★★ 真的没配才算没配", () => {
     const { base, key } = resolveKlCredentials(fakeRuntimeConfig("", ""))
     expect(base).toBe("https://env.example.com")
     expect(key).toBe("env-token")
+  })
+})
+
+/**
+ * 自动建图的门（`autoBuildAllowed`）—— 凭证 **且** 已绑身份。
+ *
+ * ## 这一组锁的是用户报的"没登录钉钉、kl-server 还在刷 Missing credentials"
+ *
+ * graphSync 定时器无条件起（挂库是解析身份的前置），而建图处理的是**存量语料**、
+ * 与采不采新消息无关。于是登出时只要有凭证它照样触发建图 → 起 kl-server → 刷屏。
+ * 加身份门之后：未绑身份 → 不建，与采集/persona/ensureReady 那三者同一个前提。
+ */
+describe("★★ 自动建图门：凭证 + 已绑身份", () => {
+  it("有凭证且已绑身份 → 允许", () => {
+    expect(autoBuildAllowed("https://gw", "k", true)).toBe(true)
+  })
+
+  it("★★ 有凭证但未绑身份 → 不允许（登出/未登录时不建图、不起 kl 刷屏）", () => {
+    expect(autoBuildAllowed("https://gw", "k", false)).toBe(false)
+  })
+
+  it("已绑身份但没凭证 → 不允许（没 key 建图必然失败）", () => {
+    expect(autoBuildAllowed("", "", true)).toBe(false)
+    expect(autoBuildAllowed("https://gw", "", true)).toBe(false)
+    expect(autoBuildAllowed("", "k", true)).toBe(false)
   })
 })

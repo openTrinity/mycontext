@@ -194,25 +194,54 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
       : (SUGGESTED_EMBED as readonly string[])
 
   /**
-   * 知识库那一路**实际会用**的协议：
-   * 用户手动改的 > 新鲜探测识别到的 > 已存值。
+   * 某个**具体模型**支持哪些协议（读探测到的 `modelProviders`）。
    *
-   * 与 `probeFresh` 同一条原则：只在探测结果仍对应当前输入时才拿它去自动填，
-   * 否则会用"上一次网关"的识别值覆盖"这一次地址"。
+   * 探到该模型的 `supported_endpoint_types` 就用它；探不到（老网关不给、或
+   * 没探过）回退到**网关级**支持集。这让"选了只支持 openai 的模型"时
+   * anthropic chip 能标灰，而不是拿网关整体的支持集去糊每个模型。
    */
-  const effectiveKlProvider: ModelProvider =
-    klProvider ?? (result?.ok === true ? result.provider : null) ?? current.klEffective.provider
+  const providersForModel = (model: string): readonly ModelProvider[] => {
+    const per = result?.ok === true ? result.modelProviders[model] : undefined
+    if (per !== undefined && per.length > 0) return per
+    return result?.ok === true && result.providers.length > 0
+      ? result.providers
+      : (["openai", "anthropic"] as const)
+  }
 
   /**
-   * 主模型实际会用的协议：用户手动改的 > 新鲜探测识别到的 > 已存值。
-   * 与知识库那条同一个判断（探测识别到的协议自动填，可手动覆盖）。
+   * 某个模型的**推荐协议**：它支持 anthropic 就选 anthropic（claude 类走原生协议
+   * 信息更全），否则 openai。这就是"从列表里选一个模型 → 自动选好它的协议"。
+   */
+  const preferredProviderFor = (model: string): ModelProvider =>
+    providersForModel(model).includes("anthropic") ? "anthropic" : "openai"
+
+  /**
+   * 知识库那一路**实际会用**的协议：
+   * 用户手动切的 > 新鲜探测下**所选 kl 模型**的推荐协议 > 已存值。
+   *
+   * ★ 从"网关级识别值"改成"按所选模型"：同一个网关里有的模型只支持 openai、
+   * 有的两者都支持，拿网关级的一个值套所有模型是错的。用户手选仍然优先
+   * （`klProvider !== null`），选模型时会把手选清掉（见 onPick），于是自动重算。
+   */
+  const klModelValue = klModel ?? current.klModelMain.value
+  const effectiveKlProvider: ModelProvider =
+    klProvider ??
+    (result?.ok === true && klModelValue.trim() !== ""
+      ? preferredProviderFor(klModelValue)
+      : null) ??
+    current.klEffective.provider
+
+  /**
+   * 主模型实际会用的协议：用户手动切的 > 新鲜探测下**所选主模型**的推荐协议 > 已存值。
    */
   const effectiveMainProvider: ModelProvider =
-    mainProvider ?? (result?.ok === true ? result.provider : null) ?? current.mainProvider.value
+    mainProvider ??
+    (result?.ok === true && modelValue.trim() !== "" ? preferredProviderFor(modelValue) : null) ??
+    current.mainProvider.value
 
   /**
-   * 探测识别到的网关**支持的协议集**。没探过（或探测没给协议信息）时两个都摆出来
-   * —— 让用户仍能手选，只是没有"这个网关支持哪些"的确证。探到了就据它标注/限制。
+   * 探测识别到的网关**支持的协议集**（网关级，用于顶部 tag）。没探过（或探测没给
+   * 协议信息）时两个都摆出来 —— 让用户仍能手选，只是没有"这个网关支持哪些"的确证。
    */
   const supportedProviders: readonly ModelProvider[] =
     result?.ok === true && result.providers.length > 0 ? result.providers : ["openai", "anthropic"]
@@ -288,6 +317,9 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
             onPick={(next) => {
               setModelMain(next)
               setCustomModel(false)
+              // ★ 选了模型就把手动协议清掉 → effectiveMainProvider 自动取该模型的
+              // 推荐协议（有 anthropic 选 anthropic）。用户之后仍可再手动切。
+              setMainProvider(null)
             }}
             otherLabel={t("model.other")}
             custom={customModel || !modelOptions.includes(modelValue)}
@@ -322,14 +354,14 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
           ★ 主模型协议选择器 —— 现在可切（去掉了原来那句"不可切换"）。
           opencode 子进程按它选 @ai-sdk/anthropic / @ai-sdk/openai-compatible 内联
           provider，直连 LlmClient 按它走 /v1/messages / /v1/chat/completions。
-          两个 chip 亮不亮由探测到的 `supportedProviders` 决定（读网关每模型的
-          supported_endpoint_types），不再靠"用哪种头连通"猜一个。
+          两个 chip 亮不亮由**所选模型**的 supported_endpoint_types 决定（不是网关整体）——
+          选了只支持 openai 的模型时 anthropic chip 就标灰。
         */}
         <ProviderPicker
           label={t("model.provider.protocol")}
           hint={t("model.provider.mainProtocolHint")}
           value={effectiveMainProvider}
-          supported={supportedProviders}
+          supported={providersForModel(modelValue)}
           onPick={setMainProvider}
           openaiLabel={t("model.provider.openai")}
           anthropicLabel={t("model.provider.anthropic")}
@@ -377,14 +409,16 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
 
           {/*
             ★ 协议选择器 —— 知识库那一路真能切协议（传给 kl 的 KL_LLM_PROVIDER）。
-            两个 chip 亮不亮由探测到的 supportedProviders 决定，点击可覆盖。
+            两个 chip 亮不亮由**所选 kl 模型**的 supported_endpoint_types 决定，点击可覆盖。
             这就是「OpenAI 兼容网关被当 Anthropic 发 → 404」那个报错的用户侧修复。
           */}
           <ProviderPicker
             label={t("model.provider.protocol")}
             hint={t("model.kl.protocolHint")}
             value={effectiveKlProvider}
-            supported={supportedProviders}
+            supported={
+              klModelValue.trim() !== "" ? providersForModel(klModelValue) : supportedProviders
+            }
             onPick={setKlProvider}
             openaiLabel={t("model.provider.openai")}
             anthropicLabel={t("model.provider.anthropic")}
@@ -414,7 +448,12 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
             <ChipPicker
               options={modelOptions}
               value={klModel ?? current.klModelMain.value}
-              onPick={(next) => setKlModel(next)}
+              onPick={(next) => {
+                setKlModel(next)
+                // ★ 选了 kl 模型就把手动协议清掉 → effectiveKlProvider 自动取该模型的
+                // 推荐协议（有 anthropic 选 anthropic）。用户之后仍可再手动切。
+                setKlProvider(null)
+              }}
               // 空值 = 跟随主配置，所以这里多一个「跟随」档
               inheritLabel={t("model.kl.inherited")}
               onInherit={() => setKlModel("")}
