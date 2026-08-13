@@ -287,6 +287,163 @@ describe("请求形状", () => {
 })
 
 /**
+ * ★★ Anthropic 传输（`provider:"anthropic"` → `/v1/messages`）。
+ *
+ * 这条锁的是主模型能切协议之后**直连这条路**的形状：数字分身降级直连、
+ * 蒸馏抽取都走这个 client。与 opencode 那条（`resolveGatewayModelConfig`
+ * 换 `@ai-sdk/anthropic`）是同一个用户设置的两半，形状差异全在 client 里收口。
+ */
+describe("Anthropic 传输", () => {
+  /** 造一个 Anthropic Messages 成功响应。 */
+  function anthropicOk(blocks: unknown[], stopReason = "end_turn") {
+    return {
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          type: "message",
+          content: blocks,
+          stop_reason: stopReason,
+          usage: { input_tokens: 12, output_tokens: 7 },
+        }),
+      text: () => Promise.resolve(""),
+    } as unknown as Response
+  }
+
+  function anthropicClient(fetchImpl: typeof fetch) {
+    return new LlmClient({
+      baseUrl: "https://gw.invalid",
+      apiKey: "sk-ant",
+      model: "claude-sonnet-4-6",
+      provider: "anthropic",
+      sleep: () => Promise.resolve(),
+      fetchImpl,
+    })
+  }
+
+  it("★ 打 /v1/messages，用 x-api-key + anthropic-version（不是 Bearer）", async () => {
+    let seenUrl = ""
+    let seenHeaders: Record<string, string> = {}
+    const client = anthropicClient((url, init) => {
+      seenUrl = String(url)
+      seenHeaders = (init as RequestInit).headers as Record<string, string>
+      return Promise.resolve(anthropicOk([{ type: "text", text: "hi" }]))
+    })
+    await client.complete(ask)
+    expect(seenUrl).toBe("https://gw.invalid/v1/messages")
+    expect(seenHeaders["x-api-key"]).toBe("sk-ant")
+    expect(seenHeaders["anthropic-version"]).toBe("2023-06-01")
+    expect(seenHeaders["Authorization"]).toBeUndefined()
+  })
+
+  it("★ system 提成顶层、其余进 content blocks，且必填 max_tokens", async () => {
+    let body: {
+      system?: string
+      messages?: { role: string; content: { type: string; text?: string }[] }[]
+      max_tokens?: number
+    } = {}
+    const client = anthropicClient((_url, init) => {
+      body = JSON.parse(String((init as RequestInit).body))
+      return Promise.resolve(anthropicOk([{ type: "text", text: "ok" }]))
+    })
+    await client.complete({
+      messages: [
+        { role: "system", content: "you are X" },
+        { role: "user", content: "hello" },
+      ],
+      maxTokens: 128,
+    })
+    expect(body.system).toBe("you are X")
+    // system 不再作为一条消息
+    expect(body.messages).toHaveLength(1)
+    expect(body.messages?.[0]?.role).toBe("user")
+    expect(body.messages?.[0]?.content[0]).toEqual({ type: "text", text: "hello" })
+    expect(body.max_tokens).toBe(128)
+  })
+
+  it("★ 多个 text block 拼接；usage 用 input/output_tokens（自相加 total）", async () => {
+    const client = anthropicClient(() =>
+      Promise.resolve(
+        anthropicOk([
+          { type: "text", text: "Hello " },
+          { type: "text", text: "world" },
+        ]),
+      ),
+    )
+    const out = await client.complete(ask)
+    expect(out.text).toBe("Hello world")
+    expect(out.usage).toEqual({ promptTokens: 12, completionTokens: 7, totalTokens: 19 })
+    expect(out.finishReason).toBe("end_turn")
+  })
+
+  it("★ tool_use block → toolCalls（input 对象转 JSON 串）", async () => {
+    const client = anthropicClient(() =>
+      Promise.resolve(
+        anthropicOk(
+          [{ type: "tool_use", id: "tu_1", name: "search", input: { query: "abc" } }],
+          "tool_use",
+        ),
+      ),
+    )
+    const out = await client.complete({
+      ...ask,
+      tools: [{ name: "search", description: "d", parameters: { type: "object" } }],
+    })
+    expect(out.toolCalls).toEqual([
+      { id: "tu_1", name: "search", argumentsJson: JSON.stringify({ query: "abc" }) },
+    ])
+  })
+
+  it("★ 工具声明用 input_schema（不是 OpenAI 的 function.parameters）", async () => {
+    let body: { tools?: { name: string; input_schema: unknown }[] } = {}
+    const client = anthropicClient((_url, init) => {
+      body = JSON.parse(String((init as RequestInit).body))
+      return Promise.resolve(anthropicOk([{ type: "text", text: "ok" }]))
+    })
+    await client.complete({
+      ...ask,
+      tools: [{ name: "search", description: "d", parameters: { type: "object" } }],
+    })
+    expect(body.tools?.[0]).toEqual({
+      name: "search",
+      description: "d",
+      input_schema: { type: "object" },
+    })
+  })
+
+  it("★ role:tool 结果 → role:user + tool_result block（tool_use_id 对上）", async () => {
+    let body: { messages?: { role: string; content: { type: string; tool_use_id?: string }[] }[] } =
+      {}
+    const client = anthropicClient((_url, init) => {
+      body = JSON.parse(String((init as RequestInit).body))
+      return Promise.resolve(anthropicOk([{ type: "text", text: "done" }]))
+    })
+    await client.complete({
+      messages: [{ role: "tool", content: "result text", toolCallId: "tu_1" }],
+    })
+    const msg = body.messages?.[0]
+    expect(msg?.role).toBe("user")
+    expect(msg?.content[0]?.type).toBe("tool_result")
+    expect(msg?.content[0]?.tool_use_id).toBe("tu_1")
+  })
+
+  it("★ 空正文（无 tool_use）→ 可重试的 PARSE_FAILED，带 stop_reason", async () => {
+    const client = anthropicClient(() => Promise.resolve(anthropicOk([], "max_tokens")))
+    await expect(client.complete(ask)).rejects.toMatchObject({
+      code: "PARSE_FAILED",
+    })
+  })
+
+  it("★ json 模式仍剥围栏（Messages API 无 response_format）", async () => {
+    const client = anthropicClient(() =>
+      Promise.resolve(anthropicOk([{ type: "text", text: '```json\n{"a":1}\n```' }])),
+    )
+    const out = await client.complete({ ...ask, json: true })
+    expect(out.text).toBe('{"a":1}')
+  })
+})
+
+/**
  * ★★ 视觉输入（图片）的线上形状。
  *
  * ## 为什么这一层必须有断言

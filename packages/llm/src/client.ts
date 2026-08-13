@@ -124,6 +124,15 @@ export interface LlmClientOptions {
   baseUrl: string
   apiKey: string
   model: string
+  /**
+   * 网关协议。默认 `openai`（`/v1/chat/completions` + Bearer）。
+   *
+   * ★ `anthropic` 走 `/v1/messages`（`x-api-key` + `anthropic-version`、system 顶层、
+   * content blocks、`tool_use`/`tool_result`、`usage.input/output_tokens`）——
+   * 这是数字分身/蒸馏/直连能跟着主模型协议走的另一条传输（见 startup 的
+   * `mainProvider`）。两条协议对外都归一成同一个 `LlmCompletion`。
+   */
+  provider?: "openai" | "anthropic"
   logger?: Logger
   /** 单请求超时（ms）。默认 90s —— 蒸馏的 prompt 可能很长 */
   timeoutMs?: number
@@ -265,6 +274,70 @@ interface RawResponse {
   error?: unknown
 }
 
+/** Anthropic Messages 的响应信封（我们只读到的那几个字段）。 */
+interface RawAnthropicResponse {
+  type?: unknown
+  content?: unknown
+  stop_reason?: unknown
+  usage?: { input_tokens?: unknown; output_tokens?: unknown }
+  error?: unknown
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+/**
+ * 把一条内部 `LlmMessage` 转成 Anthropic Messages 的 `{role, content: blocks}`。
+ *
+ * · `role:"tool"`（我们内部的工具结果）→ Anthropic 的 `role:"user"` +
+ *   `tool_result` block（`tool_use_id` 对上之前那次 `tool_use`）；
+ * · 助手带 `toolCalls` → content 里既有 text（可能空）也有 `tool_use` block ——
+ *   原样回传，否则下一条 `tool_result` 的 `tool_use_id` 对不上会 400；
+ * · 图片 → `{type:"image",source:{type:"base64",media_type,data}}`。
+ */
+function toAnthropicMessage(message: LlmMessage): {
+  role: "user" | "assistant"
+  content: unknown[]
+} {
+  if (message.role === "tool") {
+    return {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: message.toolCallId ?? "",
+          content: message.content,
+        },
+      ],
+    }
+  }
+
+  const role = message.role === "assistant" ? "assistant" : "user"
+  const content: unknown[] = []
+  if (message.content !== "") content.push({ type: "text", text: message.content })
+  for (const image of message.images ?? []) {
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: image.mimeType, data: image.base64 },
+    })
+  }
+  // 助手发起的工具调用：Anthropic 要 content 里带 `tool_use` block 原样回传。
+  for (const call of message.toolCalls ?? []) {
+    let parsedInput: unknown
+    try {
+      parsedInput = JSON.parse(call.argumentsJson)
+    } catch {
+      // 参数不是合法 JSON 时给空对象 —— 与 OpenAI 分支"缺参数给 {}"同一个兜底。
+      parsedInput = {}
+    }
+    content.push({ type: "tool_use", id: call.id, name: call.name, input: parsedInput })
+  }
+  // content 不能为空（Anthropic 会 400）—— 兜一个空文本块。
+  if (content.length === 0) content.push({ type: "text", text: "" })
+  return { role, content }
+}
+
 function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0
 }
@@ -304,6 +377,7 @@ export class LlmClient {
   private readonly maxRetries: number
   private readonly fetchImpl: typeof fetch
   private readonly sleep: (ms: number) => Promise<void>
+  private readonly provider: "openai" | "anthropic"
   /** 累计用量。蒸馏进度页要显示"花了多少 token" */
   private totals: LlmUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
 
@@ -319,6 +393,7 @@ export class LlmClient {
     this.maxRetries = options.maxRetries ?? 2
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis)
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+    this.provider = options.provider ?? "openai"
   }
 
   usage(): LlmUsage {
@@ -436,167 +511,9 @@ export class LlmClient {
     input.signal?.addEventListener("abort", onAbort, { once: true })
 
     try {
-      const body: Record<string, unknown> = {
-        model: this.options.model,
-        /**
-         * 消息按 OpenAI 兼容形状转写。
-         *
-         * 我们内部用 `toolCalls` / `toolCallId`（驼峰），线上是
-         * `tool_calls` / `tool_call_id`（下划线）—— 转写只在这一处做，
-         * 业务侧不用记两套命名。
-         */
-        messages: input.messages.map((message) => {
-          /**
-           * ★ 有图时 `content` 从 string 变成多模态数组。
-           *
-           * 形状是 OpenAI 兼容协议的 `image_url` + data URI（实测这个网关上
-           * `qwen3.7-plus` / `gpt-5.6-sol` 都认）。文本块**放第一个** ——
-           * 正文里会有「[图片 1]」这类标注，模型要先读到它才知道图属于谁。
-           *
-           * 没有图时保持裸字符串：那是绝大多数请求，多包一层数组会让
-           * 每条日志、每次重试的 body 都变大，且部分网关对两种形状的
-           * 兼容程度不同（能用字符串就别用数组）。
-           */
-          const hasImages = message.images !== undefined && message.images.length > 0
-          const content: unknown = hasImages
-            ? [
-                { type: "text", text: message.content },
-                ...(message.images ?? []).map((image) => ({
-                  type: "image_url",
-                  image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
-                })),
-              ]
-            : message.content
-          const wire: Record<string, unknown> = { role: message.role, content }
-          if (message.toolCalls !== undefined && message.toolCalls.length > 0) {
-            wire["tool_calls"] = message.toolCalls.map((call) => ({
-              id: call.id,
-              type: "function",
-              function: { name: call.name, arguments: call.argumentsJson },
-            }))
-          }
-          if (message.toolCallId !== undefined) wire["tool_call_id"] = message.toolCallId
-          return wire
-        }),
-      }
-      if (input.temperature !== undefined) body["temperature"] = input.temperature
-      if (input.maxTokens !== undefined) body["max_tokens"] = input.maxTokens
-      // 开着也仍可能带围栏（见文件头），所以下面还要剥
-      if (input.json === true) body["response_format"] = { type: "json_object" }
-      if (input.tools !== undefined && input.tools.length > 0) {
-        body["tools"] = input.tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-          },
-        }))
-      }
-
-      const url = `${this.options.baseUrl.replace(/\/+$/, "")}/v1/chat/completions`
-      const response = await this.fetchImpl(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.options.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      })
-
-      if (!response.ok) {
-        const detail = (await response.text()).slice(0, 500)
-        throw new AppError("PROCESS_FAILED", `LLM 返回 ${String(response.status)}`, {
-          messageKey: "errors:byCode.PROCESS_FAILED",
-          context: { status: response.status, retryable: isRetryable(response.status), detail },
-        })
-      }
-
-      const parsed = (await response.json()) as RawResponse
-      /**
-       * ★ HTTP 200 但 body 里有 error —— 实测过的形态。
-       * 不查这一条会把错误当成"content 是 undefined"继续往下传，
-       * 于是抽取阶段得到 0 条结论而没有任何错误。
-       */
-      if (parsed.error !== undefined && parsed.error !== null) {
-        throw new AppError("PROCESS_FAILED", "LLM 返回业务错误", {
-          messageKey: "errors:byCode.PROCESS_FAILED",
-          // 业务错误不重试：同样的请求会得到同样的错误
-          context: { detail: JSON.stringify(parsed.error).slice(0, 500) },
-        })
-      }
-
-      const choice = parsed.choices?.[0]
-      const message = choice?.message
-      const content = typeof message?.content === "string" ? message.content : ""
-      const toolCalls = parseToolCalls(message?.tool_calls)
-      /**
-       * ★ 有工具调用时**空正文是正常的**（模型在等工具结果）。
-       *
-       * 不加这个条件的话每次工具调用都会被当成"返回空内容"而重试 ——
-       * 表现是每轮工具调用都慢三倍，而日志里只有几条 retry。
-       */
-      if (content.trim() === "" && toolCalls.length === 0) {
-        /**
-         * ★★ 必须带上 `finish_reason` 与推理长度 —— 它们指向**完全不同**的处置。
-         *
-         * 真机实测（`glm-5.2`）：推理模型先把预算花在 `reasoning_content` 上，
-         * 正文是思考完才写的。预算不够时它给的是
-         * `finish_reason: "length"` + `content: ""`，而**不报错**：
-         *
-         * ```
-         * max_tokens=20   → length, content="",  reasoning="1. **分析请求：**…"
-         * max_tokens=2000 → stop,   content="好"
-         * ```
-         *
-         * 两种"空内容"要做的事正好相反：
-         * · `length` —— **我们给的 `maxTokens` 太小**，调用方该调大；
-         * · `stop`   —— 模型真的没写正文，该去查 prompt。
-         *
-         * 只报"返回空内容"的话这两者长得一样，而我查这个问题时只能靠手动
-         * curl 打网关才看出区别 —— 那正是 CLAUDE.md §4 说的"报告了结果、
-         * 但没报告原因"。
-         */
-        const finishForEmpty =
-          typeof choice?.finish_reason === "string" ? choice.finish_reason : "unknown"
-        const reasoningLength =
-          typeof message?.reasoning_content === "string" ? message.reasoning_content.length : 0
-        throw new AppError("PARSE_FAILED", "LLM 返回空内容", {
-          messageKey: "errors:byCode.PARSE_FAILED",
-          // 空内容偶发（截断/过滤），值得重试一次
-          context: {
-            retryable: true,
-            finishReason: finishForEmpty,
-            /** >0 = 预算被推理吃掉了（那时 `finishReason` 多半是 `length`）。 */
-            reasoningLength,
-            maxTokens: input.maxTokens ?? null,
-          },
-        })
-      }
-
-      const usage: LlmUsage = {
-        promptTokens: num(parsed.usage?.prompt_tokens),
-        completionTokens: num(parsed.usage?.completion_tokens),
-        totalTokens: num(parsed.usage?.total_tokens),
-      }
-      this.totals = {
-        promptTokens: this.totals.promptTokens + usage.promptTokens,
-        completionTokens: this.totals.completionTokens + usage.completionTokens,
-        totalTokens: this.totals.totalTokens + usage.totalTokens,
-      }
-
-      const reasoning =
-        typeof message?.reasoning_content === "string" ? message.reasoning_content : undefined
-      const finishReason =
-        typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined
-      return {
-        text: input.json === true ? stripCodeFence(content) : content,
-        usage,
-        ...(reasoning === undefined ? {} : { reasoning }),
-        ...(toolCalls.length === 0 ? {} : { toolCalls }),
-        ...(finishReason === undefined ? {} : { finishReason }),
-      }
+      return this.provider === "anthropic"
+        ? await this.requestAnthropic(input, controller.signal)
+        : await this.requestOpenAi(input, controller.signal)
     } catch (error) {
       // AbortError 归一成可识别的超时/取消：调用方要能区分它与业务失败
       if (error instanceof Error && error.name === "AbortError") {
@@ -620,6 +537,286 @@ export class LlmClient {
     } finally {
       clearTimeout(timer)
       input.signal?.removeEventListener("abort", onAbort)
+    }
+  }
+
+  /** 把这一次的用量并进累计（进度页要显示花了多少 token）。 */
+  private accumulate(usage: LlmUsage): void {
+    this.totals = {
+      promptTokens: this.totals.promptTokens + usage.promptTokens,
+      completionTokens: this.totals.completionTokens + usage.completionTokens,
+      totalTokens: this.totals.totalTokens + usage.totalTokens,
+    }
+  }
+
+  /**
+   * 空正文归一成可重试的 `PARSE_FAILED`（两条协议共用）。
+   *
+   * 只在**没有工具调用**时才算空 —— 有 `tool_use`/`tool_calls` 时空正文是正常的
+   * （模型在等工具结果）。带上 `finishReason`：`length` 是 maxTokens 太小、
+   * `stop`/`end_turn` 是模型真没写正文，两者处置相反（见文件头/原 OpenAI 分支）。
+   */
+  private emptyContentError(
+    finishReason: string,
+    reasoningLength: number,
+    maxTokens?: number,
+  ): never {
+    throw new AppError("PARSE_FAILED", "LLM 返回空内容", {
+      messageKey: "errors:byCode.PARSE_FAILED",
+      context: {
+        retryable: true,
+        finishReason,
+        reasoningLength,
+        maxTokens: maxTokens ?? null,
+      },
+    })
+  }
+
+  /** OpenAI 兼容：`POST {base}/v1/chat/completions`。 */
+  private async requestOpenAi(input: CompleteOptions, signal: AbortSignal): Promise<LlmCompletion> {
+    const body: Record<string, unknown> = {
+      model: this.options.model,
+      /**
+       * 消息按 OpenAI 兼容形状转写。
+       *
+       * 我们内部用 `toolCalls` / `toolCallId`（驼峰），线上是
+       * `tool_calls` / `tool_call_id`（下划线）—— 转写只在这一处做，
+       * 业务侧不用记两套命名。
+       */
+      messages: input.messages.map((message) => {
+        /**
+         * ★ 有图时 `content` 从 string 变成多模态数组。
+         *
+         * 形状是 OpenAI 兼容协议的 `image_url` + data URI（实测这个网关上
+         * `qwen3.7-plus` / `gpt-5.6-sol` 都认）。文本块**放第一个** ——
+         * 正文里会有「[图片 1]」这类标注，模型要先读到它才知道图属于谁。
+         *
+         * 没有图时保持裸字符串：那是绝大多数请求，多包一层数组会让
+         * 每条日志、每次重试的 body 都变大，且部分网关对两种形状的
+         * 兼容程度不同（能用字符串就别用数组）。
+         */
+        const hasImages = message.images !== undefined && message.images.length > 0
+        const content: unknown = hasImages
+          ? [
+              { type: "text", text: message.content },
+              ...(message.images ?? []).map((image) => ({
+                type: "image_url",
+                image_url: { url: `data:${image.mimeType};base64,${image.base64}` },
+              })),
+            ]
+          : message.content
+        const wire: Record<string, unknown> = { role: message.role, content }
+        if (message.toolCalls !== undefined && message.toolCalls.length > 0) {
+          wire["tool_calls"] = message.toolCalls.map((call) => ({
+            id: call.id,
+            type: "function",
+            function: { name: call.name, arguments: call.argumentsJson },
+          }))
+        }
+        if (message.toolCallId !== undefined) wire["tool_call_id"] = message.toolCallId
+        return wire
+      }),
+    }
+    if (input.temperature !== undefined) body["temperature"] = input.temperature
+    if (input.maxTokens !== undefined) body["max_tokens"] = input.maxTokens
+    // 开着也仍可能带围栏（见文件头），所以下面还要剥
+    if (input.json === true) body["response_format"] = { type: "json_object" }
+    if (input.tools !== undefined && input.tools.length > 0) {
+      body["tools"] = input.tools.map((tool) => ({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        },
+      }))
+    }
+
+    const url = `${this.options.baseUrl.replace(/\/+$/, "")}/v1/chat/completions`
+    const response = await this.fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.options.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500)
+      throw new AppError("PROCESS_FAILED", `LLM 返回 ${String(response.status)}`, {
+        messageKey: "errors:byCode.PROCESS_FAILED",
+        context: { status: response.status, retryable: isRetryable(response.status), detail },
+      })
+    }
+
+    const parsed = (await response.json()) as RawResponse
+    /**
+     * ★ HTTP 200 但 body 里有 error —— 实测过的形态。
+     * 不查这一条会把错误当成"content 是 undefined"继续往下传，
+     * 于是抽取阶段得到 0 条结论而没有任何错误。
+     */
+    if (parsed.error !== undefined && parsed.error !== null) {
+      throw new AppError("PROCESS_FAILED", "LLM 返回业务错误", {
+        messageKey: "errors:byCode.PROCESS_FAILED",
+        // 业务错误不重试：同样的请求会得到同样的错误
+        context: { detail: JSON.stringify(parsed.error).slice(0, 500) },
+      })
+    }
+
+    const choice = parsed.choices?.[0]
+    const message = choice?.message
+    const content = typeof message?.content === "string" ? message.content : ""
+    const toolCalls = parseToolCalls(message?.tool_calls)
+    /**
+     * ★ 有工具调用时**空正文是正常的**（模型在等工具结果）。
+     *
+     * 不加这个条件的话每次工具调用都会被当成"返回空内容"而重试 ——
+     * 表现是每轮工具调用都慢三倍，而日志里只有几条 retry。
+     */
+    if (content.trim() === "" && toolCalls.length === 0) {
+      const finishForEmpty =
+        typeof choice?.finish_reason === "string" ? choice.finish_reason : "unknown"
+      const reasoningLength =
+        typeof message?.reasoning_content === "string" ? message.reasoning_content.length : 0
+      this.emptyContentError(finishForEmpty, reasoningLength, input.maxTokens)
+    }
+
+    const usage: LlmUsage = {
+      promptTokens: num(parsed.usage?.prompt_tokens),
+      completionTokens: num(parsed.usage?.completion_tokens),
+      totalTokens: num(parsed.usage?.total_tokens),
+    }
+    this.accumulate(usage)
+
+    const reasoning =
+      typeof message?.reasoning_content === "string" ? message.reasoning_content : undefined
+    const finishReason =
+      typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined
+    return {
+      text: input.json === true ? stripCodeFence(content) : content,
+      usage,
+      ...(reasoning === undefined ? {} : { reasoning }),
+      ...(toolCalls.length === 0 ? {} : { toolCalls }),
+      ...(finishReason === undefined ? {} : { finishReason }),
+    }
+  }
+
+  /**
+   * Anthropic Messages：`POST {base}/v1/messages`。
+   *
+   * ## 与 OpenAI 分支的形状差异（都在这一处收口）
+   *
+   * · **鉴权**：`x-api-key` + `anthropic-version`，不是 `Authorization: Bearer`；
+   * · **system**：顶层 `system` 字段，不作为一条 `role:"system"` 消息；
+   * · **content**：永远是 block 数组（`{type:"text"}` / `{type:"image"}` /
+   *   `{type:"tool_use"}` / `{type:"tool_result"}`），不是裸字符串；
+   * · **图片**：`{type:"image",source:{type:"base64",media_type,data}}`，
+   *   不是 OpenAI 的 `image_url` data URI；
+   * · **工具**：声明是 `{name,description,input_schema}`；助手回来的调用是
+   *   content 里的 `tool_use` block（`id`/`name`/`input` 对象）；回传结果是
+   *   `role:"user"` + `tool_result` block（`tool_use_id` + 文本），**不是**
+   *   OpenAI 的 `role:"tool"`；
+   * · **JSON 模式**：Messages API 没有 `response_format` —— 靠 prompt 约束 +
+   *   我们仍 `stripCodeFence`（与 OpenAI 分支同一个兜底）；
+   * · **usage**：`input_tokens`/`output_tokens`，没有 total（我们自己相加）；
+   * · **结束原因**：`stop_reason`（`end_turn`/`max_tokens`/`tool_use`）。
+   */
+  private async requestAnthropic(
+    input: CompleteOptions,
+    signal: AbortSignal,
+  ): Promise<LlmCompletion> {
+    // system 提取成顶层；其余消息转 Anthropic block 形状。
+    const systemText = input.messages
+      .filter((m) => m.role === "system")
+      .map((m) => m.content)
+      .join("\n\n")
+
+    const messages = input.messages
+      .filter((m) => m.role !== "system")
+      .map((message) => toAnthropicMessage(message))
+
+    const body: Record<string, unknown> = {
+      model: this.options.model,
+      // Anthropic **必填** max_tokens —— 缺省给一个足够大的兜底（与 OpenAI 分支
+      // "不传就用网关默认"不同，这里不传会直接 400）。
+      max_tokens: input.maxTokens ?? 4096,
+      messages,
+    }
+    if (systemText.trim() !== "") body["system"] = systemText
+    if (input.temperature !== undefined) body["temperature"] = input.temperature
+    if (input.tools !== undefined && input.tools.length > 0) {
+      body["tools"] = input.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.parameters,
+      }))
+    }
+
+    const url = `${this.options.baseUrl.replace(/\/+$/, "")}/v1/messages`
+    const response = await this.fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": this.options.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500)
+      throw new AppError("PROCESS_FAILED", `LLM 返回 ${String(response.status)}`, {
+        messageKey: "errors:byCode.PROCESS_FAILED",
+        context: { status: response.status, retryable: isRetryable(response.status), detail },
+      })
+    }
+
+    const parsed = (await response.json()) as RawAnthropicResponse
+    // 与 OpenAI 分支一致：HTTP 200 但 body 是 error 信封也要当失败（不重试）。
+    if (parsed.type === "error" || (parsed.error !== undefined && parsed.error !== null)) {
+      throw new AppError("PROCESS_FAILED", "LLM 返回业务错误", {
+        messageKey: "errors:byCode.PROCESS_FAILED",
+        context: { detail: JSON.stringify(parsed.error ?? parsed).slice(0, 500) },
+      })
+    }
+
+    // content blocks → 文本（拼所有 text block）+ 工具调用（tool_use block）。
+    const blocks = Array.isArray(parsed.content) ? parsed.content : []
+    const text = blocks
+      .filter((b): b is { type: "text"; text: string } => isRecord(b) && b.type === "text")
+      .map((b) => (typeof b.text === "string" ? b.text : ""))
+      .join("")
+    const toolCalls: LlmToolCall[] = blocks
+      .filter((b): b is Record<string, unknown> => isRecord(b) && b.type === "tool_use")
+      .map((b) => ({
+        id: typeof b["id"] === "string" ? b["id"] : "",
+        name: typeof b["name"] === "string" ? b["name"] : "",
+        // Anthropic 的 `input` 是**对象**，我们对外统一成 JSON 串（与 OpenAI 一致）
+        argumentsJson: JSON.stringify(b["input"] ?? {}),
+      }))
+      .filter((c) => c.id !== "" && c.name !== "")
+
+    const stopReason = typeof parsed.stop_reason === "string" ? parsed.stop_reason : "unknown"
+    if (text.trim() === "" && toolCalls.length === 0) {
+      // Anthropic 没有单独的 reasoning 字段，传 0；stop_reason=max_tokens 对应 length。
+      this.emptyContentError(stopReason, 0, input.maxTokens)
+    }
+
+    const usage: LlmUsage = {
+      promptTokens: num(parsed.usage?.input_tokens),
+      completionTokens: num(parsed.usage?.output_tokens),
+      totalTokens: num(parsed.usage?.input_tokens) + num(parsed.usage?.output_tokens),
+    }
+    this.accumulate(usage)
+
+    return {
+      text: input.json === true ? stripCodeFence(text) : text,
+      usage,
+      ...(toolCalls.length === 0 ? {} : { toolCalls }),
+      finishReason: stopReason,
     }
   }
 }

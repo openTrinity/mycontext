@@ -2,6 +2,7 @@ export {
   buildOpencodeSpawn,
   resolveGatewayModelConfig,
   resolveModelName,
+  resolveModelProvider,
   DEFAULT_GATEWAY_MODEL,
   assertHardened,
   stripPermissionOverrides,
@@ -10,7 +11,7 @@ export {
   KL_SKILL_PERMISSION,
   HOST_TOOL_PREFIX,
 } from "./spawn-hardening.js"
-export type { OpencodeSpawnOptions, HardenedSpawn } from "./spawn-hardening.js"
+export type { OpencodeSpawnOptions, HardenedSpawn, GatewayProvider } from "./spawn-hardening.js"
 
 export { CHAT_ITEM_TYPES, textBlock, toPlainText } from "./chat-item.js"
 export type {

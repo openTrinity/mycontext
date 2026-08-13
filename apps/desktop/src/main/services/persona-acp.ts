@@ -240,6 +240,14 @@ export interface PersonaAcpOptions {
    */
   getModel?: () => string
   /**
+   * 这一轮用哪个协议（`runtimeConfig.resolved().mainProvider`）。
+   *
+   * ★ 与 `getModel` 同一个理由由装配层显式给：`seedProcessEnv` 只在装配那一刻
+   * 跑一次，用户之后在设置里切了协议、子进程是**之后**才 spawn 的，只靠 env
+   * 会读到旧快照。不给 = 退回 env（`MYCONTEXT_MODEL_PROVIDER`）再退回 openai。
+   */
+  getProvider?: () => string
+  /**
    * agent 的**过程**有更新时回调（thinking / 正文 / tool 调用组）。
    *
    * ★ 注入回调而不是给 `PersonaAcp` 塞 db + window：这个类的职责是"跑一轮
@@ -702,7 +710,11 @@ export class PersonaAcp {
     if (!usable.ok) return null
     const resolved = usable.binary
     try {
-      const modelConfig = resolveGatewayModelConfig(process.env, this.options.getModel?.())
+      const modelConfig = resolveGatewayModelConfig(
+        process.env,
+        this.options.getModel?.(),
+        this.options.getProvider?.(),
+      )
       /**
        * ★★ 基底是**激活后的 Python 环境**，`klRoot` 追加在 venv/bin **之后**。
        *

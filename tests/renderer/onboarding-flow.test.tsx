@@ -304,11 +304,18 @@ function installApi(steps: OnboardingStepView[]): Recorded {
           llmBaseUrl: { value: "", source: "default" as const },
           llmApiKey: { configured: false, tail: null, source: "default" as const },
           modelMain: { value: "glm-5.2", source: "default" as const },
+          mainProvider: { value: "openai" as const, source: "default" as const },
           embedModel: { value: "text-embedding-v4", source: "default" as const },
           klLlmBaseUrl: { value: "", source: "default" as const },
           klLlmApiKey: { configured: false, tail: null, source: "default" as const },
           klModelMain: { value: "", source: "default" as const },
-          klEffective: { baseUrl: "", model: "glm-5.2", apiKeyConfigured: false },
+          klProvider: { value: "openai" as const, source: "default" as const },
+          klEffective: {
+            baseUrl: "",
+            model: "glm-5.2",
+            apiKeyConfigured: false,
+            provider: "openai" as const,
+          },
         }),
       save: () => ok({ appliedNow: true, needsRestart: [] as ("agent" | "klServer")[] }),
       /**
@@ -321,12 +328,14 @@ function installApi(steps: OnboardingStepView[]): Recorded {
           ? ok({
               ok: true,
               reason: null,
+              provider: "openai" as const,
               detail: null,
               models: ["gateway-only-model", "glm-5.2"],
             })
           : ok({
               ok: false,
               reason: recorded.probeReason,
+              provider: null,
               detail: "Invalid token (request id: test)",
               models: [] as string[],
             }),

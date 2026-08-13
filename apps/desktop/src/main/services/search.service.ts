@@ -187,6 +187,11 @@ export interface SearchServiceOptions {
    * 不给 = 退回 env（`MYCONTEXT_MODEL_MAIN`）再退回内置默认。
    */
   getModel?: () => string
+  /**
+   * 搜索 agent 用哪个协议（`runtimeConfig.resolved().mainProvider`）。
+   * 不给 = 退回 env（`MYCONTEXT_MODEL_PROVIDER`）再退回 openai。与 getModel 同理由。
+   */
+  getProvider?: () => string
   getWindow: () => BrowserWindow | null
 }
 
@@ -787,12 +792,17 @@ export class SearchService {
     const resolved = usable.binary
 
     try {
-      // 从本机 env 解析网关模型配置（走 openai-compatible 内联 provider，
+      // 从本机 env 解析网关模型配置（按 provider 选内联 provider：anthropic →
+      // @ai-sdk/anthropic、否则 @ai-sdk/openai-compatible，两者都内联 models
       // 绕开 models.dev 注册表——见 resolveGatewayModelConfig 的头注释）。
       // 解析不到（没配网关）时不传 modelConfig，并**显式告警**（见下）。
-      // ★ 模型名由装配层显式给（`getModel`），env 只是兜底 —— 见 `getModel`。
+      // ★ 模型名与协议由装配层显式给（`getModel`/`getProvider`），env 只是兜底。
       const model = this.options.getModel?.()
-      const modelConfig = resolveGatewayModelConfig(process.env, model)
+      const modelConfig = resolveGatewayModelConfig(
+        process.env,
+        model,
+        this.options.getProvider?.(),
+      )
 
       /**
        * ★ 没配网关时**直接拒绝启动**，不是"告警后照常起"。

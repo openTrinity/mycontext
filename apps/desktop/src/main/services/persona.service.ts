@@ -254,6 +254,8 @@ export interface PersonaServiceOptions {
    * 不给 = ACP 侧退回 env（`MYCONTEXT_MODEL_MAIN`）再退回内置默认。
    */
   getModel?: () => string
+  /** 主模型协议 —— 透传给 `PersonaAcp`（见 `PersonaAcpOptions.getProvider`）。 */
+  getProvider?: () => string
   getWindow: () => BrowserWindow | null
   /**
    * 合并窗口。只在测试里传（要用假时钟压缩等待），生产用缺省值。
@@ -567,6 +569,7 @@ export class PersonaService {
              * 不给（单测）时退回 env 再退回内置默认。
              */
             ...(options.getModel === undefined ? {} : { getModel: options.getModel }),
+            ...(options.getProvider === undefined ? {} : { getProvider: options.getProvider }),
             /**
              * agent 的过程（thinking / 正文 / tool 调用）—— 两个去处：
              * ① 实时推给 UI（「正在处理」那个 tab 里滚动显示）；

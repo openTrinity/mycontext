@@ -757,7 +757,14 @@ export function bootstrapApp(mainDir: string): AppContext {
   const llmHolder = new LlmHolder(logger.child("Llm"))
   const reconfigureLlm = (): void => {
     const r = runtimeConfig.resolved()
-    llmHolder.reconfigure({ baseUrl: r.llmBaseUrl, apiKey: r.llmApiKey, model: r.modelMain })
+    llmHolder.reconfigure({
+      baseUrl: r.llmBaseUrl,
+      apiKey: r.llmApiKey,
+      model: r.modelMain,
+      // ★ 直连也按主模型协议走传输（anthropic → /v1/messages）——蒸馏与降级直连
+      // 都用这个 client，改配置后 onChange 会 reconfigure，下一次 get() 就生效。
+      provider: r.mainProvider,
+    })
   }
   reconfigureLlm()
   if (llmHolder.get() === null) {
@@ -1023,6 +1030,7 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 与"降级回复"风格不同，且查不到原因。
      */
     getModel: () => runtimeConfig.resolved().modelMain,
+    getProvider: () => runtimeConfig.resolved().mainProvider,
     getWindow: () => window,
     /**
      * 授权用的 CLI。
@@ -1161,6 +1169,7 @@ export function bootstrapApp(mainDir: string): AppContext {
      *   （少一次 re-seed、或 seed 顺序变了）,表现是静默用错模型。
      */
     getModel: () => runtimeConfig.resolved().modelMain,
+    getProvider: () => runtimeConfig.resolved().mainProvider,
     getWindow: () => window,
   })
 

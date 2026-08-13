@@ -3406,6 +3406,12 @@ export const modelProviderSchema = z.enum(["openai", "anthropic"])
 
 export type ModelProvider = z.infer<typeof modelProviderSchema>
 
+/** 协议字段的展示形态（值 + 来源标记）。主模型与知识库各有一个。 */
+export const runtimeConfigProviderFieldSchema = z.object({
+  value: modelProviderSchema,
+  source: z.enum(["user", "env", "dotenv", "default"]),
+})
+
 export const runtimeConfigSecretFieldSchema = z.object({
   configured: z.boolean(),
   /** 已配置时给后 4 位，未配置为 null */
@@ -3424,6 +3430,14 @@ export const runtimeConfigViewSchema = z.object({
   llmBaseUrl: runtimeConfigFieldSchema,
   llmApiKey: runtimeConfigSecretFieldSchema,
   modelMain: runtimeConfigFieldSchema,
+  /**
+   * 主模型访问网关用的协议（litellm 传输）。
+   *
+   * ★ 现在**可切**：opencode 子进程按它选 `@ai-sdk/anthropic` / `@ai-sdk/openai-compatible`
+   * 内联 provider，直连 `LlmClient` 按它走 `/v1/messages` / `/v1/chat/completions`。
+   * 有默认层（kernel 的 `MYCONTEXT_MODEL_PROVIDER`，默认 openai）。
+   */
+  mainProvider: runtimeConfigProviderFieldSchema,
   embedModel: runtimeConfigFieldSchema,
   klLlmBaseUrl: runtimeConfigFieldSchema,
   klLlmApiKey: runtimeConfigSecretFieldSchema,
@@ -3433,10 +3447,7 @@ export const runtimeConfigViewSchema = z.object({
    * 它只有两个合法值。有默认层（kernel 的 `MYCONTEXT_KL_PROVIDER`，默认 openai），
    * 所以 `source` 与其它字段同一套来源标记。
    */
-  klProvider: z.object({
-    value: modelProviderSchema,
-    source: z.enum(["user", "env", "dotenv", "default"]),
-  }),
+  klProvider: runtimeConfigProviderFieldSchema,
   /** KL 回退解析后**实际生效**的三项（明文 base/model，key 只给 configured） */
   klEffective: z.object({
     baseUrl: z.string(),
@@ -3461,6 +3472,8 @@ export const saveRuntimeConfigInputSchema = z.object({
   llmBaseUrl: z.string().max(2000).optional(),
   llmApiKey: z.string().max(500).nullable().optional(),
   modelMain: z.string().max(200).optional(),
+  /** 主模型协议。undefined = 不改；两个枚举值之一 = 覆盖 */
+  mainProvider: modelProviderSchema.optional(),
   embedModel: z.string().max(200).optional(),
   klLlmBaseUrl: z.string().max(2000).optional(),
   klLlmApiKey: z.string().max(500).nullable().optional(),

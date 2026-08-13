@@ -130,6 +130,7 @@ export {
   probeRuntimeConfigInputSchema,
   runtimeConfigProbeSchema,
   modelProviderSchema,
+  runtimeConfigProviderFieldSchema,
 } from "./contract.js"
 
 export type {

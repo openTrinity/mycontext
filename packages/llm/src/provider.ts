@@ -32,6 +32,8 @@ export interface LlmProviderConfig {
   baseUrl: string
   apiKey: string
   model: string
+  /** 网关协议（openai/anthropic）。缺省 openai。 */
+  provider?: "openai" | "anthropic"
 }
 
 export class LlmHolder implements LlmProvider {
@@ -60,10 +62,14 @@ export class LlmHolder implements LlmProvider {
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
       model: config.model,
+      ...(config.provider === undefined ? {} : { provider: config.provider }),
       ...(this.logger === undefined ? {} : { logger: this.logger }),
     }
     this.client = new LlmClient(options)
-    this.logger?.info("llm holder reconfigured", { model: config.model })
+    this.logger?.info("llm holder reconfigured", {
+      model: config.model,
+      provider: config.provider ?? "openai",
+    })
   }
 }
 

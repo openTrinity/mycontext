@@ -448,3 +448,55 @@ describe("KL 抽取协议", () => {
     ctx.close()
   })
 })
+
+/**
+ * 主模型协议（`mainProvider`）—— 现在可切。
+ *
+ * opencode 子进程与直连 LlmClient 都按它切传输，并经 `seedProcessEnv` 写进
+ * `MYCONTEXT_MODEL_PROVIDER` 给子进程（装配层还会显式传，见 startup）。
+ */
+describe("主模型协议", () => {
+  it("默认 openai", () => {
+    const ctx = makeService()
+    expect(ctx.service.resolved().mainProvider).toBe("openai")
+    const v = ctx.service.view()
+    expect(v.mainProvider.value).toBe("openai")
+    expect(v.mainProvider.source).toBe("default")
+    ctx.close()
+  })
+
+  it("save 覆盖为 anthropic", () => {
+    const ctx = makeService()
+    ctx.service.save({ mainProvider: "anthropic" }, NOW)
+    expect(ctx.service.resolved().mainProvider).toBe("anthropic")
+    const v = ctx.service.view()
+    expect(v.mainProvider.value).toBe("anthropic")
+    expect(v.mainProvider.source).toBe("user")
+    ctx.close()
+  })
+
+  it("env 层可覆盖（MYCONTEXT_MODEL_PROVIDER）", () => {
+    const defaults = loadConfig({ env: { MYCONTEXT_MODEL_PROVIDER: "anthropic" } })
+    const ctx = makeService(defaults)
+    expect(ctx.service.resolved().mainProvider).toBe("anthropic")
+    expect(ctx.service.view().mainProvider.source).toBe("env")
+    ctx.close()
+  })
+
+  it("★ save 后 seed 进 env 的 MYCONTEXT_MODEL_PROVIDER（子进程要读到）", () => {
+    const env: NodeJS.ProcessEnv = {}
+    const ctx = makeService(loadConfig(), env)
+    ctx.service.save({ mainProvider: "anthropic" }, NOW)
+    expect(env["MYCONTEXT_MODEL_PROVIDER"]).toBe("anthropic")
+    ctx.close()
+  })
+
+  it("主模型协议与知识库协议互不影响", () => {
+    const ctx = makeService()
+    ctx.service.save({ mainProvider: "anthropic" }, NOW)
+    // 只改主模型，知识库仍是默认 openai
+    expect(ctx.service.resolved().mainProvider).toBe("anthropic")
+    expect(ctx.service.resolved().klProvider).toBe("openai")
+    ctx.close()
+  })
+})

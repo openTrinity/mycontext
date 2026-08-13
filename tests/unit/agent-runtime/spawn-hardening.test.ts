@@ -377,6 +377,52 @@ describe("resolveGatewayModelConfig", () => {
     expect(config.provider["mycontext"]?.options.baseURL).toBe("https://gw.example.com/v1")
   })
 
+  it("★★ provider=anthropic → 内联 @ai-sdk/anthropic（仍绕过 models.dev）", () => {
+    const config = resolveGatewayModelConfig(
+      {
+        ANTHROPIC_BASE_URL: "https://gw.example.com",
+        ANTHROPIC_AUTH_TOKEN: "sk-abc",
+        MYCONTEXT_MODEL_MAIN: "claude-opus-4-8",
+      },
+      undefined,
+      "anthropic",
+    ) as {
+      provider: Record<
+        string,
+        { npm: string; options: { baseURL: string }; models: Record<string, unknown> }
+      >
+      model: string
+    }
+    const provider = config.provider["mycontext"]
+    expect(provider?.npm).toBe("@ai-sdk/anthropic")
+    // baseURL 仍是 {root}/v1（anthropic SDK 拼 /messages）
+    expect(provider?.options.baseURL).toBe("https://gw.example.com/v1")
+    // ★ 仍内联 models（绕过 models.dev 是这次安全性的关键，不因换 npm 而丢）
+    expect(provider?.models["claude-opus-4-8"]).toBeDefined()
+    expect(config.model).toBe("mycontext/claude-opus-4-8")
+  })
+
+  it("provider 覆盖优先于 env（MYCONTEXT_MODEL_PROVIDER）", () => {
+    const asNpm = (providerOverride?: string, env?: Record<string, string>) =>
+      (
+        resolveGatewayModelConfig(
+          { ANTHROPIC_BASE_URL: "https://gw", ANTHROPIC_AUTH_TOKEN: "k", ...env },
+          undefined,
+          providerOverride,
+        ) as { provider: Record<string, { npm: string }> }
+      ).provider["mycontext"]?.npm
+    // env=anthropic、无覆盖 → anthropic
+    expect(asNpm(undefined, { MYCONTEXT_MODEL_PROVIDER: "anthropic" })).toBe("@ai-sdk/anthropic")
+    // 覆盖 openai 压过 env anthropic
+    expect(asNpm("openai", { MYCONTEXT_MODEL_PROVIDER: "anthropic" })).toBe(
+      "@ai-sdk/openai-compatible",
+    )
+    // 都没有 → 默认 openai
+    expect(asNpm(undefined, {})).toBe("@ai-sdk/openai-compatible")
+    // 脏值当 openai（最安全兜底，不把脏字符串拼进配置）
+    expect(asNpm("bogus", {})).toBe("@ai-sdk/openai-compatible")
+  })
+
   /**
    * ★★ 模型声明必须含 `modalities.input: ["text","image"]`。
    *

@@ -85,6 +85,15 @@ const DEFINITIONS = {
   llmBaseUrl: { env: "MYCONTEXT_LLM_BASE_URL", default: "", sensitive: false },
   llmApiKey: { env: "MYCONTEXT_LLM_API_KEY", default: "", sensitive: true },
   modelMain: { env: "MYCONTEXT_MODEL_MAIN", default: "glm-5.2", sensitive: false },
+  /**
+   * 主模型访问网关用的协议（litellm 传输）。
+   *
+   * ★ 默认 `openai`（OpenAI 兼容口，绝大多数网关都讲）。opencode 子进程与直连
+   * `LlmClient` 都按它切传输：anthropic → `/v1/messages`（`@ai-sdk/anthropic`），
+   * openai → `/v1/chat/completions`（`@ai-sdk/openai-compatible`）。
+   * 用户在设置里改，或用 `MYCONTEXT_MODEL_PROVIDER=anthropic` 覆盖。
+   */
+  modelProvider: { env: "MYCONTEXT_MODEL_PROVIDER", default: "openai", sensitive: false },
   embedModel: { env: "MYCONTEXT_EMBED_MODEL", default: "text-embedding-v4", sensitive: false },
   /**
    * KL（知识图谱）建索引专用的网关。留空则回退主配置（见 RuntimeConfigService）。
@@ -123,6 +132,7 @@ export const appConfigSchema = z.object({
   llmBaseUrl: z.string(),
   llmApiKey: z.string(),
   modelMain: z.string().min(1),
+  modelProvider: z.enum(["openai", "anthropic"]),
   embedModel: z.string().min(1),
   klLlmBaseUrl: z.string(),
   klLlmApiKey: z.string(),

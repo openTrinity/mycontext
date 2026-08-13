@@ -36,6 +36,8 @@ import type { SettingsRepository } from "@mycontext/store"
 interface StoredOverrides {
   llmBaseUrl?: string
   modelMain?: string
+  /** 主模型协议覆盖。缺省 = 走默认层（kernel 默认 openai）。 */
+  mainProvider?: ModelProvider
   embedModel?: string
   klLlmBaseUrl?: string
   klModelMain?: string
@@ -48,6 +50,8 @@ export interface ResolvedRuntimeConfig {
   llmBaseUrl: string
   llmApiKey: string
   modelMain: string
+  /** 主模型协议（默认层 ?? 用户覆盖）。opencode 子进程与直连 LlmClient 都按它切传输。 */
+  mainProvider: ModelProvider
   embedModel: string
   /** KL 三项已解析回退后的**实际生效**值 */
   klBaseUrl: string
@@ -62,6 +66,8 @@ export interface SaveRuntimeConfigPatch {
   llmBaseUrl?: string | undefined
   llmApiKey?: string | null | undefined
   modelMain?: string | undefined
+  /** 主模型协议。undefined = 不改。 */
+  mainProvider?: ModelProvider | undefined
   embedModel?: string | undefined
   klLlmBaseUrl?: string | undefined
   klLlmApiKey?: string | null | undefined
@@ -120,6 +126,7 @@ export class RuntimeConfigService {
     const llmBaseUrl = pick(stored.llmBaseUrl, d.llmBaseUrl)
     const llmApiKey = this.options.secretStore.read(LLM_API_KEY_SECRET) ?? d.llmApiKey
     const modelMain = pick(stored.modelMain, d.modelMain)
+    const mainProvider: ModelProvider = stored.mainProvider ?? d.modelProvider
     const embedModel = pick(stored.embedModel, d.embedModel)
 
     // KL 三项：存的(非空) ?? env 默认层 ?? 回退主配置。
@@ -127,9 +134,9 @@ export class RuntimeConfigService {
     const klApiRaw = this.options.secretStore.read(KL_API_KEY_SECRET) ?? d.klLlmApiKey
     const klModelRaw = pick(stored.klModelMain, d.klModelMain)
     /**
-     * ★ 协议独立于 base/model/key 的「回退主配置」逻辑：主模型那条路（opencode）
-     * 只能 openai 兼容、没有可切协议，所以这里不跟主配置走，而是
-     * `用户存的 ?? 默认层`（kernel 默认 openai，见 config.ts 的长注释）。
+     * ★ 协议独立于 base/model/key 的「回退主配置」逻辑：`用户存的 ?? 默认层`
+     * （kernel 默认 openai，见 config.ts 的长注释）。主模型与知识库各自一份，
+     * 两条子进程/直连路都按各自的 provider 切传输。
      */
     const klProvider: ModelProvider = stored.klProvider ?? d.klProvider
 
@@ -137,6 +144,7 @@ export class RuntimeConfigService {
       llmBaseUrl,
       llmApiKey,
       modelMain,
+      mainProvider,
       embedModel,
       klBaseUrl: klBaseRaw.trim() !== "" ? klBaseRaw : llmBaseUrl,
       klApiKey: klApiRaw.trim() !== "" ? klApiRaw : llmApiKey,
@@ -185,6 +193,10 @@ export class RuntimeConfigService {
       llmBaseUrl: plain(stored.llmBaseUrl, "llmBaseUrl"),
       llmApiKey: secret(LLM_API_KEY_SECRET, "llmApiKey"),
       modelMain: plain(stored.modelMain, "modelMain"),
+      mainProvider: {
+        value: resolved.mainProvider,
+        source: stored.mainProvider !== undefined ? "user" : this.defaultSource("modelProvider"),
+      },
       embedModel: plain(stored.embedModel, "embedModel"),
       klLlmBaseUrl: plain(stored.klLlmBaseUrl, "klLlmBaseUrl"),
       klLlmApiKey: secret(KL_API_KEY_SECRET, "klLlmApiKey"),
@@ -210,8 +222,8 @@ export class RuntimeConfigService {
   save(patch: SaveRuntimeConfigPatch, nowIso: string): RuntimeConfigApply {
     const stored = this.readStored()
 
-    // 只作用于**自由串**字段（klProvider 是枚举，单独处理，见下）。
-    type StringKey = Exclude<keyof StoredOverrides, "klProvider">
+    // 只作用于**自由串**字段（mainProvider/klProvider 是枚举，单独处理，见下）。
+    type StringKey = Exclude<keyof StoredOverrides, "mainProvider" | "klProvider">
     const merge = (key: StringKey, value: string | undefined): void => {
       if (value === undefined) return
       // 空串 = 清空这一项（回退默认层）；非空 = 覆盖
@@ -225,6 +237,7 @@ export class RuntimeConfigService {
     merge("klModelMain", patch.klModelMain)
     // 协议是枚举而非自由串，不走 trim-and-delete 的 merge：undefined = 不改，
     // 给了就覆盖（两个合法值之一，由 contract 的 schema 保证）。
+    if (patch.mainProvider !== undefined) stored.mainProvider = patch.mainProvider
     if (patch.klProvider !== undefined) stored.klProvider = patch.klProvider
 
     this.options.settings.set(SETTING_KEY, JSON.stringify(stored), nowIso)
@@ -474,6 +487,14 @@ export class RuntimeConfigService {
      * 这个前提，而这一行让**没走那条路的调用方**（单测、脚本）也拿到正确值。
      */
     set("MYCONTEXT_MODEL_MAIN", resolved.modelMain)
+    /**
+     * ★ 主模型协议也 seed —— 与模型名同一个理由：opencode 子进程的
+     * `resolveGatewayModelConfig` 从 env 读它来决定内联 provider 用
+     * `@ai-sdk/anthropic` 还是 `@ai-sdk/openai-compatible`。没这一行的话
+     * 用户在设置里切了 anthropic 也到不了子进程（除非 getModel 那条显式路
+     * 也带上，见 startup.ts）。装配层同样会显式传，这一行是给单测/脚本兜底。
+     */
+    set("MYCONTEXT_MODEL_PROVIDER", resolved.mainProvider)
   }
 
   /** 订阅配置变化（LlmHolder 重配 / 向渲染层推事件）。返回取消订阅。 */

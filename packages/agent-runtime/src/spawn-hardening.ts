@@ -456,20 +456,52 @@ export function resolveModelName(
   return DEFAULT_GATEWAY_MODEL
 }
 
+/** 网关协议。`openai` 走 `/chat/completions`、`anthropic` 走 `/v1/messages`。 */
+export type GatewayProvider = "openai" | "anthropic"
+
+/**
+ * 解析主模型协议：`providerOverride` → `MYCONTEXT_MODEL_PROVIDER` → `openai`。
+ *
+ * 与 `resolveModelName` 同一个形态（覆盖 > env > 默认）、同一个理由由装配层显式
+ * 传覆盖值（`seedProcessEnv` 只在装配那一刻跑一次，用户之后在设置里改的协议
+ * 只靠 env 会读到旧快照）。非枚举值一律当 `openai` —— 那是最安全的兜底
+ * （绝大多数网关都讲 OpenAI 兼容口），也避免把脏值拼进 opencode 配置。
+ */
+export function resolveModelProvider(
+  env: NodeJS.ProcessEnv = process.env,
+  providerOverride?: string,
+): GatewayProvider {
+  // 覆盖值非空才用它，否则回退 env —— 与 resolveModelName 同一个「非空才算」判据
+  // （`providerOverride?.trim() !== ""` 在 undefined 时会误判为 true，不能那么写）。
+  const raw =
+    providerOverride !== undefined && providerOverride.trim() !== ""
+      ? providerOverride
+      : env["MYCONTEXT_MODEL_PROVIDER"]
+  return raw?.trim() === "anthropic" ? "anthropic" : "openai"
+}
+
 /**
  * 从环境变量解析出一份可直接喂给 `buildOpencodeSpawn({modelConfig})` 的模型配置。
  *
- * ## 为什么走 openai-compatible 内联 provider，而不是 anthropic provider
+ * ## 为什么用**内联** provider（而不是 opencode 的内置 provider）
  *
- * 本机网关（`ANTHROPIC_BASE_URL`）既讲 Anthropic Messages 协议，也讲
- * **OpenAI Chat Completions**（`/v1/chat/completions` 实测 200）。而 opencode 的
- * 内置 `anthropic` provider 依赖 **models.dev 注册表**去解析模型元数据 ——
- * 注册表拉不到时（离线/被墙）它**不报错**，只是 `session/prompt` 直接回
- * `end_turn` + **0 token**（实测：静默不说话，正是本项目最怕的失效）。
+ * 本机网关既讲 Anthropic Messages 协议（`/v1/messages`），也讲 **OpenAI Chat
+ * Completions**（`/v1/chat/completions`）。而 opencode 的**内置** `anthropic`
+ * provider 依赖 **models.dev 注册表**去解析模型元数据 —— 注册表拉不到时
+ * （离线/被墙）它**不报错**，只是 `session/prompt` 直接回 `end_turn` + **0 token**
+ * （实测：静默不说话，正是本项目最怕的失效）。
  *
- * 内联 `@ai-sdk/openai-compatible` provider + 内联 `models` **绕过注册表**：
- * baseURL/apiKey/模型元数据全部本地给全，不依赖任何外网解析。实测这条路
- * agent 真的回答（10k tokens、`agent_message_chunk` 有内容）。
+ * 内联 provider（自定义 `npm` + 内联 `models`）**绕过注册表**：baseURL/apiKey/
+ * 模型元数据全部本地给全，opencode 的 `resolveSDK` 直接拿 `options` 调对应
+ * `create*(...)`，不查 models.dev（实测其源码：config 来源的 provider 走
+ * `s.providers[...].options` 那条路）。所以**换 npm 不换"绕过注册表"这个性质** ——
+ * 于是 `anthropic` 与 `openai` 两种协议都能用内联 provider 安全地跑起来。
+ *
+ * ## ★ 协议由 `resolveModelProvider` 决定（见 `npm` 那一行的注释）
+ *
+ * `anthropic` → `@ai-sdk/anthropic`（POST `{base}/v1/messages`）；
+ * 否则 → `@ai-sdk/openai-compatible`（POST `{base}/v1/chat/completions`）。
+ * 两者都要 `baseURL = {root}/v1`。
  *
  * ## env 口径（本机实测）
  *
@@ -479,8 +511,8 @@ export function resolveModelName(
  * · key： `ANTHROPIC_AUTH_TOKEN` → `ANTHROPIC_API_KEY` → `MYCONTEXT_LLM_API_KEY`
  *
  * ★ 为什么必须回退到 `MYCONTEXT_LLM_*`：**它们本来就是同一个网关**
- * （`llmapi.llm-gateway.com`，OpenAI 兼容口）。让人为了搜索再配一遍
- * `ANTHROPIC_*` 是纯粹的重复劳动，而且漏配的后果极其隐蔽 ——
+ * （OpenAI 兼容口）。让人为了搜索再配一遍 `ANTHROPIC_*` 是纯粹的重复劳动，
+ * 而且漏配的后果极其隐蔽 ——
  * opencode 会退回默认 provider 去查被墙的 models.dev，表现为
  * `session/prompt` 永不返回、满 120 秒超时（真实踩过：同事机器上
  * "搜索完全没法用"，日志只有一条超时，查不到是缺密钥）。
@@ -516,6 +548,7 @@ export function resolveModelName(
 export function resolveGatewayModelConfig(
   env: NodeJS.ProcessEnv = process.env,
   modelOverride?: string,
+  providerOverride?: string,
 ): unknown | null {
   // 取第一个非空值 —— `??` 不够：env 里常见的是**空字符串**（`KEY=` 占位），
   // 那种情况下 `??` 会把空串当有效值传下去，最后表现为"配了但认证失败"。
@@ -536,13 +569,40 @@ export function resolveGatewayModelConfig(
    * 值写进日志，两份实现会漂移（见那个函数的注释）。
    */
   const model = resolveModelName(env, modelOverride)
+  const provider = resolveModelProvider(env, providerOverride)
+  /**
+   * ★★ baseURL 两种协议都收敛到**恰好一个 `/v1`**。
+   *
+   * · openai-compatible SDK 把 base 当根、拼 `/chat/completions`；
+   * · `@ai-sdk/anthropic` 把 base 当根、拼 `/messages`（实测 mulerun 网关
+   *   `POST {base}/v1/messages` 200）。
+   *
+   * 所以两者都要 `{root}/v1`。用户填了带 `/v1` 的就不再拼（否则 `/v1/v1` → 404，
+   * 与知识库那侧同一个坑）。
+   */
   const baseURL = base.endsWith("/v1") ? base : `${base.replace(/\/$/, "")}/v1`
   const providerId = "mycontext"
   const modelRef = `${providerId}/${model}`
+  /**
+   * ★★ 按协议选内联 SDK：
+   * · `anthropic` → `@ai-sdk/anthropic`（opencode 已 bundle，见其
+   *   `provider/provider.ts` 的 BUNDLED_PROVIDERS）；
+   * · 否则 → `@ai-sdk/openai-compatible`。
+   *
+   * ## ★ 为什么仍然安全（不会踩 models.dev 那个静默 0-token 坑）
+   *
+   * 那个坑是 opencode 用**内置** anthropic provider 时要去 models.dev 解析
+   * 模型元数据、注册表拉不到就静默回 0 token。我们这里给的是**内联** provider
+   * ——`models` 元数据本地给全（含 `modalities`），opencode 的 `resolveSDK`
+   * 直接拿 `options.baseURL/apiKey` 调 `createAnthropic(...)`，**不查注册表**
+   * （实测源码：config 来源的 provider 走 `s.providers[...].options` 那条路）。
+   * 所以换 npm 不换"绕过注册表"这个性质。
+   */
+  const npm = provider === "anthropic" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible"
   return {
     provider: {
       [providerId]: {
-        npm: "@ai-sdk/openai-compatible",
+        npm,
         name: "MyContext Gateway",
         options: { baseURL, apiKey },
         /**

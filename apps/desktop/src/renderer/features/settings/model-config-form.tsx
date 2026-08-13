@@ -88,6 +88,8 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const [modelMain, setModelMain] = useState<string | null>(null)
   const [embedModel, setEmbedModel] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState("")
+  /** 主模型协议草稿。null = 未编辑（用探测识别值或已存值）。 */
+  const [mainProvider, setMainProvider] = useState<ModelProvider | null>(null)
   const [klBaseUrl, setKlBaseUrl] = useState<string | null>(null)
   const [klModel, setKlModel] = useState<string | null>(null)
   const [klApiKey, setKlApiKey] = useState("")
@@ -123,6 +125,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const dirty =
     llmBaseUrl !== null ||
     modelMain !== null ||
+    mainProvider !== null ||
     embedModel !== null ||
     klBaseUrl !== null ||
     klModel !== null ||
@@ -134,6 +137,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     const patch: SaveRuntimeConfigInput = {}
     if (llmBaseUrl !== null) patch.llmBaseUrl = llmBaseUrl
     if (modelMain !== null) patch.modelMain = modelMain
+    if (mainProvider !== null) patch.mainProvider = mainProvider
     if (embedModel !== null) patch.embedModel = embedModel
     // 空串 = 不改（UI 不回显旧 key）
     if (apiKey !== "") patch.llmApiKey = apiKey
@@ -148,6 +152,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
         setKlApiKey("")
         setLlmBaseUrl(null)
         setModelMain(null)
+        setMainProvider(null)
         setEmbedModel(null)
         setKlBaseUrl(null)
         setKlModel(null)
@@ -197,6 +202,13 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
    */
   const effectiveKlProvider: ModelProvider =
     klProvider ?? (result?.ok === true ? result.provider : null) ?? current.klEffective.provider
+
+  /**
+   * 主模型实际会用的协议：用户手动改的 > 新鲜探测识别到的 > 已存值。
+   * 与知识库那条同一个判断（探测识别到的协议自动填，可手动覆盖）。
+   */
+  const effectiveMainProvider: ModelProvider =
+    mainProvider ?? (result?.ok === true ? result.provider : null) ?? current.mainProvider.value
 
   return (
     <div className="flex flex-col gap-[var(--gap-section-lg)]">
@@ -297,14 +309,34 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
                 {t("model.probe.modelNotListed")}
               </span>
             )}
-          {/*
-            ★ 如实标注（CLAUDE.md §4）：主模型这条路（opencode 子进程）**只能** OpenAI
-            兼容协议——走 anthropic provider 会依赖被墙的 models.dev、静默 0 token
-            （见 agent-runtime/spawn-hardening.ts）。所以主模型**没有**协议选择器，
-            只声明这个事实，不假装能切。真能切协议的是下面的知识库那一路。
-          */}
+        </div>
+
+        {/*
+          ★ 主模型协议选择器 —— 现在可切（去掉了原来那句"不可切换"）。
+          opencode 子进程按它选 @ai-sdk/anthropic / @ai-sdk/openai-compatible 内联
+          provider，直连 LlmClient 按它走 /v1/messages / /v1/chat/completions。
+          测试连接后自动选中识别值（effectiveMainProvider），点击可覆盖。
+        */}
+        <div className="flex flex-col gap-[var(--gap-component-sm)]">
+          <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+            {t("model.provider.protocol")}
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            <Chip
+              selected={effectiveMainProvider === "openai"}
+              onClick={() => setMainProvider("openai")}
+            >
+              {t("model.provider.openai")}
+            </Chip>
+            <Chip
+              selected={effectiveMainProvider === "anthropic"}
+              onClick={() => setMainProvider("anthropic")}
+            >
+              {t("model.provider.anthropic")}
+            </Chip>
+          </div>
           <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-            {t("model.provider.mainProtocolNote")}
+            {t("model.provider.mainProtocolHint")}
           </span>
         </div>
 
