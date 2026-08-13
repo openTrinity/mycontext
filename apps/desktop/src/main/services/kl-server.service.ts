@@ -24,6 +24,7 @@
  * 只借它"长驻 + 可主动关 + onExit 回调"这三件事。
  */
 import { join } from "node:path"
+import { execFileSync } from "node:child_process"
 import { mkdirSync, existsSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs"
 import Database from "better-sqlite3"
 import type { BrowserWindow } from "electron"
@@ -2044,6 +2045,21 @@ export class KlServerService {
       // 接管成功：端口已让出，落到下面的正常 spawn。
     }
 
+    /**
+     * ★★★ spawn 之前**无条件**检查图库锁 —— 端口探测救不了这一种。
+     *
+     * `reclaimOrphan()` 只在"端口被占"那个分支里调。但一个孤儿完全可能
+     * **锁还握着、HTTP 端口已经死了**（进程卡在异常里、或它监听的是另一个
+     * 端口 —— 飞书那次实测孤儿在 8201 而撞的是文件锁）。那时端口探测返回
+     * false → 直接往下 spawn → 新进程撞锁 exit 3 → 用户看到
+     * "图谱服务退出"，而且**重启应用也不好**（孤儿一直在）。
+     *
+     * 所以这里再做一次按锁持有者的接管。判据与 `reclaimGraphLockHolder`
+     * 相同（必须是我们自己的 kl_server 才动手），所以重复调用是安全的：
+     * 没有孤儿时它只是一次 `existsSync` + 一次 lsof。
+     */
+    await this.reclaimGraphLockHolder()
+
     // 数据目录必须存在：kl 会在里面开 SQLite / Qdrant。
     mkdirSync(this.dataDir, { recursive: true })
     this.setState("starting")
@@ -2402,7 +2418,40 @@ export class KlServerService {
    */
   private async reclaimOrphan(): Promise<boolean> {
     const record = this.readPidfile()
-    if (record === null || record.port !== this.port) return false
+    /**
+     * ★★★ 没有 pidfile 时**还有一条路**：看谁占着这个 vault 的图库锁。
+     *
+     * ## 用户报的那个错就是这条路缺失造成的
+     *
+     *     RuntimeError: Cannot start with graph backend 'ladybug':
+     *     Could not set lock on file: …/sources/feishu/kl/graph.ladybug
+     *     (Resource temporarily unavailable)
+     *
+     * 实测（lsof）：一个 4 小时前的孤儿 kl-server 仍握着**飞书那份**
+     * `graph.ladybug` 的文件锁，并监听 8201。于是每一个新的飞书 kl-server
+     * 一起来就撞锁 exit 3，而界面只显示"图谱服务退出"。
+     *
+     * ## 为什么原来的 pidfile 判据救不了它
+     *
+     * pidfile 是 spawn **成功之后**才写的（见 `writePidfile` 的调用点）。
+     * 飞书这一侧从来没成功过 —— 它每次都死在撞锁那一步 —— 所以
+     * `sources/feishu/kl/` 下**根本没有** pidfile，`readPidfile()` 返回 null，
+     * 接管逻辑直接 `return false`，退回 adopt。
+     *
+     * 也就是说：**越是启动失败的那一侧，越拿不到自愈所需的凭证**。
+     * 这是一个自我锁死的循环，而它的表现是"重启应用也不好"。
+     *
+     * ## 判据：锁文件的持有者是不是**我们自己的** kl-server
+     *
+     * 用 `lsof` 拿持有者 pid，再要求它的命令行里有 `kl_server`——
+     * 那是"这是我们起的那个 python"的可观测证据。不满足就不碰
+     * （用户自己 `kl start` 的外部进程、或别的程序碰巧打开了这个文件）。
+     *
+     * ★ 与 pidfile 那条**互补**而不是替代：pidfile 更强（记了 port 与
+     * startedAt），能用就用它；这条只在它缺失时兜底。
+     */
+    if (record === null) return await this.reclaimGraphLockHolder()
+    if (record.port !== this.port) return false
 
     // pid 还活着吗？signal 0 只做存在性检查，不真的发信号。
     try {
@@ -2443,6 +2492,93 @@ export class KlServerService {
       pid: record.pid,
       port: this.port,
     })
+    return false
+  }
+
+  /**
+   * 没有 pidfile 时的兜底接管：**按图库锁的持有者**。
+   *
+   * 判据三条都要成立才动手（见 `reclaimOrphan` 里那段注释）：
+   * ① 这个 vault 的 `graph.ladybug` 真的被某个 pid 占着；
+   * ② 那个 pid 还活着；
+   * ③ 它的命令行里有 `kl_server` —— 即"这是我们起的那个 python"。
+   *
+   * ★ 三条缺一就 `return false`（退回 adopt / 报错），**不猜**。
+   * 杀错进程比"图谱服务起不来"糟得多。
+   */
+  private async reclaimGraphLockHolder(): Promise<boolean> {
+    const lockPath = join(this.dataDir, "graph.ladybug")
+    if (!existsSync(lockPath)) return false
+
+    let pid: number | null = null
+    try {
+      /**
+       * `lsof -t` 只输出 pid。★ 用 `-t` 而不是解析完整输出：后者的列宽随
+       * 命令名长度变化，按空格切会在长路径上切错列。
+       */
+      const out = execFileSync("/usr/sbin/lsof", ["-t", lockPath], {
+        encoding: "utf8",
+        timeout: 3_000,
+      })
+      const first = out
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)[0]
+      pid = first === undefined ? null : Number.parseInt(first, 10)
+    } catch {
+      // lsof 不在 / 没权限 / 文件没被占 —— 都当"没有可接管的孤儿"
+      return false
+    }
+    if (pid === null || Number.isNaN(pid) || pid === process.pid) return false
+
+    // 存活性 + "是不是我们的 kl_server"
+    let looksLikeOurs = false
+    try {
+      process.kill(pid, 0)
+      const cmd = execFileSync("/bin/ps", ["-o", "command=", "-p", String(pid)], {
+        encoding: "utf8",
+        timeout: 3_000,
+      })
+      looksLikeOurs = cmd.includes("kl_server")
+    } catch {
+      return false
+    }
+    if (!looksLikeOurs) {
+      this.options.logger.warn("graph lock held by a foreign process; not touching it", {
+        pid,
+        lockPath,
+      })
+      return false
+    }
+
+    this.options.logger.info("reclaiming kl-server holding the graph lock", { pid, lockPath })
+    try {
+      process.kill(pid, "SIGTERM")
+    } catch (error) {
+      this.options.logger.warn("failed to signal graph-lock holder", {
+        pid,
+        detail: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+
+    /**
+     * 等它真的放开锁 —— 判据是**进程消失**，不是"睡够了"。
+     *
+     * ★ 不用 `probeExisting(port)`：那个孤儿可能监听的是另一个端口
+     * （飞书那次实测它在 8201，而撞锁的是文件），端口探测会误判成"已释放"。
+     */
+    const sleep = this.options.sleep ?? defaultSleep
+    const deadline = this.options.clock.now() + RECLAIM_PORT_RELEASE_TIMEOUT_MS
+    while (this.options.clock.now() < deadline) {
+      await sleep(RECLAIM_POLL_INTERVAL_MS)
+      try {
+        process.kill(pid, 0)
+      } catch {
+        return true // 进程已退出 → 锁已释放
+      }
+    }
+    this.options.logger.warn("graph-lock holder did not exit in time", { pid })
     return false
   }
 
