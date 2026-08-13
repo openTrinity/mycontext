@@ -379,6 +379,9 @@ describe("KlServerService · 网关出网边界", () => {
     expect(env["KL_LLM_FLASH_PROVIDER"]).toBe("openai")
     expect(env["KL_EMBED_BASE_URL"]).toBe("https://gw/v1")
     expect(env["KL_EMBED_API_KEY"]).toBe("sk-x")
+    // ★★ openai 协议下 LLM 抽取的 key 要塞进 OPENAI_API_KEY —— kl 的 litellm 那样读。
+    // 不塞的话每个 batch 报 "Missing credentials / OPENAI_API_KEY" 刷屏（真实踩过）。
+    expect(env["OPENAI_API_KEY"]).toBe("sk-x")
     // ★ 维度必须注入（网关返回 2048，kl 默认建 4096 集合会崩）——见 KlServerService 注释。
     expect(env["KL_EMBEDDING_DIM"]).toBe("2048")
     expect(env["KL_EMBED_SEND_DIMENSIONS"]).toBe("1")
@@ -392,6 +395,35 @@ describe("KlServerService · 网关出网边界", () => {
       clock: new ManualClock(1_000),
     })
     expect(svc.status().networkEgress).toBe(false)
+  })
+
+  it("★ anthropic 协议下 LLM key 塞进 ANTHROPIC_AUTH_TOKEN（不是 OPENAI_API_KEY）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const runner = fakeRunner()
+    const svc = makeService({
+      runner,
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      gateway: () => ({
+        llmBaseUrl: "https://gw",
+        llmProvider: "anthropic",
+        llmModel: "claude-sonnet-4-6",
+        embedBaseUrl: "https://gw/v1",
+        embedModel: "text-embedding-v4",
+        apiKey: "sk-ant",
+        embeddingDim: 2048,
+        sendDimensions: true,
+      }),
+    })
+    await svc.ensureReady()
+    const env = runner.getSpec()!.env
+    expect(env["KL_LLM_PROVIDER"]).toBe("anthropic")
+    // anthropic 传输：kl 的 litellm 从 ANTHROPIC_AUTH_TOKEN 读 LLM key
+    expect(env["ANTHROPIC_AUTH_TOKEN"]).toBe("sk-ant")
+    // embedding 那把仍在
+    expect(env["KL_EMBED_API_KEY"]).toBe("sk-ant")
+    // 不该把 LLM key 误塞成 OPENAI_API_KEY（anthropic 走 ANTHROPIC_AUTH_TOKEN）
+    expect(env["OPENAI_API_KEY"]).not.toBe("sk-ant")
   })
 })
 

@@ -2692,9 +2692,24 @@ export class KlServerService {
       if (gw.embedBaseUrl !== undefined && gw.embedBaseUrl !== "")
         env["KL_EMBED_BASE_URL"] = gw.embedBaseUrl
       if (gw.embedModel !== undefined && gw.embedModel !== "") env["KL_EMBED_MODEL"] = gw.embedModel
-      // 出网密钥：embedding 走 KL_EMBED_API_KEY；LLM 侧从 ANTHROPIC_AUTH_TOKEN 读
-      // （kl 的调用点如此约定），后者本就在 process.env 里，不用再塞。
-      if (gw.apiKey !== undefined && gw.apiKey !== "") env["KL_EMBED_API_KEY"] = gw.apiKey
+      /**
+       * ★★ 出网密钥。embedding 走 `KL_EMBED_API_KEY`；LLM 侧的 key 名**按协议不同**：
+       *
+       * kl 的 `llm_flash` 配置块里**没有** api_key 字段（见 config.default.yaml），
+       * 它靠 `litellm_config.py` 的 `provider_api_key(provider)` 解析：
+       * · `anthropic` → 读 `ANTHROPIC_AUTH_TOKEN`；
+       * · 其它(含 openai) → 返回 None，于是 litellm 的 openai 传输去读 `OPENAI_API_KEY`。
+       *
+       * ★ 这就是"改默认协议为 openai 后 kl 恒报 Missing credentials / OPENAI_API_KEY"
+       * 那个刷屏的根因：以前默认 anthropic 时 key 走 ANTHROPIC_AUTH_TOKEN（process.env
+       * 里 seed 过），翻成 openai 后没人塞 OPENAI_API_KEY。所以这里按协议把**同一把
+       * 出网 key**塞到对应的名下 —— embedding 那把与 LLM 那把是同一个网关的同一把。
+       */
+      if (gw.apiKey !== undefined && gw.apiKey !== "") {
+        env["KL_EMBED_API_KEY"] = gw.apiKey
+        if (gw.llmProvider === "anthropic") env["ANTHROPIC_AUTH_TOKEN"] = gw.apiKey
+        else env["OPENAI_API_KEY"] = gw.apiKey
+      }
       // ★ 维度必须与网关实际返回一致，否则 Qdrant 集合维度对不上会崩（见字段注释）。
       if (gw.embeddingDim !== undefined) env["KL_EMBEDDING_DIM"] = String(gw.embeddingDim)
       if (gw.sendDimensions === true) env["KL_EMBED_SEND_DIMENSIONS"] = "1"
