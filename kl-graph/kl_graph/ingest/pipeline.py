@@ -1917,6 +1917,92 @@ class IngestionPipeline:
                     print(f"  Facts: {flushed} vectors stored")
             s.done()
 
+    def _maybe_heal_missing_workset(self) -> bool:
+        """Self-heal when the durable workset row is missing (Cases A and B).
+
+        Called by ``_load_workset`` when ``get_ingest_batch`` returns None.
+        Classifies the failure and applies the appropriate fix:
+
+        - Case A (stale checkpoint over wiped DB): clears Phase-A checkpoint
+          steps via ``checkpoint.clear_prefix("phase_a.")`` so Phase A will
+          run again, then loads sources directly.
+        - Case B (chunks present, workset row gone, source on disk): re-runs
+          Phase A from sources.  But if the incremental dedup ledger has
+          already recorded every unit as seen, the re-parse yields an empty
+          in-memory workset while durable chunks remain — that cannot be
+          silently extracted, so this raises RuntimeError pointing at
+          --fresh-db.  Source-absent Case B cannot be healed; caller will raise.
+
+        Returns:
+            True when the situation was healed (``self._sources_loaded`` is
+            now set); False when no healing path is available.
+        """
+        if self.checkpoint is None or self.store is None:
+            return False
+
+        from kl_graph.ingest.recovery import FailureCase, classify_recovery
+
+        source_dir = self.messages_dir.parent if self.messages_dir else None
+        try:
+            conn = self.store.sql_conn
+            info = classify_recovery(conn, self.source_id, source_dir=source_dir)
+        except Exception:
+            logger.warning(
+                "Recovery classifier failed; falling back to RuntimeError",
+                exc_info=True,
+            )
+            return False
+
+        if info.case == FailureCase.A:
+            # Stale checkpoint over a wiped DB.  Phase A steps are no longer
+            # valid (chunks are gone).  Clearing the prefix lets Phase A run
+            # unconditionally on the next call.
+            logger.info(
+                "Recovery Case A: stale checkpoint, clearing phase_a.* steps "
+                "and reloading from sources (batch_id=%r)",
+                self.batch_id,
+            )
+            self.checkpoint.clear_prefix("phase_a.")
+            self._load_sources()
+            return True
+
+        if info.case == FailureCase.B and info.source_present:
+            # Workset row gone but chunks survived and source is on disk.
+            # 重新解析源目录再走一遍 Phase A 看似安全，但有一个隐藏陷阱：
+            # 增量去重账本（units 表）在上一轮已把所有 unit 记为「已见」，
+            # 而 _load_sources 会用 _filter_unseen_chunks 把已见 unit 全部滤掉，
+            # 于是内存工作集塌缩成空。若此时返回 True，Phase B 会对「零 chunk」
+            # 做抽取——DB 里明明还有 chunk，却被静默当成空跑完（正是 §4 禁止的
+            # 静默降级）。所以这里重载后必须校验：内存工作集为空但 DB 里仍有 chunk
+            # 时，工作集无法从现有账本重建，只能诚实报错要求 --fresh-db 重建。
+            logger.info(
+                "Recovery Case B: workset row missing, source on disk; "
+                "re-running Phase A from sources (batch_id=%r)",
+                self.batch_id,
+            )
+            self._load_sources()
+            if not self.all_chunks() and info.count_chunks > 0:
+                self._sources_loaded = False
+                raise RuntimeError(
+                    f"Checkpoint batch {self.batch_id!r} lost its workset row but "
+                    f"{info.count_chunks} chunk(s) survive in the DB. The unit "
+                    "dedup ledger already marks every source unit as seen, so the "
+                    "workset cannot be rebuilt by re-parsing sources (that yields "
+                    "an empty workset and would silently extract nothing). Use "
+                    "--fresh-db to start a clean rebuild (extraction cache is "
+                    "preserved in extraction_cache.db)."
+                )
+            return True
+
+        # Cases C, D, and B-without-source cannot be auto-healed.
+        logger.warning(
+            "Recovery case %r (tier=%r) is not auto-healable; "
+            "a manual --fresh-db rebuild is required",
+            info.case,
+            info.tier,
+        )
+        return False
+
     def _load_workset(self) -> None:
         """Hydrate the exact Phase-A batch from durable SQLite state.
 
@@ -1942,6 +2028,11 @@ class IngestionPipeline:
 
         batch = self.store.get_ingest_batch(self.batch_id)
         if batch is None:
+            # Durable workset row is missing.  Classify the situation before
+            # raising: Cases A and B are self-healable by re-running Phase A.
+            healed = self._maybe_heal_missing_workset()
+            if healed:
+                return
             raise RuntimeError(
                 f"Checkpoint batch {self.batch_id!r} has no durable workset; "
                 "run Phase A before any chunk-dependent phase"
@@ -2220,6 +2311,26 @@ class IngestionPipeline:
                 return
             self._load_phase_a_input()
             chunks = self.all_chunks()
+            # Build the atomicity callback before the store call so we can
+            # capture the checkpoint reference (may be None for pipeline runs
+            # without a checkpoint).  The callback is invoked by
+            # insert_chunks_with_units inside its transaction, immediately
+            # after the workset row is written and before commit.
+            checkpoint = self.checkpoint
+            if checkpoint is not None and self.batch_id:
+
+                def _checkpoint_callback(conn) -> None:
+                    # Write the checkpoint step into the same transaction.
+                    # Does NOT update the in-memory dict yet — mark_done()
+                    # below does that after the commit succeeds.
+                    checkpoint.mark_done_in_transaction(
+                        "phase_a.persist_chunks",
+                        conn,
+                        params={"ingestion_plan_schema": 1},
+                    )
+            else:
+                _checkpoint_callback = None  # type: ignore[assignment]
+
             self.store.insert_chunks_with_units(
                 chunks,
                 self.source_units,
@@ -2233,12 +2344,22 @@ class IngestionPipeline:
                     if self.batch_id and self.checkpoint is not None
                     else None
                 ),
+                checkpoint_step_callback=_checkpoint_callback,
             )
+            # The transaction committed successfully; sync the in-memory state
+            # so is_done() returns True without a DB round-trip.
+            if _checkpoint_callback is not None:
+                checkpoint.mark_done(
+                    "phase_a.persist_chunks",
+                    params={"ingestion_plan_schema": 1},
+                )
             if chunks:
                 print(f"  Messages persisted: {self.store.count_messages()}")
             print(f"  Chunks (all sources): {self.store.count_chunks()}")
             self._persist_scopes()
-            s.done(count=self.store.count_chunks())
+            if _checkpoint_callback is None:
+                # No atomic write — mark through normal path.
+                s.done(count=self.store.count_chunks())
 
     def _persist_scopes(self) -> list[Edge]:
         """Derive + persist one Scope per distinct source container.

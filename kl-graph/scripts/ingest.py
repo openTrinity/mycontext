@@ -251,7 +251,7 @@ async def main():
             print(f"Deleted checkpoint: {checkpoint_file}")
 
     checkpoint = make_checkpoint(options)
-    print(f"Checkpoint:   {checkpoint_file} (hash: {checkpoint.source_hash[:24]}...)")
+    print(f"Checkpoint:   {SQLITE_PATH}::ingest_checkpoint (hash: {checkpoint.source_hash[:24]}...)")
 
     # Handle --reset-checkpoint
     if args.reset_checkpoint:

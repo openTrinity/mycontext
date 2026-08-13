@@ -2,13 +2,28 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from kl_graph.ingest.checkpoint import IngestCheckpoint
 
 
 def _checkpoint(tmp_path: Path) -> IngestCheckpoint:
-    return IngestCheckpoint(tmp_path / "checkpoint.json", source_dirs=[])
+    conn = sqlite3.connect(str(tmp_path / "checkpoint.db"))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ingest_checkpoint (
+            source_id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL DEFAULT 1,
+            source_hash TEXT NOT NULL DEFAULT '',
+            batch_id TEXT NOT NULL DEFAULT '',
+            workset_schema INTEGER NOT NULL DEFAULT 0,
+            steps TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+    return IngestCheckpoint(conn, "test-source", source_dirs=[])
 
 
 def test_undone_step_runs_and_commits(tmp_path: Path) -> None:

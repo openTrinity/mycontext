@@ -5,6 +5,11 @@ On resume, the pipeline skips steps already marked done. The checkpoint is
 versioned by a source hash (stat-based fingerprint of source files), so it
 auto-invalidates when the input data changes.
 
+The checkpoint is stored in the ``ingest_checkpoint`` table inside
+``knowledge.db`` rather than a sidecar JSON file. This makes "Phase A done"
+and "workset exists" a single SQLite commit, eliminating the stale-JSON class
+of failures where wiping the DB left an orphaned checkpoint.
+
 See ``docs/checkpoint-design.md`` for the full design rationale, transaction
 boundaries, and rules for adding new steps.
 """
@@ -15,7 +20,7 @@ import functools
 import hashlib
 import json
 import logging
-import os
+import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Generator
@@ -86,28 +91,50 @@ class IngestCheckpoint:
     """Step-level checkpoint for resumable ingestion.
 
     The checkpoint records which pipeline steps have completed. It is persisted
-    as a JSON file and written atomically (write-to-tmp + rename) so a crash
-    never corrupts it.
+    as a row in the ``ingest_checkpoint`` table of ``knowledge.db``.  This
+    collapses the checkpoint and the workset into the same SQLite file, so they
+    can never disagree: dropping/clearing ``knowledge.db`` wipes both at once.
 
-    The checkpoint is keyed by a ``source_hash`` — a stat-based fingerprint of
-    the source files. If the source data changes (files added/removed/modified),
+    The checkpoint is keyed by a ``source_id`` (the caller-supplied stable
+    namespace, e.g. "default") AND a ``source_hash`` — a stat-based fingerprint
+    of the source files. If the source data changes (files added/removed/modified),
     the checkpoint auto-invalidates and the pipeline starts fresh.
     """
 
     VERSION = 1
 
-    def __init__(self, path: Path, source_dirs: list[Path]):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        source_id: str,
+        source_dirs: list[Path],
+    ):
         """Load or create checkpoint. Invalidates if source_hash changed.
 
         Args:
-            path: Path to the checkpoint JSON file.
+            conn: Open SQLite connection to knowledge.db.
+            source_id: Stable source namespace (e.g. "default").
             source_dirs: Directories containing source files to fingerprint.
         """
-        self.path = Path(path)
+        self._conn = conn
+        self._source_id = source_id
         self._source_dirs = source_dirs
         self._source_hash = self._compute_source_hash(source_dirs)
-        self._data: dict[str, Any] = {"version": self.VERSION, "source_hash": "", "steps": {}}
+        # In-memory copy of the checkpoint row; kept in sync with DB on every write.
+        self._data: dict[str, Any] = {
+            "version": self.VERSION,
+            "source_hash": "",
+            "batch_id": "",
+            "workset_schema": 0,
+            "steps": {},
+            "created_at": 0,
+        }
         self._load_or_reset()
+
+    @property
+    def source_id(self) -> str:
+        """The source namespace this checkpoint belongs to."""
+        return self._source_id
 
     @property
     def source_hash(self) -> str:
@@ -117,13 +144,11 @@ class IngestCheckpoint:
     @property
     def batch_id(self) -> str:
         """Stable durable-workset id for this checkpoint epoch."""
-
         return str(self._data["batch_id"])
 
     @property
     def workset_schema(self) -> int:
         """Durable-workset schema recorded by this checkpoint."""
-
         return int(self._data.get("workset_schema", 0))
 
     # ─── Primary API: step() context manager ──────────────────────────────
@@ -211,7 +236,7 @@ class IngestCheckpoint:
         return dict(entry) if isinstance(entry, dict) else {}
 
     def mark_done(self, step: str, *, params: dict | None = None, **meta) -> None:
-        """Mark step complete. Flushes to disk atomically.
+        """Mark step complete. Flushes to DB.
 
         Args:
             step: Step identifier.
@@ -224,6 +249,62 @@ class IngestCheckpoint:
         entry.update(meta)
         self._data["steps"][step] = entry
         self._flush()
+
+    def mark_done_in_transaction(
+        self,
+        step: str,
+        conn: sqlite3.Connection,
+        *,
+        params: dict | None = None,
+        **meta: Any,
+    ) -> None:
+        """Mark step complete using an already-open transaction.
+
+        Unlike :meth:`mark_done`, this writes directly via ``conn`` without
+        calling ``conn.commit()`` — it is the caller's responsibility to commit.
+        Use this to atomically co-commit the checkpoint step with other DB
+        writes (e.g. the workset INSERT in ``insert_chunks_with_units``).
+
+        This method does **not** update the in-memory ``_data["steps"]`` dict —
+        the caller must call :meth:`mark_done` after the enclosing transaction
+        commits to keep the in-memory state consistent with the DB.
+
+        Args:
+            step: Step identifier.
+            conn: The sqlite3 connection that owns the current transaction.
+            params: Optional parameters to record.
+            **meta: Additional metadata.
+        """
+        entry: dict[str, Any] = {"status": "done", "ts": int(time.time())}
+        if params is not None:
+            entry["params"] = params
+        entry.update(meta)
+        # Compute the merged steps dict for the DB write, but do NOT update
+        # self._data yet — the transaction may still roll back.
+        merged_steps = dict(self._data["steps"])
+        merged_steps[step] = entry
+        # Write to DB inside the caller's transaction (no commit here).
+        conn.execute(
+            """INSERT INTO ingest_checkpoint
+               (source_id, version, source_hash, batch_id, workset_schema, steps, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(source_id) DO UPDATE SET
+                 version=excluded.version,
+                 source_hash=excluded.source_hash,
+                 batch_id=excluded.batch_id,
+                 workset_schema=excluded.workset_schema,
+                 steps=excluded.steps,
+                 created_at=excluded.created_at""",
+            (
+                self._source_id,
+                self._data["version"],
+                self._data["source_hash"],
+                self._data["batch_id"],
+                self._data["workset_schema"],
+                json.dumps(merged_steps, ensure_ascii=False),
+                self._data["created_at"],
+            ),
+        )
 
     def clear_prefix(self, prefix: str) -> None:
         """Clear all steps starting with prefix (e.g., 'improve.').
@@ -242,11 +323,11 @@ class IngestCheckpoint:
             logger.info("Cleared %d checkpoint entries with prefix %r", len(to_remove), prefix)
 
     def reset(self) -> None:
-        """Clear all steps. Used on --fresh-db or source change."""
+        """Clear all steps and mint a new batch_id. Used on --fresh-db or source change."""
         self._data = {
             "version": self.VERSION,
             "source_hash": self._source_hash,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "created_at": int(time.time()),
             "batch_id": str(uuid.uuid4()),
             "workset_schema": 1,
             "steps": {},
@@ -254,46 +335,70 @@ class IngestCheckpoint:
         self._flush()
 
     def delete(self) -> None:
-        """Delete the checkpoint file from disk."""
-        if self.path.exists():
-            self.path.unlink()
+        """Delete the checkpoint row from the DB."""
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM ingest_checkpoint WHERE source_id=?",
+                (self._source_id,),
+            )
+        # Reset in-memory state so subsequent operations start fresh.
+        self._data = {
+            "version": self.VERSION,
+            "source_hash": self._source_hash,
+            "batch_id": "",
+            "workset_schema": 0,
+            "steps": {},
+            "created_at": 0,
+        }
 
     # ─── Internal ──────────────────────────────────────────────────────────
 
     def _load_or_reset(self) -> None:
-        """Load existing checkpoint if source_hash matches, else reset."""
-        if not self.path.exists():
+        """Load existing checkpoint row if source_hash matches, else reset."""
+        row = self._conn.execute(
+            "SELECT * FROM ingest_checkpoint WHERE source_id=?",
+            (self._source_id,),
+        ).fetchone()
+
+        if row is None:
             self.reset()
             return
+
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Corrupt checkpoint file, resetting: %s", exc)
+            data: dict[str, Any] = {
+                "version": row["version"],
+                "source_hash": row["source_hash"] or "",
+                "batch_id": row["batch_id"] or "",
+                "workset_schema": row["workset_schema"],
+                "steps": json.loads(row["steps"] or "{}"),
+                "created_at": row["created_at"],
+            }
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            logger.warning("Corrupt checkpoint row, resetting: %s", exc)
             self.reset()
             return
 
         # Version check
-        if data.get("version") != self.VERSION:
+        if data["version"] != self.VERSION:
             logger.info("Checkpoint version mismatch, resetting")
             self.reset()
             return
 
         # Once Phase A commits, its durable workset is the retry authority even
         # if the local source directory changes while the run is interrupted.
-        if data.get("source_hash") != self._source_hash:
-            persist = data.get("steps", {}).get("phase_a.persist_chunks", {})
-            complete = data.get("steps", {}).get("ingest.complete", {})
+        if data["source_hash"] != self._source_hash:
+            persist = data["steps"].get("phase_a.persist_chunks", {})
+            complete = data["steps"].get("ingest.complete", {})
             if persist.get("status") == "done" and complete.get("status") != "done":
                 logger.warning(
                     "Source changed during interrupted ingest; resuming batch %s",
                     data.get("batch_id", "<legacy>"),
                 )
-                self._source_hash = str(data.get("source_hash", self._source_hash))
+                self._source_hash = str(data["source_hash"])
             else:
                 logger.info(
                     "Source data changed (hash mismatch: %s → %s), resetting checkpoint",
-                    data.get("source_hash", "")[:16],
+                    data["source_hash"][:16],
                     self._source_hash[:16],
                 )
                 self.reset()
@@ -302,7 +407,7 @@ class IngestCheckpoint:
         # A committed legacy checkpoint has no reconstructable workset. Keep an
         # explicit schema marker so resumption fails loudly instead of silently
         # processing zero chunks.
-        if "batch_id" not in data:
+        if not data.get("batch_id"):
             data["batch_id"] = str(uuid.uuid4())
             data["workset_schema"] = 0
             self._data = data
@@ -312,13 +417,29 @@ class IngestCheckpoint:
         self._data = data
 
     def _flush(self) -> None:
-        """Write checkpoint to disk atomically (write-tmp + rename)."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(".json.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
-        # Atomic rename (POSIX guarantees this on same filesystem)
-        os.replace(str(tmp_path), str(self.path))
+        """Write in-memory checkpoint state to the DB (committing the transaction)."""
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO ingest_checkpoint
+                   (source_id, version, source_hash, batch_id, workset_schema, steps, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(source_id) DO UPDATE SET
+                     version=excluded.version,
+                     source_hash=excluded.source_hash,
+                     batch_id=excluded.batch_id,
+                     workset_schema=excluded.workset_schema,
+                     steps=excluded.steps,
+                     created_at=excluded.created_at""",
+                (
+                    self._source_id,
+                    self._data["version"],
+                    self._data["source_hash"],
+                    self._data["batch_id"],
+                    self._data["workset_schema"],
+                    json.dumps(self._data["steps"], ensure_ascii=False),
+                    self._data["created_at"],
+                ),
+            )
 
     @staticmethod
     def _compute_source_hash(dirs: list[Path]) -> str:
@@ -351,6 +472,84 @@ class IngestCheckpoint:
         manifest = "\n".join(entries)
         h = hashlib.sha256(manifest.encode("utf-8")).hexdigest()
         return f"sha256:{h}"
+
+    @classmethod
+    def migrate_from_json(
+        cls,
+        conn: sqlite3.Connection,
+        json_path: Path,
+        source_id: str,
+    ) -> bool:
+        """Import a legacy JSON checkpoint into the ingest_checkpoint table.
+
+        Called at store-open time by
+        :meth:`~kl_graph.storage.sqlite_store.SQLiteStore._migrate_checkpoint_json`.
+        Idempotent: skips import if a row already exists for source_id.
+        Deletes the JSON file after a successful import.
+
+        Args:
+            conn: Open SQLite connection (may be inside a transaction).
+            json_path: Path to the legacy JSON checkpoint file.
+            source_id: The source namespace this checkpoint belongs to.
+
+        Returns:
+            True if the JSON was imported (and deleted), False if skipped.
+        """
+        # Skip if the DB already has a row for this source.
+        existing = conn.execute(
+            "SELECT 1 FROM ingest_checkpoint WHERE source_id=?", (source_id,)
+        ).fetchone()
+        if existing is not None:
+            return False
+
+        if not json_path.exists():
+            return False
+
+        try:
+            import json as _json
+
+            with open(json_path, "r", encoding="utf-8") as fh:
+                data = _json.load(fh)
+        except (OSError, ValueError) as exc:
+            logger.warning("Failed to read legacy checkpoint %s: %s", json_path, exc)
+            return False
+
+        version = int(data.get("version", 1))
+        source_hash = str(data.get("source_hash", ""))
+        batch_id = str(data.get("batch_id", ""))
+        workset_schema = int(data.get("workset_schema", 0))
+        steps_raw = data.get("steps", {})
+        steps = steps_raw if isinstance(steps_raw, dict) else {}
+        created_at = int(time.time())
+
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO ingest_checkpoint
+                   (source_id, version, source_hash, batch_id, workset_schema, steps, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    source_id,
+                    version,
+                    source_hash,
+                    batch_id,
+                    workset_schema,
+                    _json.dumps(steps, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to import legacy checkpoint %s: %s", json_path, exc)
+            return False
+
+        # Delete the JSON after successful import.
+        try:
+            json_path.unlink()
+            logger.info("Migrated legacy checkpoint %s → ingest_checkpoint table", json_path)
+        except OSError as exc:
+            logger.warning("Migrated checkpoint but could not delete %s: %s", json_path, exc)
+
+        return True
 
 
 # ─── Reusable Helpers ─────────────────────────────────────────────────────

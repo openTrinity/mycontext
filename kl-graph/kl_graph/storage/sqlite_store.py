@@ -275,7 +275,18 @@ class SQLiteStore(KnowledgeStore):
                 unit_count INTEGER NOT NULL DEFAULT 0,
                 chunk_count INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                round_started_at INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS ingest_checkpoint (
+                source_id TEXT PRIMARY KEY,
+                version INTEGER NOT NULL DEFAULT 1,
+                source_hash TEXT NOT NULL DEFAULT '',
+                batch_id TEXT NOT NULL DEFAULT '',
+                workset_schema INTEGER NOT NULL DEFAULT 0,
+                steps TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS ingest_batch_chunks (
@@ -368,7 +379,9 @@ class SQLiteStore(KnowledgeStore):
         self._ensure_chunk_columns()
         self._ensure_ingest_run_columns()
         self._ensure_community_columns()
+        self._ensure_ingest_batch_columns()
         self._ensure_entities_fts()
+        self._migrate_checkpoint_json()
         self.conn.commit()
 
     def _ensure_entity_columns(self) -> None:
@@ -496,6 +509,56 @@ class SQLiteStore(KnowledgeStore):
             ]
         )
         logger.info("backfilled %d entities into %s", len(rows), _ENTITIES_FTS)
+
+    def _migrate_checkpoint_json(self) -> None:
+        """One-way migration: import any legacy JSON checkpoint files into the DB.
+
+        At each store-open we scan ``self.db_path.parent`` for files matching
+        ``ingest_checkpoint.<source_id>.json``.  For each one we find, if no row
+        exists yet in ``ingest_checkpoint`` for that ``source_id``, we import
+        the row and then delete the file.  Completely idempotent: a row that
+        already exists is left untouched and the JSON is *not* deleted (so the
+        first successful commit is the gate that removes the file).
+
+        Runs before the outer ``commit()`` in :meth:`_create_tables`, so the
+        migrated rows land in the same transaction as the schema setup.
+        """
+        if not self._reopenable:
+            return  # :memory: / injected-connection tests — no filesystem to scan
+
+        import re as _re
+
+        parent = FsPath(self.db_path).parent
+        if not parent.exists():
+            return
+
+        # Lazily import to avoid circular import at module load time.
+        from kl_graph.ingest.checkpoint import IngestCheckpoint as _CP
+
+        pattern = _re.compile(r"^ingest_checkpoint\.(.+)\.json$")
+        for p in parent.iterdir():
+            m = pattern.match(p.name)
+            if m is None:
+                continue
+            # 文件名用的是 runner.py 的 safe-source 变换（[alnum-_] 之外一律换 '_'），
+            # 这个变换不可逆。只有当文件名分组本身是该变换的「不动点」
+            # （safe(name)==name）时，我们才能确定它就是原始 source_id——这覆盖了
+            # "default" / "ding" 等所有正常命名。含特殊字符的 source_id 会被 mangle
+            # 成另一个串，反推出来的 key 与 runner 实际用的 key 不一致，迁移进去
+            # 反而制造一条查不到的孤儿行；这种情况下宁可跳过并告警，也不静默塞错 key。
+            file_source_id = m.group(1)
+            safe = "".join(
+                c if c.isalnum() or c in "-_" else "_" for c in file_source_id
+            )
+            if safe != file_source_id:
+                logger.warning(
+                    "Skipping legacy checkpoint %s: filename was name-mangled and "
+                    "the original source_id cannot be recovered unambiguously; "
+                    "leaving the file in place",
+                    p.name,
+                )
+                continue
+            _CP.migrate_from_json(self.conn, p, file_source_id)
 
     def close(self) -> None:
         # Close every per-thread connection opened through this store.
@@ -637,6 +700,20 @@ class SQLiteStore(KnowledgeStore):
                 "ALTER TABLE ingest_runs ADD COLUMN warning TEXT NOT NULL DEFAULT ''"
             )
 
+    def _ensure_ingest_batch_columns(self) -> None:
+        """Add round_started_at to ingest_batches if missing from older databases."""
+        cols = {
+            r[1]
+            for r in self.conn.execute("PRAGMA table_info(ingest_batches)").fetchall()
+        }
+        if "round_started_at" not in cols:
+            try:
+                self.conn.execute(
+                    "ALTER TABLE ingest_batches ADD COLUMN round_started_at INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception as exc:  # noqa: BLE001 - column may already exist
+                logger.debug("round_started_at column already exists (skipping): %s", exc)
+
     def insert_chunks_with_units(
         self,
         chunks: list[Chunk],
@@ -648,8 +725,15 @@ class SQLiteStore(KnowledgeStore):
         batch_id: str | None = None,
         batch_source_id: str | None = None,
         source_hash: str | None = None,
+        checkpoint_step_callback=None,
     ) -> None:
-        """Commit chunks, unit lineage, and the batch workset atomically."""
+        """Commit chunks, unit lineage, and the batch workset atomically.
+
+        checkpoint_step_callback: if provided, called inside the transaction
+        after the workset is written (state='ready') to atomically mark the
+        phase_a.persist_chunks step done.  Must be a callable that accepts the
+        sqlite3.Connection currently in the transaction.
+        """
         seen_chunk_ids: set[str] = set()
         duplicate_chunk_ids: list[str] = []
         for chunk in chunks:
@@ -673,10 +757,10 @@ class SQLiteStore(KnowledgeStore):
                     )
                 self.conn.execute(
                     """INSERT INTO ingest_batches
-                       (batch_id, source_id, source_hash, state, created_at, updated_at)
-                       VALUES (?, ?, ?, 'preparing', ?, ?)
+                       (batch_id, source_id, source_hash, state, created_at, updated_at, round_started_at)
+                       VALUES (?, ?, ?, 'preparing', ?, ?, ?)
                        ON CONFLICT(batch_id) DO NOTHING""",
-                    (batch_id, batch_source_id, source_hash, now, now),
+                    (batch_id, batch_source_id, source_hash, now, now, now),
                 )
                 row = self.conn.execute(
                     """SELECT source_id, source_hash, state, unit_count
@@ -829,12 +913,68 @@ class SQLiteStore(KnowledgeStore):
                        WHERE batch_id=?""",
                     (batch_unit_count, len(chunks), now, batch_id),
                 )
+                # Atomically mark phase_a.persist_chunks done in the same
+                # transaction as the workset write, so "Phase A done" and
+                # "the workset exists" are a single commit and cannot diverge.
+                if checkpoint_step_callback is not None:
+                    checkpoint_step_callback(self.conn)
 
     def get_ingest_batch(self, batch_id: str) -> dict | None:
         row = self.conn.execute(
             "SELECT * FROM ingest_batches WHERE batch_id=?", (batch_id,)
         ).fetchone()
         return dict(row) if row is not None else None
+
+    # ─── Checkpoint table (ingest_checkpoint) ──────────────────────────────
+
+    def get_checkpoint(self, source_id: str) -> dict | None:
+        """Return the checkpoint row for source_id, or None if missing."""
+        row = self.conn.execute(
+            "SELECT * FROM ingest_checkpoint WHERE source_id=?", (source_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def upsert_checkpoint(
+        self,
+        source_id: str,
+        *,
+        version: int,
+        source_hash: str,
+        batch_id: str,
+        workset_schema: int,
+        steps: dict,
+        created_at: int,
+    ) -> None:
+        """Insert or replace the checkpoint row for source_id."""
+        self.conn.execute(
+            """INSERT INTO ingest_checkpoint
+               (source_id, version, source_hash, batch_id, workset_schema, steps, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(source_id) DO UPDATE SET
+                 version=excluded.version,
+                 source_hash=excluded.source_hash,
+                 batch_id=excluded.batch_id,
+                 workset_schema=excluded.workset_schema,
+                 steps=excluded.steps,
+                 created_at=excluded.created_at""",
+            (
+                source_id,
+                version,
+                source_hash,
+                batch_id,
+                workset_schema,
+                json.dumps(steps, ensure_ascii=False),
+                created_at,
+            ),
+        )
+        self.conn.commit()
+
+    def delete_checkpoint(self, source_id: str) -> None:
+        """Delete the checkpoint row for source_id. No-op if absent."""
+        self.conn.execute(
+            "DELETE FROM ingest_checkpoint WHERE source_id=?", (source_id,)
+        )
+        self.conn.commit()
 
     def get_ingest_batch_chunks(self, batch_id: str) -> list[Chunk]:
         rows = self.conn.execute(

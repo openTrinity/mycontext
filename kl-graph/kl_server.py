@@ -1298,6 +1298,346 @@ async def improve(req: ImproveRequest):
     return {"status": "started", "run_id": run_id, "ingest": state.ingest_progress}
 
 
+# ── Recovery / quiesce endpoints ─────────────────────────────────────────────
+
+# Timeout in seconds to wait for the ingest task to acknowledge cancellation.
+_QUIESCE_TIMEOUT_S: float = 30.0
+
+
+async def _quiesce() -> dict:
+    """Cancel the running ingest task and close all DB handles.
+
+    Returns a dict with ``{"quiesced": True, "detail": ...}`` after all handles
+    have been released.  Idempotent: safe to call when no task is running.
+    """
+    # 1. Cancel the running asyncio Task (ingest or improve).
+    task = state.ingest_task
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_QUIESCE_TIMEOUT_S)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):  # noqa: BLE001
+            pass
+        # Ensure state.ingest_task is cleared even if the task didn't acknowledge.
+        state.ingest_task = None
+
+    # 2. Close KnowledgeStore (covers SQLiteStore + LadybugDB / graph backend).
+    if state.store is not None:
+        try:
+            state.store.close()
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+        state.store = None
+
+    # 3. Close all per-thread SQLite connections held directly by ServerState.
+    state.close_sqlite()
+
+    # 4. Close vector stores (Qdrant / zvec).
+    if state.qdrant_main is not None:
+        try:
+            state.qdrant_main.close()
+        except Exception:  # noqa: BLE001
+            pass
+        state.qdrant_main = None
+
+    if state.qdrant_communities is not None:
+        try:
+            state.qdrant_communities.close()
+        except Exception:  # noqa: BLE001
+            pass
+        state.qdrant_communities = None
+
+    return {"quiesced": True, "detail": "all DB handles released"}
+
+
+def _store_paths() -> list[str]:
+    """Return the five store paths under DATA_DIR.
+
+    Paths are returned only to localhost callers and must never be logged.
+    """
+    paths = [
+        str(DATA_DIR / "knowledge.db"),
+        str(DATA_DIR / "knowledge.db-shm"),
+        str(DATA_DIR / "knowledge.db-wal"),
+        str(DATA_DIR / "graph.ladybug"),
+        str(DATA_DIR / "graph.ladybug.wal"),
+        str(DATA_DIR / "qdrant_data"),
+        str(DATA_DIR / "extraction_cache.db"),
+    ]
+    return paths
+
+
+def _last_batch_source_id(conn) -> str:
+    """取最近一条 ingest_batches 行的 source_id（供恢复分类使用）。
+
+    恢复分类需要与实际写入数据对应的 source_id。这里以 round_started_at
+    最新的一行为准；表为空或查询失败返回 ""（调用方再回退到 "default"）。
+    """
+    try:
+        row = conn.execute(
+            """SELECT source_id
+               FROM ingest_batches
+               ORDER BY round_started_at DESC LIMIT 1"""
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _recovery_tier_from_db() -> str:
+    """Determine the recovery_tier using the full A/B/C/D classifier.
+
+    Returns "ok", "resume", or "cleanup".
+    Falls back to a basic heuristic if the classifier raises.
+    """
+    conn = state.sqlite_conn
+    if conn is None:
+        return "ok"
+
+    try:
+        from kl_graph.ingest.recovery import classify_recovery
+        from kl_graph.config import cfg
+
+        # source_id 必须取自实际写入的 ingest_batches 行：cfg.application 上
+        # 并没有 source_id 字段，硬编码 "default" 会让每条按渠道命名的 source
+        # （如 "ding"）被误判成另一个 source，分类结果恒为空——典型的静默降级。
+        source_id = _last_batch_source_id(conn) or "default"
+        # Derive the source export dir from config if possible.
+        try:
+            from kl_graph.config import _path
+
+            source_dir = _path(cfg.application.dws_export_dir)
+        except Exception:  # noqa: BLE001
+            source_dir = None
+
+        info = classify_recovery(conn, source_id, source_dir=source_dir)
+        return info.tier
+    except Exception:  # noqa: BLE001
+        # Graceful degradation: if classifier fails, use simple heuristic.
+        pass
+
+    # Fallback heuristic: check whether any 'ready' ingest batch exists.
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM ingest_batches WHERE state='ready'"
+        ).fetchone()
+        if row and row[0] > 0:
+            return "resume"
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM ingest_batches").fetchone()
+        if row and row[0] > 0:
+            return "cleanup"
+    except Exception:  # noqa: BLE001
+        pass
+
+    return "ok"
+
+
+def _current_ingestion_identity() -> tuple[str, int]:
+    """Return (ingestion_id, round_started_at) for the current/last round.
+
+    Returns ("", 0) if no round has been started.
+    """
+    conn = state.sqlite_conn
+    if conn is None:
+        return "", 0
+
+    # Prefer the batch currently in progress (state in ('preparing','ready')).
+    try:
+        row = conn.execute(
+            """SELECT batch_id, round_started_at
+               FROM ingest_batches
+               WHERE state IN ('preparing', 'ready')
+               ORDER BY round_started_at DESC LIMIT 1"""
+        ).fetchone()
+        if row:
+            return str(row[0] or ""), int(row[1] or 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fall back to the most recent batch regardless of state.
+    try:
+        row = conn.execute(
+            """SELECT batch_id, round_started_at
+               FROM ingest_batches
+               ORDER BY round_started_at DESC LIMIT 1"""
+        ).fetchone()
+        if row:
+            return str(row[0] or ""), int(row[1] or 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return "", 0
+
+
+@app.get("/ingest/recovery-info")
+async def get_recovery_info():
+    """Return the current ingestion round's recovery state.
+
+    Intended for localhost wrapper clients only.  ``store_paths`` lists the
+    five store files under ``data_dir`` that the wrapper must copy/restore as
+    a unit; they are never logged by the server.
+
+    Response shape::
+
+        {
+            "ingestion_id": "<batch_id or empty>",
+            "round_started_at": <epoch_seconds>,
+            "store_paths": ["<abs-path>", ...],
+            "recovery_tier": "ok" | "resume" | "cleanup"
+        }
+    """
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+
+    ingestion_id, round_started_at = _current_ingestion_identity()
+    tier = _recovery_tier_from_db()
+
+    return {
+        "ingestion_id": ingestion_id,
+        "round_started_at": round_started_at,
+        "store_paths": _store_paths(),
+        "recovery_tier": tier,
+    }
+
+
+@app.post("/ingest/stop")
+async def ingest_stop():
+    """Gracefully stop the running ingest job and release all DB handles.
+
+    Cancels the running asyncio ingest task, waits for it to acknowledge
+    (up to 30 s), then closes all SQLite / Kuzu / Qdrant connections so the
+    wrapper can safely copy or restore the store files.
+
+    Returns::
+
+        {
+            "quiesced": true,
+            "detail": "all DB handles released",
+            "ingestion_id": "<batch_id>",
+            "round_started_at": <epoch_seconds>,
+            "store_paths": ["<abs-path>", ...]
+        }
+    """
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+
+    ingestion_id, round_started_at = _current_ingestion_identity()
+
+    result = await _quiesce()
+    result["ingestion_id"] = ingestion_id
+    result["round_started_at"] = round_started_at
+    result["store_paths"] = _store_paths()
+    return result
+
+
+@app.post("/ingest/stop-and-cleanup")
+async def ingest_stop_and_cleanup():
+    """Last-resort endpoint: stop the job, quiesce, and return the round identity.
+
+    Intended for the wrapper to call when resume is impossible (design §4.3).
+    Sequence:
+    1. Verify a batch identity exists (return 409 if none — nothing to report).
+    2. Write an honest warning to ``ingest_runs.warning`` stating that a full
+       restore requires the wrapper's pre-round backup and that kl performed no
+       logical deletion.
+    3. Quiesce — cancel the running job and close all DB handles.
+    4. Return ``{ingestion_id, round_started_at, store_paths}``.
+
+    kl does **not** restore anything (it holds no copy).  kl does **not** perform
+    logical deletion (no DELETE/UPDATE on chunks, entities, or facts).  The
+    response is factual (CLAUDE.md §4).
+
+    Returns::
+
+        {
+            "ingestion_id": "<batch_id>",
+            "round_started_at": <epoch_seconds>,
+            "store_paths": ["<abs-path>", ...]
+        }
+
+    Raises:
+        503 — server not ready.
+        409 — no batch identity found; nothing to stop or report.
+    """
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+
+    # quiesce 会关闭 SQLite 连接，所以要先取到 identity。
+    ingestion_id, round_started_at = _current_ingestion_identity()
+    if not ingestion_id:
+        raise HTTPException(
+            409,
+            "No batch identity found — no round has been started so there is nothing to stop or report.",
+        )
+
+    warning = (
+        f"stop-and-cleanup was called for round {ingestion_id!r}. "
+        "kl performed no logical deletion: chunks, entities, and facts are intact. "
+        f"To restore to the pre-round state the wrapper must restore the backup it "
+        f"filed under ingestion_id={ingestion_id!r}. "
+        "If the wrapper never took a backup at that identity there is nothing to restore to."
+    )
+
+    # warning 要在 quiesce 之前写（quiesce 会把连接关掉）。
+    conn = state.sqlite_conn
+    if conn is not None:
+        run_id = state.current_run_id
+        if run_id:
+            updated = conn.execute(
+                "UPDATE ingest_runs SET warning=?, updated_at=? WHERE run_id=?",
+                (warning, int(time.time()), run_id),
+            ).rowcount
+            if not updated:
+                # 当前 run_id 在表里没有对应行时，补插一行。
+                now = int(time.time())
+                conn.execute(
+                    """INSERT INTO ingest_runs
+                       (run_id, source_id, input_dir, state, phase, percent, detail,
+                        error, started_at, updated_at, warning)
+                       VALUES (?, 'unknown', '', 'failed', '', 0.0, '',
+                               'stopped by stop-and-cleanup', ?, ?, ?)""",
+                    (run_id, now, now, warning),
+                )
+        else:
+            # 不知道 run_id 时，写到最近一条 ingest_runs 行。
+            recent = conn.execute(
+                "SELECT run_id FROM ingest_runs ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+            if recent:
+                conn.execute(
+                    "UPDATE ingest_runs SET warning=?, updated_at=? WHERE run_id=?",
+                    (warning, int(time.time()), recent[0]),
+                )
+            else:
+                # 一条 ingest_runs 都没有时，新建一行并标记 state='failed'。
+                new_run_id = str(uuid.uuid4())
+                now = int(time.time())
+                conn.execute(
+                    """INSERT INTO ingest_runs
+                       (run_id, source_id, input_dir, state, phase, percent, detail,
+                        error, started_at, updated_at, warning)
+                       VALUES (?, 'unknown', '', 'failed', '', 0.0, '',
+                               'stopped by stop-and-cleanup', ?, ?, ?)""",
+                    (new_run_id, now, now, warning),
+                )
+        conn.commit()
+
+    # 停掉任务并释放所有 DB 句柄。
+    await _quiesce()
+
+    return {
+        "ingestion_id": ingestion_id,
+        "round_started_at": round_started_at,
+        "store_paths": _store_paths(),
+    }
+
+
 @app.post("/search")
 async def search(req: EmbedSearchRequest):
     """Vector similarity search over a single collection.

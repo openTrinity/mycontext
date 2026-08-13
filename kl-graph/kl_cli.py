@@ -1670,6 +1670,139 @@ def path(
         click.echo()
 
 
+# ── Checkpoint Commands (local DB, no server) ──────────────────────────────
+
+
+@cli.group()
+@click.pass_context
+def checkpoint(ctx):
+    """Inspect or reset the ingestion checkpoint (reads local knowledge.db)."""
+
+
+@checkpoint.command("show")
+@click.option("--source-id", default="default", help="Source namespace (default: default)")
+@click.option("--json-output", "--json", "json_out", is_flag=True, help="JSON output")
+def checkpoint_show(source_id: str, json_out: bool):
+    """Print the current checkpoint state from knowledge.db.
+
+    Does NOT require kl-server to be running — reads the DB directly.
+    """
+    from kl_graph.config import DATA_DIR
+    from kl_graph.storage.sqlite_store import SQLiteStore
+
+    db_path = DATA_DIR / "knowledge.db"
+    if not db_path.exists():
+        raise click.ClickException(f"knowledge.db not found at {db_path}")
+
+    store = SQLiteStore(db_path)
+    try:
+        row = store.get_checkpoint(source_id)
+    finally:
+        store.close()
+
+    if row is None:
+        if json_out:
+            click.echo(json.dumps({"source_id": source_id, "exists": False}))
+        else:
+            click.echo(f"No checkpoint found for source_id={source_id!r}")
+        return
+
+    if json_out:
+        click.echo(json.dumps(row, ensure_ascii=False, indent=2))
+        return
+
+    steps = {}
+    try:
+        steps = json.loads(row.get("steps") or "{}")
+    except (ValueError, TypeError):
+        pass
+
+    click.echo(f"source_id:      {row['source_id']}")
+    click.echo(f"batch_id:       {row['batch_id'] or '(none)'}")
+    click.echo(f"source_hash:    {str(row.get('source_hash', ''))[:32]}...")
+    click.echo(f"workset_schema: {row.get('workset_schema', 0)}")
+    if row.get("created_at"):
+        from datetime import datetime
+        ts = datetime.fromtimestamp(row["created_at"]).strftime("%Y-%m-%d %H:%M:%S")  # noqa: DTZ006
+        click.echo(f"created_at:     {ts}")
+
+    if steps:
+        click.echo(f"\nSteps ({len(steps)}):")
+        for name, entry in sorted(steps.items()):
+            status = entry.get("status", "?") if isinstance(entry, dict) else str(entry)
+            ts_raw = entry.get("ts") if isinstance(entry, dict) else None
+            ts_str = ""
+            if ts_raw:
+                try:
+                    from datetime import datetime
+                    ts_str = "  " + datetime.fromtimestamp(ts_raw).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006
+                except (ValueError, OSError):
+                    pass
+            click.echo(f"  {'✓' if status == 'done' else '?'} {name}{ts_str}")
+    else:
+        click.echo("\nNo steps recorded.")
+
+
+@checkpoint.command("reset")
+@click.option("--source-id", default="default", help="Source namespace (default: default)")
+@click.option(
+    "--prefix",
+    default=None,
+    metavar="PREFIX",
+    help="Clear only steps matching this prefix (e.g. 'improve'). "
+    "Omit to reset ALL steps and mint a new batch_id.",
+)
+@click.option(
+    "--input-dir",
+    "input_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Source directory (used to compute source_hash for the new checkpoint). "
+    "Defaults to application.dws_export_dir from config.",
+)
+@click.confirmation_option(
+    prompt="This will discard checkpoint progress. Continue?"
+)
+def checkpoint_reset(source_id: str, prefix: str | None, input_dir: Path | None):
+    """Reset or partially clear the ingestion checkpoint in knowledge.db.
+
+    Without --prefix: discards ALL step progress and mints a new batch_id
+    (equivalent to --reset-checkpoint in scripts/ingest.py).
+
+    With --prefix: clears only steps matching the prefix (e.g. 'improve.')
+    while preserving Phase A progress.
+
+    Does NOT require kl-server to be running — reads the DB directly.
+    """
+    from kl_graph.config import DATA_DIR, _path, cfg
+    from kl_graph.ingest.checkpoint import IngestCheckpoint
+    from kl_graph.storage.sqlite_store import SQLiteStore
+
+    db_path = DATA_DIR / "knowledge.db"
+    if not db_path.exists():
+        raise click.ClickException(f"knowledge.db not found at {db_path}")
+
+    if input_dir is None:
+        input_dir = _path(cfg.application.dws_export_dir)
+
+    store = SQLiteStore(db_path)
+    try:
+        cp = IngestCheckpoint(store.conn, source_id, [Path(input_dir)])
+        if prefix:
+            if not prefix.endswith("."):
+                prefix = prefix + "."
+            cp.clear_prefix(prefix)
+            click.echo(f"Cleared checkpoint steps with prefix {prefix!r} for source_id={source_id!r}")
+        else:
+            cp.reset()
+            click.echo(
+                f"Checkpoint reset for source_id={source_id!r} "
+                f"(new batch_id={cp.batch_id!r})"
+            )
+    finally:
+        store.close()
+
+
 # ── Entry Point ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

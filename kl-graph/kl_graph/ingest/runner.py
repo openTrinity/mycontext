@@ -88,7 +88,7 @@ class IngestResult:
         }
 
     @classmethod
-    def from_checkpoint_dict(cls, raw: dict) -> "IngestResult":
+    def from_checkpoint_dict(cls, raw: dict) -> IngestResult:
         """Restore an outcome saved with :meth:`as_checkpoint_dict`."""
         failures = tuple(
             ExtractionFailure(**failure)
@@ -140,17 +140,42 @@ FinalizeCallback = Callable[[ServingIndexUpdate], None]
 
 
 def checkpoint_path(source_id: str, data_dir: Path = DATA_DIR) -> Path:
-    """Return the stable, filesystem-safe checkpoint path for a source."""
+    """Return the legacy filesystem-safe checkpoint path for a source.
 
+    Used only for display and --fresh-db file cleanup. The live checkpoint is
+    stored in the ``ingest_checkpoint`` table of ``knowledge.db`` — see
+    :func:`make_checkpoint`.
+    """
     safe_source = "".join(
         char if char.isalnum() or char in "-_" else "_" for char in source_id
     )
     return Path(data_dir) / f"ingest_checkpoint.{safe_source}.json"
 
 
-def make_checkpoint(options: IngestOptions, data_dir: Path = DATA_DIR) -> IngestCheckpoint:
+def make_checkpoint(
+    options: IngestOptions,
+    data_dir: Path = DATA_DIR,
+    store=None,
+) -> IngestCheckpoint:
+    """Create a DB-backed checkpoint for ``options.source_id``.
+
+    Args:
+        options: Ingest configuration (source_id, input_dir, …).
+        data_dir: Data directory for the SQLite DB (used when *store* is None).
+        store: An open :class:`~kl_graph.storage.sqlite_store.SQLiteStore`.
+            If None, a temporary store is opened against ``data_dir/knowledge.db``.
+
+    Returns:
+        An :class:`IngestCheckpoint` backed by the SQLite DB.
+    """
+    if store is None:
+        from kl_graph.storage.sqlite_store import SQLiteStore
+
+        store = SQLiteStore(Path(data_dir) / "knowledge.db")
     return IngestCheckpoint(
-        checkpoint_path(options.source_id, data_dir), [Path(options.input_dir)]
+        store.conn,
+        options.source_id,
+        [Path(options.input_dir)],
     )
 
 
@@ -183,7 +208,10 @@ async def run_ingestion(
             concurrency=options.concurrency,
             improve_mode=improve_mode,
             keep_cache=options.keep_cache,
-        )
+        ),
+        # 复用调用方注入的 store，避免再开一条永不关闭的 SQLite 连接；
+        # store 为 None 时 make_checkpoint 才会自己开一条（独立/CLI 路径）。
+        store=store,
     )
 
     def report(phase: str, percent: float, detail: str) -> None:
