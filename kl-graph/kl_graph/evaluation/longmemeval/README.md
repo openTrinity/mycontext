@@ -50,11 +50,12 @@ set +a
 `pipeline.py` 按固定顺序调用现有阶段，不在编排层重新实现任何评估逻辑：
 
 ```text
-Convert → Build → Ask → Generate → Score
+KL Graph: Convert → Build → Ask → Generate → Score
+Khoj:               Build → Ask → Generate → Score
 ```
 
-这套 YAML 流水线当前只覆盖 KL Graph 后端。RAGFlow 和 Khoj 的 Build/Ask/Generate
-尚未接入；它们只能在自行生成 `hypotheses.jsonl` 后复用下面的 Score 阶段。
+YAML 流水线通过必填的 `backend: kl_graph|khoj` 选择后端。RAGFlow 尚未接入完整
+流水线，只能在自行生成 `hypotheses.jsonl` 后复用下面的 Score 阶段。
 
 推荐通过 OmegaConf YAML 保存实验参数：
 
@@ -211,9 +212,9 @@ temperature、token 上限、上下文窗口、并发、超时和重试次数全
 ## Phase 4：score.py
 
 `score.py` 基于 LongMemEval 官方 `evaluate_qa.py` 的 answer-check prompt，使用
-OpenAI-compatible 异步客户端调用 judge，并额外输出汇总指标。对 KL case set，
-它还会在同一次 Score 中计算 `turn_recall@5`：Fact 通过 `source_unit_id`、Chunk
-通过 `member_message_ids` 映射原始 user turn。第三方来源和许可见
+OpenAI-compatible 异步客户端调用 judge，并额外输出汇总指标。它还会在同一次
+Score 中计算 `turn_recall@K`：KL Fact/Chunk 通过数据库来源字段映射原始 user
+turn，Khoj chunk 则使用 Ask 已验证并保存的 `source_turn_ids`。第三方来源和许可见
 `THIRD_PARTY_LICENSE_LONGMEMEVAL`。
 
 ```bash
@@ -221,13 +222,11 @@ python -m kl_graph.evaluation.longmemeval.score \
   --config kl_graph/evaluation/longmemeval/experiment.example.yaml
 ```
 
-`score.py` 从 YAML 的 `source`、`case_set`、`hypotheses`、`selection`、`run` 和
-`score` 段读取 reference、答案路径、题目子集、输出路径和全部 judge 参数；不会解析无关的
-Build/Generate 段；只有启用 KL turn recall 时还会读取 `ask.top_k` 来定位 artifact。
-旧的位置参数和评分参数不再支持。外部后端结果可通过
-根级 `hypotheses` 指向其答案文件，并按需设置
-`score.retrieval.turn_recall.enabled: false`。这只表示复用统一评分器，并不表示
-RAGFlow/Khoj 已接入 YAML 流水线。
+`score.py` 从 YAML 的 `source`、`hypotheses`、`selection`、`run` 和 `score` 段读取
+reference、答案路径、题目子集、输出路径和全部 judge 参数。启用 turn recall 时，
+KL 要求 `case_set`，Khoj 从 `run.output_dir` 读取 Ask artifacts；两者都会校验
+`score.retrieval.turn_recall.k <= ask.top_k`。旧的位置参数和评分参数不再支持。
+RAGFlow 外部结果仍可通过根级 `hypotheses` 复用最终答案 Score。
 
 逐题和汇总输出路径由 YAML 显式指定，例如：
 
@@ -340,28 +339,28 @@ Khoj runner 同样直接读取原生 LongMemEval JSON，不依赖 `convert.py`�
 session、date 和 turn 标记。客户端不预切 chunk；切块、embedding、持久化和 rerank
 都由 Khoj server 负责。
 
-这些 Document 存在同一个 Khoj server/PostgreSQL 中，但 ask 会使用精确 filename
-过滤，每个问题只能检索其对应 case 的 Document：
+这些 Document 存在同一个 Khoj server/PostgreSQL 中，但 Ask 会使用精确 filename
+过滤，每个问题只能检索其对应 case 的 Document。所有实验参数来自同一份 OmegaConf
+YAML，API token 仍只从 `KHOJ_API_TOKEN` 读取：
 
 ```bash
-# 上传全部 case；已有匹配状态由 --resume 校验并复用
+export LONGMEMEVAL_SOURCE=/path/to/longmemeval_s_sample100.json
+export KHOJ_BASE_URL=http://127.0.0.1:42112
+export KHOJ_API_TOKEN=optional-bearer-token
+
+# 完整 Build → Ask → Generate → Score
+.venv/bin/python -m kl_graph.evaluation.longmemeval.pipeline \
+  --config kl_graph/evaluation/longmemeval/experiment.khoj.example.yaml
+
+# 也可以单独运行一个阶段
 .venv/bin/python -m kl_graph.evaluation.longmemeval.khoj.build \
-  /path/to/longmemeval_s_sample100.json \
-  --all --resume --keep-going --case-concurrency 3
-
-# 一个 case 一次 Khoj search，服务端启用 rerank，保存 Top-5
+  --config kl_graph/evaluation/longmemeval/experiment.khoj.example.yaml
 .venv/bin/python -m kl_graph.evaluation.longmemeval.khoj.ask \
-  /path/to/longmemeval_s_sample100.json \
-  --case 00ca467f \
-  --max-concurrent 4
-
-# 使用 Khoj 自己的生成流程产出 hypotheses 后，可复用统一 Score
-.venv/bin/python -m kl_graph.evaluation.longmemeval.score \
-  --config /path/to/khoj-experiment.yaml
+  --config kl_graph/evaluation/longmemeval/experiment.khoj.example.yaml
 ```
 
-默认 build 状态位于 `data/longmemeval-khoj/cases/QUESTION_ID/khoj.json`。单 case
-ask 默认输出到该 case 的
-`benchmark/longmemeval-khoj-ask/all/RUN_TIME/`；多 case ask 位于
-`data/longmemeval-khoj/benchmark/longmemeval-khoj-ask/all/RUN_TIME/`。KL 的 YAML
-`generate.py` 不接受 Khoj ask run；复用 Score 时需显式配置外部 hypotheses 和输出。
+Build 状态位于 YAML `artifact_root` 下的 `cases/QUESTION_ID/khoj.json`。Ask run
+固定写到 `run.output_dir`，Generate 直接读取其中的 `run.json`、`results.jsonl` 和
+`responses/*.json`，生成根级 `hypotheses` 指定的文件，再交给统一 Score。Khoj Ask
+还会把每个 server chunk 映射回上传文档中的 `source_turn_ids`；因此 Score 可以和
+KL Graph 一样计算 `turn_recall@K`，其中 `K` 不得超过 `ask.top_k`。

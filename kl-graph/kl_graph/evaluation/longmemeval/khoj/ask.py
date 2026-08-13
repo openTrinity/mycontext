@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -14,7 +13,8 @@ from datetime import datetime
 from pathlib import Path, PurePath
 from typing import Any
 
-from kl_graph.config import PROJECT_ROOT
+from omegaconf.errors import OmegaConfBaseException
+
 from kl_graph.evaluation.io import (
     artifact_stem,
     atomic_write_json,
@@ -22,101 +22,68 @@ from kl_graph.evaluation.io import (
     json_lines,
 )
 from kl_graph.evaluation.khoj import KhojEvaluationClient
+from kl_graph.evaluation.longmemeval.experiment import (
+    KhojAskExperiment,
+    load_khoj_ask_experiment,
+    select_entries,
+)
+from kl_graph.evaluation.longmemeval.experiment import (
+    output_dir as experiment_output_dir,
+)
 from kl_graph.evaluation.longmemeval.source import (
-    DEFAULT_SOURCE,
     case_root,
     load_cases,
-    select_cases,
+    render_document_turns,
     source_fingerprint,
 )
 
-from .build import DEFAULT_ARTIFACT_ROOT, DEFAULT_BASE_URL, load_state
-
-DEFAULT_TOP_K = 5
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return parsed
-
-
-def _positive_float(value: str) -> float:
-    parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
+from .build import load_state
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", nargs="?", type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument(
-        "--case", dest="case_ids", action="append", metavar="QUESTION_ID"
-    )
-    selection.add_argument("--first", type=_positive_int, metavar="N")
-    selection.add_argument("--all", action="store_true")
-    parser.add_argument("--top-k", type=_positive_int, default=DEFAULT_TOP_K)
-    parser.add_argument("--max-concurrent", type=_positive_int, default=4)
-    parser.add_argument("--checkpoint-every", type=_positive_int, default=10)
-    parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--run-id", default=None)
-    parser.add_argument("--resume", action="store_true")
     parser.add_argument(
-        "--base-url", default=os.environ.get("KHOJ_BASE_URL", DEFAULT_BASE_URL)
+        "--config", type=Path, required=True, help="LongMemEval Khoj experiment YAML"
     )
-    parser.add_argument("--timeout-seconds", type=_positive_float, default=120.0)
-    args = parser.parse_args(argv)
-    if args.run_id and not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):
-        parser.error(
-            "--run-id may contain only letters, digits, dot, underscore, and hyphen"
-        )
-    if args.output_dir is not None and args.run_id is not None:
-        parser.error("--output-dir and --run-id are mutually exclusive")
-    if args.top_k > 10:
-        parser.error("--top-k cannot exceed Khoj's server-side candidate limit of 10")
-    return args
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args(argv)
+
+
+def _runtime_options(experiment: KhojAskExperiment) -> argparse.Namespace:
+    """Adapt typed YAML values to the existing ask worker boundary."""
+    return argparse.Namespace(
+        artifact_root=experiment.artifact_root,
+        base_url=experiment.khoj.base_url,
+        checkpoint_every=experiment.ask.checkpoint_every,
+        max_concurrent=experiment.ask.concurrency,
+        max_retries=experiment.khoj.max_retries,
+        output_dir=experiment_output_dir(experiment),
+        overwrite=experiment.run.mode == "overwrite",
+        resume=experiment.run.mode == "resume",
+        timeout_seconds=experiment.ask.timeout_seconds,
+        top_k=experiment.ask.top_k,
+    )
 
 
 def _resolve_output_dir(
     args: argparse.Namespace, selected: list[dict[str, Any]]
 ) -> Path:
-    if args.output_dir is not None:
-        candidate = args.output_dir.expanduser().resolve()
-    else:
-        if len(selected) == 1:
-            root = case_root(args.artifact_root, str(selected[0]["question_id"]))
-        else:
-            root = args.artifact_root.expanduser().resolve()
-        root = root / "benchmark" / "longmemeval-khoj-ask" / "all"
-        if args.resume and args.run_id is None:
-            candidates = (
-                sorted(
-                    path
-                    for path in root.iterdir()
-                    if path.is_dir() and (path / "run.json").is_file()
-                )
-                if root.is_dir()
-                else []
-            )
-            if not candidates:
-                raise FileNotFoundError(f"no Khoj ask run to resume under {root}")
-            return candidates[-1]
-        run_id = args.run_id or datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-        candidate = root / run_id
-        if not args.resume and args.run_id is None:
-            suffix = 1
-            while candidate.exists():
-                candidate = root / f"{run_id}-{suffix:02d}"
-                suffix += 1
+    del selected  # the YAML output directory is explicit for every selection
+    candidate = args.output_dir.expanduser().resolve()
     if args.resume:
-        if not (candidate / "run.json").is_file():
-            raise FileNotFoundError(f"Khoj ask run does not exist: {candidate}")
-    elif candidate.exists():
-        raise FileExistsError(f"output directory exists: {candidate}; use --resume")
+        run_path = candidate / "run.json"
+        if candidate.exists() and not run_path.is_file():
+            unexpected = [
+                path.name
+                for path in candidate.iterdir()
+                if path.name != "experiment.resolved.json"
+            ]
+            if unexpected:
+                raise FileNotFoundError(
+                    f"Khoj ask run is incomplete at {candidate}: {unexpected}"
+                )
+    elif candidate.exists() and not args.overwrite:
+        raise FileExistsError(f"output directory exists: {candidate}")
     return candidate
 
 
@@ -221,6 +188,54 @@ def _normalise_items(
     return items
 
 
+def _source_turn_ids(
+    case: dict[str, Any], *, filename: str, compiled: str
+) -> list[str]:
+    """Map one server-owned Khoj chunk back to its contributing user turns."""
+    prefix = f"{filename}\n"
+    body = compiled.removeprefix(prefix).strip()
+    if not body:
+        raise ValueError(f"Khoj chunk contains no document text: {filename}")
+
+    rendered_turns = render_document_turns(case)
+    document = "".join(text for _, text in rendered_turns)
+    starts: list[int] = []
+    offset = 0
+    for _, text in rendered_turns:
+        starts.append(offset)
+        offset += len(text)
+
+    matches: list[int] = []
+    start = document.find(body)
+    while start >= 0:
+        matches.append(start)
+        start = document.find(body, start + 1)
+    if not matches:
+        raise ValueError(
+            "Khoj chunk cannot be located in the uploaded source document: "
+            f"{filename}"
+        )
+
+    candidates: list[list[str]] = []
+    for chunk_start in matches:
+        chunk_end = chunk_start + len(body)
+        ids = [
+            turn_id
+            for (turn_id, text), turn_start in zip(
+                rendered_turns, starts, strict=True
+            )
+            if turn_start < chunk_end and turn_start + len(text) > chunk_start
+        ]
+        if ids and ids not in candidates:
+            candidates.append(ids)
+    if len(candidates) != 1:
+        raise ValueError(
+            "Khoj chunk has an ambiguous source-turn mapping: "
+            f"{filename}; candidates={candidates}"
+        )
+    return candidates[0]
+
+
 def _ask_one(
     client: KhojEvaluationClient,
     case: dict[str, Any],
@@ -249,6 +264,12 @@ def _ask_one(
         items = _normalise_items(results, top_k=args.top_k, expected_filename=filename)
         if not items:
             raise RuntimeError(f"Khoj returned no usable chunks for {question_id}")
+        for item in items:
+            item["source_turn_ids"] = _source_turn_ids(
+                case,
+                filename=filename,
+                compiled=str(item["content"]),
+            )
         relative = Path("responses") / f"{artifact_stem(question_id)}.json"
         atomic_write_json(
             output_dir / relative,
@@ -265,6 +286,7 @@ def _ask_one(
                     "document_filter": filename,
                     "content_type": "plaintext",
                     "chunking_owner": "khoj_server",
+                    "source_turn_mapping": "uploaded_document_character_spans_v1",
                 },
             },
         )
@@ -346,6 +368,7 @@ def _write_run(
             "dedupe": False,
             "content_type": "plaintext",
             "chunking_owner": "khoj_server",
+            "source_turn_mapping": "uploaded_document_character_spans_v1",
             "max_concurrent": args.max_concurrent,
             "base_url": args.base_url.rstrip("/"),
             "protocol": "one_document_filtered_khoj_search_per_question_case",
@@ -361,7 +384,10 @@ def _validate_resume(
 ) -> None:
     if not args.resume:
         return
-    run = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+    run_path = output_dir / "run.json"
+    if not run_path.is_file():
+        return
+    run = json.loads(run_path.read_text(encoding="utf-8"))
     expected = {
         "source_sha256": source_sha256,
         "question_ids": [str(case["question_id"]) for case in selected],
@@ -369,6 +395,7 @@ def _validate_resume(
         "top_k": args.top_k,
         "dedupe": False,
         "base_url": args.base_url.rstrip("/"),
+        "source_turn_mapping": "uploaded_document_character_spans_v1",
     }
     mismatch = {
         key: {"recorded": run.get(key), "requested": value}
@@ -383,18 +410,32 @@ def _validate_resume(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+    try:
+        cli = parse_args(argv)
+        experiment = load_khoj_ask_experiment(cli.config)
+        args = _runtime_options(experiment)
+    except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
+        print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
+        return 2
     client: KhojEvaluationClient | None = None
     try:
-        source, cases = load_cases(args.source)
-        selected = select_cases(cases, case_ids=args.case_ids, first=args.first)
+        source, cases = load_cases(experiment.source)
+        selected = select_entries(cases, experiment.selection)
         source_sha256 = source_fingerprint(source)
+        if cli.dry_run:
+            print(
+                f"Khoj LongMemEval questions: {len(selected)}; "
+                f"concurrency={args.max_concurrent}; output={args.output_dir}",
+                flush=True,
+            )
+            return 0
         output_dir = _resolve_output_dir(args, selected)
         _validate_resume(output_dir, args, source_sha256, selected)
         client = KhojEvaluationClient(
             os.environ.get("KHOJ_API_TOKEN", ""),
             args.base_url,
             timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
         )
         health = client.health()
         settings = client.server_info()

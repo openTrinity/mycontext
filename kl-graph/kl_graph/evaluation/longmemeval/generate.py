@@ -41,6 +41,7 @@ from kl_graph.evaluation.longmemeval.experiment import (
     GenerateConfig,
     GenerateExperiment,
     load_generate_experiment,
+    output_dir,
     select_entries,
 )
 from kl_graph.evaluation.longmemeval.source import (
@@ -595,7 +596,7 @@ def _generation_configuration(
     return {
         "benchmark": "longmemeval",
         "stage": "generate",
-        "backend": "kl",
+        "backend": experiment.backend,
         "input_root": str(root),
         "output": str(output),
         "question_ids": question_ids,
@@ -603,8 +604,59 @@ def _generation_configuration(
         **config.model_dump(),
         "prompt_reserve_tokens": PROMPT_RESERVE_TOKENS,
         "max_retrieval_length": max_retrieval_length,
-        "fact_context_mode": FACT_CONTEXT_MODE,
+        "context_mode": (
+            FACT_CONTEXT_MODE
+            if experiment.backend == "kl_graph"
+            else "direct_server_chunks"
+        ),
     }
+
+
+def _configured_generation_inputs(
+    experiment: GenerateExperiment,
+    *,
+    max_retrieval_length: int,
+) -> tuple[Path, list[str], list[tuple[str, str]]]:
+    if experiment.backend == "khoj":
+        ask_root, question_ids, prompts = _khoj_generation_inputs(
+            output_dir(experiment),
+            max_retrieval_length=max_retrieval_length,
+        )
+        run = json.loads((ask_root / "run.json").read_text(encoding="utf-8"))
+        configured_sha256 = source_fingerprint(experiment.source)
+        if run.get("source_sha256") != configured_sha256:
+            raise ValueError("Khoj ask source differs from experiment source")
+        _, cases = load_cases(experiment.source)
+        selected = select_entries(cases, experiment.selection)
+        expected_ids = [str(case["question_id"]) for case in selected]
+        if question_ids != expected_ids:
+            raise ValueError("Khoj ask question IDs/order differ from selection")
+        return ask_root, question_ids, prompts
+
+    if experiment.case_set is None:  # pragma: no cover - schema invariant
+        raise ValueError("backend='kl_graph' requires case_set")
+    root, entries = _load_case_entries(experiment.case_set)
+    selected = select_entries(entries, experiment.selection)
+    question_ids = [str(entry["question_id"]) for entry in selected]
+    prompts: list[tuple[str, str]] = []
+    for entry in selected:
+        question_id = str(entry["question_id"])
+        case_root = _resolve_manifest_path(root, entry["path"], "path")
+        evaluation = _read_evaluation(case_root, question_id)
+        items = _read_ask_items(case_root, question_id, experiment.ask_top_k)
+        hydrated_items = _hydrate_items(case_root, question_id, evaluation, items)
+        prompts.append(
+            (
+                question_id,
+                _build_prompt(
+                    evaluation.question,
+                    evaluation.question_date,
+                    hydrated_items,
+                    max_retrieval_length=max_retrieval_length,
+                ),
+            )
+        )
+    return root, question_ids, prompts
 
 
 def _validate_resume_run(path: Path, expected: dict[str, Any]) -> dict[str, Any]:
@@ -642,9 +694,10 @@ async def main(argv: list[str] | None = None) -> int:
         max_retrieval_length = (
             config.model_context_tokens - config.max_tokens - PROMPT_RESERVE_TOKENS
         )
-        root, entries = _load_case_entries(experiment.case_set)
-        selected = select_entries(entries, experiment.selection)
-        manifest_order = [str(entry["question_id"]) for entry in selected]
+        root, manifest_order, prompts = _configured_generation_inputs(
+            experiment,
+            max_retrieval_length=max_retrieval_length,
+        )
         output = experiment.hypotheses
         run_path = Path(f"{output}.run.json")
         run_configuration = _generation_configuration(
@@ -666,27 +719,6 @@ async def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "output contains question IDs outside this selection: "
                 f"{sorted(unknown_ids)[:5]}"
-            )
-
-        prompts: list[tuple[str, str]] = []
-        for entry in selected:
-            question_id = str(entry["question_id"])
-            case_root = _resolve_manifest_path(root, entry["path"], "path")
-            evaluation = _read_evaluation(case_root, question_id)
-            items = _read_ask_items(case_root, question_id, experiment.ask_top_k)
-            hydrated_items = _hydrate_items(
-                case_root, question_id, evaluation, items
-            )
-            prompts.append(
-                (
-                    question_id,
-                    _build_prompt(
-                        evaluation.question,
-                        evaluation.question_date,
-                        hydrated_items,
-                        max_retrieval_length=max_retrieval_length,
-                    ),
-                )
             )
 
         prompt_sha256_by_question = {

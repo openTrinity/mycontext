@@ -1,8 +1,7 @@
-schema_version: 1
+schema_version: 2
 benchmark: longmemeval
+backend: kl_graph
 
-# This schema currently orchestrates the KL Graph backend only. RAGFlow and
-# Khoj may reuse its Score section after producing hypotheses independently.
 # Relative paths are resolved from this YAML file. API keys are intentionally
 # absent and remain environment-only.
 source: ${oc.env:LONGMEMEVAL_SOURCE}

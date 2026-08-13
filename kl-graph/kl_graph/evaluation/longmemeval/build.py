@@ -57,8 +57,8 @@ from kl_graph.evaluation.build_contract import (
     validate_production_build_status,
 )
 from kl_graph.evaluation.longmemeval.experiment import (
-    BuildConfig,
     BuildExperiment,
+    KLBuildConfig,
     load_build_experiment,
     select_entries,
 )
@@ -165,7 +165,7 @@ def _validate_dws_root(question_id: str, dws_root: Path) -> None:
 
 
 def _ingest_command(
-    config: BuildConfig, *, input_dir: Path, question_id: str
+    config: KLBuildConfig, *, input_dir: Path, question_id: str
 ) -> list[str]:
     command = [
         sys.executable,

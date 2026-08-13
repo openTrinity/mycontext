@@ -14,61 +14,51 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kl_graph.config import PROJECT_ROOT
+from omegaconf.errors import OmegaConfBaseException
+
 from kl_graph.evaluation.io import artifact_stem, atomic_write_json
 from kl_graph.evaluation.khoj import KhojEvaluationClient
+from kl_graph.evaluation.longmemeval.experiment import (
+    KhojBuildExperiment,
+    load_khoj_build_experiment,
+    select_entries,
+)
 from kl_graph.evaluation.longmemeval.source import (
-    DEFAULT_SOURCE,
     case_root,
     document_fingerprint,
     load_cases,
     render_document,
-    select_cases,
     source_fingerprint,
 )
 
-DEFAULT_BASE_URL = "http://127.0.0.1:42112"
-DEFAULT_ARTIFACT_ROOT = PROJECT_ROOT / "data" / "longmemeval-khoj"
 _OUTPUT_LOCK = threading.Lock()
-
-
-def _positive_float(value: str) -> float:
-    parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return parsed
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", nargs="?", type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument(
-        "--case", dest="case_ids", action="append", metavar="QUESTION_ID"
-    )
-    selection.add_argument("--first", type=_positive_int, metavar="N")
-    selection.add_argument("--all", action="store_true")
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--keep-going", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--case-concurrency", type=_positive_int, default=1)
-    parser.add_argument("--document-prefix", default="longmemeval")
     parser.add_argument(
-        "--base-url", default=os.environ.get("KHOJ_BASE_URL", DEFAULT_BASE_URL)
+        "--config", type=Path, required=True, help="LongMemEval Khoj experiment YAML"
     )
-    parser.add_argument("--timeout-seconds", type=_positive_float, default=300.0)
-    args = parser.parse_args(argv)
-    if not args.document_prefix.strip():
-        parser.error("--document-prefix must be non-empty")
-    return args
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args(argv)
+
+
+def _runtime_options(
+    experiment: KhojBuildExperiment, *, dry_run: bool
+) -> argparse.Namespace:
+    """Adapt typed YAML values to the existing build worker boundary."""
+    return argparse.Namespace(
+        artifact_root=experiment.artifact_root,
+        base_url=experiment.khoj.base_url,
+        case_concurrency=experiment.build.case_concurrency,
+        document_prefix=experiment.build.document_prefix,
+        dry_run=dry_run,
+        keep_going=experiment.run.keep_going,
+        # A compatible Khoj document build is immutable and always reusable.
+        resume=True,
+        timeout_seconds=experiment.build.timeout_seconds,
+        max_retries=experiment.khoj.max_retries,
+    )
 
 
 def _utc_now() -> str:
@@ -305,11 +295,17 @@ def _print(*lines: str, file=None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+    try:
+        cli = parse_args(argv)
+        experiment = load_khoj_build_experiment(cli.config)
+        args = _runtime_options(experiment, dry_run=cli.dry_run)
+    except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
+        print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
+        return 2
     client: KhojEvaluationClient | None = None
     try:
-        source, cases = load_cases(args.source)
-        selected = select_cases(cases, case_ids=args.case_ids, first=args.first)
+        source, cases = load_cases(experiment.source)
+        selected = select_entries(cases, experiment.selection)
         source_sha256 = source_fingerprint(source)
         if args.dry_run:
             server: dict[str, Any] = {}
@@ -318,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
                 os.environ.get("KHOJ_API_TOKEN", ""),
                 args.base_url,
                 timeout_seconds=args.timeout_seconds,
+                max_retries=args.max_retries,
             )
             health = client.health()
             settings = client.server_info()

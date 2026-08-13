@@ -1,9 +1,9 @@
-"""Score LongMemEval QA answers and optional KL ``turn_recall@5``.
+"""Score LongMemEval QA answers and optional backend source-turn recall.
 
 Adapted from LongMemEval ``src/evaluation/evaluate_qa.py`` at commit
-``9e0b455f4ef0e2ab8f2e582289761153549043fc``. Local changes provide KL
+``9e0b455f4ef0e2ab8f2e582289761153549043fc``. Local changes provide configured
 experiment inputs, compact progress, a JSON metric summary, and deterministic
-KL source-turn recall. LongMemEval is MIT licensed; see
+source-turn recall. LongMemEval is MIT licensed; see
 ``THIRD_PARTY_LICENSE_LONGMEMEVAL`` in this directory.
 """
 
@@ -37,8 +37,11 @@ from kl_graph.evaluation.longmemeval.experiment import (
     score_output,
     select_entries,
 )
+from kl_graph.evaluation.longmemeval.experiment import (
+    output_dir as experiment_output_dir,
+)
 from kl_graph.evaluation.longmemeval.generate import _read_item_source_units
-from kl_graph.evaluation.longmemeval.source import resolve_source
+from kl_graph.evaluation.longmemeval.source import resolve_source, source_fingerprint
 
 QUESTION_TYPES = (
     "single-session-user",
@@ -134,24 +137,19 @@ def _accuracy(values: list[int]) -> float | None:
     return round(fmean(values), 4) if values else None
 
 
-def _read_retrieval_targets(
-    case_root: Path,
+def _retrieval_targets(
+    data: dict[str, Any],
     question_id: str,
+    *,
+    is_abstention: bool,
 ) -> tuple[str, bool, list[str], dict[str, str]]:
     """Read Gold user turns and the role of every addressable source turn."""
-    path = case_root / "evaluation.jsonl"
-    with path.open("r", encoding="utf-8") as stream:
-        rows = [json.loads(line) for line in stream if line.strip()]
-    if len(rows) != 1:
-        raise ValueError(f"expected one evaluation row: {path}")
-    data = rows[0].get("data")
     if not isinstance(data, dict) or data.get("question_id") != question_id:
         raise ValueError(f"evaluation question ID mismatch: {question_id}")
 
     question_type = data.get("question_type")
     if not isinstance(question_type, str) or not question_type:
         raise ValueError(f"case {question_id}: invalid question_type")
-    is_abstention = data.get("is_abstention")
     if not isinstance(is_abstention, bool):
         raise TypeError(f"case {question_id}: invalid is_abstention flag")
     sessions = data.get("haystack_sessions")
@@ -182,6 +180,25 @@ def _read_retrieval_targets(
             if role == "user" and turn.get("has_answer") is True:
                 gold_turn_ids.append(turn_id)
     return question_type, is_abstention, gold_turn_ids, source_roles
+
+
+def _read_retrieval_targets(
+    case_root: Path,
+    question_id: str,
+) -> tuple[str, bool, list[str], dict[str, str]]:
+    path = case_root / "evaluation.jsonl"
+    with path.open("r", encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
+    if len(rows) != 1:
+        raise ValueError(f"expected one evaluation row: {path}")
+    data = rows[0].get("data")
+    if not isinstance(data, dict):
+        raise TypeError(f"evaluation data is not an object: {path}")
+    return _retrieval_targets(
+        data,
+        question_id,
+        is_abstention=data.get("is_abstention"),
+    )
 
 
 def _turn_recall_metric(k: int) -> str:
@@ -246,17 +263,50 @@ def _retrieved_user_turn_ids(
     return retrieved
 
 
-def _score_retrieval_case(
-    case_root: Path,
+def _retrieved_khoj_user_turn_ids(
+    items: list[dict[str, Any]],
     question_id: str,
-    k: int,
+    source_roles: dict[str, str],
+) -> list[str]:
+    retrieved: list[str] = []
+    seen: set[str] = set()
+    for rank, item in enumerate(items, 1):
+        turn_ids = item.get("source_turn_ids")
+        if (
+            not isinstance(turn_ids, list)
+            or not turn_ids
+            or not all(isinstance(value, str) and value for value in turn_ids)
+        ):
+            raise ValueError(
+                f"case {question_id}: Khoj item {rank} has no source_turn_ids"
+            )
+        for turn_id in turn_ids:
+            role = source_roles.get(turn_id)
+            if role is None:
+                raise ValueError(
+                    f"case {question_id}: Khoj source turn is absent from "
+                    f"evaluation chats: {turn_id}"
+                )
+            if role != "user":
+                raise ValueError(
+                    f"case {question_id}: Khoj source turn is not a user turn: "
+                    f"{turn_id}"
+                )
+            if turn_id not in seen:
+                seen.add(turn_id)
+                retrieved.append(turn_id)
+    return retrieved
+
+
+def _retrieval_row(
     *,
-    artifact_top_k: int,
+    question_id: str,
+    question_type: str,
+    is_abstention: bool,
+    gold_turn_ids: list[str],
+    k: int,
 ) -> dict[str, Any]:
     metric = _turn_recall_metric(k)
-    question_type, is_abstention, gold_turn_ids, source_roles = _read_retrieval_targets(
-        case_root, question_id
-    )
     base: dict[str, Any] = {
         "question_id": question_id,
         "question_type": question_type,
@@ -275,18 +325,49 @@ def _score_retrieval_case(
             "eligible": False,
             "exclusion_reason": "no_gold_user_turns",
         }
+    return base
+
+
+def _score_retrieved_turns(
+    row: dict[str, Any], retrieved_turn_ids: list[str], k: int
+) -> dict[str, Any]:
+    if not row["eligible"]:
+        return row
+    gold_turn_ids = row["gold_turn_ids"]
+    retrieved_set = set(retrieved_turn_ids)
+    matched_gold = [turn_id for turn_id in gold_turn_ids if turn_id in retrieved_set]
+    return {
+        **row,
+        f"retrieved_turn_ids_at_{k}": retrieved_turn_ids,
+        f"matched_gold_turn_ids_at_{k}": matched_gold,
+        _turn_recall_metric(k): len(matched_gold) / len(gold_turn_ids),
+    }
+
+
+def _score_retrieval_case(
+    case_root: Path,
+    question_id: str,
+    k: int,
+    *,
+    artifact_top_k: int,
+) -> dict[str, Any]:
+    question_type, is_abstention, gold_turn_ids, source_roles = _read_retrieval_targets(
+        case_root, question_id
+    )
+    row = _retrieval_row(
+        question_id=question_id,
+        question_type=question_type,
+        is_abstention=is_abstention,
+        gold_turn_ids=gold_turn_ids,
+        k=k,
+    )
+    if not row["eligible"]:
+        return row
 
     retrieved_turn_ids = _retrieved_user_turn_ids(
         case_root, question_id, source_roles, k, artifact_top_k
     )
-    retrieved_set = set(retrieved_turn_ids)
-    matched_gold = [turn_id for turn_id in gold_turn_ids if turn_id in retrieved_set]
-    return {
-        **base,
-        f"retrieved_turn_ids_at_{k}": retrieved_turn_ids,
-        f"matched_gold_turn_ids_at_{k}": matched_gold,
-        metric: len(matched_gold) / len(gold_turn_ids),
-    }
+    return _score_retrieved_turns(row, retrieved_turn_ids, k)
 
 
 def _retrieval_mean(values: list[float]) -> float | None:
@@ -318,9 +399,9 @@ def _aggregate_retrieval_rows(
         "metric": metric,
         "k": k,
         "definition": (
-            f"unique Gold user turns covered by the first {k} KL Items divided "
-            "by all unique Gold user turns; Facts map through source_unit_id and "
-            "Chunks map through member_message_ids"
+            f"unique Gold user turns covered by the first {k} retrieved items "
+            "divided by all unique Gold user turns; backend adapters map each "
+            "retrieved Fact or Chunk to its contributing source user turns"
         ),
         "counts": {
             "total_cases": len(rows),
@@ -361,6 +442,100 @@ def _score_retrieval_rows(
         )
         for question_id in question_ids
     ]
+
+
+def _read_khoj_retrieval_items(
+    ask_dir: Path,
+    source: Path,
+    question_ids: list[str],
+    k: int,
+    artifact_top_k: int,
+) -> dict[str, list[dict[str, Any]]]:
+    ask_dir = ask_dir.expanduser().resolve()
+    run = json.loads((ask_dir / "run.json").read_text(encoding="utf-8"))
+    if not isinstance(run, dict):
+        raise TypeError(f"Khoj ask run is not an object: {ask_dir}")
+    if run.get("backend") != "khoj" or run.get("benchmark") != "longmemeval":
+        raise ValueError(f"not a LongMemEval Khoj ask run: {ask_dir}")
+    if run.get("status") != "complete":
+        raise ValueError(f"Khoj ask run is not complete: {ask_dir}")
+    if run.get("source_turn_mapping") != "uploaded_document_character_spans_v1":
+        raise ValueError(f"Khoj ask run has no compatible source-turn mapping: {ask_dir}")
+    if run.get("source_sha256") != source_fingerprint(source):
+        raise ValueError("native LongMemEval source changed after the Khoj ask run")
+    if run.get("question_ids") != question_ids:
+        raise ValueError("Khoj ask question IDs/order differ from Score selection")
+    if run.get("top_k") != artifact_top_k:
+        raise ValueError("Khoj ask artifact Top-K differs from experiment config")
+
+    results = list(json_lines(ask_dir / "results.jsonl"))
+    if [row.get("question_id") for row in results] != question_ids:
+        raise ValueError("Khoj result IDs/order do not match run.json")
+    items_by_id: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        question_id = str(result["question_id"])
+        if result.get("status") != "completed":
+            raise ValueError(f"Khoj retrieval did not complete: {question_id}")
+        relative = Path(str(result.get("response_path") or ""))
+        response_path = relative if relative.is_absolute() else ask_dir / relative
+        response_path = response_path.resolve()
+        if not response_path.is_relative_to(ask_dir):
+            raise ValueError(f"Khoj response path escapes ask directory: {relative}")
+        response = json.loads(response_path.read_text(encoding="utf-8"))
+        if not isinstance(response, dict) or response.get("question_id") != question_id:
+            raise ValueError(f"Khoj response question ID mismatch: {question_id}")
+        items = response.get("items")
+        if (
+            not isinstance(items, list)
+            or not items
+            or not all(isinstance(item, dict) for item in items)
+        ):
+            raise ValueError(f"Khoj retrieval returned invalid items: {question_id}")
+        if len(items) > artifact_top_k:
+            raise ValueError(f"Khoj retrieval exceeded configured Top-K: {question_id}")
+        items_by_id[question_id] = items[:k]
+    return items_by_id
+
+
+def _score_khoj_retrieval_rows(
+    ask_dir: Path,
+    source: Path,
+    references: dict[str, dict[str, Any]],
+    question_ids: list[str],
+    k: int,
+    artifact_top_k: int,
+) -> list[dict[str, Any]]:
+    items_by_id = _read_khoj_retrieval_items(
+        ask_dir,
+        source,
+        question_ids,
+        k,
+        artifact_top_k,
+    )
+    rows: list[dict[str, Any]] = []
+    for question_id in question_ids:
+        reference = references[question_id]
+        question_type, is_abstention, gold_turn_ids, source_roles = (
+            _retrieval_targets(
+                reference,
+                question_id,
+                is_abstention=question_id.endswith("_abs"),
+            )
+        )
+        row = _retrieval_row(
+            question_id=question_id,
+            question_type=question_type,
+            is_abstention=is_abstention,
+            gold_turn_ids=gold_turn_ids,
+            k=k,
+        )
+        if row["eligible"]:
+            retrieved_turn_ids = _retrieved_khoj_user_turn_ids(
+                items_by_id[question_id], question_id, source_roles
+            )
+            row = _score_retrieved_turns(row, retrieved_turn_ids, k)
+        rows.append(row)
+    return rows
 
 
 def _load_hypotheses(path: Path) -> list[dict[str, Any]]:
@@ -565,15 +740,27 @@ async def main(argv: list[str] | None = None) -> int:
         retrieval_metrics: dict[str, Any] | None = None
         if turn_recall.enabled:
             if experiment.ask_top_k is None:  # pragma: no cover - schema invariant
-                raise RuntimeError("Ask Top-K is required for KL retrieval scoring")
-            case_set, entries = _load_case_entries(experiment.case_set)
-            retrieval_rows = _score_retrieval_rows(
-                case_set,
-                entries,
-                hypothesis_ids,
-                turn_recall.k,
-                experiment.ask_top_k,
-            )
+                raise RuntimeError("Ask Top-K is required for retrieval scoring")
+            if experiment.backend == "kl_graph":
+                if experiment.case_set is None:  # pragma: no cover - schema invariant
+                    raise RuntimeError("case_set is required for KL retrieval scoring")
+                case_set, entries = _load_case_entries(experiment.case_set)
+                retrieval_rows = _score_retrieval_rows(
+                    case_set,
+                    entries,
+                    hypothesis_ids,
+                    turn_recall.k,
+                    experiment.ask_top_k,
+                )
+            else:
+                retrieval_rows = _score_khoj_retrieval_rows(
+                    experiment_output_dir(experiment),
+                    reference_path,
+                    reference_by_id,
+                    hypothesis_ids,
+                    turn_recall.k,
+                    experiment.ask_top_k,
+                )
             retrieval_by_id = {str(row["question_id"]): row for row in retrieval_rows}
             retrieval_metrics = _aggregate_retrieval_rows(
                 retrieval_rows, turn_recall.k

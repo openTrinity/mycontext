@@ -14,6 +14,7 @@ from kl_graph.evaluation.longmemeval.convert import (
     _required_list,
     _required_text,
     case_dir_name,
+    message_id,
     parse_longmemeval_date,
 )
 
@@ -141,14 +142,13 @@ def select_cases(
     return cases
 
 
-def render_document(case: dict[str, Any]) -> str:
-    """Join native user turns while leaving chunking to the target server."""
+def render_document_turns(case: dict[str, Any]) -> list[tuple[str, str]]:
+    """Render addressable user turns before a backend applies chunking."""
     question_id = str(case["question_id"])
     sessions = case["haystack_sessions"]
     session_ids = case["haystack_session_ids"]
     dates = case["haystack_dates"]
-    lines: list[str] = []
-    user_turns = 0
+    rendered: list[tuple[str, str]] = []
     for session_index, (session, session_id, date) in enumerate(
         zip(sessions, session_ids, dates, strict=True)
     ):
@@ -156,14 +156,23 @@ def render_document(case: dict[str, Any]) -> str:
             if turn["role"] != "user":
                 continue
             content = str(turn["content"]).replace("\r\n", "\n").replace("\r", "\n")
-            lines.append(
-                f"[SESSION={session_index:04d}] [SESSION_ID={session_id}] "
-                f"[DATE={date}] [TURN={turn_index:04d}] USER: {content}"
+            rendered.append(
+                (
+                    message_id(question_id, session_index, turn_index),
+                    (
+                        f"[SESSION={session_index:04d}] [SESSION_ID={session_id}] "
+                        f"[DATE={date}] [TURN={turn_index:04d}] USER: {content}\n"
+                    ),
+                )
             )
-            user_turns += 1
-    if not user_turns:
+    if not rendered:
         raise ValueError(f"case {question_id}: no user turns to upload")
-    return "\n".join(lines) + "\n"
+    return rendered
+
+
+def render_document(case: dict[str, Any]) -> str:
+    """Join native user turns while leaving chunking to the target server."""
+    return "".join(text for _, text in render_document_turns(case))
 
 
 def document_fingerprint(case: dict[str, Any]) -> str:

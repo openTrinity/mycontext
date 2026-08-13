@@ -1,9 +1,10 @@
-"""Run the LongMemEval KL evaluation pipeline end to end.
+"""Run a configured LongMemEval evaluation pipeline end to end.
 
 This module is only an orchestrator. Conversion, graph construction,
 retrieval, generation, and QA judging remain owned by their existing modules:
 
-    convert -> build -> ask -> generate -> score
+    KL Graph: convert -> build -> ask -> generate -> score
+    Khoj:             build -> ask -> generate -> score
 
 Run behavior and every experiment value come from one required YAML file.
 """
@@ -30,6 +31,7 @@ from kl_graph.evaluation.longmemeval.experiment import (
     BENCHMARK_NAME,
     EXPERIMENT_SCHEMA_VERSION,
     Experiment,
+    KLExperiment,
     load_experiment,
     output_dir,
     score_metrics_output,
@@ -37,6 +39,7 @@ from kl_graph.evaluation.longmemeval.experiment import (
     select_entries,
 )
 from kl_graph.evaluation.longmemeval.source import (
+    load_cases,
     resolve_source,
     source_fingerprint,
 )
@@ -69,7 +72,6 @@ def _resolved_experiment(
     *,
     experiment: Experiment,
     source: Path,
-    case_set: Path,
     output_dir: Path,
     question_ids: list[str],
 ) -> dict[str, Any]:
@@ -78,28 +80,50 @@ def _resolved_experiment(
     score["output"] = str(score_output(experiment))
     score["metrics_output"] = str(score_metrics_output(experiment))
     score["judge"]["label_parser"] = "official_substring_yes"
-    return {
+    resolved = {
         "schema_version": EXPERIMENT_SCHEMA_VERSION,
         "benchmark": BENCHMARK_NAME,
+        "backend": experiment.backend,
         "config_file": str(experiment.config_path),
         "source": str(source),
         "source_sha256": source_fingerprint(source),
-        "case_set": str(case_set),
         "hypotheses": str(experiment.hypotheses),
         "selection": {"question_ids": question_ids},
         "run": {
             **experiment.run.model_dump(),
             "output_dir": str(output_dir),
         },
-        "convert": experiment.convert.model_dump(),
         "build": experiment.build.model_dump(),
-        "ask": {
-            **experiment.ask.model_dump(),
-            "phase2": False,
-        },
         "generate": experiment.generate.model_dump(),
         "score": score,
     }
+    if experiment.backend == "kl_graph":
+        resolved.update(
+            {
+                "case_set": str(experiment.case_set),
+                "convert": experiment.convert.model_dump(),
+                "ask": {
+                    **experiment.ask.model_dump(),
+                    "phase2": False,
+                },
+            }
+        )
+    else:
+        resolved.update(
+            {
+                "artifact_root": str(experiment.artifact_root),
+                "khoj": experiment.khoj.model_dump(),
+                "ask": {
+                    **experiment.ask.model_dump(),
+                    "rerank": True,
+                    "dedupe": False,
+                    "content_type": "plaintext",
+                    "document_filter": "exact_filename",
+                    "source_turn_mapping": "uploaded_document_character_spans_v1",
+                },
+            }
+        )
+    return resolved
 
 
 def _write_resolved_experiment(
@@ -149,10 +173,13 @@ def _conversion_is_compatible(
 
 
 def _stage_command(stage: str, experiment: Experiment) -> list[str]:
+    module = stage
+    if experiment.backend == "khoj" and stage in {"build", "ask"}:
+        module = f"khoj.{stage}"
     return [
         sys.executable,
         "-m",
-        f"kl_graph.evaluation.longmemeval.{stage}",
+        f"kl_graph.evaluation.longmemeval.{module}",
         "--config",
         str(experiment.config_path),
     ]
@@ -161,7 +188,7 @@ def _stage_command(stage: str, experiment: Experiment) -> list[str]:
 def _pending_builds(
     root: Path,
     selected: list[dict[str, Any]],
-    experiment: Experiment,
+    experiment: KLExperiment,
 ) -> list[str]:
     if experiment.build.fresh:
         return [str(entry["question_id"]) for entry in selected]
@@ -189,7 +216,12 @@ def _pending_builds(
 def _print_dry_run(
     experiment: Experiment,
 ) -> None:
-    for stage in ("convert", "build", "ask", "generate", "score"):
+    stages = (
+        ("convert", "build", "ask", "generate", "score")
+        if experiment.backend == "kl_graph"
+        else ("build", "ask", "generate", "score")
+    )
+    for stage in stages:
         _run_stage(stage, _stage_command(stage, experiment), dry_run=True)
 
 
@@ -202,30 +234,34 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         source = resolve_source(experiment.source)
-        case_set = experiment.case_set
         run_output_dir = output_dir(experiment)
         if args.dry_run:
             _print_dry_run(experiment)
             return 0
 
-        compatible = _conversion_is_compatible(
-            source, case_set, experiment.convert.timezone
-        )
-        if experiment.convert.reconvert or not compatible:
-            if case_set.exists() and not experiment.convert.reconvert:
-                raise ValueError(
-                    f"existing case set is incompatible: {case_set}; "
-                    "set convert.reconvert=true to replace it"
-                )
-            _run_stage(
-                "convert",
-                _stage_command("convert", experiment),
-                dry_run=False,
+        if experiment.backend == "kl_graph":
+            case_set = experiment.case_set
+            compatible = _conversion_is_compatible(
+                source, case_set, experiment.convert.timezone
             )
+            if experiment.convert.reconvert or not compatible:
+                if case_set.exists() and not experiment.convert.reconvert:
+                    raise ValueError(
+                        f"existing case set is incompatible: {case_set}; "
+                        "set convert.reconvert=true to replace it"
+                    )
+                _run_stage(
+                    "convert",
+                    _stage_command("convert", experiment),
+                    dry_run=False,
+                )
+            else:
+                print("\n=== CONVERT ===\nSKIPPED compatible case set", flush=True)
+            root, entries = _load_case_entries(case_set)
         else:
-            print("\n=== CONVERT ===\nSKIPPED compatible case set", flush=True)
+            _, entries = load_cases(source)
+            root = None
 
-        root, entries = _load_case_entries(case_set)
         selected = select_entries(entries, experiment.selection)
         selected_ids = [str(entry["question_id"]) for entry in selected]
         run_output_dir.mkdir(parents=True, exist_ok=True)
@@ -234,7 +270,6 @@ def main(argv: list[str] | None = None) -> int:
             _resolved_experiment(
                 experiment=experiment,
                 source=source,
-                case_set=root,
                 output_dir=run_output_dir,
                 question_ids=selected_ids,
             ),
@@ -242,15 +277,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"experiment={experiment_path}", flush=True)
 
-        pending_builds = _pending_builds(root, selected, experiment)
-        if pending_builds:
+        if experiment.backend == "khoj":
             _run_stage(
                 "build",
                 _stage_command("build", experiment),
                 dry_run=False,
             )
         else:
-            print("\n=== BUILD ===\nSKIPPED complete compatible builds", flush=True)
+            assert root is not None
+            pending_builds = _pending_builds(root, selected, experiment)
+            if pending_builds:
+                _run_stage(
+                    "build",
+                    _stage_command("build", experiment),
+                    dry_run=False,
+                )
+            else:
+                print(
+                    "\n=== BUILD ===\nSKIPPED complete compatible builds",
+                    flush=True,
+                )
 
         _run_stage("ask", _stage_command("ask", experiment), dry_run=False)
         _run_stage(
