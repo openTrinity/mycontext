@@ -43,6 +43,7 @@ import { VAULT_0025_SEARCH_GRAPH_SCOPE } from "./migrations/vault/v25-search-gra
 import { VAULT_0026_CLEAR_PLACEHOLDER_TITLES } from "./migrations/vault/v26-clear-placeholder-titles.js"
 import { VAULT_0027_CHAT_COVERAGE } from "./migrations/vault/v27-chat-coverage.js"
 import { VAULT_0028_ATTENTION_SCOPE } from "./migrations/vault/v28-attention-scope.js"
+import { VAULT_0029_DOCUMENT_COVERAGE } from "./migrations/vault/v29-document-coverage.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -363,6 +364,13 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
    * ★ 只加表；编号全局单调（见 v25 那条注释）。
    */
   { version: 28, name: "attention-scope", sql: VAULT_0028_ATTENTION_SCOPE },
+  /**
+   * 文档的覆盖面 —— 补齐"消息 / 听记 / 文档"三类里最后一类。
+   *
+   * ★ 两类能回答"这段日期齐没齐"、一类不能，是最难解释的状态：
+   * 用户会以为文档那栏坏了。★ 只加表；编号全局单调（见 v25 那条注释）。
+   */
+  { version: 29, name: "document-coverage", sql: VAULT_0029_DOCUMENT_COVERAGE },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */

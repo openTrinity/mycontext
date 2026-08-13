@@ -18,6 +18,7 @@
  */
 import type { Clock, Logger } from "@mycontext/kernel"
 import {
+  AttentionRouter,
   ConversationRepository,
   MessageRepository,
   PersonaConfigRepository,
@@ -38,7 +39,30 @@ export interface PersonaHandlerOptions {
 }
 
 /**
- * 把**一条**消息投给 supervisor（含准入判断）。返回是否被接纳。
+ * 两条通路共用的仓储集合。
+ *
+ * ★ 含 `router` —— 路由必须在**这里**而不是在各自的调用点：见
+ * `deliverMessage` 里那段 ★★★。
+ */
+interface DeliveryRepos {
+  messages: MessageRepository
+  conversations: ConversationRepository
+  configs: PersonaConfigRepository
+  router: AttentionRouter
+}
+
+/** 造一份两条通路共用的仓储（statement 缓存因此有效，见 `createPersonaFastPath`）。 */
+function createRepos(options: PersonaHandlerOptions): DeliveryRepos {
+  return {
+    messages: new MessageRepository(options.db),
+    conversations: new ConversationRepository(options.db),
+    configs: new PersonaConfigRepository(options.db),
+    router: new AttentionRouter(options.db, options.clock),
+  }
+}
+
+/**
+ * 把**一条**消息投给 supervisor（含**路由** + 准入判断）。返回是否被接纳。
  *
  * ## ★ 为什么单独抽出来
  *
@@ -46,18 +70,34 @@ export interface PersonaHandlerOptions {
  * · **快通道** —— 入库后的进程内事件（`inbound.message`），毫秒级；
  * · **慢兜底** —— Outbox 消费者扫 changelog（崩溃/漏事件时补上）。
  *
- * 两条路必须走**同一段**准入逻辑。各写一遍的话"快通道收了、慢兜底拒了"
+ * 两条路必须走**同一段**判据。各写一遍的话"快通道收了、慢兜底拒了"
  * 这种不一致会极难发现：两边都不报错，只是行为不同。
  *
  * 去重在 `Mailbox.push`（按 message_id），所以两条路重叠是安全的。
+ *
+ * ## ★★★ 路由在这里，不在调用点
+ *
+ * 改动前路由只在**快通道的调用点外面**（`ingest.service.ts` 的
+ * `inbound.message` 回调里），于是慢兜底整条**绕过监听范围** ——
+ * 用户勾的那个范围在那条路上不生效。而慢兜底恰恰是真机上主要生效的那条
+ * （快通道要求 `changed.length > 0`，而本机历史早已采完）。
+ *
+ * 放在这个函数里的判据是：**这是两条路唯一的交汇点**。任何新增的第三条
+ * 投递路径也必然要经过它，所以"忘了加路由"在结构上不可能。
+ *
+ * ## ★★ 路由与 `admit()` 仍然分开（下沉的是"在哪调"，不是"合并成一个"）
+ *
+ * | 谁 | 问的是 | 变了会怎样 |
+ * |---|---|---|
+ * | 路由 | 这条消息属于分身的关心范围吗 | 不属于 → 根本不该进管控层 |
+ * | admit | 这条消息现在该触发一次回复吗 | 不该 → 进了但被丢弃，有理由可查 |
+ *
+ * 混成一个 reason 会让"范围外"和"暂时不回"用同一句话表达，而它们一个是
+ * 配置问题、一个是时机问题 —— 用户排查时需要的正是这个区别。
  */
 export function deliverMessage(
   options: PersonaHandlerOptions,
-  repos: {
-    messages: MessageRepository
-    conversations: ConversationRepository
-    configs: PersonaConfigRepository
-  },
+  repos: DeliveryRepos,
   messageId: string,
 ): boolean {
   const message = repos.messages.findById(messageId)
@@ -65,6 +105,23 @@ export function deliverMessage(
   const conversation = repos.conversations.findById(message.conversationId)
   if (conversation === null) return false
   if (options.channelIds !== undefined && !options.channelIds.includes(conversation.channelId)) {
+    return false
+  }
+
+  /**
+   * ★★★ 路由闸：先判「这个会话我管不管」，再判「现在该不该回」。
+   *
+   * 顺序有理由：路由是**配置**问题（一次 `count(*)` + 一次主键查询，便宜），
+   * 而下面那三条准入前置要 3 次带子查询的 SQL。范围外的消息在这里就该走，
+   * 没有理由为它去查 `message_mentions` 与"对方后来有没有又说话"。
+   */
+  const route = repos.router.route({
+    channelId: conversation.channelId,
+    conversationExternalId: conversation.externalId,
+    sentAt: message.sentAt,
+  })
+  if (!route.routed) {
+    options.logger?.debug("persona route skipped", { reason: route.reason })
     return false
   }
 
@@ -116,36 +173,28 @@ export function deliverMessage(
 /**
  * 快通道投递器：给 `IngestService` 的 `inbound.message` 事件用。
  *
- * 与消费者共用 `deliverMessage`，也共用同一批仓储实例（`prepare` 的
- * 语句缓存因此有效 —— 逐条投递时这一点不是微优化：回溯 20 万条时
- * 每条都重建 statement 会是分钟级的差别）。
+ * 与消费者共用 `deliverMessage`（**含路由**），也共用同一批仓储实例
+ * —— `prepare` 的语句缓存因此有效。逐条投递时这一点不是微优化：
+ * 回溯 20 万条时每条都重建 statement 会是分钟级的差别。
  */
 export function createPersonaFastPath(
   options: PersonaHandlerOptions,
 ): (messageId: string) => boolean {
-  const repos = {
-    messages: new MessageRepository(options.db),
-    conversations: new ConversationRepository(options.db),
-    configs: new PersonaConfigRepository(options.db),
-  }
+  const repos = createRepos(options)
   return (messageId) => deliverMessage(options, repos, messageId)
 }
 
 /**
  * 把一批变更投给 supervisor。
  *
- * 返回的 `processed` 是**接纳数**而不是"看过的条数"：被准入闸挡掉的
+ * 返回的 `processed` 是**接纳数**而不是"看过的条数"：被路由或准入闸挡掉的
  * 算 skipped。这样状态页上的"处理了 N 条"就是"真的进队列的 N 条"，
  * 而不是一个虚高的数字。
  *
- * ★ 与快通道共用 `deliverMessage` —— 两条路的准入逻辑只有一份。
+ * ★ 与快通道共用 `deliverMessage` —— 路由与准入的判据只有一份。
  */
 export function createPersonaInboxHandler(options: PersonaHandlerOptions) {
-  const repos = {
-    messages: new MessageRepository(options.db),
-    conversations: new ConversationRepository(options.db),
-    configs: new PersonaConfigRepository(options.db),
-  }
+  const repos = createRepos(options)
 
   return (batch: readonly ChangelogRow[]): { processed: number; skipped: number } => {
     let processed = 0

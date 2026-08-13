@@ -33,6 +33,7 @@ import {
   type SelfIdentityView,
 } from "@mycontext/ipc-contract"
 import { AUTO_BUILD_MIN_INTERVAL_MS } from "@mycontext/knowledge-feed"
+import { buildDomainStatuses } from "@mycontext/ingest"
 import { IngestService } from "./ingest.service.js"
 import type { FeedDirs, FeedService } from "./feed.service.js"
 
@@ -617,6 +618,33 @@ export class DataPlaneService {
         minutesCoverage: null,
         storage: { mainBytes: 0, walBytes: 0, rawRecords: 0, rawPruned: 0, vectors: 0 },
         staleConsumers: [],
+        /**
+         * ★★ 未登录时消费者列表**为空**，而不是"四个消费者、全部 absent"。
+         *
+         * 判据是这一层要表达的事实：**还没有库**，所以"这套部署里有哪些
+         * 消费者"这个问题现在没有答案。给一份"全部 absent"会让状态页显示
+         * 四行红色的"不存在" —— 而用户此刻要做的只是登录。
+         *
+         * ★ 与 `minutesCoverage: null` 同一个取舍："不知道"不能显示成
+         * "有问题"，也不能显示成"没问题"。
+         */
+        consumers: [],
+        /**
+         * ★ 域的**声明**与登录无关（`DOMAINS` 是静态的），所以这里给全量、
+         * 水位全 0 —— 那是诚实的："这些是我们支持的域，现在还没有数据"。
+         *
+         * 与 `consumers: []` 的区别：消费者的"存在与否"是**运行时**事实
+         * （注册过才算），而域是**设计**事实。前者未登录时未知，后者已知。
+         */
+        domains: buildDomainStatuses({ domainHeads: {} }).map((status) => ({ ...status })),
+        /**
+         * ★ 未登录时范围闸「没配、没丢过」。
+         *
+         * `restricted: false` 是**诚实**的：那时压根没有库，也就没有任何
+         * 白名单在生效。给 `true` + `allowed: 0` 会让界面说"许可 0 个会话"
+         * —— 而那是"一个都不采"这个**已配置**状态，与"还没登录"完全不同。
+         */
+        scope: { restricted: false, allowed: null, droppedOutOfScope: 0, lastDroppedAt: null },
         eventStream: null,
       }
     }

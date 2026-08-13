@@ -1369,8 +1369,37 @@ export function useUpdateProfile() {
  *
  * 不轮询：主进程在入库后主动推快照（见下面的 useIngestProgress）。
  * 轮询会在空闲时白跑，而在忙时又跟不上 —— 两头都不对。
+ *
+ * ## ★★★ 订阅**内建**在这个 hook 里（而不是让调用方另调 useIngestProgress）
+ *
+ * ### 实测过的故障（CDP 确证）
+ *
+ * 仪表盘显示「采集未运行」，而**同一时刻**主进程 `running: true`、
+ * 两个渠道都在跑、无错误无 blocked。去别的页转一圈回来那句话就消失了。
+ *
+ * 根因：`useIngestSnapshot` 只在挂载时取一次（无 `refetchInterval`），
+ * 刷新全靠 `useIngestProgress` 的推送写回同一个 cache key。而**仪表盘
+ * 只调了 `useIngestSnapshot`、没调 `useIngestProgress`** —— 运行状态页调了。
+ * 于是仪表盘卡在挂载那一刻的快照，而冷启动时序恰好不利：
+ *
+ * ```
+ * vault opened       ← 渲染层挂载，此刻 running=false
+ * ingest started     ← 2 秒后定时器才起，running=true（但没人推给仪表盘）
+ * ```
+ *
+ * ### 为什么把订阅并进来，而不是给仪表盘补一行
+ *
+ * `useIngestSnapshot` 每多一个调用方，就多一个"忘了配对订阅"的机会，
+ * 而忘了的表现就是这次这样：数字静默过期、没有任何报错（CLAUDE.md §4）。
+ * 把订阅收进 hook 内部，这个错在结构上不可能再犯 —— 取快照与保持新鲜
+ * 变成同一件事，不是两件要记得配对的事。
+ *
+ * ★ `useIngestProgress` 仍单独导出：`refresh-status-button` 等只想"订阅、
+ * 不自己发起查询"的地方还用它。订阅是逐实例的独立 `ipcRenderer.on`，
+ * 多个订阅者并存安全（见 preload 的 `onProgress`）。
  */
 export function useIngestSnapshot(enabled: boolean) {
+  useIngestProgress()
   return useQuery({
     queryKey: QUERY_KEYS.ingest,
     queryFn: async () => unwrap(await window.mycontext.ingest.snapshot()),

@@ -250,40 +250,89 @@ describe("AttentionCoverageRepository：实时流覆盖面", () => {
 })
 
 /**
- * ── ★★★ 接线：路由真的挂在投递之前 ─────────────────────────────
+ * ── ★★★ 接线：路由挂在**两条投递路的交汇点**上 ────────────────────
  *
- * 上面全绿而 `ingest.service.ts` 里那段路由被删掉的话，分身照旧收到
- * **所有**会话的消息 —— 而"监听范围"就变成一个只存在于界面上的概念。
- * 本仓库反复出现的形状：两头都锁了、中间那根线是裸的。
+ * ## 这一组断言被重写过，理由必须写清（否则下次又会退回去）
+ *
+ * 上一版锁的是 `ingest.service.ts` 里那段路由的文本形状
+ * （`const accepted = routed ? ... : false`、`let routed = true`、
+ * `AttentionCoverageRepository(...).bump`）。那些断言在当时是对的，
+ * 但它们锁死了一个**错的位置**：
+ *
+ * 路由只在那里 ⇒ 只有**快通道**过范围闸，而慢兜底（`persona-inbox`
+ * 消费者）整条绕过 —— 用户勾的监听范围在那条路上不生效。而慢兜底恰恰是
+ * 真机上主要生效的那条（`inbound.message` 要求 `changed.length > 0`，
+ * 本机历史早已采完：实测 62 个连续页全是 `changed:0 / unchanged:51`）。
+ *
+ * 也就是说：**上一版三条断言全绿，而功能是坏的**。锁文本形状的代价就在这里
+ * —— 它把"当前实现长什么样"当成了"行为对不对"。
+ *
+ * 所以现在：
+ * · **行为**门禁交给 `tests/integration/persona/attention-routing.test.ts`
+ *   （直接调真 handler，删掉路由那道 if ⇒ 4 条转红，已实测）；
+ * · 这里只留**结构**断言：路由在 `deliverMessage` 里（两条路唯一的交汇点），
+ *   且调用点不再各自实现一份。结构断言的价值是防"又把它挪回调用点"。
  */
-describe("接线：路由挂在 personaFastPath 之前", () => {
-  it("★★★ 投递**受** routed 门控（不是「路由在前面出现过」）", async () => {
+describe("接线：路由挂在两条投递路的交汇点（deliverMessage）", () => {
+  it("★★★ 路由在 `deliverMessage` 里，且在准入前置查询之前", async () => {
     /**
-     * ── 这一条第一版**没有判别力** ──────────────────────────────
+     * 判据是**位置**：`deliverMessage` 是快通道（`createPersonaFastPath`）与
+     * 慢兜底（`createPersonaInboxHandler`）唯一都会经过的函数。路由在这里
+     * ⇒ 任何新增的第三条投递路径也必然过闸，"忘了加路由"在结构上不可能。
      *
-     * 我原来断言 `indexOf("routeToAttention(") < indexOf("personaFastPath?.(")`
-     * —— 即"路由那行在文件里更靠前"。反证时我把投递改成无条件调用
-     * （`const accepted = this.personaFastPath?.(...)`，路由结果只 `void` 掉），
-     * 那正是"等于没路由"的形状，而断言**照样绿**：两个字面量的先后没变。
+     * ★ 还断言它在 `message_mentions` 那条查询**之前**：范围外的消息不该
+     * 为它去查 mentions 与"对方后来有没有又说话"（3 次带子查询的 SQL）。
+     * 这不只是性能 —— 顺序反了说明路由变成了"事后旁白"而不是闸。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/persona/src/inbox-consumer.ts", "utf8")
+    const fnIdx = src.indexOf("export function deliverMessage")
+    expect(fnIdx).toBeGreaterThan(0)
+    const body = src.slice(fnIdx, src.indexOf("export function createPersonaFastPath"))
+    // 路由真的被调用，且它的结论门控 return
+    expect(body).toContain("repos.router.route({")
+    expect(body).toContain("if (!route.routed)")
+    /**
+     * 路由在准入前置查询之前。
      *
-     * 顺序不是判据，**门控**才是。所以改成断言那一行里 `routed` 真的参与
-     * 了投递的条件表达式。
-     *
-     * 反证：把它改成 `const accepted = this.personaFastPath?.(message.id) ?? false`
-     * （无论 routed 如何都投递）→ 这条转红（已实测）。
+     * ★ 锚点用 `SELECT count(*) AS c FROM message_mentions` 而不是
+     * 光秃秃的 `message_mentions` —— 后者会先命中**注释里**那句
+     * "「@我」从 message_mentions 读"，于是断言比较的是两个注释的先后，
+     * 而那与真实执行顺序无关（第一版正是这样红的：666 < 611 不成立，
+     * 因为注释出现在路由调用之后）。锚点必须是**代码**，不是文本。
+     */
+    expect(body.indexOf("repos.router.route(")).toBeLessThan(body.indexOf("FROM message_mentions"))
+  })
+
+  it("★★★ 两条通路共用同一份仓储（含 router）—— 判据只有一处", async () => {
+    /**
+     * 反证：让 `createPersonaFastPath` 自己 new 一份不含 router 的仓储
+     * → 这条转红。而红之前的状态正是"两条路各有一份判据"，
+     * 那种不一致的表现是"快通道拦了、慢兜底放了"，两边都不报错。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/persona/src/inbox-consumer.ts", "utf8")
+    expect(src).toContain("router: new AttentionRouter(options.db, options.clock)")
+    // 两个工厂都走 createRepos，不各自 new
+    const fast = src.slice(src.indexOf("export function createPersonaFastPath"))
+    expect(fast).toContain("createRepos(options)")
+    const slow = src.slice(src.indexOf("export function createPersonaInboxHandler"))
+    expect(slow).toContain("createRepos(options)")
+  })
+
+  it("★★★ 调用点**不再**自己实现一份路由（否则判据又变成两份）", async () => {
+    /**
+     * 下沉之后 `ingest.service.ts` 里那段路由必须**消失**，而不是留着
+     * 「双保险」。留着的后果是同一条消息被记账两次（覆盖面虚高一倍），
+     * 而且两份判据会各自演化。
      */
     const { readFileSync } = await import("node:fs")
     const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
-    const idx = src.indexOf("const accepted =")
-    expect(idx).toBeGreaterThan(0)
-    // 取到该语句结尾：投递必须写在 `routed ? ... : false` 里面
-    const stmt = src.slice(idx, idx + 200)
-    expect(stmt).toContain("routed")
-    expect(stmt).toContain("this.personaFastPath?.(message.id)")
-    // ★ `routed` 必须出现在调用**之前**（即它是条件，不是事后的旁白）
-    expect(stmt.indexOf("routed")).toBeLessThan(stmt.indexOf("this.personaFastPath"))
-    // 而且路由本身要真的算过
-    expect(src).toContain("routeToAttention({")
+    // 只允许出现在注释里说明"为什么搬走了"，不允许再有真实调用
+    expect(src).not.toContain("routeToAttention({")
+    expect(src).not.toContain("new AttentionCoverageRepository(")
+    // 而投递本身仍在（快通道没被顺手删掉）
+    expect(src).toContain("this.personaFastPath?.(message.id)")
   })
 
   it("★★★ 名单为空时**放行**（否则是一次静默功能回归）", async () => {
@@ -292,23 +341,32 @@ describe("接线：路由挂在 personaFastPath 之前", () => {
      * "什么都不关心"会让分身整个静默 —— 用户看到的是"它不理人了"，
      * 而日志里一个错都没有。
      *
-     * 反证：把 `hasScope` 那个判据删掉（无条件路由）→ 这条转红。
+     * 判据现在在 `AttentionRouter.route()`。行为侧由集成测试
+     * 「名单为空 → 放行」锁住；这里锁的是那段判据没被"顺手收紧"。
      */
     const { readFileSync } = await import("node:fs")
-    const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
-    expect(src).toContain("activeCount(this.options.plugin.meta.id) > 0")
-    const idx = src.indexOf("let routed = true")
-    expect(idx).toBeGreaterThan(0)
+    const src = readFileSync("packages/store/src/attention-router.ts", "utf8")
+    expect(src).toContain("activeCount(input.channelId) === 0")
+    expect(src).toContain("enforced: false")
   })
 
-  it("★★ 两侧都记账（routed / skipped）", async () => {
+  it("★★ 两侧都记账（routed / skipped），且按消息业务时间分桶", async () => {
+    /**
+     * 只记放行的话，"范围设窄了"与"那段时间没消息"不可区分 ——
+     * 而那正是用户会来问的那个问题。
+     *
+     * ★ `dayBucket` 用 `input.sentAt` 而不是 `clock.now()`：一条昨天的消息
+     * 今天被慢兜底捞回来时，它属于**昨天**那一天的实时流覆盖面。
+     * 用记账时刻分桶会让回填那一轮把几万条旧消息全记到今天。
+     */
     const { readFileSync } = await import("node:fs")
-    const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
-    const idx = src.indexOf("AttentionCoverageRepository(this.options.db).bump")
+    const src = readFileSync("packages/store/src/attention-router.ts", "utf8")
+    const idx = src.indexOf("this.coverage.bump(")
     expect(idx).toBeGreaterThan(0)
-    const call = src.slice(idx, idx + 400)
-    expect(call).toContain("routed: verdict.routed ? 1 : 0")
-    expect(call).toContain("skipped: verdict.routed ? 0 : 1")
+    const call = src.slice(idx, idx + 300)
+    expect(call).toContain("routed: routed ? 1 : 0")
+    expect(call).toContain("skipped: routed ? 0 : 1")
+    expect(call).toContain("toDayBucket(input.sentAt)")
   })
 })
 

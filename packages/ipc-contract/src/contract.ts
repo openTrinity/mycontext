@@ -489,7 +489,14 @@ export type UpdateProfileInput = z.infer<typeof updateProfileInputSchema>
 // 引导流程
 // ---------------------------------------------------------------
 
-export const ONBOARDING_STEP_IDS = ["channel", "model", "persona", "sources", "distill"] as const
+export const ONBOARDING_STEP_IDS = [
+  "channel",
+  "model",
+  "persona",
+  "sources",
+  "attention",
+  "distill",
+] as const
 export const onboardingStepSchema = z.enum(ONBOARDING_STEP_IDS)
 export type OnboardingStepId = z.infer<typeof onboardingStepSchema>
 

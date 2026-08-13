@@ -80,6 +80,26 @@ export {
   MinutesCoverageRepository,
 } from "./repositories/media-minutes.js"
 export { ChatCoverageRepository, toDayBucket } from "./repositories/chat-coverage.js"
+/**
+ * 覆盖面的**共用基类** —— 聊天（v27）与文档（v29）两张表形状同构，
+ * 五条判据（累加/COALESCE/MIN(drained)/不凭空造行）只有一份实现。
+ * 见 `coverage-base.ts` 文件头。
+ */
+export { CoverageRepositoryBase } from "./repositories/coverage-base.js"
+export type {
+  CoverageRow,
+  CoverageDay,
+  CoverageSummary,
+  CoverageTable,
+  PartitionColumn,
+} from "./repositories/coverage-base.js"
+export { DocumentCoverageRepository, toSpaceKey } from "./repositories/document-coverage.js"
+export type {
+  DocumentCoverageRow,
+  DocumentCoverageDay,
+  DocumentCoverageSummary,
+} from "./repositories/document-coverage.js"
+
 export {
   AttentionScopeRepository,
   AttentionCoverageRepository,
@@ -90,6 +110,16 @@ export type {
   AttentionRoute,
   AttentionRouteInput,
 } from "./repositories/attention-scope.js"
+/**
+ * 路由器 —— 快通道与慢兜底**共用**的那道监听范围闸。
+ *
+ * ★ 与 `routeToAttention`（纯判据）分开导出：判据仍然是那个纯函数，
+ * 这个类只是"执行一次判据所需的三件事"的打包（名单空不空 / 取那一行 /
+ * 记账两侧）。见 `attention-router.ts` 文件头 —— 它修的是
+ * "慢兜底整条绕过监听范围"那个真实缺陷。
+ */
+export { AttentionRouter } from "./attention-router.js"
+export type { AttentionRouterInput, AttentionRouterVerdict } from "./attention-router.js"
 export type { ChatCoverageRow, ChatCoverageDay } from "./repositories/chat-coverage.js"
 export { DocumentRepository } from "./repositories/documents.js"
 export type { DocumentUpsertResult } from "./repositories/documents.js"

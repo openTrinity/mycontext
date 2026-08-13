@@ -19,13 +19,9 @@ import { SelfIdentityPanel } from "../settings/self-identity-panel.js"
  * 主渠道 id。本人身份、数字分身这些只在它上面成立 —— 其余渠道是只读接入。
  */
 const PRIMARY_CHANNEL_ID = "dingtalk"
-import {
-  useClearIngestBlocked,
-  useIngestProgress,
-  useIngestSnapshot,
-  useRunIngestOnce,
-} from "../../lib/queries.js"
+import { useClearIngestBlocked, useIngestSnapshot, useRunIngestOnce } from "../../lib/queries.js"
 import { ChannelPicker } from "./channel-picker.js"
+import { DataPlaneTopologyPanel } from "./data-plane-topology-panel.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
 function formatBytes(bytes: number): string {
@@ -52,8 +48,7 @@ export function DataPlanePanel({
   const snapshot = useIngestSnapshot(enabled)
   const runOnce = useRunIngestOnce()
   const clearBlocked = useClearIngestBlocked()
-  // 订阅主进程推来的快照：入库后立刻更新，不轮询
-  useIngestProgress()
+  // ★ 订阅已并进 useIngestSnapshot（见其注释）—— 这里不再单独调，避免重复挂 handler。
 
   /**
    * 当前在看哪个渠道。`null` = 没选过 → 第一个（主渠道排在前）。
@@ -196,11 +191,18 @@ export function DataPlanePanel({
         />
       )}
 
-      {data.staleConsumers.length > 0 && (
-        <p className="typography-body-small-400 rounded-[var(--radius-md)] bg-[var(--status-fill-warning-container)] px-3 py-2 text-[var(--status-warning)]">
-          {t("status.dataPlane.staleConsumers", { list: data.staleConsumers.join(", ") })}
-        </p>
-      )}
+      {/*
+        ★★★ 数据平面拓扑（消费者逐个 + 域水位）。
+
+        它**取代**了原来那行「离线消费者：distill, graph-export」——
+        那行说不出落后多少、在等谁、存不存在，而这三件事的出路完全不同
+        （见 `DataPlaneTopologyPanel` 的文件头）。
+
+        ★ `staleConsumers` 那个字段仍在契约里（别的地方可能读），
+        但这里不再单独渲染它：stale 已经作为每个消费者的一个状态显示了，
+        两处都画会让同一件事说两遍，而它们措辞不同就会互相矛盾。
+      */}
+      <DataPlaneTopologyPanel consumers={data.consumers} domains={data.domains} />
 
       {/* ★ 归属判定同样只对主渠道成立（它依赖身份行）—— 见下面 SelfIdentityPanel */}
       {channel === PRIMARY_CHANNEL_ID && data.unjudged > 0 && (

@@ -24,6 +24,7 @@ import type { Clock, Logger } from "@mycontext/kernel"
 import { isAppError } from "@mycontext/kernel"
 import type { ChannelConversationItem, ChannelPlugin } from "@mycontext/channels"
 import { createDistillHandler, DISTILL_CONSUMER_ID } from "@mycontext/distill"
+import { type IngestSnapshot as ContractIngestSnapshot } from "@mycontext/ipc-contract"
 import {
   createPersonaFastPath,
   createPersonaInboxHandler,
@@ -39,6 +40,8 @@ import {
   normalize,
   OutboxConsumer,
   runCycle,
+  buildConsumerStatuses,
+  buildDomainStatuses,
   type ConsumerOutcome,
   type CycleRunnable,
   persistBatch,
@@ -71,10 +74,9 @@ import {
   type MessageRow,
   type SqliteDatabase,
   ChatCoverageRepository,
+  DocumentCoverageRepository,
+  toSpaceKey,
   toDayBucket,
-  AttentionScopeRepository,
-  AttentionCoverageRepository,
-  routeToAttention,
 } from "@mycontext/store"
 
 /** L1 探针基础周期。实测探针约 0.7s，15s 是「够快且不浪费」的折中。 */
@@ -560,118 +562,49 @@ export interface IngestServiceOptions {
   residentConversationExternalIds?: () => readonly string[]
 }
 
-export interface IngestSnapshot {
-  running: boolean
-  channelId: string
-  messages: number
-  conversations: number
-  unjudged: number
-  outboxHead: number
-  ftsIndexed: number
-  ftsLag: number
-  probeIntervalMs: number
-  probeThrottled: boolean
-  lastError: string | null
-  /** 需要用户介入的终态（登录过期 / 缺授权）：UI 要显式引导，不能静默重试 */
-  blockedReason: "session_expired" | "permission_required" | null
-  /** 连续失败轮数。>0 时状态页要显示「正在退避重试」，否则减速看起来像卡住 */
-  failedAttempts: number
-  selfConfirmed: boolean
-  /**
-   * 身份没确认的**原因**。null = 已确认。
-   *
-   * 界面据此给不同的引导（见 ipc-contract 里 `selfIdentityState` 的注释：
-   * 四种成因只有一种是同名歧义，用一句话盖住会把用户指向不存在的问题）。
-   */
-  selfIdentityState: "unbound" | "unresolved" | "ambiguous" | "unconfirmed" | null
-  /** 媒体元数据行数（一期只记 ID 不下载字节） */
-  mediaAssets: number
-  /** 听记条数 */
-  minutes: number
-  /**
-   * 听记的**覆盖面**（"是不是全部"，不是"有多少"）。null = 还没跑过一轮。
-   *
-   * ★ 上面那个计数在首版会稳定停在 50（列表只取首页），而那与
-   * "这个账号一共 50 场会"在界面上完全同形 —— 这一组是那个静默缺失的出口。
-   * 与 `backfill` 那三个数字同一个思路：把落差摊开才能被看见。
-   */
-  minutesCoverage: {
-    /** 上一轮把列表翻到底了吗。false = 撞了页数预算，覆盖不全。 */
-    drained: boolean
-    /** 已覆盖到的最早会议时间（unix ms）；null = 库里还没有会议。 */
-    earliestStartedAt: number | null
-    /** 有几场会的**转写**没抽干（与 `drained` 是两件事，见契约里的注释）。 */
-    transcriptTruncated: number
-  } | null
-  storage: {
-    mainBytes: number
-    walBytes: number
-    rawRecords: number
-    rawPruned: number
-    vectors: number
-  }
-  staleConsumers: string[]
-  /**
-   * 「选的范围 vs 实际覆盖」。
-   *
-   * ★ 必须在状态页上，不能只在日志里：这个落差过去是**完全静默**的 ——
-   * 用户在引导里选 180 天、库里只有 7 天，而界面上每一个数字都正常
-   * （消息数在涨、无错误、蒸馏 grade 是 A）。唯一的症状是画像薄，
-   * 而"薄"没有参照物，看不出来。
-   */
-  backfill: {
-    /** 用户选的下界；null = 不限，undefined 序列化后为 null 表示没配 */
-    since: number | null
-    /** 已覆盖到的最早时间；null = 库里还没有消息 */
-    coveredFrom: number | null
-    /** 还差多少毫秒到目标；0 = 已到位 */
-    remainingMs: number
-    /**
-     * 回填卡住了的原因；null = 正常。
-     *
-     * 与 `remainingMs` 分开报：那个只说"还差多少"，而**差着不动**
-     * 与"正在推进"在界面上是同一个数字。活锁必须自己有一个出口。
-     */
-    stalled: string | null
-    /**
-     * 当前正在回填的时间窗；null = 这一刻没有在跑的窗。
-     *
-     * ★ 让等待变成**可观察**的：只报 `remainingMs` 时那个数字每几分钟
-     * 才动一次，用户分不清"在跑"与"卡住"。引导第四步用它显示
-     * "正在拉 X 到 Y"。
-     */
-    activeWindow: { start: number; end: number } | null
-    /** 已采集的消息总数（该渠道）。进度条的分子。 */
-    messages: number
-    /**
-     * 采集**有没有真的开始**（库里有消息，或回填推进过）。
-     *
-     * ★ 必须与 `remainingMs` 分开：「一条都没有」曾经也被算成
-     * `remainingMs: 0`，于是界面对一个**采集完全失败**的库显示
-     * 「选的 N 天已全部采集完成」（实测踩到过，见 `backfillCoverage`
-     * 的注释）。false 时 UI 要说"还没开始"，不能说"已完成"。
-     */
-    started: boolean
-  }
-  /**
-   * 采集范围闸的状态。
-   *
-   * ★ 必须可见，理由与 `backfill` 那一段同源：全局窗（`list-all`）没有
-   * 会话过滤参数，所以"只采勾选的会话"只能靠**落库前丢弃**实现。
-   * 而丢弃不上报的话，"越界被挡住了"与"这段时间本来没消息"在界面上
-   * 完全同形 —— 用户无法确认自己的勾选真的生效了。
-   */
-  scope: {
-    /** 是否设了会话白名单。false = 用户没配过范围（不设限） */
-    restricted: boolean
-    /** 许可的会话数；null = 不限（≠ 0，那是"一个都不许"） */
-    allowed: number | null
-    /** 本进程累计丢弃的越界消息条数 */
-    droppedOutOfScope: number
-    /** 最近一次丢弃的时刻；null = 本进程还没丢过 */
-    lastDroppedAt: number | null
-  }
-}
+/**
+ * 采集状态快照。
+ *
+ * ## ★★★ 从契约**派生**，而不是在这里再声明一遍
+ *
+ * 这里原来有一份**手写的** `IngestSnapshot` 接口（约 110 行），与
+ * `@mycontext/ipc-contract` 里那份 zod schema 并行存在。两份声明描述
+ * 同一个对象，而它们只能靠人去同步 —— 本轮加 `consumers` / `domains`
+ * 两个字段时立刻撞上：契约加了、这里没加，于是 `snapshot()` 报
+ * "consumers 不存在于 IngestSnapshot"，而 `data-plane.service` 那侧同时报
+ * "缺 consumers"。同一次改动、两个方向相反的错误，成因就是两份声明。
+ *
+ * 更糟的是**它们不一致时未必报错**：契约里加一个可选字段、这里不加，
+ * 类型检查照过，只是主进程永远不填它 —— 而界面读到 undefined。
+ * 那正是本仓库最贵的那类静默降级。
+ *
+ * 所以改成从契约派生：契约是唯一真源（它同时是运行时校验的依据，
+ * 渲染层读的也是它）。加字段只需改一处。
+ *
+ * ★ 仍然导出这个名字：本文件内有三处按属性引用它
+ * （`IngestSnapshot["blockedReason"]` / `["selfIdentityState"]`），
+ * 外部也有 import。保留别名是这次收敛最小的形状 —— 不改任何调用方。
+ *
+ * ★ 那 110 行注释**没有丢**：它们本来就该长在契约上（渲染层读的是契约），
+ * 而契约里那些字段各自的 why 已经写在 `ingestSnapshotSchema` 里。
+ */
+export type IngestSnapshot = ContractIngestSnapshot
+
+/**
+ * 采集层**自己能填**的那部分快照。
+ *
+ * ## ★★ 为什么要这个 Omit，而不是让采集层也填那两个字段
+ *
+ * `eventStream`（长连接健康）与 `perChannel`（逐渠道汇总）都由
+ * `DataPlaneService` 填 —— 前者的长连接**不在采集层**（它由数据面持有），
+ * 后者要跨多个 `IngestService` 才汇总得出来。让采集层给一个 `null` 占位，
+ * 就等于让它对一件自己不知道的事表态，而 `null` 的含义是"渠道不支持/未起"
+ * —— 那是一句**假话**（真相是"这一层不负责"）。
+ *
+ * 用类型把这个分工写清：采集层给不出的字段，它的返回类型里就没有。
+ * 数据面 `{...ingest.snapshot(), eventStream, ...perChannel}` 补齐成完整契约。
+ */
+export type IngestSnapshotPart = Omit<ContractIngestSnapshot, "eventStream" | "perChannel">
 
 export class IngestService {
   /** 快通道：入库后立刻投递，供数字人订阅。 */
@@ -816,6 +749,24 @@ export class IngestService {
    * 不记位置的话列表尾部永远轮不到（而那往往正是最缺数据的那些）。
    */
   private activeScanOffset = 0
+  /**
+   * 上一轮 `runCycle()` 的结果。空数组 = 还没跑过一轮。
+   *
+   * ## ★★ 只为了那个 `waitingForUpstream`
+   *
+   * 「蒸馏在等图谱」这件事**只在那一轮的返回值里存在** —— 它不落库
+   * （落库要么加一张表、要么在游标上加一列，而它是一个瞬时状态，
+   * 存下来就会过期，而过期的方向是"显示一个早已解除的等待"）。
+   *
+   * 所以它必须在内存里留一份，否则 `runCycle` 算出来的这个信息只会进日志，
+   * 而"蒸馏没进展"与"蒸馏在等图谱"在界面上永远同形（lag 都在涨、
+   * processed 都是 0），出路却相反。
+   *
+   * ★ 其余字段（lag / stale / 错误）**不从这里取**，从 `consumer_cursors`
+   * 取 —— 那才是持久的真相。进程刚起时这个数组是空的，而那时游标里的进度
+   * 仍然有效；从这里取 lag 会让重启后界面显示"全部落后 0 条"（假的）。
+   */
+  private lastCycle: readonly ConsumerOutcome[] = []
   /**
    * 会话目录的缓存（三路合并实测 4.8s，比扫描周期还长 —— 不能每轮重取）。
    * null = 还没取过或已过期。
@@ -1031,73 +982,24 @@ export class IngestService {
           /**
            * ★ 只在**真的接纳了**才回调。
            *
-           * `personaFastPath` 返回 false 的两种情况都不该叫醒调度：
-           * 准入闸拒掉（这个账号 86 个会话，多数消息被成本闸拒）、
-           * 或者慢兜底已经收下了同一条（按 message_id 去重）。
+           * `personaFastPath` 返回 false 的三种情况都不该叫醒调度：
+           * 路由判定范围外、准入闸拒掉（这个账号 86 个会话，多数消息被成本
+           * 闸拒）、或者慢兜底已经收下了同一条（按 message_id 去重）。
            * 不区分的话每条入库消息都会排一次唤醒 —— 回溯时是几千次空跑。
+           *
+           * ## ★★★ 路由**不在这里**了（这是一次刻意的下沉）
+           *
+           * 这里原来有一整段路由：读 `attention_scope`、调 `routeToAttention`、
+           * 记 `attention_coverage`。但那样路由只在**快通道**上生效 ——
+           * 慢兜底（`persona-inbox` 消费者）整条绕过监听范围，而它恰恰是
+           * 真机上主要生效的那条（快通道要求 `changed.length > 0`，
+           * 而本机历史早已采完：实测 62 个连续页全是 `changed:0/unchanged:51`）。
+           *
+           * 现在路由在 `deliverMessage()` 里 —— 两条投递路唯一的交汇点。
+           * 判据、记账、"名单为空则放行"都只有一份，任何新增的第三条路径
+           * 也必然经过它，所以"忘了加路由"在结构上不可能。
            */
-          /**
-           * ★★★ 路由：先判「这条消息属于分身的关心范围吗」。
-           *
-           * 用户原话：「消费者是不是得有个路由模块，看这段时间新消息会不会是
-           * 我这个数字分身的设置要关心的」。这里就是那个位置 —— 在消息
-           * 进入管控层**之前**。
-           *
-           * ## 为什么路由与 `admit()` 分开
-           *
-           * `admit()` 问的是"现在该不该回"（kill switch / 自己发的 / 已回过 /
-           * 太旧 / 触发词），而路由问的是"这个会话我管不管"。两者的出路不同：
-           * 范围外要用户去勾选，不该回是时机问题。混成一个 reason 会让
-           * 用户排查时分不清"我没勾"和"暂时不回"。
-           *
-           * ## ★ 范围为空时**放行**（回落到旧行为）
-           *
-           * `attention_scope` 是这一版新加的表，存量用户那张表是空的。
-           * 空表判成"什么都不关心"会让分身**整个静默**，而那是一次
-           * 静默功能回归（用户看到的是"它不理人了"，日志里一个错都没有）。
-           * 所以判据是"名单非空才生效"—— 迁移期的正确一侧。
-           */
-          const scopeRepo = new AttentionScopeRepository(this.options.db)
-          const hasScope = scopeRepo.activeCount(this.options.plugin.meta.id) > 0
-          let routed = true
-          if (hasScope) {
-            const conversation = new ConversationRepository(this.options.db).findById(
-              message.conversationId,
-            )
-            const scopeRow =
-              conversation === null
-                ? null
-                : scopeRepo.get(this.options.plugin.meta.id, conversation.externalId)
-            const verdict = routeToAttention({
-              conversationExternalId: conversation?.externalId ?? "",
-              sentAt: message.sentAt,
-              scope:
-                scopeRow === null
-                  ? null
-                  : { enabledAt: scopeRow.enabledAt, active: scopeRow.active },
-            })
-            routed = verdict.routed
-            /**
-             * ★ 记账 routed / skipped 两侧 —— 只记放行的话，
-             * "范围设窄了"与"那段时间没消息"不可区分。
-             */
-            try {
-              new AttentionCoverageRepository(this.options.db).bump(this.options.plugin.meta.id, {
-                dayBucket: toDayBucket(message.sentAt),
-                routed: verdict.routed ? 1 : 0,
-                skipped: verdict.routed ? 0 : 1,
-                at: this.options.clock.now(),
-              })
-            } catch {
-              // 记账失败不许影响投递（它是派生物，投递是正事）
-            }
-            if (!verdict.routed) {
-              this.options.logger.debug("persona route skipped", {
-                reason: verdict.reason,
-              })
-            }
-          }
-          const accepted = routed ? (this.personaFastPath?.(message.id) ?? false) : false
+          const accepted = this.personaFastPath?.(message.id) ?? false
           if (accepted) this.options.onPersonaDelivered?.()
         } catch (error) {
           /**
@@ -1657,6 +1559,75 @@ export class IngestService {
           })),
         })
         totals.changed = result.changed.length
+        /**
+         * ★★ 记文档覆盖面（v29 `document_coverage`）。
+         *
+         * ## 为什么记 `listed.items` 而不是 `result.changed`
+         *
+         * 与 `chat_coverage` 那侧**相反**的选择，理由是两者回答的问题不同：
+         * 聊天那边 `bump` 的是"这一轮新落库了多少条"（累加成总量，
+         * 再由 `rebuildFromMessages` 兜底存量）；这里要回答的是
+         * "这个空间这一天**有**多少篇"，而它是一个**快照量** ——
+         * 一篇文档被改了十次仍然是一篇。
+         *
+         * 所以这里不累加 `changed`（那会让改动频繁的空间篇数虚高到几倍），
+         * 而是直接把这一轮列到的篇数按 (空间, 天) 分组，用 `markSpaceDrained`
+         * 的 `listedTotal` 记"渠道说有多少"，真值仍由 `rebuildFromDocuments`
+         * 从 `documents` 表数出来（幂等、可重跑）。
+         *
+         * ★ `drained` 取 `!listed.truncated`：截断了就是没抽干。
+         * 恒记 true 会把"还有更多知识库没列到"显示成"已采完"，
+         * 而那正是本仓库最忌讳的静默数据缺失。
+         */
+        try {
+          const coverage = new DocumentCoverageRepository(this.options.db)
+          /** (空间, 天) → 这一轮列到的篇数。★ 与聊天那侧同一个分桶手法。 */
+          const bySpaceDay = new Map<string, number>()
+          for (const item of listed.items) {
+            // ★ 分桶判据与 `toDocumentChangelogEntry` 的 occurredAt 一致
+            const occurredAt = item.updatedAt ?? item.createdAt ?? now
+            /**
+             * ★ 分隔符用 `\u0000` 而不是空格或冒号：空间 id 是渠道给的
+             * 字符串，可能含任何可打印字符。用一个可能出现在 id 里的分隔符，
+             * `split` 会把 id 切成两半 —— 于是 `dayBucket` 拿到 id 的后半段，
+             * 这一天的数据被记到一个不存在的日期上，而两个数字都会「看起来对」。
+             * 与聊天那侧（byDay 的 key）用的是同一个分隔符。
+             */
+            const key = `${toSpaceKey(item.workspaceId)}\u0000${toDayBucket(occurredAt)}`
+            bySpaceDay.set(key, (bySpaceDay.get(key) ?? 0) + 1)
+          }
+          for (const [key, listedTotal] of bySpaceDay) {
+            const [spaceExternalId, dayBucket] = key.split("\u0000")
+            if (spaceExternalId === undefined || dayBucket === undefined) continue
+            coverage.markDrained(channelId, {
+              spaceExternalId,
+              dayBucket,
+              // 截断了就是没抽干 —— 见上面那段
+              drained: !listed.truncated,
+              listedTotal,
+              at: now,
+            })
+          }
+          /**
+           * ★ 真值从 `documents` 重建（幂等）。
+           *
+           * 不能只靠上面那一轮：文档的守卫条件很严（四列都没变就判重），
+           * 所以存量库里 `local_count` 会永远是 0 —— 界面会说"这段日期 0 篇"
+           * 而库里有几百篇。与 `chat_coverage` 的 `rebuildFromMessages`
+           * 同一个理由，只是这里每轮都跑（文档量比消息小两三个数量级，
+           * 一条 GROUP BY 走 channel_id 索引，不需要那套 backfilled 标记）。
+           */
+          coverage.rebuildFromDocuments(channelId, now)
+        } catch (error) {
+          /**
+           * ★ 记账失败**不许**影响采集：这张表是给界面看的派生物，
+           * 而上面 `persistDocuments` 才是真数据。但也不静默 ——
+           * 否则"覆盖面为 0"与"记账挂了"不可区分。
+           */
+          this.options.logger.warn("document coverage bump failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          })
+        }
       }
 
       /**
@@ -2615,6 +2586,14 @@ export class IngestService {
       runnables.set(PERSONA_CONSUMER_ID, this.personaConsumer)
     }
     const outcomes = await runCycle(runnables)
+    /**
+     * ★ 留一份给快照（状态页要显示"在等哪个上游"）。
+     *
+     * 这个信息**只在返回值里存在**：它不落库（瞬时状态，存下来就会过期，
+     * 而过期的方向是显示一个早已解除的等待）。不留的话 `runCycle` 算出来的
+     * 依赖闸状态就只进日志 —— 而那正是改动前的形态。
+     */
+    this.lastCycle = outcomes
     /**
      * ★ 只在"真有话说"时记日志：跑空一轮（全 0）每 2 分钟刷一条
      * 是噪声，而它会把真正的异常淹掉。
@@ -4208,7 +4187,7 @@ export class IngestService {
    * 每次调用都是主进程的一段硬阻塞。因此**不要在逐条消息的路径上调它**，
    * 只能由 batch 结束或节流后的推送触发（见 data-plane.service 的 pushSnapshot）。
    */
-  snapshot(): IngestSnapshot {
+  snapshot(): IngestSnapshotPart {
     const channelId = this.options.plugin.meta.id
     const messages = new MessageRepository(this.options.db)
     const changelog = new ChangelogRepository(this.options.db)
@@ -4218,6 +4197,21 @@ export class IngestService {
     const scope = this.collectionScope()
     const minutesRepo = new MinutesRepository(this.options.db)
     const coverage = new MinutesCoverageRepository(this.options.db).get(channelId)
+
+    /**
+     * ★ 拓扑视图的两组数据。**在这里算一次**而不是在 return 里各调一次：
+     * `headByDomain()` 是 4 次索引 seek，`consumers.list()` + `staleConsumers()`
+     * 各一次查询 —— 而 `snapshot()` 已经是一段硬阻塞（9 个 COUNT(*)，
+     * 20 万行实测 6.31ms）。同一个值算两遍是白加的阻塞。
+     */
+    const domainHeads = changelog.headByDomain()
+    const consumerStatuses = buildConsumerStatuses({
+      head: changelog.head(),
+      domainHeads,
+      cursors: consumers.list(),
+      staleIds: consumers.staleConsumers().map((consumer) => consumer.consumerId),
+      lastCycle: this.lastCycle,
+    })
 
     return {
       running: this.running,
@@ -4263,6 +4257,24 @@ export class IngestService {
         vectors: stats.vectors,
       },
       staleConsumers: consumers.staleConsumers().map((consumer) => consumer.consumerId),
+      /**
+       * ★★★ 数据平面拓扑：**每个**消费者的状态 + 每个域的水位。
+       *
+       * 合成逻辑在 `buildConsumerStatuses`（`@mycontext/ingest`，纯函数）——
+       * 放在那里而不是这里的理由是它要能被单测直接打到每个分支
+       * （absent / 在等上游 / stale / 落后多少），而不必造一个跑得起来的管线。
+       *
+       * ★ `lastCycle` 只贡献 `waitingForUpstream`（瞬时状态，不落库）；
+       * lag / stale / 错误都从 `consumer_cursors` 取 —— 那才是持久的真相。
+       */
+      consumers: consumerStatuses.map((status) => ({
+        ...status,
+        // 契约里是可变数组（zod schema），声明里是 readonly —— 复制一份
+        domains: [...status.domains],
+        dependsOn: [...status.dependsOn],
+      })),
+      domains: buildDomainStatuses({ domainHeads }).map((status) => ({ ...status })),
+
       // 「选了 180 天但只采到 7 天」必须可见（见 IngestSnapshot 的注释）。
       backfill: {
         ...this.scheduler.backfillCoverage(this.backfillSince() ?? null),

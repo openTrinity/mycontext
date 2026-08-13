@@ -18,7 +18,10 @@
 import { describe, expect, it } from "vitest"
 import {
   CONSUMERS,
+  DOMAINS,
   PRODUCERS,
+  activeDomains,
+  checkTopologyConsistency,
   resolveConsumerOrder,
   runCycle,
   type ConsumerSpec,
@@ -264,5 +267,108 @@ describe("接线：runSharedConsumersOnce 走拓扑序", () => {
      */
     expect(body.includes("await this.ftsConsumer.runOnce()")).toBe(false)
     expect(body.includes("await this.distillConsumer.runOnce()")).toBe(false)
+  })
+})
+
+/**
+ * ── ★★★ 声明的自检：漏一行 / 多一个空域必须被抓到 ────────────────
+ *
+ * ## 为什么这一组是必需的（两个已经真的发生过的错）
+ *
+ * 把拓扑变成**数据**的代价是：数据错了不会像代码那样编译失败。
+ *
+ * ① `PRODUCERS` 曾经**漏了 `doc-ingest`** —— 而 `normalizer.ts:289` 一直在
+ *    产 `doc` 域。拓扑视图会画出"这个域有数据、却没有任何生产者"；
+ * ② `contact` 域在 `CHANGELOG_DOMAINS` 里声明了，却**没有生产者**。
+ *    视图会显示"通讯录 0 条"，读起来像坏了 —— 而事实是我们不采
+ *    （PII 类命令不进白名单，CLAUDE.md §5）。
+ *
+ * 两个错误都不报错、都只在**界面上**显形，而那时已经在用户眼前了。
+ */
+describe("拓扑自检：声明与事实必须一致", () => {
+  it("★★★ 当前的声明是自洽的（没有空 active 域、没有未声明的域）", () => {
+    expect(checkTopologyConsistency()).toEqual([])
+  })
+
+  it("★★★ 标 active 却没有生产者 → 被抓到", () => {
+    /**
+     * 这是错误 ①（漏声明生产者）的形状。反证的意义在于：
+     * 若这条不红，那么删掉 `PRODUCERS` 里任意一行都不会有人发现。
+     */
+    const problems = checkTopologyConsistency({
+      domains: [{ id: "doc", producedBy: "active", purpose: "文档" }],
+      producers: [],
+      consumers: [],
+    })
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain("doc")
+  })
+
+  it("★★★ 标 absent 却必须写清原因（否则「没做」与「坏了」同形）", () => {
+    const problems = checkTopologyConsistency({
+      domains: [{ id: "contact", producedBy: "absent", purpose: "通讯录" }],
+      producers: [],
+      consumers: [],
+    })
+    expect(problems.some((p) => p.includes("absentReason"))).toBe(true)
+  })
+
+  it("★★ 消费者声明消费一个没有生产者的域 → 被抓到", () => {
+    /**
+     * 这种声明会让界面显示"某消费者在消费 contact，lag 0" ——
+     * 而它永远收不到任何一条。用户读到的是"它追平了"。
+     */
+    const problems = checkTopologyConsistency({
+      domains: [{ id: "contact", producedBy: "absent", purpose: "通讯录", absentReason: "PII" }],
+      producers: [],
+      consumers: [
+        {
+          id: "x",
+          domains: ["contact"],
+          required: false,
+          dependsOn: [],
+          routed: false,
+          purpose: "测试",
+        },
+      ],
+    })
+    expect(problems.some((p) => p.includes("contact"))).toBe(true)
+  })
+
+  it("★★ `attention-stream` 不算 changelog 生产者（它产的是路由判断）", () => {
+    /**
+     * ★ 判据落在"只数 `scope: learning` 的生产者"。把 attention 算进来的话，
+     * 一个只有 attention 生产者的域会看起来"有人在产"，
+     * 而 changelog 里其实永远是空的 —— 那正是这套自检要防的形状。
+     */
+    const problems = checkTopologyConsistency({
+      domains: [{ id: "chat", producedBy: "active", purpose: "聊天" }],
+      producers: [
+        {
+          id: "attention-stream",
+          domains: ["chat"],
+          scope: "attention",
+          backfills: false,
+          purpose: "路由",
+        },
+      ],
+      consumers: [],
+    })
+    expect(problems).toHaveLength(1)
+  })
+
+  it("★ activeDomains() 只给真的有生产者的那三个", () => {
+    expect(activeDomains()).toEqual(["chat", "minutes", "doc"])
+  })
+
+  it("★★★ contact 标 absent，并说清是安全边界而不是排期", () => {
+    /**
+     * 措辞判据：`absentReason` 不能读起来像"暂未实现"。通讯录属 PII，
+     * 相关命令按 CLAUDE.md §5 不进白名单 —— 那不是排期问题。
+     * 标成 planned 反而是一个不会兑现的承诺。
+     */
+    const contact = DOMAINS.find((domain) => domain.id === "contact")
+    expect(contact?.producedBy).toBe("absent")
+    expect(contact?.absentReason).toContain("白名单")
   })
 })
