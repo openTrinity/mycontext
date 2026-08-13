@@ -7,12 +7,13 @@ Covers:
 - Hub guard: entity with >200 fact edges skipped (ABOUT), entity with >200 distinct
   partners skipped (co-mention); two entities sharing 201 chunks are NOT capped
 - Collision-proof labels: identical textual id in entities and facts stays two vertices
-- Hierarchy: barbell graph with >10 nodes per clique forces level-1 subdivision with
-  parent links
+- Hierarchy: coupled-cliques graph in the nucleation regime yields depth 2 with
+  parent links pointing UP (level 0 is the finest)
 - Determinism: two runs with fixed seed on large graph give identical assignments
 - Isolated nodes unassigned
 - Shared namespace: entities and facts in same cluster id space with overlap
-- Repeated-deeper fill: node final at level ℓ has COMM_MEMBER edges at every level ≥ ℓ
+- Dense semantics: every node carries its own cluster at every level, with
+  COMM_MEMBER edges at every level
 - Deep-then-shallow rebuild leaves no stale deeper state
 - Empty detection result clears all community_L* columns, Community rows, COMM_MEMBER edges
 """
@@ -26,8 +27,6 @@ import pytest
 from kl_graph.models.types import Edge, EdgeType, community_id_from
 from kl_graph.periodic.community_detection import (
     HUB_GUARD_THRESHOLD,
-    LEIDEN_MAX_CLUSTER_SIZE,
-    LEIDEN_SEED,
     _build_community_graph,
     detect_communities_hierarchical,
     project_community_membership_edges,
@@ -698,11 +697,8 @@ def test_determinism_with_fixed_seed_on_large_graph() -> None:
     for level in assignments1:
         assert assignments1[level] == assignments2[level]
 
-    # Compare native_parents
-    assert result1["native_parents"] == result2["native_parents"]
-
-    # Compare native_finality
-    assert result1["native_finality"] == result2["native_finality"]
+    # Compare parents
+    assert result1["parents"] == result2["parents"]
 
     store.close()
 
@@ -711,10 +707,8 @@ def _make_barbell_graph_store() -> SQLiteStore:
     """Create a barbell graph with two 20-node clusters connected by a weak bridge.
 
     Each cluster uses a ring+chord topology (each node connects to its 4
-    nearest neighbours) so that the internal density is below the threshold
-    where Leiden refuses to subdivide.  With 20 nodes per cluster and
-    ``LEIDEN_MAX_CLUSTER_SIZE=10``, hierarchical Leiden is forced to produce
-    at least two levels.
+    nearest neighbours). Used as a non-trivial fixed graph for determinism
+    checks; hierarchy depth on it is data-dependent under HIT-Leiden.
     """
     conn = sqlite3.connect(":memory:")
     store = SQLiteStore(db_path=None, conn=conn)
@@ -855,44 +849,134 @@ def test_shared_namespace_entities_and_facts_with_overlap() -> None:
     store.close()
 
 
-def test_hierarchy_produces_subdivisions_with_parent_links() -> None:
-    """Barbell graph with >10 nodes per clique forces level-1 subdivision with parent links."""
-    store = _make_barbell_graph_store()
-    edges, label_map = _build_community_graph(store)
-    result = detect_communities_hierarchical(edges, label_map)
-    
-    assignments = result["assignments"]
-    native_parents = result["native_parents"]
+def _make_coupled_cliques_store() -> SQLiteStore:
+    """Two 10-cliques with full bipartite coupling (weight 0.9).
 
-    # Should have multiple levels (at least L0 and L1)
-    assert len(assignments) >= 2, (
-        f"Expected at least 2 levels for barbell graph, got {len(assignments)}"
+    Nucleation-barrier regime: no single node benefits from crossing, so the
+    base partition keeps two communities; the JOINT merge improves
+    modularity, so the supergraph coarsens them into one community. Yields a
+    genuine depth-2 hierarchy at the default γ=1.0.
+    """
+    conn = sqlite3.connect(":memory:")
+    store = SQLiteStore(db_path=None, conn=conn)
+
+    ids = [f"a{i}" for i in range(10)] + [f"b{i}" for i in range(10)]
+    for eid in ids:
+        conn.execute("INSERT INTO entities (id, name) VALUES (?, ?)", (eid, eid))
+
+    all_edges: list[Edge] = []
+    for prefix in ("a", "b"):
+        grp = [f"{prefix}{i}" for i in range(10)]
+        for x in range(10):
+            for y in range(x + 1, 10):
+                all_edges.append(
+                    Edge(
+                        source_type="entity",
+                        source_id=grp[x],
+                        target_type="entity",
+                        target_id=grp[y],
+                        edge_type=EdgeType.ENTITY_SIMILAR,
+                        properties={"hybrid_score": 1.0},
+                    )
+                )
+    for i in range(10):
+        for j in range(10):
+            all_edges.append(
+                Edge(
+                    source_type="entity",
+                    source_id=f"a{i}",
+                    target_type="entity",
+                    target_id=f"b{j}",
+                    edge_type=EdgeType.ENTITY_SIMILAR,
+                    properties={"hybrid_score": 0.9},
+                )
+            )
+    store.insert_edges(all_edges)
+    conn.commit()
+    return store
+
+
+def _coupled_cliques_dynamic_graph():
+    """Two 10-cliques with full bipartite coupling w=0.9 as a DynamicGraph.
+
+    Mirrors the engine-test fixture; see its docstring for the analytic
+    zero-joint-gain / nucleation-barrier properties at γ=1.
+    """
+    import itertools
+
+    from kl_graph.periodic.incremental_leiden import DynamicGraph
+
+    g = DynamicGraph()
+    for prefix in ("a", "b"):
+        grp = [f"{prefix}{i}" for i in range(10)]
+        for x, y in itertools.combinations(grp, 2):
+            g.add_edge(x, y, 1.0)
+    for i in range(10):
+        for j in range(10):
+            g.add_edge(f"a{i}", f"b{j}", 0.9)
+    return g
+
+
+def test_hierarchy_produces_aggregation_levels_with_parent_links() -> None:
+    """A genuinely deep hierarchy reports parent links one level up.
+
+    Depth is GROWN, not assumed: the coupled cliques build at depth 1 (the
+    super-level joint-merge gain is exactly zero), and a batch that makes
+    the joint gain strictly positive extends the hierarchy. The detection
+    conversion must then report dense assignments with each level-0 cluster's
+    parent at level 1 and no parent at the top.
+    """
+    from kl_graph.periodic.community_detection import _hierarchy_to_detection
+    from kl_graph.periodic.incremental_leiden import (
+        EdgeChange,
+        HITLeiden,
+        IncrementalLeidenConfig,
+    )
+    from kl_graph.periodic.incremental_leiden.static_build import (
+        LeidenLevel,
+        LeidenResult,
     )
 
-    # Check that parent links exist
-    levels = sorted(assignments.keys())
-    assert 0 in levels, "Level 0 should exist"
-    assert 1 in levels, "Level 1 should exist (subdivision)"
+    cfg = IncrementalLeidenConfig(gamma=1.0, max_levels=8, seed=0xDEADBEEF)
+    hl = HITLeiden.build(_coupled_cliques_dynamic_graph(), config=cfg)
+    assert len(hl.hierarchy.levels) == 1, "zero joint gain: honest depth 1"
 
-    # Check that at least some level-1 clusters have parent links
-    level1_clusters = set(assignments[1].values())
-    parent_links_found = 0
-    for cluster in level1_clusters:
-        parent_key = (1, cluster)
-        if parent_key in native_parents and native_parents[parent_key] is not None:
-            parent_links_found += 1
+    hl.apply_batch([EdgeChange("a0", "b0", 1.0)])
+    assert len(hl.hierarchy.levels) == 2, "strictly favorable joint merge extends"
 
-    assert parent_links_found > 0, (
-        f"Expected at least one level-1 cluster with parent link, found {parent_links_found}"
-    )
-
-    # Check that all nodes at level 1 were also at level 0
-    for node_id in assignments[1]:
-        assert node_id in assignments[0], (
-            f"Node {node_id} at level 1 should also be at level 0"
+    levels = [
+        LeidenLevel(
+            graph=lvl.graph,
+            membership=dict(lvl.movement.membership),
+            sub_membership=dict(lvl.refinement.membership),
+            node_to_children=dict(lvl.node_to_children),
+            s_pre=dict(lvl.s_pre),
         )
+        for lvl in hl.hierarchy.levels
+    ]
+    result = LeidenResult(levels=levels, base_membership=dict(hl.flat_membership()))
+    label_map = {label: ("entity", label) for label in levels[0].graph.vertices}
+    assignments, parents = _hierarchy_to_detection(result, label_map)
 
-    store.close()
+    level_ids = sorted(assignments.keys())
+    assert level_ids == [0, 1]
+    top = level_ids[-1]
+
+    # Non-top clusters have parents one level up; top-level clusters do not.
+    for level in level_ids:
+        for cluster in set(assignments[level].values()):
+            parent = parents[(level, cluster)]
+            if level < top:
+                assert parent is not None, (
+                    f"cluster ({level}, {cluster}) must have a parent"
+                )
+                assert parent in set(assignments[level + 1].values())
+            else:
+                assert parent is None
+
+    # Dense: every node at every level.
+    for level in level_ids:
+        assert set(assignments[level].keys()) == set(assignments[0].keys())
 
 
 def test_projection_creates_mixed_communities() -> None:
@@ -920,80 +1004,61 @@ def test_projection_creates_mixed_communities() -> None:
     store.close()
 
 
-def test_repeated_deeper_fill_columns_native_only_edges() -> None:
-    """Columns are repeated-filled at every level; rows/edges are native-only.
+def test_dense_columns_and_comm_member_edges_across_all_levels() -> None:
+    """Every node owns its cluster at every level: columns AND edges are dense.
 
-    [A human 2026-08-09] native-only materialization: a node final at level
-    ell keeps its repeated-fill values in every community_L{i} column (query
-    convenience), but gets COMM_MEMBER edges only for its genuine memberships
-    (levels <= ell), and no Community rows exist for the repeated-fill copies.
+    The aggregation hierarchy assigns every vertex a community at every level
+    (no finality), so each node keeps its own cluster id in every
+    community_L{i} column and gets a genuine COMM_MEMBER edge at every level.
     """
-    store = _make_barbell_graph_store()
+    store = _make_coupled_cliques_store()
     edges, label_map = _build_community_graph(store)
     result = detect_communities_hierarchical(edges, label_map)
 
     assignments = result["assignments"]
-    native_finality = result["native_finality"]
 
     # Store and project
     store_communities(store, result)
     project_community_membership_edges(store, result)
 
-    # Get all levels
     levels = sorted(assignments.keys())
 
-    # Native cluster set: exactly what the projection may materialize.
+    # Community rows: one per cluster at every level.
     native_pairs = {
         (level, cid) for level in levels for cid in assignments[level].values()
     }
     native_ids = {community_id_from(f"L{level}", cid) for level, cid in native_pairs}
-
-    # Community rows: one per native cluster, no copies.
     row_ids = {
         r[0] for r in store.conn.execute("SELECT id FROM communities").fetchall()
     }
-    assert row_ids == native_ids, "Community rows must be exactly native clusters"
+    assert row_ids == native_ids, "Community rows must be exactly the clusters"
 
-    # Keys are (node_type, original_id) tuples.
-    for node_key, final_level in native_finality.items():
-        node_type, original_id = node_key
-        table = "entities" if node_type == "entity" else "facts"
-
-        # Check columns: node should have community_L{i} filled for all i
-        # (repeated fill is unchanged).
-        for level in levels:
+    # Every node: own cluster id in every level column AND one COMM_MEMBER
+    # edge per level.
+    for level in levels:
+        level_str = f"L{level}"
+        for node_key, cluster in assignments[level].items():
+            node_type, original_id = node_key
+            table = "entities" if node_type == "entity" else "facts"
             col = f"community_L{level}"
             row = store.sql_conn.execute(
                 f"SELECT {col} FROM {table} WHERE id = ?", (original_id,)
             ).fetchone()
-            assert row is not None, f"Node {original_id} should exist in {table}"
-            assert row[0] is not None, (
-                f"Node {original_id} should have {col} filled (final level {final_level})"
-            )
+            assert row is not None and row[0] == cluster
 
-        # Check COMM_MEMBER edges: genuine memberships only (level <= final).
-        for level in levels:
-            level_str = f"L{level}"
             edges_found = store.sql_conn.execute(
                 """
                 SELECT COUNT(*) FROM edges
-                WHERE (source_id = ? OR target_id = ?)
+                WHERE source_type = ? AND source_id = ?
                 AND edge_type = 'COMM_MEMBER'
                 AND json_extract(properties, '$.level') = ?
                 """,
-                (original_id, original_id, level_str),
+                (node_type, original_id, level_str),
             ).fetchone()[0]
-
-            if level <= final_level:
-                assert edges_found > 0, (
-                    f"Node {original_id} (final level {final_level}) should have "
-                    f"COMM_MEMBER edge at level {level}"
-                )
-            else:
-                assert edges_found == 0, (
-                    f"Node {original_id} (final level {final_level}) must NOT have "
-                    f"a copy COMM_MEMBER edge at level {level}"
-                )
+            assert edges_found == 1, (
+                f"Node {original_id} must have exactly one COMM_MEMBER edge "
+                f"at level {level}"
+            )
 
     store.close()
 
@@ -1108,8 +1173,8 @@ def test_entity_fact_id_collision_preserved_through_pipeline() -> None:
 
 def test_deep_then_shallow_rebuild_clears_stale_state() -> None:
     """Deep-then-shallow rebuild leaves no stale deeper state."""
-    # First, create a store with deep hierarchy
-    store = _make_barbell_graph_store()
+    # First, create a store with a genuine depth-2 hierarchy.
+    store = _make_coupled_cliques_store()
     edges, label_map = _build_community_graph(store)
     result_deep = detect_communities_hierarchical(edges, label_map)
     
@@ -1130,8 +1195,7 @@ def test_deep_then_shallow_rebuild_clears_stale_state() -> None:
     sample_keys = list(result_deep["assignments"][0].keys())[:5]
     shallow_result = {
         "assignments": {0: {node_key: 0 for node_key in sample_keys}},
-        "native_parents": {},
-        "native_finality": {node_key: 0 for node_key in sample_keys},
+        "parents": {(0, 0): None},
     }
     
     # Rebuild with shallow result
@@ -1196,8 +1260,7 @@ def test_empty_detection_result_clears_all_state() -> None:
     # Now clear with empty result
     empty_result = {
         "assignments": {},
-        "native_parents": {},
-        "native_finality": {},
+        "parents": {},
     }
     
     store_communities(store, empty_result)

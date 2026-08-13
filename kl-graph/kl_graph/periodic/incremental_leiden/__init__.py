@@ -6,12 +6,12 @@ al., "Maintaining Leiden Communities in Large Dynamic Graphs", arXiv:2601.08554
 ``docs/math/hit_leiden_spec.md`` (github.com/randomvariable/hit-leiden). No
 public Python package exists, so the algorithm is implemented here directly.
 
-This is the incremental twin of :mod:`kl_graph.periodic.community_detection`.
-That module reruns ``graspologic_native.hierarchical_leiden`` over the whole
-graph; this one maintains an existing partition under a batch of edge changes,
-touching only the affected region. Both express the graph with the same
-collision-proof vertex labels (``e:<id>`` / ``f:<id>``), so a partition produced
-by either is readable by the other.
+This module is the single Leiden implementation for BOTH paths:
+:mod:`kl_graph.periodic.community_detection` runs :func:`naive_leiden` for the
+full rebuild, and :class:`HITLeiden` maintains the same hierarchy shape under a
+batch of edge changes. Both express the graph with the same collision-proof
+vertex labels (``e:<id>`` / ``f:<id>``), so a partition produced by either is
+readable by the other.
 
 Layout (one concern per module, dependencies strictly one-directional):
     :mod:`~kl_graph.periodic.incremental_leiden.config`
@@ -33,7 +33,9 @@ Layout (one concern per module, dependencies strictly one-directional):
     :mod:`~kl_graph.periodic.incremental_leiden.aggregation`
         Supernode collapsing and partition-cache rebuilding.
     :mod:`~kl_graph.periodic.incremental_leiden.maintainer`
-        :class:`HITLeiden` — the incremental maintainer (Algorithms 2, 3, 4, 6).
+        :class:`HITLeiden` — the incremental maintainer (Algorithms 2-6).
+    :mod:`~kl_graph.periodic.incremental_leiden.state`
+        Persistence of the maintainer's hierarchy between batches.
 
 Everything below is re-exported here, so
 ``from kl_graph.periodic.incremental_leiden import HITLeiden`` keeps working and
@@ -59,6 +61,10 @@ from kl_graph.periodic.incremental_leiden.modularity import (
     modularity_gain,
 )
 from kl_graph.periodic.incremental_leiden.partition import Partition
+from kl_graph.periodic.incremental_leiden.state import (
+    deserialize_maintainer,
+    serialize_maintainer,
+)
 from kl_graph.periodic.incremental_leiden.static_build import (
     LeidenLevel,
     LeidenResult,
@@ -77,9 +83,11 @@ __all__ = [
     "Partition",
     "connected_components",
     "default_config",
+    "deserialize_maintainer",
     "edge_weight_to_communities",
     "largest_component",
     "modularity",
     "modularity_gain",
     "naive_leiden",
+    "serialize_maintainer",
 ]

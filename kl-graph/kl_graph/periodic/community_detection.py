@@ -2,15 +2,22 @@
 
 Builds a single heterogeneous graph containing both entities and facts as
 vertices, with weighted edges from ENTITY_SIMILAR, FACT_SIMILAR, ABOUT, and
-synthesized co-mention. Runs GraphRAG-style hierarchical Leiden (via
-graspologic_native) once over that graph and stores assignments at
-every level produced.
+synthesized co-mention. Runs the HIT-Leiden static build
+(:func:`kl_graph.periodic.incremental_leiden.naive_leiden`) once over that
+graph and stores assignments at every level the hierarchy produces.
+
+This is the SAME algorithm the incremental path maintains
+(:class:`kl_graph.periodic.incremental_leiden.HITLeiden`), so a full rebuild
+and an incremental maintenance pass produce the same hierarchy shape:
+level 0 is the finest (base) partition and each higher level is the
+modularity-guarded aggregation of the one below.
 
 Assignments are written to ``community_L{i}`` columns (created lazily for
-every level i present in the hierarchy). A node final at level ℓ carries its
-level-i cluster id in every column i ≤ ℓ and repeats the level-ℓ id into
-every deeper column that exists. :func:`project_community_membership_edges`
-derives reified Community rows + ``COMM_MEMBER`` edges from those columns.
+every level i present in the hierarchy). Every node carries its own cluster
+id at every level — there is no finality fill, because an aggregation
+hierarchy assigns every vertex a community at every level.
+:func:`project_community_membership_edges` derives reified Community rows +
+``COMM_MEMBER`` edges from those assignments.
 """
 
 from __future__ import annotations
@@ -18,32 +25,30 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING
 
-import graspologic_native as gn
-
 from kl_graph.models.types import Community, Edge, EdgeType, community_id_from
+from kl_graph.periodic.incremental_leiden import (
+    DynamicGraph,
+    default_config,
+    naive_leiden,
+)
 
 if TYPE_CHECKING:
     from kl_graph.storage.sqlite_store import SQLiteStore
 
-# Legacy constant for backward compatibility with incremental.py
-# DEPRECATED: The hierarchical Leiden implementation uses
-# LEIDEN_RESOLUTION and other specific constants below. This is kept only
-# to avoid breaking imports in incremental.py (which we don't own).
+# Legacy level-name registry kept for call sites that still pass per-level
+# resolution dicts around (improvement.py → community strategies). The
+# hierarchy is no longer resolution-swept — a single γ from the app config
+# drives every level — so only the KEYS (level names) matter here.
 RESOLUTIONS = {
-    "L0": 0.3,   # Domain/org-level (few large communities)
-    "L1": 1.0,   # Team/project-level
-    "L2": 3.0,   # Feature/topic-level
-    "L3": 10.0,  # Conversation/component-level (many small communities)
+    "L0": 1.0,
+    "L1": 1.0,
+    "L2": 1.0,
+    "L3": 1.0,
 }
 
-# GraphRAG hierarchical Leiden parameters (frozen; do not tune without
-# updating the design doc and regenerating baselines).
-LEIDEN_RESOLUTION = 1.0
-LEIDEN_RANDOMNESS = 0.001
-LEIDEN_ITERATIONS = 1
-LEIDEN_USE_MODULARITY = True
-LEIDEN_MAX_CLUSTER_SIZE = 10
-LEIDEN_SEED = 0xDEADBEEF
+# Scope guard: partition only the largest connected component. Small
+# components are left unclustered exactly like the incremental path, so the
+# two paths never disagree on scope.
 LEIDEN_USE_LCC = True
 
 # Hub guard: entities incident to more than this many facts are dropped from
@@ -321,12 +326,13 @@ def _build_community_graph(
     # ``edge_weights`` is a dict keyed by tuples whose iteration order follows
     # insertion order, and insertion order follows the graph-scan order, which is
     # not stable across runs (set iteration over ``entity_ids``/``fact_ids``, and
-    # backend scan order). ``hierarchical_leiden`` is order-SENSITIVE even with a
-    # fixed seed: the same graph in a different edge order yields a different
-    # hierarchy (measured: L1 ARI 0.75-0.90 between reruns on identical data, and
-    # even a different number of levels). That makes every partition comparison
-    # -- incremental vs full, day over day, before vs after a change -- read
-    # detector noise as if it were a real signal.
+    # backend scan order). The Leiden kernels (``graspologic_native.leiden`` at
+    # every hierarchy level) are order-SENSITIVE even with a fixed seed: the
+    # same graph in a different edge order yields a different hierarchy
+    # (measured on the old hierarchical path: L1 ARI 0.75-0.90 between reruns
+    # on identical data). That makes every partition comparison -- incremental
+    # vs full, day over day, before vs after a change -- read detector noise
+    # as if it were a real signal.
     #
     # Sorting here makes the whole detection path a pure function of the stored
     # graph, which is what the frozen seed was always meant to deliver.
@@ -336,21 +342,103 @@ def _build_community_graph(
     return edges, label_map
 
 
+def parents_from_levels(
+    memberships: list[dict[str, int]],
+    upper_s_pre: list[dict[str, str] | None],
+) -> dict[tuple[int, int], int | None]:
+    """Resolve parent links for a hierarchy from its level maps.
+
+    The aggregation structure, not cluster naming, is authoritative: a
+    level-p node reaches level p+1 through ``upper_s_pre[p]``, and its
+    movement cluster's parent is the upper community that absorbed it.
+    Naming the super-node ``"c{cluster}"`` is only valid while movement and
+    refinement coincide (the static build); a maintained hierarchy diverges
+    after refinement, so parents must come from the aggregation map.
+
+    Args:
+        memberships: Per-level ``node -> cluster`` maps, index 0 = finest.
+        upper_s_pre: ``upper_s_pre[p]`` maps level-p nodes to level-(p+1)
+            nodes; ``None`` at the top level.
+
+    Returns:
+        ``{(level, cluster): parent_cluster or None}`` for every cluster at
+        every level.
+    """
+    parents: dict[tuple[int, int], int | None] = {}
+    for level_idx, membership in enumerate(memberships):
+        s_pre = upper_s_pre[level_idx] if level_idx < len(upper_s_pre) else None
+        clusters = sorted(set(membership.values()))
+        if s_pre is None:
+            for cluster in clusters:
+                parents[(level_idx, cluster)] = None
+            continue
+        cluster_parents: dict[int, set[int]] = {}
+        for node, cluster in membership.items():
+            up_node = s_pre.get(node)
+            if up_node is None:
+                continue
+            up_cluster = memberships[level_idx + 1].get(up_node)
+            if up_cluster is not None:
+                cluster_parents.setdefault(cluster, set()).add(up_cluster)
+        for cluster in clusters:
+            found = cluster_parents.get(cluster, set())
+            # The nesting invariant gives exactly one parent; when it is
+            # violated (degenerate state) pick the minimum for determinism.
+            parents[(level_idx, cluster)] = min(found) if found else None
+    return parents
+
+
+def _hierarchy_to_detection(
+    result,
+    label_map: dict[str, tuple[str, str]],
+) -> tuple[dict[int, dict[tuple[str, str], int]], dict[tuple[int, int], int | None]]:
+    """Convert a :class:`LeidenResult` into the detection dict shape.
+
+    Args:
+        result: Static-build output (per-level graphs + memberships).
+        label_map: Collision-proof label -> ``(node_type, original_id)``.
+
+    Returns:
+        ``(assignments, parents)`` where assignments is dense — every node
+        carries its own cluster id at every level — and parents maps each
+        ``(level, cluster)`` to its parent cluster one level up (None at the
+        top). Parent links come from the aggregation structure: a level-p
+        cluster corresponds 1:1 to the super-node ``"c{cluster}"`` at level
+        p+1, so its parent is that super-node's upper-level community.
+    """
+    assignments: dict[int, dict[tuple[str, str], int]] = {}
+    for level_idx, lvl in enumerate(result.levels):
+        per_level: dict[tuple[str, str], int] = {}
+        for node, cluster in lvl.membership.items():
+            for base_v in lvl.node_to_children.get(node, {node}):
+                node_key = label_map.get(base_v)
+                if node_key is not None:
+                    per_level[node_key] = int(cluster)
+        assignments[level_idx] = per_level
+
+    parents = parents_from_levels(
+        [dict(lvl.membership) for lvl in result.levels],
+        [
+            dict(result.levels[p + 1].s_pre) if p + 1 < len(result.levels) else None
+            for p in range(len(result.levels))
+        ],
+    )
+    return assignments, parents
+
+
 def detect_communities_hierarchical(
     edges: list[tuple[str, str, float]],
     label_map: dict[str, tuple[str, str]],
 ) -> dict:
-    """Run hierarchical Leiden over the community edge list.
+    """Run the HIT-Leiden static build over the community edge list.
 
-    Calls graspologic_native.hierarchical_leiden with GraphRAG parameters:
-    resolution=1.0, randomness=0.001, iterations=1, use_modularity=True,
-    max_cluster_size=10, seed=0xDEADBEEF, starting_communities=None.
+    Uses :func:`naive_leiden` with γ / seed / max_levels from the app config
+    (``pipelines.ingestion.incremental.leiden``) — the SAME parameters the
+    incremental maintainer uses, so a full rebuild and incremental maintenance
+    of the same graph converge on the same hierarchy shape.
 
     Normalizes edge pairs lexicographically, deduplicates keeping last, and
-    optionally restricts to the largest connected component (use_lcc=True).
-
-    Preserves native parent_cluster and is_final_cluster from the Leiden output
-    rather than re-inferring them.
+    optionally restricts to the largest connected component (LEIDEN_USE_LCC).
 
     Args:
         edges: List of (label_u, label_v, weight) triples using collision-proof
@@ -359,11 +447,11 @@ def detect_communities_hierarchical(
 
     Returns:
         A dict with keys:
-        - 'assignments': {level: {(node_type, original_id): cluster_id}}
-        - 'native_parents': {(level, cluster): parent_cluster or None}
-        - 'native_finality': {(node_type, original_id): final_level}
+        - 'assignments': {level: {(node_type, original_id): cluster_id}},
+          dense across all levels (level 0 = finest).
+        - 'parents': {(level, cluster): parent_cluster at level+1, or None}
     """
-    print("  Running hierarchical Leiden...")
+    print("  Running HIT-Leiden static build...")
 
     # Normalize and deduplicate (keep last).
     normalized: dict[tuple[str, str], float] = {}
@@ -374,132 +462,43 @@ def detect_communities_hierarchical(
     deduped_edges = sorted((u, v, w) for (u, v), w in normalized.items())
     print(f"    Edges after normalization+dedup: {len(deduped_edges)}")
 
+    empty = {"assignments": {}, "parents": {}}
     if not deduped_edges:
         print("    No edges; skipping Leiden.")
-        return {
-            "assignments": {},
-            "native_parents": {},
-            "native_finality": {},
-        }
+        return empty
 
     # Optional LCC filter.
     if LEIDEN_USE_LCC:
         lcc_edges = _find_lcc(deduped_edges)
-        print(f"    LCC: {len({u for u, v, w in lcc_edges} | {v for u, v, w in lcc_edges})} nodes, {len(lcc_edges)} edges")
+        lcc_nodes = {u for u, v, w in lcc_edges} | {v for u, v, w in lcc_edges}
+        print(f"    LCC: {len(lcc_nodes)} nodes, {len(lcc_edges)} edges")
     else:
         lcc_edges = deduped_edges
 
     if not lcc_edges:
         print("    No edges after LCC filter; skipping Leiden.")
-        return {
-            "assignments": {},
-            "native_parents": {},
-            "native_finality": {},
-        }
+        return empty
 
-    # Call graspologic_native.
-    clusters = gn.hierarchical_leiden(
-        edges=lcc_edges,
-        starting_communities=None,
-        resolution=LEIDEN_RESOLUTION,
-        randomness=LEIDEN_RANDOMNESS,
-        iterations=LEIDEN_ITERATIONS,
-        use_modularity=LEIDEN_USE_MODULARITY,
-        max_cluster_size=LEIDEN_MAX_CLUSTER_SIZE,
-        seed=LEIDEN_SEED,
+    graph = DynamicGraph()
+    for u, v, w in lcc_edges:
+        graph.add_edge(u, v, w)
+
+    icfg = default_config()
+    result = naive_leiden(
+        graph,
+        gamma=icfg.gamma,
+        max_levels=icfg.max_levels,
+        seed=icfg.seed,
     )
 
-    # Map records to {level: {(node_type, original_id): cluster_id}} and preserve
-    # native parent_cluster and is_final_cluster.
-    # Using (node_type, original_id) tuples as keys prevents collision when an
-    # entity and fact share the same textual id.
-    assignments: dict[int, dict[tuple[str, str], int]] = {}
-    native_parents: dict[tuple[int, int], int | None] = {}
-    native_finality: dict[tuple[str, str], int] = {}
-
-    for record in clusters:
-        level = record.level
-        cluster = record.cluster
-        label = record.node
-        parent_cluster = record.parent_cluster
-        is_final = record.is_final_cluster
-
-        # Map label back to (node_type, original_id) tuple.
-        if label not in label_map:
-            continue
-        node_key = label_map[label]  # (node_type, original_id)
-
-        if level not in assignments:
-            assignments[level] = {}
-        assignments[level][node_key] = cluster
-
-        # Store native parent link (once per cluster).
-        parent_key = (level, cluster)
-        if parent_key not in native_parents:
-            native_parents[parent_key] = parent_cluster
-
-        # Track finality: the deepest level where this node is marked final.
-        if is_final:
-            native_finality[node_key] = level
+    assignments, parents = _hierarchy_to_detection(result, label_map)
 
     for level in sorted(assignments.keys()):
         n_nodes = len(assignments[level])
         n_clusters = len(set(assignments[level].values()))
         print(f"    Level {level}: {n_clusters} clusters, {n_nodes} nodes assigned")
 
-    return {
-        "assignments": assignments,
-        "native_parents": native_parents,
-        "native_finality": native_finality,
-    }
-
-
-def effective_assignments(detection_result: dict) -> dict[tuple[str, str], dict[int, int]]:
-    """Expand raw detection output into the per-level cells actually persisted.
-
-    ``hierarchical_leiden`` only reports a node at the levels where it was still
-    being subdivided: a node whose cluster is final at L1 simply does not appear
-    at L2/L3.  The ``community_L*`` columns, however, are dense — a node's final
-    cluster id is repeated into every deeper column so a query at any level
-    always resolves a community.  Anything that compares stored columns against
-    fresh detection output must apply this same expansion, or it will read the
-    absence of deep-level rows as a disagreement that does not exist.
-
-    This is the single source of truth for that rule, shared by
-    :func:`store_communities` (which writes the cells) and by any analysis that
-    reconstructs what a rerun would store.
-
-    Args:
-        detection_result: Dict from :func:`detect_communities_hierarchical` with
-            ``assignments`` and ``native_finality`` keys.
-
-    Returns:
-        ``{(node_type, original_id): {level: cluster_id}}`` covering every level
-        present in the result, or an empty dict when there are no assignments.
-    """
-    assignments = detection_result.get("assignments", {})
-    native_finality = detection_result.get("native_finality", {})
-    if not assignments:
-        return {}
-
-    levels = sorted(assignments.keys())
-    expanded: dict[tuple[str, str], dict[int, int]] = {}
-    for node_key in set().union(*[assignments[level].keys() for level in levels]):
-        # Prefer the native is_final_cluster record; fall back to the deepest
-        # level the node actually appears at.
-        final_level = native_finality.get(node_key)
-        if final_level is None:
-            final_level = max(
-                level for level in levels if node_key in assignments[level]
-            )
-        final_cid = assignments[final_level][node_key]
-        expanded[node_key] = {
-            level: (
-                assignments[level][node_key] if level <= final_level else final_cid
-            )
-            for level in levels
-        }
-    return expanded
+    return {"assignments": assignments, "parents": parents}
 
 
 def store_communities(
@@ -508,9 +507,10 @@ def store_communities(
 ) -> None:
     """Store hierarchical community assignments in community_L{i} columns.
 
-    Creates columns lazily for every level present in the hierarchy. Builds a
-    canonical "effective assignments" map that includes repeated final cluster
-    ids into deeper columns, then uses it as the single source for all writes.
+    Creates columns lazily for every level present in the hierarchy. The
+    detection ``assignments`` are dense (every node has its own cluster id at
+    every level of the aggregation hierarchy), so they are written as-is — no
+    finality fill.
 
     Clears ALL existing community_L* columns on every run (including empty
     results) before writing, implementing rebuild-not-migrate semantics.
@@ -518,12 +518,13 @@ def store_communities(
     Args:
         sqlite: Store to write assignments to.
         detection_result: Dict from detect_communities_hierarchical
-            with 'assignments', 'native_parents', 'native_finality' keys.
+            with 'assignments' and 'parents' keys.
     """
     assignments = detection_result.get("assignments", {})
 
-    # Enumerate ALL existing community_L* columns dynamically.
-    existing_cols: set[int] = set()
+    # Enumerate existing community_L* columns per table (they can legitimately
+    # differ after external ALTERs, so clearing must be per-table too).
+    existing_cols: dict[str, set[int]] = {"entities": set(), "facts": set()}
     for table in ("entities", "facts"):
         cursor = sqlite.sql_conn.execute(f"PRAGMA table_info({table})")
         for row in cursor.fetchall():
@@ -531,17 +532,18 @@ def store_communities(
             if col_name.startswith("community_L"):
                 try:
                     level = int(col_name.split("L")[1])
-                    existing_cols.add(level)
+                    existing_cols[table].add(level)
                 except (ValueError, IndexError):
                     pass
 
     # Clear ALL existing community_L* columns on every run (rebuild-not-migrate).
-    if existing_cols:
-        print(f"  Clearing {len(existing_cols)} existing community_L* columns...")
-        for level in sorted(existing_cols):
-            col = f"community_L{level}"
-            sqlite.sql_conn.execute(f"UPDATE entities SET {col} = NULL")
-            sqlite.sql_conn.execute(f"UPDATE facts SET {col} = NULL")
+    n_existing = len(existing_cols["entities"] | existing_cols["facts"])
+    if n_existing:
+        print(f"  Clearing {n_existing} existing community_L* columns...")
+        for table in ("entities", "facts"):
+            for level in sorted(existing_cols[table]):
+                col = f"community_L{level}"
+                sqlite.sql_conn.execute(f"UPDATE {table} SET {col} = NULL")
         sqlite.sql_conn.commit()
 
     # If no new assignments, we're done (columns are cleared).
@@ -564,25 +566,12 @@ def store_communities(
                 pass
     sqlite.sql_conn.commit()
 
-    # Build canonical "effective assignments" map: for each node, determine its
-    # final level (from native is_final_cluster, or deepest appearance), then
-    # fill every level column with the appropriate cluster id (repeating the
-    # final-level id into deeper columns).
-    #
-    # This is the SINGLE SOURCE for column writes, Community rows, and
-    # COMM_MEMBER edges.
-    # node_key is (node_type, original_id) tuple to prevent collision.
-    effective = effective_assignments(detection_result)
-
-    # Write assignments to the database.
+    # Write assignments to the database. node_key is (node_type, original_id).
     total_writes = 0
-    for node_key, node_assignments in effective.items():
-        # node_key is (node_type, original_id) tuple.
-        node_type, original_id = node_key
-        table = "entities" if node_type == "entity" else "facts"
-
-        # Write cluster ids for each level.
-        for level, cluster_id in node_assignments.items():
+    for level in levels:
+        for node_key, cluster_id in assignments[level].items():
+            node_type, original_id = node_key
+            table = "entities" if node_type == "entity" else "facts"
             col = f"community_L{level}"
             sqlite.sql_conn.execute(
                 f"UPDATE {table} SET {col} = ? WHERE id = ?", (cluster_id, original_id)
@@ -601,17 +590,15 @@ def project_community_membership_edges(
 ) -> None:
     """Derive Community rows + COMM_MEMBER edges from the detection result.
 
-    Materializes NATIVE clusters only [A human 2026-08-09]: one Community row
-    (plus member counts and COMM_MEMBER edges) per genuine Leiden cluster.
-    The repeated-final-id fill stays in the community_L* columns for query
-    convenience but gets no rows/edges/reports — copies carry identical
-    member sets to their origin cluster and would only duplicate reports.
+    Materializes one Community row (plus member counts and COMM_MEMBER edges)
+    per genuine cluster at every level of the aggregation hierarchy.
 
     Reified Community rows use node_type="mixed" and carry level, total
     member_count, and separate entity_member_count / fact_member_count stored
     as additive columns on the communities table. Parent relationships use the
-    native parent_cluster records from hierarchical Leiden (Option B semantics)
-    rather than re-inferring by majority vote.
+    hierarchy's aggregation records: a level-p cluster's parent is the level
+    p+1 cluster that absorbed it (level 0 is the FINEST level here, so parents
+    point UP to level+1).
 
     Deletes ALL existing Community rows and ALL COMM_MEMBER edges before
     inserting the fresh projection (rebuild-not-migrate).
@@ -619,7 +606,7 @@ def project_community_membership_edges(
     Args:
         sqlite: Store to read assignments from and write the projection to.
         detection_result: Dict from detect_communities_hierarchical
-            with 'assignments', 'native_parents', 'native_finality' keys.
+            with 'assignments' and 'parents' keys.
         batch_size: Edge rows per executemany/insert batch.
     """
     # Wholesale-delete existing Community rows and COMM_MEMBER edges on every
@@ -629,7 +616,7 @@ def project_community_membership_edges(
     sqlite.delete_edges(edge_type=EdgeType.COMM_MEMBER.value)
 
     assignments = detection_result.get("assignments", {})
-    native_parents = detection_result.get("native_parents", {})
+    parents = detection_result.get("parents", {})
 
     if not assignments:
         print("  No assignments to project (cleared existing projection).")
@@ -665,15 +652,15 @@ def project_community_membership_edges(
             else:
                 fact_counts[key] += 1
 
-    # Use native parent_cluster records (Option B semantics) rather than
-    # re-inferring by majority vote.
+    # Parent links come from the aggregation hierarchy (Option B semantics):
+    # never re-inferred by majority vote.
     def _get_parent_id(level: int, cid: int) -> tuple[str | None, int | None]:
-        """Resolve parent Community id from native records."""
-        parent_cluster = native_parents.get((level, cid))
-        if parent_cluster is not None and level > 0:
+        """Resolve parent Community id from hierarchy records."""
+        parent_cluster = parents.get((level, cid))
+        if parent_cluster is not None:
             return (
-                community_id_from(f"L{level - 1}", parent_cluster),
-                level - 1,
+                community_id_from(f"L{level + 1}", parent_cluster),
+                level + 1,
             )
         return (None, None)
 
@@ -709,8 +696,8 @@ def project_community_membership_edges(
     sqlite.sql_conn.commit()
     print(f"    Inserted {len(communities)} Community rows (with entity/fact member counts).")
 
-    # Build COMM_MEMBER edges for genuine memberships only — exactly what
-    # `assignments` holds (levels up to and including each node's final level).
+    # Build COMM_MEMBER edges for every membership — assignments are dense
+    # across all levels of the aggregation hierarchy.
     edges: list[Edge] = []
     for level in levels:
         for node_key, cid in assignments[level].items():

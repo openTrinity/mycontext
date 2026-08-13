@@ -1947,10 +1947,10 @@ def _entity_lookup_impl(req: EntityRequest):
         for c in state.sqlite_conn.execute("PRAGMA table_info(entities)").fetchall()
     ]
     # The community columns are created LAZILY, one per detected level, so a
-    # corpus that only produced L0..L1 has no community_L2/L3. Select exactly the
-    # columns that exist and pad the rest, otherwise this SELECT raises
-    # "no such column: community_L3" and turns into a hard 500.
-    present_levels = [lvl for lvl in range(4) if f"community_L{lvl}" in cols]
+    # corpus that only produced L0 has no community_L1..L3 (and a deep one may
+    # exceed L3). Select exactly the columns that exist, otherwise this SELECT
+    # raises "no such column" and turns into a hard 500.
+    present_levels = _available_community_levels()
     has_community = COMMUNITIES_ENABLED and "community_L0" in cols
     community_cols = [f"community_L{lvl}" for lvl in present_levels]
     base_cols = _ENTITY_BASE_COLS_SQL
@@ -2330,6 +2330,44 @@ def _level_int(level: str | int) -> int:
     return int(s)
 
 
+def _available_community_levels() -> list[int]:
+    """Levels present as ``community_L*`` columns on entities, sorted ascending.
+
+    HIT-Leiden hierarchy depth is data-driven: a shallow corpus may only
+    produce L0, so endpoints must discover levels instead of assuming L0..L3.
+    """
+    cols = state.sqlite_conn.execute("PRAGMA table_info(entities)").fetchall()
+    levels: list[int] = []
+    for c in cols:
+        name = str(c[1])
+        if name.startswith("community_L"):
+            try:
+                levels.append(int(name.removeprefix("community_L")))
+            except ValueError:
+                continue
+    return sorted(levels)
+
+
+def _resolve_community_level(requested: str | int) -> int:
+    """Resolve a requested level against the levels that actually exist.
+
+    Falls back to the coarsest level at least as coarse as requested, or the
+    coarsest existing level when none is — a request for L1 on a depth-1
+    hierarchy serves L0 instead of 500ing on a missing column.
+
+    Raises:
+        HTTPException(404): When no community levels have been detected yet.
+    """
+    levels = _available_community_levels()
+    if not levels:
+        raise HTTPException(404, "No community levels detected yet")
+    want = _level_int(requested)
+    if want in levels:
+        return want
+    coarser = [lvl for lvl in levels if lvl > want]
+    return min(coarser) if coarser else max(levels)
+
+
 def _community_browse_impl(req: CommunityRequest):
     """Browse communities with summaries."""
     if not state.ready:
@@ -2353,6 +2391,10 @@ def _community_browse_impl(req: CommunityRequest):
         return {"communities": [], "note": hint}
 
     if req.community_id is not None:
+        # Resolve against existing columns when detection has run; a summaries-
+        # only store (no community_L* columns yet) keeps the requested level.
+        levels = _available_community_levels()
+        lvl = _resolve_community_level(req.level) if levels else _level_int(req.level)
         row = state.sqlite_conn.execute(
             """
             SELECT title, summary, tags, top_members, member_count,
@@ -2360,16 +2402,16 @@ def _community_browse_impl(req: CommunityRequest):
             FROM community_summaries
             WHERE level = ? AND community_id = ?
         """,
-            (_level_int(req.level), req.community_id),
+            (lvl, req.community_id),
         ).fetchone()
 
         if not row:
             return {
-                "error": f"No summary for L{_level_int(req.level)}/{req.community_id}"
+                "error": f"No summary for L{lvl}/{req.community_id}"
             }
 
         return {
-            "level": req.level,
+            "level": f"L{lvl}",
             "community_id": req.community_id,
             "member_count": row[4],
             "entity_count": row[5],
@@ -2381,6 +2423,8 @@ def _community_browse_impl(req: CommunityRequest):
             "top_members": json.loads(row[3]),
         }
 
+    levels = _available_community_levels()
+    lvl = _resolve_community_level(req.level) if levels else _level_int(req.level)
     rows = state.sqlite_conn.execute(
         """
         SELECT community_id, member_count, title, summary, tags, rating
@@ -2388,10 +2432,11 @@ def _community_browse_impl(req: CommunityRequest):
         WHERE level = ?
         ORDER BY member_count DESC LIMIT ?
     """,
-        (_level_int(req.level), req.top_k),
+        (lvl, req.top_k),
     ).fetchall()
 
     return {
+        "level": f"L{lvl}",
         "communities": [
             {
                 "community_id": r[0],
@@ -2420,7 +2465,8 @@ def _community_members_impl(req: MembersRequest):
     if not COMMUNITIES_ENABLED:
         raise HTTPException(404, "Community features are disabled")
 
-    col = f"community_{req.level}"
+    lvl = _resolve_community_level(req.level)
+    col = f"community_L{lvl}"
 
     if req.node_type == "entity":
         rows = state.sqlite_conn.execute(
@@ -2833,43 +2879,51 @@ def _seeds_for_query(
 
 
 def _has_community_labels() -> bool:
-    """Whether community detection has run (adds community_L1 columns).
+    """Whether community detection has run (adds community_L* columns).
 
     Freshly-built graphs (ingest only, no scripts/improve) lack these columns,
-    so the graph endpoints must degrade gracefully instead of erroring.
+    so the graph endpoints must degrade gracefully instead of erroring. Depth
+    is data-driven under HIT-Leiden, so ANY level column counts.
     """
     if not COMMUNITIES_ENABLED:
         return False
-    cols = state.sqlite_conn.execute("PRAGMA table_info(entities)").fetchall()
-    return any(c[1] == "community_L1" for c in cols)
+    return bool(_available_community_levels())
 
 
 def _resolve_nodes(nodes: list[dict]) -> list[dict]:
-    """Attach intrinsic content + free community_L1 label to walk nodes.
+    """Attach intrinsic content + a community label to walk nodes.
 
     Entities carry name + pagerank; facts carry text + confidence; communities
     carry their level/summary/member_count. No source chunks/attachments —
-    provenance is pulled on demand via /context.
+    provenance is pulled on demand via /context. The community label uses the
+    resolved display level (L1 when present, coarsening/fallback otherwise),
+    because hierarchy depth is data-driven.
     """
     resolved = []
     has_comm = _has_community_labels()
+    disp = _resolve_community_level("L1") if has_comm else None
+    comm_col = f"community_L{disp}" if has_comm else None
     for n in nodes:
         nid = n["id"]
         ntype = gw.node_type_of(nid)
         bare = gw.strip_prefix(nid)
         out = {"id": nid, "type": ntype, "score": n["score"], "hop": n["hop"]}
         if ntype == "entity":
-            cols = "name, community_L1" if has_comm else "name"
+            cols = f"name, {comm_col}" if has_comm else "name"
             row = state.sqlite_conn.execute(
                 f"SELECT {cols} FROM entities WHERE id = ?", (bare,)
             ).fetchone()
             if row:
                 out["name"] = row[0]
                 if has_comm:
-                    out["community_L1"] = row[1]
+                    out[comm_col] = row[1]
                 out["pagerank"] = (state.pagerank or {}).get(bare, 0.0)
         elif ntype == "fact":
-            cols = "text, confidence, community_L1" if has_comm else "text, confidence"
+            cols = (
+                f"text, confidence, {comm_col}"
+                if has_comm
+                else "text, confidence"
+            )
             row = state.sqlite_conn.execute(
                 f"SELECT {cols} FROM facts WHERE id = ?", (bare,)
             ).fetchone()
@@ -2877,7 +2931,7 @@ def _resolve_nodes(nodes: list[dict]) -> list[dict]:
                 out["text"] = row[0]
                 out["confidence"] = row[1]
                 if has_comm:
-                    out["community_L1"] = row[2]
+                    out[comm_col] = row[2]
         elif ntype == "chunk":
             row = state.sqlite_conn.execute(
                 "SELECT source_type, timestamp, source_ref FROM chunks WHERE id = ?",

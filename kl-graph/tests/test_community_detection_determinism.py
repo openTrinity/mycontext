@@ -1,18 +1,18 @@
 """Community detection must be a pure function of the stored graph.
 
-``LEIDEN_SEED`` is frozen precisely so that a rebuild over unchanged data
-reproduces the same hierarchy.  It does not, on its own, deliver that:
-``graspologic_native.hierarchical_leiden`` is sensitive to **edge order**, and
-``_build_community_graph`` accumulated edges in graph-scan order — which varies
-between runs (set iteration over id sets, backend scan order).  Measured on a
-real 792-node graph before the fix, two consecutive builds of the *same*
-database produced L1 partitions with ARI 0.75–0.90, and even a different number
-of hierarchy levels.
+The app config's frozen γ/seed exist precisely so that a rebuild over
+unchanged data reproduces the same hierarchy.  That does not, on its own,
+deliver it: the graspologic-backed Leiden kernels are sensitive to **edge
+order**, and ``_build_community_graph`` used to accumulate edges in
+graph-scan order — which varies between runs (set iteration over id sets,
+backend scan order).  Measured on a real 792-node graph before the fix, two
+consecutive builds of the *same* database produced L1 partitions with ARI
+0.75–0.90, and even a different number of hierarchy levels.
 
-That silently destroys every partition comparison the incremental-community work
-depends on: incremental-vs-full agreement, day-over-day stability, and
-before/after checks all read detector noise as real community movement.  These
-tests pin the ordering guarantee at both boundaries.
+That silently destroys every partition comparison the incremental-community
+work depends on: incremental-vs-full agreement, day-over-day stability, and
+before/after checks all read detector noise as real community movement.
+These tests pin the ordering guarantee at both boundaries.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ import random
 from kl_graph.periodic.community_detection import (
     _build_community_graph,
     detect_communities_hierarchical,
-    effective_assignments,
 )
 
 
@@ -99,10 +98,8 @@ def test_detect_communities_is_invariant_to_input_edge_order() -> None:
     shuffled = list(edges)
     random.Random(4242).shuffle(shuffled)
 
-    baseline = effective_assignments(detect_communities_hierarchical(edges, label_map))
-    reordered = effective_assignments(
-        detect_communities_hierarchical(shuffled, label_map)
-    )
+    baseline = detect_communities_hierarchical(edges, label_map)
+    reordered = detect_communities_hierarchical(shuffled, label_map)
     assert baseline == reordered
 
 
@@ -111,30 +108,27 @@ def test_repeated_detection_over_one_graph_is_identical() -> None:
     store = _fixture_store(11)
     edges, label_map = _build_community_graph(store)
     runs = [
-        effective_assignments(detect_communities_hierarchical(edges, label_map))
-        for _ in range(3)
+        detect_communities_hierarchical(edges, label_map) for _ in range(3)
     ]
     assert runs[0] == runs[1] == runs[2]
 
 
-def test_effective_assignments_densifies_final_clusters_into_deeper_levels() -> None:
-    """The dense expansion the ``community_L*`` columns store is shared, not copied.
+def test_assignments_are_dense_across_levels() -> None:
+    """Every node carries its own cluster id at every level (no finality fill).
 
-    A node final at L0 must resolve at L1 too (repeating its final cluster id),
-    otherwise a stored-vs-recomputed comparison reads the missing deep-level rows
-    as a disagreement.
+    The aggregation hierarchy assigns every vertex a community at every level,
+    so stored-vs-recomputed comparisons never need a densification step.
     """
-    detection = {
-        "assignments": {
-            0: {("entity", "a"): 5, ("entity", "b"): 6},
-            1: {("entity", "b"): 9},
-        },
-        "native_finality": {("entity", "a"): 0, ("entity", "b"): 1},
-    }
-    expanded = effective_assignments(detection)
-    assert expanded[("entity", "a")] == {0: 5, 1: 5}
-    assert expanded[("entity", "b")] == {0: 6, 1: 9}
-
-
-def test_effective_assignments_on_empty_detection_is_empty() -> None:
-    assert effective_assignments({"assignments": {}, "native_finality": {}}) == {}
+    edges, label_map = _build_community_graph(_fixture_store(3))
+    result = detect_communities_hierarchical(edges, label_map)
+    assignments = result["assignments"]
+    assert assignments, "fixture must produce a hierarchy"
+    levels = sorted(assignments.keys())
+    node_sets = [set(assignments[level].keys()) for level in levels]
+    assert all(s == node_sets[0] for s in node_sets), (
+        "every level must cover exactly the same node set"
+    )
+    # Every level's parents are present; the top level's parents are None.
+    top = levels[-1]
+    for cluster in set(assignments[top].values()):
+        assert result["parents"][(top, cluster)] is None

@@ -50,6 +50,9 @@ class ImprovementResult:
     changed_communities: int = 0
     stale_summaries: int = 0
     changed_community_ids: tuple[str, ...] = ()
+    summaries_regenerated: int = 0
+    summaries_kept: int = 0
+    summaries_retired: int = 0
 
 
 def validate_improve_mode(mode: str) -> ImproveMode:
@@ -70,12 +73,13 @@ def has_full_improvement_baseline(store: KnowledgeStore) -> bool:
         return True
 
     conn = store.sql_conn
-    required = {f"community_{level}" for level in RESOLUTIONS}
+    # Depth is data-driven under HIT-Leiden, so "initialized" means ANY
+    # community_L* column exists (a depth-1 hierarchy never grows L1..L3).
     for table in ("entities", "facts"):
         columns = {
             str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
-        if not required.issubset(columns):
+        if not any(col.startswith("community_L") for col in columns):
             return False
     return True
 
@@ -121,10 +125,15 @@ def _current_community_ids(
         columns = {
             str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
-        levels = [level for level in RESOLUTIONS if f"community_{level}" in columns]
+        levels = sorted(
+            int(col.removeprefix("community_L"))
+            for col in columns
+            if col.startswith("community_L")
+            and col.removeprefix("community_L").isdigit()
+        )
         if not levels:
             continue
-        selected = ", ".join(f"community_{level}" for level in levels)
+        selected = ", ".join(f"community_L{level}" for level in levels)
         for start in range(0, len(ids), 500):
             batch = ids[start : start + 500]
             placeholders = ",".join("?" for _ in batch)
@@ -136,7 +145,7 @@ def _current_community_ids(
                 for level, cluster_id in zip(levels, row):
                     if cluster_id is not None:
                         touched.add(
-                            community_id_from(level, int(cluster_id))
+                            community_id_from(f"L{level}", int(cluster_id))
                         )
     return touched
 
@@ -164,12 +173,14 @@ def _invalidate_summaries(
 ) -> int:
     """Mark summaries stale when at least one changed member exceeds the ratio.
 
-    NOTE (Task 5): this crude ``1 / member_count`` marker is retained ONLY as a
-    conservative fallback for the incremental path while HIT-Leiden incremental
-    detection is deferred to phase 2. The authoritative, baseline-relative gate
-    now lives in ``community_summarizer.run_gated_summarization`` and runs on the
-    full reconcile path. When the full path reconciles + gates, it supersedes
-    these coarse markers on the next full improve.
+    This crude ``1 / member_count`` marker is a conservative signal from the
+    incremental path: it flags a community as worth revisiting without deciding
+    whether to regenerate. The authoritative, baseline-relative gate lives in
+    ``community_summarizer.run_gated_summarization``, which honours these markers
+    (``communities.summary_stale``) and clears them only on a successful
+    regeneration. The incremental path runs that gated pass in the same batch
+    (see ``run_incremental_improvement``); a full reconcile supersedes the
+    markers on the next full improve.
     """
 
     if not community_ids:
@@ -211,6 +222,39 @@ def _invalidate_summaries(
     except sqlite3.DatabaseError:
         logger.exception("Failed to invalidate incremental community summaries")
         return 0
+
+
+def _current_memberships(store: KnowledgeStore) -> dict[int, dict[int, set[str]]]:
+    """Read every persisted ``community_L*`` column as reconcile input.
+
+    Returns:
+        ``{level: {cluster_id: set(member_id)}}`` with collision-proof
+        ``"<node_type>:<id>"`` member ids — exactly the shape the full path
+        feeds to ``CommunityIdentity.reconcile`` via ``invert_assignments``.
+        Empty when no level has assignments yet.
+    """
+    conn = store.sql_conn
+    assignments: dict[int, dict[tuple[str, str], int]] = {}
+    for table, node_type in (("entities", "entity"), ("facts", "fact")):
+        columns = {
+            str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column in sorted(columns):
+            if not column.startswith("community_L"):
+                continue
+            try:
+                level = int(column.removeprefix("community_L"))
+            except ValueError:
+                continue
+            for node_id, cluster in conn.execute(
+                f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL",
+            ):
+                assignments.setdefault(level, {})[(node_type, str(node_id))] = int(cluster)
+    if not assignments:
+        return {}
+    from kl_graph.periodic.community_identity import invert_assignments
+
+    return invert_assignments(assignments)
 
 
 def run_incremental_improvement(
@@ -314,13 +358,13 @@ def run_incremental_improvement(
                 except (TypeError, ValueError):
                     continue
 
-    # Step 2b: Summary invalidation. Incremental community *assignment* and the
-    # scoped COMM_MEMBER projection are deferred to the next full improve
-    # (hierarchical Leiden rebuilds the whole projection); the incremental
-    # strategy is a guarded no-op, so ``changed`` stays empty here. We still
-    # invalidate the summaries of the communities the touched nodes already
-    # belong to, so a stale report is not served for a community whose members
-    # changed.
+    # Step 2b: Summary invalidation. The incremental strategy maintains the
+    # whole hierarchy AND re-materializes the reified projection (Community
+    # rows + COMM_MEMBER edges, rebuild-not-migrate), so incremental-only
+    # days are not left waiting on a full improve. Here we union the reported
+    # changes with the communities the touched nodes already belong to and
+    # mark their summaries stale, so a stale report is never served for a
+    # community whose members changed on either side of the move.
     projection_done = checkpoint is not None and checkpoint.is_done(
         "improve.incremental_projection", params=params
     )
@@ -339,6 +383,70 @@ def run_incremental_improvement(
                 stale=stale_count,
             )
 
+    # Step 2c: stable-identity reconcile + gated (re)summarization. This is
+    # where the stale markers from step 2b are CONSUMED: reconciliation
+    # re-resolves stable UUIDs for the updated partition (so reports keep
+    # following their communities across cluster renumbering), and the gated
+    # summarizer regenerates exactly the reports whose churn crossed the gate
+    # — or were externally marked stale — keeping every untouched report at
+    # zero LLM cost. Without this step an incremental regime accumulates stale
+    # markers forever and never regenerates a single report.
+    summaries_regenerated = summaries_kept = summaries_retired = 0
+    reconcile_done = checkpoint is not None and checkpoint.is_done(
+        "improve.incremental_reconcile", params=params
+    )
+    if not reconcile_done:
+        memberships = _current_memberships(store)
+        if memberships:
+            import uuid as _uuid
+
+            from kl_graph.periodic.community_identity import CommunityIdentity
+            from kl_graph.periodic.community_summarizer import (
+                run_gated_summarization,
+            )
+
+            identity = CommunityIdentity(store)
+            # Stable per batch so a crash-and-resume re-runs the SAME run id
+            # (reconciliation is idempotent by run id); a fresh id only when
+            # the caller gave no batch identity at all.
+            run_id = f"incr-{batch_id}" if batch_id else f"incr-{_uuid.uuid4().hex}"
+            identity.reconcile(memberships, run_id)
+            # Births / split / merge products are forced to (re)summarize, as
+            # on the full path.
+            forced_uuids = {
+                ev.successor_uuid
+                for ev in identity.lineage_events_for(run_id)
+                if ev.event_type in ("birth", "split", "merge")
+                and ev.successor_uuid
+            }
+            gated = run_gated_summarization(
+                store,
+                identity,
+                run_id=run_id,
+                levels=None,
+                min_members=10,
+                forced_uuids=forced_uuids,
+            )
+            summaries_regenerated = int(gated["regenerated"])
+            summaries_kept = int(gated["kept"])
+            summaries_retired = int(gated["retired"])
+            logger.info(
+                "Incremental reconcile+summarize (%s): regenerated %d, kept %d, "
+                "retired %d",
+                run_id,
+                summaries_regenerated,
+                summaries_kept,
+                summaries_retired,
+            )
+        if checkpoint is not None:
+            checkpoint.mark_done(
+                "improve.incremental_reconcile",
+                params=params,
+                regenerated=summaries_regenerated,
+                kept=summaries_kept,
+                retired=summaries_retired,
+            )
+
     return ImprovementResult(
         requested_mode="incremental",
         applied_mode="incremental",
@@ -346,6 +454,9 @@ def run_incremental_improvement(
         changed_communities=len(changed),
         stale_summaries=stale_count,
         changed_community_ids=tuple(sorted(changed)),
+        summaries_regenerated=summaries_regenerated,
+        summaries_kept=summaries_kept,
+        summaries_retired=summaries_retired,
     )
 
 
@@ -393,6 +504,9 @@ def run_improvement(
             changed_communities=result.changed_communities,
             stale_summaries=result.stale_summaries,
             changed_community_ids=result.changed_community_ids,
+            summaries_regenerated=result.summaries_regenerated,
+            summaries_kept=result.summaries_kept,
+            summaries_retired=result.summaries_retired,
         )
 
     from kl_graph.periodic.runner import run_periodic_improvement

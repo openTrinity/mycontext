@@ -37,8 +37,12 @@ def modularity(graph: DynamicGraph, membership: dict[str, int], gamma: float) ->
 
     # Internal weight per community: Σ A_ij over i,j in same community.
     # Each undirected edge (u,v,w) with u≠v in the same community contributes
-    # 2w to the i,j double sum; a self-loop w contributes w·... — we follow the
-    # A_ij double-sum convention where a self-loop counts once as A_vv.
+    # 2w to the i,j double sum; a self-loop contributes 2w as well, matching
+    # the degree convention (apply_change counts a loop as 2w in k_v). With
+    # this convention the aggregation identity holds EXACTLY: the modularity
+    # of the aggregated supergraph (loops = internal weights) under the
+    # singleton partition equals the modularity of the base partition, so
+    # optimizing super-level moves optimizes composed base modularity.
     internal: dict[int, float] = defaultdict(float)
     degree_sum: dict[int, float] = defaultdict(float)
 
@@ -50,10 +54,7 @@ def modularity(graph: DynamicGraph, membership: dict[str, int], gamma: float) ->
         cv = membership[v]
         if cu != cv:
             continue
-        if u == v:
-            internal[cu] += w  # self-loop: A_vv counted once
-        else:
-            internal[cu] += 2.0 * w  # both (u,v) and (v,u)
+        internal[cu] += 2.0 * w  # both (u,v) and (v,u); loops included
 
     q = 0.0
     for c, deg in degree_sum.items():

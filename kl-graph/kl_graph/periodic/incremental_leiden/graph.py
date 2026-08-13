@@ -117,6 +117,15 @@ class DynamicGraph:
     def has_vertex(self, v: str) -> bool:
         return v in self._adj
 
+    def ensure_vertex(self, v: str) -> None:
+        """Register ``v`` even if it currently has no incident edges.
+
+        State deserialization uses this to restore singleton communities that
+        carry no edges yet; ``add_edge`` is the only other vertex creator and
+        would keep such vertices out of the graph.
+        """
+        self._adj.setdefault(v, {})
+
     @property
     def vertices(self) -> list[str]:
         return list(self._adj.keys())

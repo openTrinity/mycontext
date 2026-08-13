@@ -22,13 +22,17 @@ class Level:
         movement: Movement partition ``f^p`` (vertex → community).
         refinement: Refinement partition ``s^p`` (vertex → sub-community).
         node_to_children: Supernode id → set of base-vertex ids it represents.
-        child_to_supernode: Base-vertex id → this level's node id containing it.
+        s_pre: Node id at the level BELOW → this level's node id, as recorded
+            when this level's graph was last aggregated (``s_pre`` in the
+            paper's Algorithm 4). Empty at the base level. Needed to lift edge
+            deltas from below into this level's supergraph coordinates.
     """
 
     graph: DynamicGraph
     movement: Partition
     refinement: Partition
     node_to_children: dict[str, set[str]] = field(default_factory=dict)
+    s_pre: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -46,12 +46,15 @@ class LeidenLevel:
             sub-communities) of this level's nodes.
         node_to_children: For super-levels, maps each supernode to the set of
             base-level vertex ids it represents.
+        s_pre: Node id at the level below → this level's node id, as recorded
+            when this level was aggregated. Empty at the base level.
     """
 
     graph: DynamicGraph
     membership: dict[str, int]
     sub_membership: dict[str, int]
     node_to_children: dict[str, set[str]] = field(default_factory=dict)
+    s_pre: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -143,7 +146,7 @@ def _leiden_flat(
         graspologic drops as isolates are assigned fresh singleton labels so the
         result is total.
     """
-    edges = graph.edges()
+    edges = sorted(graph.edges(), key=lambda e: (e[0], e[1]))
     if not edges:
         # No edges: every vertex is its own community.
         return {v: i for i, v in enumerate(sorted(graph.vertices))}
@@ -167,6 +170,93 @@ def _leiden_flat(
             partition[v] = next_label
             next_label += 1
     return partition
+
+
+def _leiden_flat_moves(
+    graph: DynamicGraph,
+    *,
+    gamma: float,
+    starting_communities: dict[str, int] | None = None,
+    max_passes: int = 20,
+) -> dict[str, int]:
+    """Movement-phase Leiden using the package's own gain formula.
+
+    Super-level clustering MUST optimize composed base modularity. The
+    aggregation identity guarantees that: with loops carrying internal
+    weights (degree convention 2w), the supergraph's modularity under any
+    super-partition equals the base modularity of the composed partition.
+    ``graspologic_native.leiden`` optimizes its own loop convention instead,
+    which measurably over-merged real supergraphs (composed Q 0.766 vs the
+    0.838 of the state it was asked to coarsen) and thereby blocked every
+    hierarchy extension — so super levels are clustered here, with moves
+    driven by :func:`modularity_gain`.
+
+    Deterministic: sorted vertex order, repeated passes until no improving
+    move remains (movement phase only; refinement at these levels happens
+    incrementally during maintenance).
+
+    Args:
+        graph: The (super)graph to cluster.
+        gamma: Resolution parameter.
+        starting_communities: Optional warm-start partition.
+        max_passes: Safety cap on full passes over the vertex set.
+
+    Returns:
+        A dense ``node -> community_label`` map covering every vertex.
+    """
+    from kl_graph.periodic.incremental_leiden.modularity import (
+        edge_weight_to_communities,
+        modularity_gain,
+    )
+
+    membership = (
+        dict(starting_communities)
+        if starting_communities
+        else {v: i for i, v in enumerate(sorted(graph.vertices))}
+    )
+    # Ensure totality for vertices absent from a warm start.
+    next_label = (max(membership.values()) + 1) if membership else 0
+    for v in sorted(graph.vertices):
+        if v not in membership:
+            membership[v] = next_label
+            next_label += 1
+
+    part = Partition(graph, membership)
+    min_gain = 1e-12
+    for _ in range(max_passes):
+        two_m = 2.0 * graph.total_weight
+        if two_m <= 0.0:
+            break
+        moved = False
+        for v in sorted(graph.vertices):
+            if v not in part.membership or not graph.has_vertex(v):
+                continue
+            k_v = graph.degree(v)
+            source = part.community_of(v)
+            w_to = edge_weight_to_communities(graph, v, part.membership)
+            w_source = w_to.get(source, 0.0)
+            d_source = part.community_degree(source)
+            best_target, best_gain = source, 0.0
+            for target in sorted(w_to):
+                if target == source:
+                    continue
+                gain = modularity_gain(
+                    k_v=k_v,
+                    w_v_to_target=w_to[target],
+                    w_v_to_source=w_source,
+                    d_source=d_source,
+                    d_target=part.community_degree(target),
+                    two_m=two_m,
+                    gamma=gamma,
+                )
+                if gain > best_gain + min_gain:
+                    best_gain, best_target = gain, target
+            if best_target != source:
+                part.move(v, best_target, graph)
+                moved = True
+        if not moved:
+            break
+    return dict(part.membership)
 
 
 def naive_leiden(
@@ -193,22 +283,41 @@ def naive_leiden(
     levels: list[LeidenLevel] = []
     current_graph = graph
     node_children: dict[str, set[str]] = {v: {v} for v in graph.vertices}
+    pending_s_pre: dict[str, str] = {}
     # Track the best composed modularity seen so far; a coarser level is only
     # accepted if it does not decrease global modularity (standard Leiden
     # termination — otherwise a tiny supergraph can spuriously merge everything).
     prev_modularity = float("-inf")
 
     for level_idx in range(max_levels):
-        warm = initial_membership if (initial_membership is not None and level_idx == 0) else None
-        partition_map = _leiden_flat(
-            current_graph, gamma=gamma, seed=seed, starting_communities=warm
-        )
+        if level_idx == 0:
+            # Base level: mature graspologic kernel (graph has no self-loops,
+            # so its objective coincides with ours).
+            partition_map = _leiden_flat(
+                current_graph, gamma=gamma, seed=seed,
+                starting_communities=initial_membership,
+            )
+        else:
+            # Super levels: the consistent mover (see its docstring — the
+            # graspologic kernel is not modularity-consistent with the base
+            # once aggregation self-loops appear).
+            partition_map = _leiden_flat_moves(current_graph, gamma=gamma)
+
+        n_cand_comms = len(set(partition_map.values()))
+        if level_idx > 0 and n_cand_comms == current_graph.num_vertices:
+            # The candidate coarsened nothing (every super-node kept its own
+            # community). Appending it would create a trivial level that adds
+            # no structure — this happens exactly when no joint merge has
+            # strictly positive gain, e.g. at a zero-gain coupling. Honest
+            # depth stops here instead of padding a fake level.
+            break
 
         candidate_level = LeidenLevel(
             graph=current_graph,
             membership=dict(partition_map),
             sub_membership=dict(partition_map),
             node_to_children=dict(node_children),
+            s_pre=dict(pending_s_pre),
         )
 
         # Guard: a coarser level must not reduce global (base-graph) modularity.
@@ -235,6 +344,11 @@ def naive_leiden(
         # supergraph.
         sub_partition = Partition(current_graph, partition_map)
         super_graph, supernode_members = _aggregate(current_graph, sub_partition)
+        # Record the aggregation map for the next level (Alg 4's ``s_pre``).
+        pending_s_pre = {
+            node: f"c{sub_partition.community_of(node)}"
+            for node in current_graph.vertices
+        }
 
         new_children: dict[str, set[str]] = {}
         for sid, members in supernode_members.items():

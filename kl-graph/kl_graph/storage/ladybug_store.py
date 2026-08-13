@@ -92,6 +92,16 @@ class LadybugStore(KnowledgeStore):
         )
 
     @property
+    def db_path(self) -> Path:
+        """Path of the knowledge SQLite database.
+
+        Callers that persist state next to the database (e.g. the HIT-Leiden
+        maintainer state) resolve their file location off this; without it
+        wrapped stores silently lose persistence.
+        """
+        return self._sqlite.db_path
+
+    @property
     def sql_conn(self) -> sqlite3.Connection:
         """Escape hatch: returns the underlying SQLite connection."""
         return self._sqlite.conn
