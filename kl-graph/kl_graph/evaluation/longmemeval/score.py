@@ -24,11 +24,6 @@ from openai import AsyncOpenAI
 from tqdm import tqdm
 
 from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl, json_lines
-from kl_graph.evaluation.longmemeval.build import (
-    CASE_DATA_DIRNAME,
-    _load_case_entries,
-    _resolve_manifest_path,
-)
 from kl_graph.evaluation.longmemeval.convert import message_id
 from kl_graph.evaluation.longmemeval.experiment import (
     ScoreConfig,
@@ -41,6 +36,11 @@ from kl_graph.evaluation.longmemeval.experiment import (
     output_dir as experiment_output_dir,
 )
 from kl_graph.evaluation.longmemeval.generate import _read_item_source_units
+from kl_graph.evaluation.longmemeval.kl_graph.build import (
+    CASE_DATA_DIRNAME,
+    _load_case_entries,
+    _resolve_manifest_path,
+)
 from kl_graph.evaluation.longmemeval.source import resolve_source, source_fingerprint
 
 QUESTION_TYPES = (

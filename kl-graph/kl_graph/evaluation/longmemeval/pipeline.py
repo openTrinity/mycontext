@@ -22,12 +22,8 @@ from typing import Any
 
 from omegaconf.errors import OmegaConfBaseException
 
+from kl_graph.config import PROJECT_ROOT
 from kl_graph.evaluation.io import atomic_write_json
-from kl_graph.evaluation.longmemeval.build import (
-    PROJECT_ROOT,
-    _load_case_entries,
-    validate_built_case,
-)
 from kl_graph.evaluation.longmemeval.experiment import (
     BENCHMARK_NAME,
     EXPERIMENT_SCHEMA_VERSION,
@@ -38,6 +34,10 @@ from kl_graph.evaluation.longmemeval.experiment import (
     score_metrics_output,
     score_output,
     select_entries,
+)
+from kl_graph.evaluation.longmemeval.kl_graph.build import (
+    _load_case_entries,
+    validate_built_case,
 )
 from kl_graph.evaluation.longmemeval.source import (
     load_cases,
@@ -191,7 +191,7 @@ def _conversion_is_compatible(
 def _stage_command(stage: str, experiment: Experiment) -> list[str]:
     module = stage
     executable = sys.executable
-    if experiment.backend in {"khoj", "ragflow"} and stage in {"build", "ask"}:
+    if stage in {"build", "ask"}:
         module = f"{experiment.backend}.{stage}"
     if experiment.backend == "ragflow" and stage in {"build", "ask"}:
         executable = experiment.ragflow.python

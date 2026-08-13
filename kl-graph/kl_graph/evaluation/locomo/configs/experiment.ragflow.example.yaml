@@ -1,0 +1,62 @@
+schema_version: 1
+benchmark: locomo
+backend: ragflow
+
+source: ${oc.env:LOCOMO_SOURCE}
+artifact_root: ../../../../data/locomo-ragflow
+
+selection:
+  conversations:
+    all: true
+  questions:
+    all: true
+
+run:
+  mode: resume
+  output_dir: ../../../../data/locomo-ragflow-run/ask
+  keep_going: true
+
+ragflow:
+  python: ../../../../.venv-ragflow/bin/python
+  base_url: ${oc.env:RAGFLOW_BASE_URL}
+
+build:
+  case_concurrency: 1
+  dataset_prefix: locomo
+  embedding_model: ${oc.env:RAGFLOW_EMBEDDING_MODEL}
+  graph: true
+  chunk_method: naive
+  chunk_token_num: 512
+  delimiter: "\n"
+  parse_timeout_seconds: 3600
+  graph_timeout_seconds: 10800
+  poll_seconds: 2
+
+ask:
+  use_kg: true
+  top_k: 5
+  candidate_count: 1024
+  similarity_threshold: 0.2
+  vector_similarity_weight: 0.3
+  rerank_id: null
+  concurrency: 4
+  checkpoint_every: 10
+
+generate:
+  output_dir: ../../../../data/locomo-ragflow-run/generate
+  top_k: 5
+  concurrency: 10
+  checkpoint_every: 10
+  provider: anthropic
+  model: qwen3.7-flash
+  base_url: ${oc.env:KL_LLM_BASE_URL}
+  temperature: 0
+  max_tokens: 128
+  timeout_seconds: 120
+  max_retries: 3
+  include_community_context: false
+  allow_remote_content: true
+
+score:
+  output_dir: ../../../../data/locomo-ragflow-run/score
+  recall_k: 5

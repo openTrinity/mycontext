@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Iterable
@@ -15,7 +16,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .build import CASE_SET_FORMAT, DATASET_NAME
+from omegaconf.errors import OmegaConfBaseException
+
+from .cases import CASE_SET_FORMAT, DATASET_NAME
+from .experiment import load_convert_experiment
 
 SCHEMA_VERSION = 1
 _SESSION_FORMATS = ("%I:%M %p on %d %B, %Y", "%I:%M %p on %B %d, %Y")
@@ -366,17 +370,27 @@ def _sha256(path: Path) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "input", type=Path, help="locomo10.json or the directory containing it"
-    )
-    parser.add_argument("output", type=Path, help="conversation case-set directory")
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    manifest = convert(args.input, args.output, overwrite=args.overwrite)
+    try:
+        args = parse_args(argv)
+        experiment = load_convert_experiment(args.config)
+        if args.dry_run:
+            print(f"source={_resolve_source(experiment.source)}")
+            print(f"case_set={experiment.case_set}")
+            return 0
+        manifest = convert(
+            experiment.source,
+            experiment.case_set,
+            overwrite=experiment.convert.reconvert,
+        )
+    except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
+        print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
+        return 2
     print(json.dumps(manifest["counts"], ensure_ascii=False, sort_keys=True))
     return 0
 

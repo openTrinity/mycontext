@@ -1,0 +1,52 @@
+schema_version: 1
+benchmark: locomo
+backend: kl_graph
+
+source: ${oc.env:LOCOMO_SOURCE}
+case_set: ../../../../data/locomo-v2
+
+selection:
+  conversations:
+    all: true
+  questions:
+    all: true
+
+run:
+  mode: resume
+  output_dir: ../../../../data/locomo-run/ask
+  keep_going: true
+
+convert:
+  reconvert: false
+
+build:
+  with_improve: true
+  fresh: false
+  keep_cache: true
+  case_concurrency: 3
+  concurrency: 10
+
+ask:
+  concurrency: 4
+  checkpoint_every: 10
+  top_k: 5
+  timeout_seconds: 180
+
+generate:
+  output_dir: ../../../../data/locomo-run/generate
+  top_k: 5
+  concurrency: 10
+  checkpoint_every: 10
+  provider: anthropic
+  model: qwen3.7-flash
+  base_url: ${oc.env:KL_LLM_BASE_URL}
+  temperature: 0
+  max_tokens: 128
+  timeout_seconds: 120
+  max_retries: 3
+  include_community_context: false
+  allow_remote_content: true
+
+score:
+  output_dir: ../../../../data/locomo-run/score
+  recall_k: 5

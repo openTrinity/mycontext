@@ -30,11 +30,6 @@ from typing import Any
 from omegaconf.errors import OmegaConfBaseException
 
 from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl, json_lines
-from kl_graph.evaluation.longmemeval.build import (
-    CASE_DATA_DIRNAME,
-    _load_case_entries,
-    _resolve_manifest_path,
-)
 from kl_graph.evaluation.longmemeval.convert import message_id
 from kl_graph.evaluation.longmemeval.experiment import (
     PROMPT_RESERVE_TOKENS,
@@ -43,6 +38,11 @@ from kl_graph.evaluation.longmemeval.experiment import (
     load_generate_experiment,
     output_dir,
     select_entries,
+)
+from kl_graph.evaluation.longmemeval.kl_graph.build import (
+    CASE_DATA_DIRNAME,
+    _load_case_entries,
+    _resolve_manifest_path,
 )
 from kl_graph.evaluation.longmemeval.source import (
     cases_by_id,

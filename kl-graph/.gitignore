@@ -24,7 +24,7 @@ survey/
 
 # Experiments and evaluation datasets (local only)
 experiments/
-locomo/
+/locomo/
 *.zip
 
 # AgentKit runtime state (session-specific)

@@ -1,0 +1,59 @@
+schema_version: 2
+benchmark: longmemeval
+backend: khoj
+
+# Relative paths are resolved from this YAML file. API tokens remain
+# environment-only and are read from KHOJ_API_TOKEN.
+source: ${oc.env:LONGMEMEVAL_SOURCE}
+artifact_root: ../../../../data/longmemeval-khoj
+hypotheses: ../../../../data/longmemeval-khoj/hypotheses.jsonl
+
+selection:
+  all: true
+
+run:
+  mode: resume
+  output_dir: ../../../../data/longmemeval-khoj/ask
+  keep_going: true
+
+khoj:
+  base_url: ${oc.env:KHOJ_BASE_URL}
+  max_retries: 2
+
+build:
+  case_concurrency: 3
+  document_prefix: longmemeval
+  timeout_seconds: 300
+
+ask:
+  top_k: 5
+  concurrency: 4
+  checkpoint_every: 10
+  timeout_seconds: 120
+
+generate:
+  concurrency: 10
+  provider: anthropic
+  model: qwen3.7-flash
+  base_url: ${oc.env:KL_LLM_BASE_URL}
+  temperature: 0
+  max_tokens: 500
+  model_context_tokens: 128000
+  timeout_seconds: 120
+  max_retries: 2
+
+score:
+  output: ../../../../data/longmemeval-khoj/score-results.jsonl
+  metrics_output: ../../../../data/longmemeval-khoj/score-metrics.json
+  concurrency: 10
+  judge:
+    model: ${oc.env:LONGMEM_EVAL_MODEL}
+    base_url: ${oc.env:OPENAI_BASE_URL}
+    temperature: 0
+    max_tokens: 10
+    timeout_seconds: 120
+    max_retries: 5
+  retrieval:
+    turn_recall:
+      enabled: true
+      k: 5

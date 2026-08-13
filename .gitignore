@@ -93,6 +93,12 @@ kl-graph/.venv/
 kl-graph/**/__pycache__/
 kl-graph/**/*.pyc
 
+# Local evaluation test work
+kl-graph/kl_graph/evaluation/tests/
+kl-graph/kl_graph/evaluation/locomo/khoj/tests/
+kl-graph/kl_graph/evaluation/locomo/ragflow/tests/
+kl-graph/tests/test_rerank.py
+
 # 内置 Python：**解释器与 venv（含全部依赖）都入 git**。
 #
 # 为什么连 venv 一起入：打包后的用户不可能去跑 `pnpm setup:python`，

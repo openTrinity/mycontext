@@ -13,13 +13,13 @@ from typing import Any
 
 import httpx
 
+from kl_graph.config import PROJECT_ROOT
 from kl_graph.evaluation.io import atomic_write_json
-from kl_graph.evaluation.locomo.build import (
+from kl_graph.evaluation.locomo.cases import (
     CASE_DATA_DIRNAME,
-    PROJECT_ROOT,
-    case_environment,
     resolve_case_root,
 )
+from kl_graph.evaluation.locomo.kl_graph.build import case_environment
 
 ROUTES_ENV = "KL_LOCOMO_ROUTES"
 SERVER_START_TIMEOUT = 90.0

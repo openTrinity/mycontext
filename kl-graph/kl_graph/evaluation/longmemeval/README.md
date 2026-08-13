@@ -11,8 +11,8 @@ LongMemEval JSON
     │
     └─ convert.py        数据准备：拆分 case，生成 DWS 输入
           │
-          ├─ Phase 1: build.py       建图
-          ├─ Phase 2: ask.py         检索 Top-K
+          ├─ Phase 1: kl_graph/build.py  建图
+          ├─ Phase 2: kl_graph/ask.py    检索 Top-K
           ├─ Phase 3: generate.py    生成回答
           └─ Phase 4: score.py       评估回答
 ```
@@ -65,11 +65,11 @@ YAML 流水线通过必填的 `backend: kl_graph|khoj|ragflow` 选择后端。
 export LONGMEMEVAL_SOURCE=/path/to/longmemeval_s_sample100.json
 
 python -m kl_graph.evaluation.longmemeval.pipeline \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml \
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml \
   --dry-run
 
 python -m kl_graph.evaluation.longmemeval.pipeline \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
 YAML 支持 `${oc.env:NAME}`，API Key 不进入配置文件。`run.mode: resume` 时流水线
@@ -87,8 +87,8 @@ Score 的可变运行参数集中在 `score` 配置中；官方 judge prompt、s
 
 ```yaml
 score:
-  output: ../../../data/longmemeval/score-results.jsonl
-  metrics_output: ../../../data/longmemeval/score-metrics.json
+  output: ../../../../data/longmemeval/score-results.jsonl
+  metrics_output: ../../../../data/longmemeval/score-metrics.json
   concurrency: 10
   judge:
     model: ${oc.env:LONGMEM_EVAL_MODEL}
@@ -119,7 +119,7 @@ case 的 `evaluation.jsonl` 中，不会进入图。
 
 ```bash
 python -m kl_graph.evaluation.longmemeval.convert \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
 `convert.py` 会直接通过 OmegaConf 读取同一份 YAML 中的 `source`、`case_set`、
@@ -139,8 +139,8 @@ extraction 和图存储都走生产 ingestion 代码；此脚本本身只负责�
 推荐运行方式：
 
 ```bash
-python -m kl_graph.evaluation.longmemeval.build \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml
+python -m kl_graph.evaluation.longmemeval.kl_graph.build \
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
 `build.case_concurrency` 控制同时运行多少个独立 case，`build.concurrency` 控制
@@ -153,8 +153,8 @@ python -m kl_graph.evaluation.longmemeval.build \
 常用检查命令：
 
 ```bash
-python -m kl_graph.evaluation.longmemeval.build \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml \
+python -m kl_graph.evaluation.longmemeval.kl_graph.build \
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml \
   --dry-run
 ```
 
@@ -172,8 +172,8 @@ Phase 2。启动前会检查 build 状态，并拒绝使用 storage backend 或 
 模型/维度与构建时不一致的图。
 
 ```bash
-python -m kl_graph.evaluation.longmemeval.ask \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml
+python -m kl_graph.evaluation.longmemeval.kl_graph.ask \
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
 `run.mode: resume` 会跳过配置匹配且结构完整的 `ask_top{ask.top_k}.json`，并重新
@@ -202,7 +202,7 @@ case 的结果。case 并发、server 启动超时和请求超时分别由
 
 ```bash
 python -m kl_graph.evaluation.longmemeval.generate \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
 输出路径由根级 `hypotheses` 显式指定。每完成一个 case 都会原子更新文件；
@@ -221,7 +221,7 @@ turn，Khoj chunk 则使用 Ask 已验证并保存的 `source_turn_ids`。第三
 
 ```bash
 python -m kl_graph.evaluation.longmemeval.score \
-  --config kl_graph/evaluation/longmemeval/experiment.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
 `score.py` 从 YAML 的 `source`、`hypotheses`、`selection`、`run` 和 `score` 段读取
@@ -320,13 +320,13 @@ export RAGFLOW_API_KEY=your-api-key
 
 # 完整 Build → Ask → Generate → Score
 .venv/bin/python -m kl_graph.evaluation.longmemeval.pipeline \
-  --config kl_graph/evaluation/longmemeval/experiment.ragflow.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.ragflow.example.yaml
 
 # 也可以单独运行 RAGFlow 阶段；仍只接受同一份 YAML
 .venv-ragflow/bin/python -m kl_graph.evaluation.longmemeval.ragflow.build \
-  --config kl_graph/evaluation/longmemeval/experiment.ragflow.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.ragflow.example.yaml
 .venv-ragflow/bin/python -m kl_graph.evaluation.longmemeval.ragflow.ask \
-  --config kl_graph/evaluation/longmemeval/experiment.ragflow.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.ragflow.example.yaml
 ```
 
 Build 状态位于 YAML `artifact_root` 下的 `cases/QUESTION_ID/ragflow.json`，Ask 固定
@@ -352,13 +352,13 @@ export KHOJ_API_TOKEN=optional-bearer-token
 
 # 完整 Build → Ask → Generate → Score
 .venv/bin/python -m kl_graph.evaluation.longmemeval.pipeline \
-  --config kl_graph/evaluation/longmemeval/experiment.khoj.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.khoj.example.yaml
 
 # 也可以单独运行一个阶段
 .venv/bin/python -m kl_graph.evaluation.longmemeval.khoj.build \
-  --config kl_graph/evaluation/longmemeval/experiment.khoj.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.khoj.example.yaml
 .venv/bin/python -m kl_graph.evaluation.longmemeval.khoj.ask \
-  --config kl_graph/evaluation/longmemeval/experiment.khoj.example.yaml
+  --config kl_graph/evaluation/longmemeval/configs/experiment.khoj.example.yaml
 ```
 
 Build 状态位于 YAML `artifact_root` 下的 `cases/QUESTION_ID/khoj.json`。Ask run

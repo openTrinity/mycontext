@@ -1,0 +1,70 @@
+schema_version: 2
+benchmark: longmemeval
+backend: ragflow
+
+# Relative paths are resolved from this YAML file. RAGFLOW_API_KEY remains
+# environment-only. Build/Ask run in the dedicated Python 3.13 environment.
+source: ${oc.env:LONGMEMEVAL_SOURCE}
+artifact_root: ../../../../data/longmemeval-ragflow
+hypotheses: ../../../../data/longmemeval-ragflow/hypotheses.jsonl
+
+selection:
+  all: true
+
+run:
+  mode: resume
+  output_dir: ../../../../data/longmemeval-ragflow/ask
+  keep_going: true
+
+ragflow:
+  python: ../../../../.venv-ragflow/bin/python
+  base_url: ${oc.env:RAGFLOW_BASE_URL}
+
+build:
+  case_concurrency: 3
+  dataset_prefix: longmemeval
+  embedding_model: null
+  graph: true
+  chunk_method: naive
+  chunk_token_num: 512
+  delimiter: "\n"
+  parse_timeout_seconds: 3600
+  graph_timeout_seconds: 10800
+  poll_seconds: 2
+
+ask:
+  use_kg: true
+  top_k: 5
+  candidate_count: 1024
+  similarity_threshold: 0.2
+  vector_similarity_weight: 0.3
+  rerank_id: null
+  concurrency: 4
+  checkpoint_every: 10
+
+generate:
+  concurrency: 10
+  provider: anthropic
+  model: qwen3.7-flash
+  base_url: ${oc.env:KL_LLM_BASE_URL}
+  temperature: 0
+  max_tokens: 500
+  model_context_tokens: 128000
+  timeout_seconds: 120
+  max_retries: 2
+
+score:
+  output: ../../../../data/longmemeval-ragflow/score-results.jsonl
+  metrics_output: ../../../../data/longmemeval-ragflow/score-metrics.json
+  concurrency: 10
+  judge:
+    model: ${oc.env:LONGMEM_EVAL_MODEL}
+    base_url: ${oc.env:OPENAI_BASE_URL}
+    temperature: 0
+    max_tokens: 10
+    timeout_seconds: 120
+    max_retries: 5
+  retrieval:
+    turn_recall:
+      enabled: true
+      k: 5
