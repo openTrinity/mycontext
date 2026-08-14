@@ -172,6 +172,7 @@ class LadybugStore(KnowledgeStore):
         batch_id: str | None = None,
         batch_source_id: str | None = None,
         source_hash: str | None = None,
+        checkpoint_step_callback=None,
     ) -> None:
         """Atomically commit SQLite lineage, then converge graph chunk nodes."""
         self._sqlite.insert_chunks_with_units(
@@ -183,6 +184,11 @@ class LadybugStore(KnowledgeStore):
             batch_id=batch_id,
             batch_source_id=batch_source_id,
             source_hash=source_hash,
+            # 必须透传：回调在底层 SQLiteStore 的同一事务里执行，把
+            # phase_a.persist_chunks 标记为 done 与 workset 写入合成一次提交。
+            # 图后端只做委托，漏了这个 kwarg 会让恢复链路的原子性检查点失效，
+            # 且在服务端（Ladybug 后端）直接抛 unexpected keyword argument。
+            checkpoint_step_callback=checkpoint_step_callback,
         )
         for chunk in chunks:
             self._graph.upsert_chunk_node(

@@ -323,7 +323,14 @@ class IngestCheckpoint:
             logger.info("Cleared %d checkpoint entries with prefix %r", len(to_remove), prefix)
 
     def reset(self) -> None:
-        """Clear all steps and mint a new batch_id. Used on --fresh-db or source change."""
+        """Clear all steps and mint a new batch_id.
+
+        Used on ``--fresh-db`` or source change, and also to skip a round whose
+        workset cannot be rebuilt (see :class:`kl_graph.ingest.recovery.
+        SkipRoundError`): minting a fresh ``batch_id`` and dropping the round's
+        resume steps lets the next round accumulate cleanly, and touches no
+        graph data.
+        """
         self._data = {
             "version": self.VERSION,
             "source_hash": self._source_hash,

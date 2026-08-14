@@ -198,6 +198,67 @@ def test_server_ingest_job_persists_partial_outcome(tmp_path, monkeypatch) -> No
     ]
 
 
+def test_server_ingest_job_persists_skipped_outcome(tmp_path, monkeypatch) -> None:
+    """本轮工作集不可重建时，服务端落库为 state='done' + skip 告警，而非 'error'。
+
+    回归：SkipRoundError 走 runner 的 skip 路径 → IngestResult.outcome=='skipped'，
+    counts_callback 把 warning 写进 ingest_progress，终态 _set_progress('done',…)
+    落库。告警必须建议恢复快照、绝不含 --fresh-db（AGENTS.md §4/§5）。
+    """
+    from kl_graph.ingest import runner
+
+    server_state = _state(tmp_path)
+    server_state.current_run_id = "run-skip"
+    server_state.ingest_progress = {
+        "source_id": "slack-prod",
+        "improve_mode": "off",
+        "job_type": "ingest",
+    }
+    server_state.sqlite_conn.execute(
+        """INSERT INTO ingest_runs
+           (run_id, source_id, input_dir, state, phase, started_at, updated_at)
+           VALUES ('run-skip', 'slack-prod', 'D:/exports', 'running',
+                   'phase_a', 1, 1)"""
+    )
+    server_state.sqlite_conn.commit()
+    result = runner.IngestResult(
+        0,
+        0,
+        0,
+        0,
+        skipped_reason=(
+            "workset unavailable; skipping this round and keeping the "
+            "accumulated graph; restore a snapshot if needed."
+        ),
+    )
+    monkeypatch.setattr(kl_server, "state", server_state)
+    monkeypatch.setattr(kl_server, "_shared_stores", lambda: ("store", "qdrant"))
+    monkeypatch.setattr(kl_server, "_hot_swap_graph", lambda update: None)
+
+    async def fake_run(_options, *, counts_callback=None, **_kwargs):
+        if counts_callback is not None:
+            counts_callback(result)
+        return result
+
+    monkeypatch.setattr(runner, "run_ingestion", fake_run)
+
+    asyncio.run(
+        kl_server._run_single_ingest_job(
+            kl_server.IngestRequest(
+                input_dir=str(tmp_path),
+                source_id="slack-prod",
+                improve_mode="off",
+            )
+        )
+    )
+
+    status = asyncio.run(kl_server.get_status())["ingest"]
+    assert status["state"] == "done"
+    assert status["outcome"] == "skipped"
+    assert "snapshot" in status["warning"].lower()
+    assert "--fresh-db" not in status["warning"]
+
+
 def test_failure_manifest_is_paginated_and_cleared_per_source(
     tmp_path, monkeypatch
 ) -> None:

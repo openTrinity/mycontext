@@ -18,6 +18,37 @@ def test_ingest_options_reject_nonpositive_concurrency(tmp_path) -> None:
         IngestOptions(tmp_path, "slack-prod", concurrency=0)
 
 
+def test_make_checkpoint_uses_portable_sql_conn(tmp_path) -> None:
+    """make_checkpoint 必须走两种后端都实现的 sql_conn 访问器。
+
+    回归用例：服务端复用图后端（LadybugStore），它只暴露 sql_conn，没有
+    裸 SQLiteStore 那个 conn 属性。此前误用 store.conn，导致真实服务器上
+    Phase A 一建检查点就抛 AttributeError；而单测把 make_checkpoint 整个
+    mock 掉了，从没真跑过这条路径，故静默漏过（AGENTS.md §4）。
+    这里用一个只提供 sql_conn 的假 store 驱动真正的 make_checkpoint。
+    """
+    import sqlite3
+
+    from kl_graph.ingest.runner import make_checkpoint
+    from kl_graph.storage.sqlite_store import SQLiteStore
+
+    # 用真正的 SQLiteStore 建库以获得 ingest_checkpoint 等表结构，
+    # 再把它的连接藏在一个只暴露 sql_conn 的壳里，模拟图后端。
+    backing = SQLiteStore(tmp_path / "knowledge.db")
+
+    class _LadybugLikeStore:
+        """模拟图后端：只暴露 sql_conn，故意不提供 .conn。"""
+
+        @property
+        def sql_conn(self) -> sqlite3.Connection:
+            return backing.conn
+
+    options = IngestOptions(tmp_path, "slack-prod")
+    checkpoint = make_checkpoint(options, data_dir=tmp_path, store=_LadybugLikeStore())
+    assert checkpoint.source_id == "slack-prod"
+    backing.close()
+
+
 def test_runner_constructs_unit_incremental_pipeline(tmp_path) -> None:
     pipeline = MagicMock()
     pipeline._phase_a_complete.return_value = False
@@ -65,6 +96,7 @@ def test_runner_constructs_unit_incremental_pipeline(tmp_path) -> None:
             "extraction_succeeded": 0,
             "extraction_failed": 0,
             "failures": [],
+            "skipped_reason": "",
         },
     )
     pipeline.close.assert_called_once()
@@ -107,6 +139,45 @@ def test_runner_reports_partial_extraction_outcome(tmp_path) -> None:
     assert result.extraction_failed == 1
     assert result.failures == (failure,)
     assert seen[-1] == result
+
+
+def test_runner_skips_round_when_workset_unrecoverable(tmp_path) -> None:
+    """SkipRoundError 从 pipeline 冒出时，runner 不硬失败：reset 检查点、
+    标记 outcome='skipped'（完成带告警），counts_callback 收到 skip 结果，
+    图谱不动。回归 AGENTS.md §4/§5：可容忍的“本轮不可续”不该报成崩溃。"""
+    from kl_graph.ingest.recovery import SkipRoundError
+
+    pipeline = MagicMock()
+    pipeline._phase_a_complete.return_value = False
+    # Phase A 触发 _load_workset → 工作集不可重建 → 抛 SkipRoundError。
+    pipeline.run_phase_a.side_effect = SkipRoundError(
+        "workset unavailable; skipping this round and keeping the accumulated "
+        "graph; restore a snapshot if needed."
+    )
+    checkpoint = MagicMock(batch_id="batch-skip")
+    checkpoint.is_done.return_value = False
+    seen: list[IngestResult] = []
+
+    with patch("kl_graph.ingest.runner.IngestionPipeline", return_value=pipeline):
+        result = asyncio.run(
+            run_ingestion(
+                IngestOptions(tmp_path, "slack-prod", improve_mode="off"),
+                checkpoint=checkpoint,
+                counts_callback=seen.append,
+            )
+        )
+
+    assert result.outcome == "skipped"
+    assert "--fresh-db" not in result.warning
+    assert "snapshot" in result.warning.lower()
+    # 丢弃坏轮次的续跑状态，让下一轮从干净 batch 继续累积。
+    checkpoint.reset.assert_called_once()
+    # 图谱不动：既没标记完成，也没清理工作集。
+    checkpoint.mark_done.assert_not_called()
+    pipeline.complete_workset.assert_not_called()
+    # skip 结果通过 counts_callback 写进 ingest_progress（→ ingest_runs.warning）。
+    assert seen and seen[-1].outcome == "skipped"
+    pipeline.close.assert_called_once()
 
 
 def test_runner_retains_workset_when_graph_build_fails(tmp_path) -> None:

@@ -37,6 +37,22 @@ logger = logging.getLogger(__name__)
 # ─── Public types ─────────────────────────────────────────────────────────────
 
 
+class SkipRoundError(RuntimeError):
+    """本轮摄取无法继续，但已累积的图谱完好、必须原样保留。
+
+    高频增量摄取场景下，图谱是长期累积的：当工作集行丢失/损坏而无法从现有
+    去重账本重建时（Case B 空重建、Case C/D、无源可解析等），既不能静默把
+    幸存 chunk 当空跑完（§4 静默降级），也不能建议 --fresh-db 整库重建
+    （会清空长期数据）。此异常表示「跳过被打断的这一轮」：runner 捕获后
+    reset 检查点、把结果标为 'skipped'（完成带告警，而非 state='error'），
+    图谱数据不动，下一轮从干净的新 batch 继续增量累积。告警里建议**恢复
+    快照**（若有）而不是 --fresh-db。
+
+    继承 RuntimeError：即使某条调用路径漏接，也退化为改动前的硬失败行为，
+    不会静默吞掉。
+    """
+
+
 class FailureCase(str, Enum):
     """One of the four classifier outcomes, or None when everything is normal."""
 

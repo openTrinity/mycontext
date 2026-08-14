@@ -203,10 +203,13 @@ If the server process is killed mid-ingestion (OOM, kill -9, power loss):
   The checkpoint JSON is written atomically (write-tmp + rename).
 - **Workset** (`ingest_batches` / `ingest_batch_chunks` tables): if the chunk
   count is inconsistent (e.g. due to external deletion or disk corruption), the
-  server raises a RuntimeError with an actionable message. The workset is NOT
-  automatically recovered — SQLite transactions are atomic, so a mismatch
-  indicates external corruption, not a mid-transaction crash. Use `--fresh-db`
-  to start a clean rebuild (extraction cache is preserved).
+  round is **skipped** — the server records the run as `state='done'` with a
+  warning (not `error`), preserves the accumulated graph, and resets the
+  checkpoint so the next round accumulates from a clean batch. The interrupted
+  round's units stay marked as seen, so its facts are not re-derived
+  automatically; **restore a snapshot** if that round's data is needed. The
+  workset is NOT automatically rebuilt — SQLite transactions are atomic, so a
+  mismatch indicates external corruption, not a mid-transaction crash.
 - **LadybugDB lock**: the backend uses an OS-level database lock, which the OS
   releases when the owning process exits. A lock error therefore indicates a
   live concurrent owner or a permissions/filesystem problem; startup fails
@@ -215,6 +218,10 @@ If the server process is killed mid-ingestion (OOM, kill -9, power loss):
   no main database existed before open. If a main database already exists, the
   WAL may contain recoverable state, so both files are preserved and startup
   fails loudly for manual diagnosis.
+
+For the full per-case rescue matrix (A/B/C/D → resume vs. skip) and the
+localhost rescue endpoints (`/ingest/recovery-info`, `/ingest/stop`), see
+[`rescue-api.md`](./rescue-api.md).
 
 ## Cost analysis by step
 

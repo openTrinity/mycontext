@@ -109,7 +109,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--skill-path",
         type=Path,
-        default=PROJECT_ROOT / ".claude" / "skills" / "kl" / "SKILL.md",
+        default=PROJECT_ROOT / ".agents" / "skills" / "kl" / "SKILL.md",
     )
     parser.add_argument("--codex-sdk-path", type=Path, default=_default_sdk_path())
     parser.add_argument("--codex-bin", type=Path, default=_default_codex_bin())

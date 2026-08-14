@@ -24,6 +24,7 @@ from kl_graph.ingest.improvement import (
 )
 from kl_graph.ingest.llm_extractor import ExtractionFailure
 from kl_graph.ingest.pipeline import KEEP_EXTRACTION_CACHE, IngestionPipeline
+from kl_graph.ingest.recovery import SkipRoundError
 from kl_graph.utils.litellm_lifecycle import (
     run_litellm_coro,
     stop_litellm_logging_worker,
@@ -60,13 +61,19 @@ class IngestResult:
     extraction_succeeded: int = 0
     extraction_failed: int = 0
     failures: tuple[ExtractionFailure, ...] = ()
+    # 非空时表示本轮被跳过（工作集不可重建但图谱完好）——见 recovery.SkipRoundError。
+    skipped_reason: str = ""
 
     @property
     def outcome(self) -> str:
+        if self.skipped_reason:
+            return "skipped"
         return "partial" if self.extraction_failed else "success"
 
     @property
     def warning(self) -> str:
+        if self.skipped_reason:
+            return self.skipped_reason
         if not self.extraction_failed:
             return ""
         return (
@@ -85,6 +92,7 @@ class IngestResult:
             "extraction_succeeded": self.extraction_succeeded,
             "extraction_failed": self.extraction_failed,
             "failures": [failure.as_dict() for failure in self.failures],
+            "skipped_reason": self.skipped_reason,
         }
 
     @classmethod
@@ -104,6 +112,7 @@ class IngestResult:
             extraction_succeeded=int(raw.get("extraction_succeeded", 0)),
             extraction_failed=int(raw.get("extraction_failed", len(failures))),
             failures=failures,
+            skipped_reason=str(raw.get("skipped_reason", "")),
         )
 
 
@@ -172,8 +181,12 @@ def make_checkpoint(
         from kl_graph.storage.sqlite_store import SQLiteStore
 
         store = SQLiteStore(Path(data_dir) / "knowledge.db")
+    # 用 sql_conn 而非 conn：这是两种后端都实现的可移植访问器。
+    # 服务端复用的是图后端（LadybugStore），它只暴露 sql_conn（内部转发到
+    # 底层 SQLiteStore.conn）；裸 SQLiteStore 两者都有。早先误用 .conn 会在
+    # Ladybug 后端上抛 AttributeError，导致 Phase A 一建检查点就失败。
     return IngestCheckpoint(
-        store.conn,
+        store.sql_conn,
         options.source_id,
         [Path(options.input_dir)],
     )
@@ -434,5 +447,18 @@ async def run_ingestion(
             detail = f"ingest complete with warning: {result.warning}"
         report("done", 1.0, detail)
         return result
+    except SkipRoundError as exc:
+        # 工作集丢失/损坏且无法从现有去重账本重建：跳过被打断的这一轮，
+        # 但已累积的图谱完好、原样保留（§4/§5）。reset 检查点丢弃这一轮的
+        # 续跑状态并铸新 batch_id，让下一轮从干净状态继续增量累积；旧轮的
+        # units 仍标记为 seen（= 丢失），如需找回须恢复快照 —— 这一点通过
+        # warning 明确写进 ingest_runs，可观测而非静默降级。
+        logger.warning("Ingest round skipped (workset unrecoverable): %s", exc)
+        checkpoint.reset()
+        skip_result = IngestResult(0, 0, 0, 0, skipped_reason=str(exc))
+        if counts_callback is not None:
+            counts_callback(skip_result)
+        report("done", 1.0, f"round skipped: {exc}")
+        return skip_result
     finally:
         pipeline.close()

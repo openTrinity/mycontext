@@ -72,12 +72,17 @@ class KnowledgeStore(ABC):
         batch_id: str | None = None,
         batch_source_id: str | None = None,
         source_hash: str | None = None,
+        checkpoint_step_callback=None,
     ) -> None:
         """Atomically persist chunks and their ordered source-unit mappings.
 
         Backends used for ingestion must override this method.  It is deliberately
         part of the chunk commit point so a completed checkpoint can never refer
         to chunks whose lineage rows were not committed.
+
+        checkpoint_step_callback: 可选回调，须在写入 workset 的同一事务内被调用，
+        用于把 phase_a.persist_chunks 检查点步骤与 workset 写入原子地一起提交。
+        委托型后端必须原样透传给底层 SQLite 实现。
         """
         raise NotImplementedError
 

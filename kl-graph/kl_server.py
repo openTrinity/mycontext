@@ -158,6 +158,13 @@ class ServerState:
 
     def _open_sqlite(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._sqlite_path, check_same_thread=False)
+        # row_factory 必须设成 Row：恢复分类器（recovery.classify_recovery）与多处
+        # 端点都按列名取值（cp_row["batch_id"] 等）。这条连接是 quiesce（stop）
+        # 清空线程本地句柄后、下一次请求在工作线程上懒开的连接，
+        # 不经过 SQLiteStore（后者才会设 row_factory）。漏设会让 classify_recovery
+        # 抛 TypeError，被 _recovery_tier_from_db 吞掉后退回粗粒度启发式——把需要
+        # cleanup 的 Case D 静默误报成 resume（AGENTS.md §4 的静默降级）。
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-64000")  # 64MB
@@ -676,7 +683,11 @@ async def _run_single_ingest_job(req: IngestRequest):
         # counts_callback (_set_ingest_counts) the moment extraction finished, so
         # only the terminal progress state needs writing here.
         detail = "ingest complete"
-        if result.extraction_failed:
+        if result.outcome == "skipped":
+            # 本轮工作集不可重建（图谱已保留）：完成带告警，而非 state='error'。
+            # warning 已由 counts_callback 写入 ingest_progress，落库为 done。
+            detail = f"round skipped: {result.warning}"
+        elif result.extraction_failed:
             detail = f"ingest complete with warning: {result.warning}"
         _set_progress("done", "", 1.0, detail)
         logger.info("Background ingest complete.")
@@ -1351,9 +1362,16 @@ async def _quiesce() -> dict:
 
 
 def _store_paths() -> list[str]:
-    """Return the five store paths under DATA_DIR.
+    """Return the store paths under DATA_DIR for the wrapper to back up / restore.
 
     Paths are returned only to localhost callers and must never be logged.
+
+    向量目录必须取自实际生效的后端，不能写死 "qdrant_data"：本机默认后端是 zvec
+    （config.default.yaml 里 vector.backend=zvec → 运行期目录是 zvec_data /
+    zvec_communities）。曾经这里硬编码 qdrant_data，桌面端按此清单删除/恢复时会
+    漏掉真正的 zvec_data 向量目录——清理不彻底、恢复也对不上，属于静默降级
+    （AGENTS.md §4）。改用与启动时同源的 VECTOR_PATH / COMMUNITY_VECTOR_PATH
+    （均由 vector_store_path(后端, DATA_DIR) 派生），后端换成 qdrant 时自动跟随。
     """
     paths = [
         str(DATA_DIR / "knowledge.db"),
@@ -1361,23 +1379,38 @@ def _store_paths() -> list[str]:
         str(DATA_DIR / "knowledge.db-wal"),
         str(DATA_DIR / "graph.ladybug"),
         str(DATA_DIR / "graph.ladybug.wal"),
-        str(DATA_DIR / "qdrant_data"),
+        str(VECTOR_PATH),
+        str(COMMUNITY_VECTOR_PATH),
         str(DATA_DIR / "extraction_cache.db"),
     ]
     return paths
 
 
 def _last_batch_source_id(conn) -> str:
-    """取最近一条 ingest_batches 行的 source_id（供恢复分类使用）。
+    """取用于恢复分类的 source_id：优先 ingest_batches，回退 ingest_checkpoint。
 
-    恢复分类需要与实际写入数据对应的 source_id。这里以 round_started_at
-    最新的一行为准；表为空或查询失败返回 ""（调用方再回退到 "default"）。
+    恢复分类需要与实际数据对应的 source_id。首选 round_started_at 最新的
+    ingest_batches 行（有进行中/已完成 batch 时最贴切）。但 Case A（陈旧检查点
+    覆盖在被清空的图数据之上，如桌面端“清空图谱”后）里 ingest_batches 整表被清空，
+    只有 ingest_checkpoint 幸存——此时若仍回退到 "default"，分类器按 "default"
+    查不到检查点，tier 恒为 "ok"，恰恰把需要 resume 的清空场景静默判成健康
+    （AGENTS.md §4）。因此 ingest_batches 为空时改从幸存的 ingest_checkpoint 取
+    source_id。两表皆空才回退到调用方的 "default"。
     """
     try:
         row = conn.execute(
             """SELECT source_id
                FROM ingest_batches
                ORDER BY round_started_at DESC LIMIT 1"""
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:  # noqa: BLE001
+        pass
+    # 回退：ingest_batches 无行（Case A：图数据被清空但检查点幸存）。
+    try:
+        row = conn.execute(
+            "SELECT source_id FROM ingest_checkpoint LIMIT 1"
         ).fetchone()
         if row and row[0]:
             return str(row[0])
@@ -1472,6 +1505,20 @@ def _current_ingestion_identity() -> tuple[str, int]:
     except Exception:  # noqa: BLE001
         pass
 
+    # 最后回退：ingest_batches 整表被清空（Case A：桌面端“清空图谱”后仅
+    # ingest_checkpoint 幸存）。此时仍要给出真实的 ingestion_id——桌面端把它的
+    # 轮前备份按 ingestion_id 归档，返回空串会让它找不到该恢复哪一份备份，恢复
+    # 链路静默断掉（AGENTS.md §4）。checkpoint 表存了 batch_id 但没存
+    # round_started_at，所以时间戳诚实地保持 0，不臆造。
+    try:
+        row = conn.execute(
+            "SELECT batch_id FROM ingest_checkpoint WHERE batch_id != '' LIMIT 1"
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0]), 0
+    except Exception:  # noqa: BLE001
+        pass
+
     return "", 0
 
 
@@ -1534,108 +1581,6 @@ async def ingest_stop():
     result["round_started_at"] = round_started_at
     result["store_paths"] = _store_paths()
     return result
-
-
-@app.post("/ingest/stop-and-cleanup")
-async def ingest_stop_and_cleanup():
-    """Last-resort endpoint: stop the job, quiesce, and return the round identity.
-
-    Intended for the wrapper to call when resume is impossible (design §4.3).
-    Sequence:
-    1. Verify a batch identity exists (return 409 if none — nothing to report).
-    2. Write an honest warning to ``ingest_runs.warning`` stating that a full
-       restore requires the wrapper's pre-round backup and that kl performed no
-       logical deletion.
-    3. Quiesce — cancel the running job and close all DB handles.
-    4. Return ``{ingestion_id, round_started_at, store_paths}``.
-
-    kl does **not** restore anything (it holds no copy).  kl does **not** perform
-    logical deletion (no DELETE/UPDATE on chunks, entities, or facts).  The
-    response is factual (CLAUDE.md §4).
-
-    Returns::
-
-        {
-            "ingestion_id": "<batch_id>",
-            "round_started_at": <epoch_seconds>,
-            "store_paths": ["<abs-path>", ...]
-        }
-
-    Raises:
-        503 — server not ready.
-        409 — no batch identity found; nothing to stop or report.
-    """
-    if not state.ready:
-        raise HTTPException(503, "Server not ready")
-
-    # quiesce 会关闭 SQLite 连接，所以要先取到 identity。
-    ingestion_id, round_started_at = _current_ingestion_identity()
-    if not ingestion_id:
-        raise HTTPException(
-            409,
-            "No batch identity found — no round has been started so there is nothing to stop or report.",
-        )
-
-    warning = (
-        f"stop-and-cleanup was called for round {ingestion_id!r}. "
-        "kl performed no logical deletion: chunks, entities, and facts are intact. "
-        f"To restore to the pre-round state the wrapper must restore the backup it "
-        f"filed under ingestion_id={ingestion_id!r}. "
-        "If the wrapper never took a backup at that identity there is nothing to restore to."
-    )
-
-    # warning 要在 quiesce 之前写（quiesce 会把连接关掉）。
-    conn = state.sqlite_conn
-    if conn is not None:
-        run_id = state.current_run_id
-        if run_id:
-            updated = conn.execute(
-                "UPDATE ingest_runs SET warning=?, updated_at=? WHERE run_id=?",
-                (warning, int(time.time()), run_id),
-            ).rowcount
-            if not updated:
-                # 当前 run_id 在表里没有对应行时，补插一行。
-                now = int(time.time())
-                conn.execute(
-                    """INSERT INTO ingest_runs
-                       (run_id, source_id, input_dir, state, phase, percent, detail,
-                        error, started_at, updated_at, warning)
-                       VALUES (?, 'unknown', '', 'failed', '', 0.0, '',
-                               'stopped by stop-and-cleanup', ?, ?, ?)""",
-                    (run_id, now, now, warning),
-                )
-        else:
-            # 不知道 run_id 时，写到最近一条 ingest_runs 行。
-            recent = conn.execute(
-                "SELECT run_id FROM ingest_runs ORDER BY updated_at DESC LIMIT 1"
-            ).fetchone()
-            if recent:
-                conn.execute(
-                    "UPDATE ingest_runs SET warning=?, updated_at=? WHERE run_id=?",
-                    (warning, int(time.time()), recent[0]),
-                )
-            else:
-                # 一条 ingest_runs 都没有时，新建一行并标记 state='failed'。
-                new_run_id = str(uuid.uuid4())
-                now = int(time.time())
-                conn.execute(
-                    """INSERT INTO ingest_runs
-                       (run_id, source_id, input_dir, state, phase, percent, detail,
-                        error, started_at, updated_at, warning)
-                       VALUES (?, 'unknown', '', 'failed', '', 0.0, '',
-                               'stopped by stop-and-cleanup', ?, ?, ?)""",
-                    (new_run_id, now, now, warning),
-                )
-        conn.commit()
-
-    # 停掉任务并释放所有 DB 句柄。
-    await _quiesce()
-
-    return {
-        "ingestion_id": ingestion_id,
-        "round_started_at": round_started_at,
-        "store_paths": _store_paths(),
-    }
 
 
 @app.post("/search")

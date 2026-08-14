@@ -467,3 +467,71 @@ def test_ladybug_store_get_chunks_by_ids_all_unknown(tmp_path: pathlib.Path) -> 
     assert result == []
     store.close()
 
+
+
+@skip_no_ladybug
+def test_insert_chunks_with_units_forwards_checkpoint_callback(
+    tmp_path: pathlib.Path,
+) -> None:
+    """LadybugStore 必须把 checkpoint_step_callback 透传给底层 SQLiteStore。
+
+    回归用例：恢复链路给 SQLiteStore.insert_chunks_with_units 增加了
+    checkpoint_step_callback，用于把 phase_a.persist_chunks 与 workset 写入
+    原子提交。但图后端的委托包装当时漏改，导致服务端（Ladybug 后端）真实
+    摄取在 Phase A 落盘时抛 “unexpected keyword argument”，而单测从未走过
+    Ladybug 这条委托路径故静默漏过（AGENTS.md §4）。这里断言回调确实被调用
+    且拿到的是同一事务里的 SQLite 连接。
+    """
+    from kl_graph.models.types import ChunkUnit, SourceUnit
+
+    store = create_store(
+        "ladybug",
+        db_path=tmp_path / "test.db",
+        ladybug_path=str(tmp_path / "graph.ladybug"),
+    )
+    chunk = Chunk(
+        id="c1",
+        content="hello world",
+        source_type="message",
+        timestamp=100,
+        metadata={"conversation_id": "conv1", "sender": "Alice"},
+    )
+    unit = SourceUnit(
+        source_id="ding",
+        source_type="message",
+        unit_id="u1",
+        content_hash="h1",
+        timestamp=100,
+        metadata={},
+    )
+    membership = ChunkUnit(
+        chunk_id="c1",
+        source_id="ding",
+        source_type="message",
+        unit_id="u1",
+        unit_ordinal_in_chunk=0,
+        chunk_ordinal_in_unit=0,
+        start_offset=0,
+        end_offset=11,
+    )
+
+    seen = {}
+
+    def _cb(conn) -> None:
+        seen["called"] = True
+        seen["conn"] = conn
+
+    store.insert_chunks_with_units(
+        [chunk],
+        [unit],
+        [membership],
+        batch_id="b1",
+        batch_source_id="ding",
+        source_hash="sh1",
+        checkpoint_step_callback=_cb,
+    )
+
+    assert seen.get("called") is True
+    # 回调应拿到底层 SQLite 事务连接，即 sql_conn。
+    assert seen.get("conn") is store.sql_conn
+    store.close()

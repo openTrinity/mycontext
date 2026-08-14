@@ -4,7 +4,7 @@ Each test builds a synthetic durable state (ingest_checkpoint + ingest_batches
 + chunks table) and asserts the correct :class:`FailureCase` and
 :data:`RecoveryTier`.
 
-All fake IDs/hashes use FAKE-prefixed values (CLAUDE.md §1).
+All fake IDs/hashes use FAKE-prefixed values (AGENTS.md §1).
 """
 
 from __future__ import annotations
@@ -445,14 +445,18 @@ def test_case_b_execution_loads_sources_idempotent(tmp_path: Path) -> None:
     assert sources_loaded == [True], "_load_sources must be called for Case B"
 
 
-def test_case_b_empty_reparse_fails_loudly(tmp_path: Path) -> None:
+def test_case_b_empty_reparse_skips_round(tmp_path: Path) -> None:
     """Case B where the dedup ledger collapses the re-parse to an empty workset.
 
     The incremental units ledger already marks every unit as seen, so
     _load_sources yields zero chunks while durable chunks survive in the DB.
     Returning True here would make Phase B extract nothing — a silent data
-    loss (CLAUDE.md §4).  The heal must raise and point at --fresh-db instead.
+    loss (AGENTS.md §4).  The heal must raise SkipRoundError (skip the round,
+    keep the accumulated graph, advise a snapshot restore) — never --fresh-db,
+    which would destroy the long-lived graph.
     """
+    from kl_graph.ingest.recovery import SkipRoundError
+
     batch_id = "FAKEBATCH-EXEC-B03"
     pipeline, _store, _checkpoint, conn = _make_pipeline_with_checkpoint(
         tmp_path,
@@ -470,19 +474,25 @@ def test_case_b_empty_reparse_fails_loudly(tmp_path: Path) -> None:
 
     try:
         pipeline._maybe_heal_missing_workset()
-    except RuntimeError as exc:
-        assert "--fresh-db" in str(exc)
+    except SkipRoundError as exc:
+        message = str(exc)
+        assert "--fresh-db" not in message
+        assert "snapshot" in message.lower()
     else:
-        raise AssertionError("empty re-parse must raise, not silently 'heal'")
+        raise AssertionError("empty re-parse must skip the round, not silently 'heal'")
     assert pipeline._sources_loaded is False
 
 
-def test_case_b_no_source_not_healed(tmp_path: Path) -> None:
-    """Case B (source absent): _maybe_heal_missing_workset returns False.
+def test_case_b_no_source_skips_round(tmp_path: Path) -> None:
+    """Case B (source absent): _maybe_heal_missing_workset skips the round.
 
-    Without the source export on disk Phase A cannot re-run safely; the caller
-    should raise RuntimeError.
+    Without the source export on disk Phase A cannot re-run, so the workset
+    cannot be rebuilt from the surviving ledger.  Rather than force a full
+    rebuild, the healer raises SkipRoundError: skip the round, keep the
+    accumulated graph, advise a snapshot restore (never --fresh-db).
     """
+    from kl_graph.ingest.recovery import SkipRoundError
+
     batch_id = "FAKEBATCH-EXEC-B02"
     pipeline, _store, _checkpoint, conn = _make_pipeline_with_checkpoint(
         tmp_path,
@@ -493,6 +503,11 @@ def test_case_b_no_source_not_healed(tmp_path: Path) -> None:
     _insert_chunks(conn, n=2)
     # No ingest_batches row → Case B (source absent).
 
-    healed = pipeline._maybe_heal_missing_workset()
-
-    assert healed is False, "Case B without source must NOT be auto-healed"
+    try:
+        pipeline._maybe_heal_missing_workset()
+    except SkipRoundError as exc:
+        message = str(exc)
+        assert "--fresh-db" not in message
+        assert "snapshot" in message.lower()
+    else:
+        raise AssertionError("Case B without source must skip the round")

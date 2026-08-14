@@ -925,10 +925,25 @@ class IngestionPipeline:
         self._load_extraction_cache()
 
     def _restore_extraction_checkpoint(self) -> None:
-        """Restore extraction item counts and failures needed by run status."""
+        """Restore extraction item counts and failures needed by run status.
+
+        断点续跑（extraction 步已完成、跳过重算）时，本方法只负责恢复
+        “抽取项列表 + 失败清单”，供状态汇报与随后的 run_graph_build 查缓存。
+
+        关键：抽取项必须来自 _load_workset 从持久化 workset
+        (ingest_batch_extraction_items) 恢复的 **source-aware** 计划 ——
+        缓存正是按这些项的指纹落库的。曾经这里在 _load_workset 之后又用旧的
+        build_extraction_items(self.all_chunks()) 无条件覆盖一遍：旧构造器按
+        “每会话切片一项 / strategy_version=chat-message-v2” 产出，与 source-aware
+        的“每消息一项 / session-chat-v3”既不同 id 也不同指纹（实测 0/3 命中）。
+        覆盖后 _sources_loaded 已为真，run_graph_build 里的 _load_workset 提前
+        返回，clobber 保留 → 缓存覆盖率 0% → 图为空 → facts 归零，而运行状态却
+        报 done（典型静默降级，AGENTS.md §4）。
+        故删除该覆盖：_load_workset 已在计划为空且确有 chunk 时自行回退到
+        build_extraction_items（见 _load_workset 内的兼容分支），无需在此重复且有害地重建。
+        """
         self._init_stores()
         self._load_workset()
-        self.extraction_items = build_extraction_items(self.all_chunks())
         if self.checkpoint is None:
             return
         metadata = self.checkpoint.step_metadata("phase_b.extraction")
@@ -1930,17 +1945,26 @@ class IngestionPipeline:
           Phase A from sources.  But if the incremental dedup ledger has
           already recorded every unit as seen, the re-parse yields an empty
           in-memory workset while durable chunks remain — that cannot be
-          silently extracted, so this raises RuntimeError pointing at
-          --fresh-db.  Source-absent Case B cannot be healed; caller will raise.
+          silently extracted (§4), and it cannot be rebuilt from the existing
+          ledger either, so this raises :class:`SkipRoundError`: the round is
+          skipped, the accumulated graph is preserved, and the operator is
+          advised to restore a snapshot.  Source-absent Case B and Cases C/D
+          are likewise unrecoverable and raise :class:`SkipRoundError`.
 
         Returns:
             True when the situation was healed (``self._sources_loaded`` is
-            now set); False when no healing path is available.
+            now set).  Raises :class:`SkipRoundError` when the round must be
+            skipped; returns False only when no classifier was available
+            (caller then raises its generic no-workset error).
         """
         if self.checkpoint is None or self.store is None:
             return False
 
-        from kl_graph.ingest.recovery import FailureCase, classify_recovery
+        from kl_graph.ingest.recovery import (
+            FailureCase,
+            SkipRoundError,
+            classify_recovery,
+        )
 
         source_dir = self.messages_dir.parent if self.messages_dir else None
         try:
@@ -1974,7 +1998,7 @@ class IngestionPipeline:
             # 于是内存工作集塌缩成空。若此时返回 True，Phase B 会对「零 chunk」
             # 做抽取——DB 里明明还有 chunk，却被静默当成空跑完（正是 §4 禁止的
             # 静默降级）。所以这里重载后必须校验：内存工作集为空但 DB 里仍有 chunk
-            # 时，工作集无法从现有账本重建，只能诚实报错要求 --fresh-db 重建。
+            # 时，工作集无法从现有账本重建 —— 跳过本轮而不是整库重建，图谱保留。
             logger.info(
                 "Recovery Case B: workset row missing, source on disk; "
                 "re-running Phase A from sources (batch_id=%r)",
@@ -1983,25 +2007,32 @@ class IngestionPipeline:
             self._load_sources()
             if not self.all_chunks() and info.count_chunks > 0:
                 self._sources_loaded = False
-                raise RuntimeError(
+                raise SkipRoundError(
                     f"Checkpoint batch {self.batch_id!r} lost its workset row but "
                     f"{info.count_chunks} chunk(s) survive in the DB. The unit "
                     "dedup ledger already marks every source unit as seen, so the "
                     "workset cannot be rebuilt by re-parsing sources (that yields "
-                    "an empty workset and would silently extract nothing). Use "
-                    "--fresh-db to start a clean rebuild (extraction cache is "
-                    "preserved in extraction_cache.db)."
+                    "an empty workset and would silently extract nothing). Skipping "
+                    "this round and keeping the accumulated graph; restore a "
+                    "snapshot to recover the interrupted round's facts if needed."
                 )
             return True
 
-        # Cases C, D, and B-without-source cannot be auto-healed.
+        # Cases C, D, and B-without-source cannot be reconstructed from the
+        # surviving ledger.  Skip the round and keep the accumulated graph
+        # rather than forcing a full rebuild.
         logger.warning(
-            "Recovery case %r (tier=%r) is not auto-healable; "
-            "a manual --fresh-db rebuild is required",
+            "Recovery case %r (tier=%r) is not auto-healable; skipping this "
+            "round and preserving the accumulated graph",
             info.case,
             info.tier,
         )
-        return False
+        raise SkipRoundError(
+            f"Ingestion round cannot be resumed (recovery case {info.case.value}): "
+            "its workset is unavailable and cannot be rebuilt from the current "
+            "dedup ledger. Skipping this round and keeping the accumulated graph; "
+            "restore a snapshot if the interrupted round's data is needed."
+        )
 
     def _load_workset(self) -> None:
         """Hydrate the exact Phase-A batch from durable SQLite state.
@@ -2010,6 +2041,8 @@ class IngestionPipeline:
         Re-running source deduplication here would lose the original batch because
         its units are already present in the canonical ``units`` table.
         """
+
+        from kl_graph.ingest.recovery import SkipRoundError
 
         if self._sources_loaded:
             return
@@ -2021,15 +2054,17 @@ class IngestionPipeline:
             and self.checkpoint.workset_schema < 1
             and self.checkpoint.is_done("phase_a.persist_chunks")
         ):
-            raise RuntimeError(
+            raise SkipRoundError(
                 "Cannot resume a legacy checkpoint after Phase A: it has no durable "
-                "chunk workset. Start an explicit fresh rebuild."
+                "chunk workset. Skipping this round and keeping the accumulated "
+                "graph; restore a snapshot if this round's data is needed."
             )
 
         batch = self.store.get_ingest_batch(self.batch_id)
         if batch is None:
             # Durable workset row is missing.  Classify the situation before
-            # raising: Cases A and B are self-healable by re-running Phase A.
+            # raising: Case A is self-healable; Cases B/C/D raise SkipRoundError
+            # from the healer.  A False return means no classifier was available.
             healed = self._maybe_heal_missing_workset()
             if healed:
                 return
@@ -2037,21 +2072,29 @@ class IngestionPipeline:
                 f"Checkpoint batch {self.batch_id!r} has no durable workset; "
                 "run Phase A before any chunk-dependent phase"
             )
-        if batch["state"] != "ready":
+        if batch["state"] == "complete":
+            # 已完成的轮次被重开是逻辑错误（工作集已按设计清理），诚实硬报错。
             raise RuntimeError(
                 f"Ingestion batch {self.batch_id!r} is {batch['state']!r}; "
                 "its workset is no longer available"
+            )
+        if batch["state"] != "ready":
+            # 非 ready 非 complete = 部分写/损坏的中间态：跳过本轮，保留图谱。
+            raise SkipRoundError(
+                f"Ingestion batch {self.batch_id!r} is {batch['state']!r}; "
+                "its workset is not in a resumable state. Skipping this round and "
+                "keeping the accumulated graph; restore a snapshot if needed."
             )
 
         chunks = self.store.get_ingest_batch_chunks(self.batch_id)
         expected = int(batch["chunk_count"])
         if len(chunks) != expected:
-            raise RuntimeError(
+            raise SkipRoundError(
                 f"Ingestion batch {self.batch_id!r} is corrupt: expected "
                 f"{expected} chunks, loaded {len(chunks)}. The workset was "
                 "likely damaged by an external crash or manual deletion. "
-                "Use --fresh-db to start a clean rebuild (extraction cache "
-                "is preserved in extraction_cache.db)."
+                "Skipping this round and keeping the accumulated graph; restore "
+                "a snapshot if this round's data is needed."
             )
         self.messages = [c for c in chunks if c.source_type == "message"]
         self.extra_chunks = [c for c in chunks if c.source_type != "message"]
