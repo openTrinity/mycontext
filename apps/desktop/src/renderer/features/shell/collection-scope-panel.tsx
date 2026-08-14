@@ -298,7 +298,28 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           <ScopeCoverage
             key={domain}
             domain={domain}
-            channelId={channelId}
+            /**
+             * ★★★ 必须传 `activeChannel` 而不是 `channelId`。
+             *
+             * ## 这是 CDP 探针在真应用里抓到的（单测抓不到）
+             *
+             * `ScopeCoverage` 对 `channelId === null` 直接 `return null` ——
+             * 而 picker 没选过时这个 prop **就是 null**（那是常态：刚打开
+             * 状态页、只有一个渠道时都不会去点 picker）。
+             *
+             * 后果：整块覆盖面**一个字都不渲染** —— 连"正在统计…"与
+             * "还没有记账数据"都没有。实测（CDP）：三个源都开着、
+             * IPC 三个域全通，而界面上那三行完全不存在。
+             *
+             * 而这正是这个文件自己的注释警告过的那件事：`activeChannel`
+             * 提出来的理由是"读库/存库/草稿归属/会话过滤/已保存提示**五处**
+             * 都要用它，任意两处不一致就是一次跨渠道错位"。
+             * 覆盖面是**第六处**，而它漏了。
+             *
+             * ★ 单测抓不到它是因为渲染层测试都显式传了一个 channelId ——
+             * 而"没选过 picker"这个真实的默认状态没人造。
+             */
+            channelId={activeChannel}
             rangeDays={effective?.rangeDays ?? null}
             customRange={effective?.customRange ?? null}
           />

@@ -37,24 +37,28 @@ function toDayBucket(at: number): string {
 }
 
 /**
- * 每个域的**量词**与名字。
+ * 每个域的 i18n key 后缀（`status.scope.coverage.domain.<域>.label|unit`）。
  *
- * ## ★★ 为什么必须按域给量词，而不是统一说"条"
+ * ## ★★ 为什么量词必须按域给，而不是统一说"条"
  *
  * 「已有 300 条文档」是错的中文（文档按**篇**、会议按**场**）。
- * 而这不只是文案洁癖：三栏并排显示时，量词是用户区分
+ * 而这不只是文案洁癖：三栏并排显示时，量词与名字是用户区分
  * "这一行讲的是哪类数据"的**唯一**线索 —— 三行都说"条"读起来像
  * 同一个数字被显示了三遍。
  *
- * ★ `label` 也在这里给：界面上那三行需要一个标题，而把它交给调用方
- * 会让三处各写一份（然后其中一处漂成"文件"）。
+ * ## ★★★ 为什么走 i18n 而不是在这里写死中文
+ *
+ * 我第一版把 `{label: "消息", unit: "条"}` 直接写在这个文件里 ——
+ * 那会让**英文界面显示中文量词**。而更糟的是它让我误以为文案已经生效了：
+ * `t(key, {defaultValue})` 的 `defaultValue` **只在 key 不存在时**才用，
+ * 而 `settings.json` 里 `status.scope.coverage.summary` 这几个 key
+ * **本来就有**（旧的、不带 label/unit 的版本）—— 于是我改的 defaultValue
+ * 一个字都没进界面。
+ *
+ * 实测（CDP）：三行覆盖面并排渲染，而三行文案**完全一样**
+ * （都是"这段日期还没有记账数据"），用户根本分不清哪行是哪个域。
+ * 那正是"两类能回答、一类不能"要消灭的问题换了个形式又出现。
  */
-const DOMAIN_WORDS: Record<CoverageDomain, { label: string; unit: string }> = {
-  chat: { label: "消息", unit: "条" },
-  minutes: { label: "会议听记", unit: "场" },
-  doc: { label: "文档", unit: "篇" },
-}
-
 export function ScopeCoverage({
   channelId,
   /**
@@ -129,7 +133,14 @@ export function ScopeCoverage({
    * 采集还没跑到，也可能是那几天真的没消息。把它说成"0 条消息"
    * 就是把一个我们不知道的事讲成事实（v27 迁移注释里同一个取舍）。
    */
-  const words = DOMAIN_WORDS[domain]
+  /**
+   * ★ label / unit 走 i18n（见上面那段 ★★★）。`defaultValue` 只是兜底 ——
+   * 真正生效的是 `settings.json` 里那几个 key。
+   */
+  const words = {
+    label: t(`status.scope.coverage.domain.${domain}.label`, { defaultValue: domain }),
+    unit: t(`status.scope.coverage.domain.${domain}.unit`, { defaultValue: "" }),
+  }
   if (data === undefined || data.dayCount === 0) {
     return (
       <p className="typography-caption-400 text-[var(--text-base-tertiary)]">

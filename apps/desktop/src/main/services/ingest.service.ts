@@ -75,7 +75,6 @@ import {
    * `readDomainScope(db, "chat")` 的薄封装）。
    */
   readDomainScope,
-  isOccurredAtInScope,
   collectsNothing,
   type DomainScope,
   purgeOutOfScopeMessages,

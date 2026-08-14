@@ -205,12 +205,26 @@
       "savedHint": "Saved. Newly added scope will be backfilled on the next collection pass (minutes).",
       "growOnlyNote": "Scope only grows: unchecking does not delete what it already learned, nor shrink the scope — the graph and profile have already used those messages. To really remove data, use General › Wipe this channel's data.",
       "coverage": {
-        "loading": "Counting what you already have…",
-        "empty": "No coverage records for this range yet — once collection runs, per-day counts show up here.",
-        "summary": "{{count}} messages since {{from}}, across {{days}} days",
+        "loading": "Counting the {{label}} you already have…",
+        "empty": "{{label}}: no coverage records for this range yet — once collection runs, per-day counts show up here.",
+        "summary": "{{label}}: {{count}} {{unit}} since {{from}}, across {{days}} days",
         "allDrained": "All of these days are fully collected (paged to the end).",
         "pending": "{{done}} day(s) fully collected, {{pending}} still backfilling.",
-        "clamped": "(Counting the last 90 days only; earlier history is still in the learning scope.)"
+        "clamped": "(Counting the last 90 days only; earlier history is still in the learning scope.)",
+        "domain": {
+          "chat": {
+            "label": "Messages",
+            "unit": "messages"
+          },
+          "minutes": {
+            "label": "Meeting notes",
+            "unit": "sessions"
+          },
+          "doc": {
+            "label": "Documents",
+            "unit": "docs"
+          }
+        }
       }
     },
     "attention": {
