@@ -34,10 +34,13 @@ from kl_graph.evaluation.locomo.cases import (
 )
 from kl_graph.evaluation.locomo.experiment import (
     GenerateExperiment,
+    case_stage_output_dir,
+    convert_output_dir,
     load_generate_experiment,
 )
 from kl_graph.evaluation.locomo.source import (
     load_samples,
+    normalize_sample_id,
     select_samples,
     source_fingerprint,
 )
@@ -50,18 +53,26 @@ Translate relevant evidence into English while preserving names, titles, and oth
 When the evidence is already in English, use its exact words whenever possible.
 If the question cannot be answered, answer exactly: Not mentioned"""
 
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--case-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
 
-def _runtime_options(experiment: GenerateExperiment) -> argparse.Namespace:
+def _runtime_options(
+    experiment: GenerateExperiment, *, case_id: str | None
+) -> argparse.Namespace:
     config = experiment.generate
     return argparse.Namespace(
         allow_remote_content=config.allow_remote_content,
-        ask_dir=Path(experiment.run.output_dir),
+        ask_dir=(
+            case_stage_output_dir(experiment, case_id, "ask")
+            if case_id is not None
+            else Path(experiment.run.output_dir)
+        ),
         base_url=config.base_url,
         checkpoint_every=config.checkpoint_every,
         include_community_context=config.include_community_context,
@@ -69,7 +80,11 @@ def _runtime_options(experiment: GenerateExperiment) -> argparse.Namespace:
         max_retries=config.max_retries,
         max_tokens=config.max_tokens,
         model=config.model,
-        output_dir=Path(config.output_dir),
+        output_dir=(
+            case_stage_output_dir(experiment, case_id, "generate")
+            if case_id is not None
+            else Path(config.output_dir)
+        ),
         provider=config.provider,
         resume=experiment.run.mode == "resume",
         temperature=config.temperature,
@@ -358,7 +373,11 @@ def _resolve_output_dir(
     del dataset_dir, conversation_ids, category, input_run
     output_dir = args.output_dir.expanduser().resolve()
     if args.resume and not (output_dir / "run.json").is_file():
-        raise FileNotFoundError(f"generation run does not exist: {output_dir}")
+        unexpected = list(output_dir.iterdir()) if output_dir.is_dir() else []
+        if unexpected:
+            raise FileNotFoundError(
+                f"generation run has artifacts but no run.json: {output_dir}"
+            )
     return output_dir
 
 
@@ -393,9 +412,7 @@ def _generation_configuration(
     }
 
 
-def _validate_resume_run(
-    output_dir: Path, expected: dict[str, Any]
-) -> dict[str, Any]:
+def _validate_resume_run(output_dir: Path, expected: dict[str, Any]) -> dict[str, Any]:
     path = output_dir / "run.json"
     existing = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(existing, dict):
@@ -412,18 +429,35 @@ def _validate_configured_ask_run(
     experiment: GenerateExperiment,
     input_run: dict[str, Any],
     dataset_dir: Path,
+    *,
+    case_id: str | None,
 ) -> None:
     if experiment.backend == "kl_graph":
-        if experiment.case_set is None or dataset_dir != experiment.case_set.resolve():
+        configured_case_set = convert_output_dir(experiment)
+        if dataset_dir != configured_case_set.resolve():
             raise ValueError("Ask run case set differs from the configured case_set")
         _, entries = load_case_entries(dataset_dir)
         selected = select_cases(entries, experiment.selection.conversations)
+        if case_id is not None:
+            requested = normalize_sample_id(case_id)
+            selected = [
+                entry
+                for entry in selected
+                if normalize_sample_id(str(entry["conversation_id"])) == requested
+            ]
         conversations = [str(entry["conversation_id"]) for entry in selected]
     else:
         if dataset_dir != experiment.source.resolve():
             raise ValueError("Ask run source differs from the configured source")
         _, samples = load_samples(dataset_dir)
         selected = select_samples(samples, experiment.selection.conversations)
+        if case_id is not None:
+            requested = normalize_sample_id(case_id)
+            selected = [
+                sample
+                for sample in selected
+                if normalize_sample_id(str(sample["sample_id"])) == requested
+            ]
         conversations = [str(sample["sample_id"]) for sample in selected]
     questions = experiment.selection.questions
     expected = {
@@ -448,7 +482,7 @@ async def main(argv: list[str] | None = None) -> int:
     try:
         cli = parse_args(argv)
         experiment = load_generate_experiment(cli.config)
-        args = _runtime_options(experiment)
+        args = _runtime_options(experiment, case_id=cli.case_id)
     except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
         print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
         return 2
@@ -466,7 +500,12 @@ async def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             f"configured Ask directory is not a {experiment.backend} LoCoMo run"
         )
-    _validate_configured_ask_run(experiment, input_run, dataset_dir)
+    _validate_configured_ask_run(
+        experiment,
+        input_run,
+        dataset_dir,
+        case_id=cli.case_id,
+    )
     if backend in {"ragflow", "khoj"}:
         if input_run.get("source_sha256") != source_fingerprint(dataset_dir):
             raise ValueError("native LoCoMo source has changed on disk")
@@ -527,9 +566,13 @@ async def main(argv: list[str] | None = None) -> int:
         questions=len(rows),
     )
     prior_run = (
-        _validate_resume_run(output_dir, run_configuration) if args.resume else {}
+        _validate_resume_run(output_dir, run_configuration)
+        if args.resume and (output_dir / "run.json").is_file()
+        else {}
     )
     answers_path = output_dir / "answers.jsonl"
+    if not args.resume:
+        atomic_write_jsonl(answers_path, [])
     completed = _load_resumable(answers_path) if args.resume else {}
     row_ids = {str(row["id"]) for row in rows}
     unknown_ids = sorted(set(completed).difference(row_ids))

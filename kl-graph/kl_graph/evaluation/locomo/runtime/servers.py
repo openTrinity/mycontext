@@ -15,10 +15,7 @@ import httpx
 
 from kl_graph.config import PROJECT_ROOT
 from kl_graph.evaluation.io import atomic_write_json
-from kl_graph.evaluation.locomo.cases import (
-    CASE_DATA_DIRNAME,
-    resolve_case_root,
-)
+from kl_graph.evaluation.locomo.cases import CASE_DATA_DIRNAME, resolve_case_root
 from kl_graph.evaluation.locomo.kl_graph.build import case_environment
 
 ROUTES_ENV = "KL_LOCOMO_ROUTES"
@@ -34,12 +31,14 @@ class ProductionGraphServers:
         cases: list[dict[str, Any]],
         artifact_dir: Path,
         *,
+        build_dirs: dict[str, Path] | None = None,
         startup_timeout: float = SERVER_START_TIMEOUT,
     ):
         if not cases:
             raise ValueError("at least one LoCoMo conversation graph is required")
         self.case_set_root = case_set_root
         self.cases = cases
+        self.build_dirs = build_dirs or {}
         self.artifact_dir = artifact_dir
         self.startup_timeout = startup_timeout
         self.routes_path = artifact_dir / "server_routes.json"
@@ -60,15 +59,22 @@ class ProductionGraphServers:
         routes: dict[str, dict[str, object]] = {}
         try:
             for case in self.cases:
-                case_root = resolve_case_root(self.case_set_root, case)
-                data_dir = case_root / CASE_DATA_DIRNAME
                 conversation_id = str(case["conversation_id"])
+                build_dir = self.build_dirs.get(conversation_id) or resolve_case_root(
+                    self.case_set_root, case
+                )
+                data_dir = build_dir / CASE_DATA_DIRNAME
                 if not (data_dir / "knowledge.db").is_file():
                     raise FileNotFoundError(
                         f"conversation graph has not been built: {data_dir}"
                     )
                 port = _free_port()
-                env = case_environment(os.environ, self.case_set_root, case)
+                env = case_environment(
+                    os.environ,
+                    self.case_set_root,
+                    case,
+                    build_dir=build_dir,
+                )
                 env["KL_SERVER_PORT"] = str(port)
                 log_path = self.artifact_dir / f"{_safe_stem(conversation_id)}.log"
                 log_stream = log_path.open("w", encoding="utf-8")

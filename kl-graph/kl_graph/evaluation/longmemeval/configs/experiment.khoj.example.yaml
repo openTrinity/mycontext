@@ -1,12 +1,10 @@
-schema_version: 2
+schema_version: 3
 benchmark: longmemeval
 backend: khoj
 
 # Relative paths are resolved from this YAML file. API tokens remain
 # environment-only and are read from KHOJ_API_TOKEN.
 source: ${oc.env:LONGMEMEVAL_SOURCE}
-artifact_root: ../../../../data/longmemeval-khoj
-hypotheses: ../../../../data/longmemeval-khoj/hypotheses.jsonl
 
 selection:
   all: true
@@ -15,6 +13,7 @@ run:
   mode: resume
   output_dir: ../../../../data/longmemeval-khoj/ask
   keep_going: true
+  case_concurrency: 3
 
 tracking:
   database: ../../../../data/evaluation/results.sqlite
@@ -35,6 +34,7 @@ ask:
   timeout_seconds: 120
 
 generate:
+  output_dir: ../../../../data/longmemeval-khoj/generate
   concurrency: 10
   provider: anthropic
   model: qwen3.7-flash
@@ -46,8 +46,7 @@ generate:
   max_retries: 2
 
 score:
-  output: ../../../../data/longmemeval-khoj/score-results.jsonl
-  metrics_output: ../../../../data/longmemeval-khoj/score-metrics.json
+  output_dir: ../../../../data/longmemeval-khoj/score
   concurrency: 10
   judge:
     model: ${oc.env:LONGMEM_EVAL_MODEL}

@@ -1,20 +1,19 @@
-schema_version: 2
+schema_version: 3
 benchmark: longmemeval
 backend: kl_graph
 
 # Relative paths are resolved from this YAML file. API keys are intentionally
 # absent and remain environment-only.
 source: ${oc.env:LONGMEMEVAL_SOURCE}
-case_set: ../../../../data/longmemeval
-hypotheses: ../../../../data/longmemeval/hypotheses.jsonl
 
 selection:
   all: true
 
 run:
   mode: resume
-  output_dir: ../../../../data/longmemeval
+  output_dir: ../../../../data/longmemeval-kl/ask
   keep_going: true
+  case_concurrency: 3
 
 tracking:
   database: ../../../../data/evaluation/results.sqlite
@@ -39,6 +38,7 @@ ask:
   request_timeout_seconds: 180
 
 generate:
+  output_dir: ../../../../data/longmemeval-kl/generate
   concurrency: 10
   provider: anthropic
   model: qwen3.7-flash
@@ -50,8 +50,7 @@ generate:
   max_retries: 2
 
 score:
-  output: ../../../../data/longmemeval/score-results.jsonl
-  metrics_output: ../../../../data/longmemeval/score-metrics.json
+  output_dir: ../../../../data/longmemeval-kl/score
   concurrency: 10
   judge:
     model: ${oc.env:LONGMEM_EVAL_MODEL}

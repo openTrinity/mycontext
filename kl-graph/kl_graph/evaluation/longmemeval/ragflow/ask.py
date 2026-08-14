@@ -23,11 +23,11 @@ from kl_graph.evaluation.io import (
 )
 from kl_graph.evaluation.longmemeval.experiment import (
     RagflowAskExperiment,
+    case_stage_output_dir,
+    experiment_output_dir,
     load_ragflow_ask_experiment,
+    output_dir,
     select_entries,
-)
-from kl_graph.evaluation.longmemeval.experiment import (
-    output_dir as experiment_output_dir,
 )
 from kl_graph.evaluation.longmemeval.source import (
     case_root,
@@ -46,18 +46,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config", type=Path, required=True, help="LongMemEval RAGFlow experiment YAML"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--case-id")
     return parser.parse_args(argv)
 
 
-def _runtime_options(experiment: RagflowAskExperiment) -> argparse.Namespace:
+def _runtime_options(
+    experiment: RagflowAskExperiment, *, case_id: str | None
+) -> argparse.Namespace:
     """Adapt typed YAML values to the existing ask worker boundary."""
     return argparse.Namespace(
-        artifact_root=experiment.artifact_root,
+        artifact_root=experiment_output_dir(experiment),
         base_url=experiment.ragflow.base_url,
         candidate_count=experiment.ask.candidate_count,
         checkpoint_every=experiment.ask.checkpoint_every,
         max_concurrent=experiment.ask.concurrency,
-        output_dir=experiment_output_dir(experiment),
+        output_dir=(
+            case_stage_output_dir(experiment, case_id, "ask")
+            if case_id is not None
+            else output_dir(experiment)
+        ),
         overwrite=experiment.run.mode == "overwrite",
         rerank_id=experiment.ask.rerank_id,
         resume=experiment.run.mode == "resume",
@@ -379,13 +386,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cli = parse_args(argv)
         experiment = load_ragflow_ask_experiment(cli.config)
-        args = _runtime_options(experiment)
+        args = _runtime_options(experiment, case_id=cli.case_id)
     except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
         print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
         return 2
     try:
         source, cases = load_cases(experiment.source)
         selected = select_entries(cases, experiment.selection)
+        if cli.case_id is not None:
+            selected = [
+                case for case in selected if str(case["question_id"]) == cli.case_id
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {cli.case_id}")
         source_sha256 = source_fingerprint(source)
         output_dir = _resolve_output_dir(args, selected)
         if cli.dry_run:
@@ -407,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     results_path = output_dir / "results.jsonl"
+    if not args.resume:
+        atomic_write_jsonl(results_path, [])
     completed = _load_completed(results_path) if args.resume else {}
     _write_run(
         output_dir,

@@ -11,10 +11,15 @@ from types import SimpleNamespace
 from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl
 from kl_graph.evaluation.longmemeval import score
 from kl_graph.evaluation.longmemeval.generate import _ragflow_generation_inputs
+from kl_graph.evaluation.longmemeval.ragflow.ask import (
+    _normalise_items,
+    _source_turn_ids,
+)
 from kl_graph.evaluation.longmemeval.ragflow.build import _build_one
 from kl_graph.evaluation.longmemeval.source import (
     load_cases,
     render_document,
+    render_document_turns,
     source_fingerprint,
 )
 
@@ -99,6 +104,9 @@ def test_build_configures_naive_512_newline_chunking(tmp_path: Path) -> None:
         embedding_model="embedding-model",
         graph=False,
         dataset_prefix="longmemeval",
+        chunk_method="naive",
+        chunk_token_num=512,
+        delimiter="\n",
         dry_run=False,
         resume=False,
         parse_timeout=1.0,
@@ -116,12 +124,49 @@ def test_build_configures_naive_512_newline_chunking(tmp_path: Path) -> None:
     assert b"first user turn" in client.uploaded
     assert b"ASSISTANT_MUST_NOT_BE_UPLOADED" not in client.uploaded
     state = json.loads(
-        (args.artifact_root / "cases" / "q%2Fexample" / "ragflow.json").read_text(
+        (args.artifact_root / "q_example" / "build" / "ragflow.json").read_text(
             encoding="utf-8"
         )
     )
     assert state["status"] == "complete"
     assert state["parse"]["chunk_count"] == 2
+
+
+def test_vector_chunks_map_to_turns_while_graph_does_not_consume_top_k() -> None:
+    rendered = render_document_turns(_case())
+    chunks = [
+        {
+            "id": "graph",
+            "content": "synthesized graph context",
+            "document_id": "",
+            "document_name": "Related content in Knowledge Graph",
+        },
+        {
+            "id": "chunk-1",
+            "content": rendered[0][1].strip(),
+            "document_id": "doc-1",
+            "document_name": "q-example.txt",
+        },
+        {
+            "id": "chunk-2",
+            "content": rendered[1][1].strip(),
+            "document_id": "doc-1",
+            "document_name": "q-example.txt",
+        },
+        {
+            "id": "chunk-3",
+            "content": "not persisted",
+            "document_id": "doc-1",
+            "document_name": "q-example.txt",
+        },
+    ]
+
+    items, graph_count = _normalise_items(chunks, top_k=2)
+
+    assert graph_count == 1
+    assert [item["type"] for item in items] == ["graph", "chunk", "chunk"]
+    assert _source_turn_ids(_case(), items[1]["content"]) == [rendered[0][0]]
+    assert _source_turn_ids(_case(), items[2]["content"]) == [rendered[1][0]]
 
 
 def test_generate_uses_ragflow_item_content_directly(tmp_path: Path) -> None:
@@ -158,7 +203,9 @@ def test_generate_uses_ragflow_item_content_directly(tmp_path: Path) -> None:
         },
     )
 
-    root, question_ids, prompts = _ragflow_generation_inputs(ask_dir)
+    root, question_ids, prompts = _ragflow_generation_inputs(
+        ask_dir, max_retrieval_length=126_500
+    )
 
     assert root == ask_dir.resolve()
     assert question_ids == [QUESTION_ID]
@@ -168,30 +215,47 @@ def test_generate_uses_ragflow_item_content_directly(tmp_path: Path) -> None:
     assert "ASSISTANT_MUST_NOT_BE_UPLOADED" not in prompts[0][1]
 
 
-def test_score_accepts_explicit_native_subset_without_case_set(
+def test_score_accepts_configured_native_subset_without_case_set(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "native.json"
     _write_source(source)
-    hypotheses = tmp_path / "hypotheses.jsonl"
+    hypotheses = tmp_path / "generate" / "hypotheses.jsonl"
     atomic_write_jsonl(
         hypotheses,
         [{"question_id": QUESTION_ID, "hypothesis": "candidate answer"}],
     )
-
-    result = asyncio.run(
-        score.main(
-            [
-                str(tmp_path / "missing-converted-case-set"),
-                "--reference",
-                str(source),
-                "--hypotheses",
-                str(hypotheses),
-                "--metric-model",
-                "judge",
-                "--dry-run",
-            ]
-        )
+    config = tmp_path / "experiment.yaml"
+    config.write_text(
+        f"""schema_version: 3
+benchmark: longmemeval
+backend: ragflow
+source: {source}
+selection:
+  cases: ["{QUESTION_ID}"]
+run:
+  mode: overwrite
+  output_dir: {tmp_path / "ask"}
+  keep_going: false
+  case_concurrency: 1
+score:
+  output_dir: {tmp_path / "score"}
+  concurrency: 1
+  judge:
+    model: judge
+    base_url: https://judge.example/v1
+    temperature: 0
+    max_tokens: 10
+    timeout_seconds: 120
+    max_retries: 5
+  retrieval:
+    turn_recall:
+      enabled: false
+      k: 5
+""",
+        encoding="utf-8",
     )
+
+    result = asyncio.run(score.main(["--config", str(config), "--dry-run"]))
 
     assert result == 0

@@ -18,6 +18,7 @@ from omegaconf.errors import OmegaConfBaseException
 from kl_graph.evaluation.io import atomic_write_json
 from kl_graph.evaluation.locomo.experiment import (
     RagflowBuildExperiment,
+    experiment_output_dir,
     load_ragflow_build_experiment,
 )
 from kl_graph.evaluation.ragflow import RagflowEvaluationClient
@@ -25,6 +26,7 @@ from kl_graph.evaluation.ragflow import RagflowEvaluationClient
 from ..source import (
     case_root,
     load_samples,
+    normalize_sample_id,
     render_transcript,
     select_samples,
     source_fingerprint,
@@ -37,6 +39,7 @@ _OUTPUT_LOCK = threading.Lock()
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--case-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -45,7 +48,7 @@ def _runtime_options(
     experiment: RagflowBuildExperiment, *, dry_run: bool
 ) -> argparse.Namespace:
     return argparse.Namespace(
-        artifact_root=experiment.artifact_root,
+        artifact_root=experiment_output_dir(experiment),
         base_url=experiment.ragflow.base_url,
         case_concurrency=experiment.build.case_concurrency,
         chunk_method=experiment.build.chunk_method,
@@ -59,7 +62,7 @@ def _runtime_options(
         keep_going=experiment.run.keep_going,
         parse_timeout=experiment.build.parse_timeout_seconds,
         poll_seconds=experiment.build.poll_seconds,
-        resume=True,
+        resume=experiment.run.mode == "resume",
     )
 
 
@@ -68,7 +71,7 @@ def _utc_now() -> str:
 
 
 def _state_path(artifact_root: Path, sample_id: str) -> Path:
-    return case_root(artifact_root, sample_id) / "ragflow.json"
+    return case_root(artifact_root, sample_id) / "build" / "ragflow.json"
 
 
 def load_state(artifact_root: Path, sample_id: str) -> dict[str, Any]:
@@ -79,9 +82,7 @@ def load_state(artifact_root: Path, sample_id: str) -> dict[str, Any]:
     return value
 
 
-def _write_state(
-    artifact_root: Path, sample_id: str, state: dict[str, Any]
-) -> None:
+def _write_state(artifact_root: Path, sample_id: str, state: dict[str, Any]) -> None:
     state["updated_at"] = _utc_now()
     atomic_write_json(_state_path(artifact_root, sample_id), state)
 
@@ -373,6 +374,15 @@ def main(argv: list[str] | None = None) -> int:
         args = _runtime_options(experiment, dry_run=cli.dry_run)
         source, samples = load_samples(experiment.source)
         selected = select_samples(samples, experiment.selection.conversations)
+        if cli.case_id is not None:
+            requested = normalize_sample_id(cli.case_id)
+            selected = [
+                sample
+                for sample in selected
+                if normalize_sample_id(str(sample["sample_id"])) == requested
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {cli.case_id}")
         source_sha256 = source_fingerprint(source)
         if args.dry_run:
             client = None

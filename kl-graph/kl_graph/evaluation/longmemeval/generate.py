@@ -35,6 +35,9 @@ from kl_graph.evaluation.longmemeval.experiment import (
     PROMPT_RESERVE_TOKENS,
     GenerateConfig,
     GenerateExperiment,
+    case_stage_output_dir,
+    convert_output_dir,
+    hypotheses_output,
     load_generate_experiment,
     output_dir,
     select_entries,
@@ -103,6 +106,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="validate inputs and construct prompts without calling the model",
     )
+    parser.add_argument("--case-id")
     return parser.parse_args(argv)
 
 
@@ -176,11 +180,11 @@ def _read_evaluation(case_root: Path, question_id: str) -> EvaluationCase:
 
 
 def _read_ask_items(
-    case_root: Path,
+    ask_dir: Path,
     question_id: str,
     top_k: int,
 ) -> list[dict[str, Any]]:
-    path = case_root / "results" / f"ask_top{top_k}.json"
+    path = ask_dir / "result.json"
     artifact = json.loads(path.read_text(encoding="utf-8"))
     if artifact.get("question_id") != question_id:
         raise ValueError(f"ask result question ID mismatch: {question_id}")
@@ -195,9 +199,7 @@ def _read_ask_items(
     if not isinstance(items, list) or not items:
         raise ValueError(f"case {question_id}: ask returned no items")
     if len(items) > top_k:
-        raise ValueError(
-            f"case {question_id}: expected at most {top_k} ask items"
-        )
+        raise ValueError(f"case {question_id}: expected at most {top_k} ask items")
     if not all(isinstance(item, dict) for item in items):
         raise ValueError(f"case {question_id}: malformed ask items")
     return items
@@ -270,13 +272,13 @@ def _read_item_source_units(
 
 
 def _hydrate_items(
-    case_root: Path,
+    build_dir: Path,
     question_id: str,
     evaluation: EvaluationCase,
     items: list[dict[str, Any]],
 ) -> list[HydratedItem]:
     """Restore official flat-turn rounds for user-only Chunk and Fact hits."""
-    database = (case_root / CASE_DATA_DIRNAME / "knowledge.db").resolve()
+    database = (build_dir / CASE_DATA_DIRNAME / "knowledge.db").resolve()
     if not database.is_file():
         raise FileNotFoundError(f"case {question_id} has not been built: {database}")
 
@@ -615,6 +617,7 @@ def _generation_configuration(
 def _configured_generation_inputs(
     experiment: GenerateExperiment,
     *,
+    case_id: str | None,
     max_retrieval_length: int,
 ) -> tuple[Path, list[str], list[tuple[str, str]]]:
     if experiment.backend in {"khoj", "ragflow"}:
@@ -623,8 +626,13 @@ def _configured_generation_inputs(
             if experiment.backend == "khoj"
             else _ragflow_generation_inputs
         )
+        ask_root = (
+            case_stage_output_dir(experiment, case_id, "ask")
+            if case_id is not None
+            else output_dir(experiment)
+        )
         ask_root, question_ids, prompts = loader(
-            output_dir(experiment), max_retrieval_length=max_retrieval_length
+            ask_root, max_retrieval_length=max_retrieval_length
         )
         run = json.loads((ask_root / "run.json").read_text(encoding="utf-8"))
         configured_sha256 = source_fingerprint(experiment.source)
@@ -634,6 +642,10 @@ def _configured_generation_inputs(
             )
         _, cases = load_cases(experiment.source)
         selected = select_entries(cases, experiment.selection)
+        if case_id is not None:
+            selected = [
+                case for case in selected if str(case["question_id"]) == case_id
+            ]
         expected_ids = [str(case["question_id"]) for case in selected]
         if question_ids != expected_ids:
             raise ValueError(
@@ -641,18 +653,22 @@ def _configured_generation_inputs(
             )
         return ask_root, question_ids, prompts
 
-    if experiment.case_set is None:  # pragma: no cover - schema invariant
-        raise ValueError("backend='kl_graph' requires case_set")
-    root, entries = _load_case_entries(experiment.case_set)
+    root, entries = _load_case_entries(convert_output_dir(experiment))
     selected = select_entries(entries, experiment.selection)
+    if case_id is not None:
+        selected = [entry for entry in selected if str(entry["question_id"]) == case_id]
+        if len(selected) != 1:
+            raise ValueError(f"case is not selected: {case_id}")
     question_ids = [str(entry["question_id"]) for entry in selected]
     prompts: list[tuple[str, str]] = []
     for entry in selected:
         question_id = str(entry["question_id"])
         case_root = _resolve_manifest_path(root, entry["path"], "path")
+        ask_dir = case_stage_output_dir(experiment, question_id, "ask")
+        build_dir = case_stage_output_dir(experiment, question_id, "build")
         evaluation = _read_evaluation(case_root, question_id)
-        items = _read_ask_items(case_root, question_id, experiment.ask_top_k)
-        hydrated_items = _hydrate_items(case_root, question_id, evaluation, items)
+        items = _read_ask_items(ask_dir, question_id, experiment.ask_top_k)
+        hydrated_items = _hydrate_items(build_dir, question_id, evaluation, items)
         prompts.append(
             (
                 question_id,
@@ -670,17 +686,14 @@ def _configured_generation_inputs(
 def _validate_resume_run(path: Path, expected: dict[str, Any]) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError(
-            "resume requires a generation run manifest; set run.mode=overwrite: "
-            f"{path}"
+            f"resume requires a generation run manifest; set run.mode=overwrite: {path}"
         )
     existing = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(existing, dict):
         raise TypeError(f"generation run manifest is not an object: {path}")
     actual = existing.get("configuration")
     if actual != expected:
-        raise ValueError(
-            "generation configuration changed; set run.mode=overwrite"
-        )
+        raise ValueError("generation configuration changed; set run.mode=overwrite")
     return existing
 
 
@@ -704,10 +717,16 @@ async def main(argv: list[str] | None = None) -> int:
         )
         root, manifest_order, prompts = _configured_generation_inputs(
             experiment,
+            case_id=args.case_id,
             max_retrieval_length=max_retrieval_length,
         )
-        output = experiment.hypotheses
-        run_path = Path(f"{output}.run.json")
+        output = (
+            case_stage_output_dir(experiment, args.case_id, "generate")
+            / "hypotheses.jsonl"
+            if args.case_id is not None
+            else hypotheses_output(experiment)
+        )
+        run_path = output.parent / "run.json"
         run_configuration = _generation_configuration(
             experiment=experiment,
             root=root,
@@ -718,9 +737,14 @@ async def main(argv: list[str] | None = None) -> int:
 
         persisted: dict[str, dict[str, str]] = {}
         prior_run: dict[str, Any] = {}
-        if output.exists() and experiment.run.mode == "resume":
-            prior_run = _validate_resume_run(run_path, run_configuration)
-            persisted = _completed_rows(output)
+        if experiment.run.mode == "resume":
+            if run_path.is_file():
+                prior_run = _validate_resume_run(run_path, run_configuration)
+                persisted = _completed_rows(output) if output.is_file() else {}
+            elif output.exists():
+                raise ValueError(
+                    f"generation output exists without run manifest: {output}"
+                )
 
         unknown_ids = set(persisted).difference(manifest_order)
         if unknown_ids:
@@ -752,6 +776,14 @@ async def main(argv: list[str] | None = None) -> int:
             for question_id, prompt in pending:
                 print(f"{question_id}: prompt_chars={len(prompt)}", flush=True)
             print(f"pending hypotheses: {len(pending)}", flush=True)
+            return 0
+
+        if (
+            not pending
+            and prior_run.get("status") == "complete"
+            and output.is_file()
+        ):
+            print(f"generation complete and compatible; skipped: {output}", flush=True)
             return 0
 
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -804,9 +836,7 @@ async def main(argv: list[str] | None = None) -> int:
             for position, (question_id, prompt) in enumerate(pending, start=1)
         ]
         try:
-            for completed_now, task in enumerate(
-                asyncio.as_completed(tasks), start=1
-            ):
+            for completed_now, task in enumerate(asyncio.as_completed(tasks), start=1):
                 question_id, hypothesis = await task
                 completed[question_id] = {
                     "question_id": question_id,

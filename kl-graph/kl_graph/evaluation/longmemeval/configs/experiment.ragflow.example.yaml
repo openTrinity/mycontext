@@ -1,12 +1,10 @@
-schema_version: 2
+schema_version: 3
 benchmark: longmemeval
 backend: ragflow
 
 # Relative paths are resolved from this YAML file. RAGFLOW_API_KEY remains
 # environment-only. Build/Ask run in the dedicated Python 3.13 environment.
 source: ${oc.env:LONGMEMEVAL_SOURCE}
-artifact_root: ../../../../data/longmemeval-ragflow
-hypotheses: ../../../../data/longmemeval-ragflow/hypotheses.jsonl
 
 selection:
   all: true
@@ -15,6 +13,7 @@ run:
   mode: resume
   output_dir: ../../../../data/longmemeval-ragflow/ask
   keep_going: true
+  case_concurrency: 3
 
 tracking:
   database: ../../../../data/evaluation/results.sqlite
@@ -46,6 +45,7 @@ ask:
   checkpoint_every: 10
 
 generate:
+  output_dir: ../../../../data/longmemeval-ragflow/generate
   concurrency: 10
   provider: anthropic
   model: qwen3.7-flash
@@ -57,8 +57,7 @@ generate:
   max_retries: 2
 
 score:
-  output: ../../../../data/longmemeval-ragflow/score-results.jsonl
-  metrics_output: ../../../../data/longmemeval-ragflow/score-metrics.json
+  output_dir: ../../../../data/longmemeval-ragflow/score
   concurrency: 10
   judge:
     model: ${oc.env:LONGMEM_EVAL_MODEL}

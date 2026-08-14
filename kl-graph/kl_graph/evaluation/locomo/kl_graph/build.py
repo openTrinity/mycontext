@@ -38,8 +38,11 @@ from kl_graph.evaluation.locomo.cases import (
 )
 from kl_graph.evaluation.locomo.experiment import (
     KLBuildExperiment,
+    case_stage_output_dir,
+    convert_output_dir,
     load_kl_build_experiment,
 )
+from kl_graph.evaluation.locomo.source import normalize_sample_id
 
 _OUTPUT_LOCK = threading.Lock()
 
@@ -52,6 +55,7 @@ def case_source_id(conversation_id: str) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--case-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -71,11 +75,15 @@ def _runtime_options(
 
 
 def case_environment(
-    base: dict[str, str], case_set_root: Path, case: dict[str, Any]
+    base: dict[str, str],
+    case_set_root: Path,
+    case: dict[str, Any],
+    *,
+    build_dir: Path | None = None,
 ) -> dict[str, str]:
     case_root = resolve_case_root(case_set_root, case)
     dws_root = case_root / "dws"
-    data_dir = case_root / CASE_DATA_DIRNAME
+    data_dir = (build_dir or case_root) / CASE_DATA_DIRNAME
     conversation_id = str(case["conversation_id"])
     env = base.copy()
     env["KL_DWS_EXPORT_DIR"] = str(dws_root)
@@ -90,19 +98,21 @@ def validate_built_case(
     case_set_root: Path,
     case: dict[str, Any],
     *,
+    build_dir: Path | None = None,
     check_build_status: bool = True,
 ) -> dict[str, Any] | None:
     """Require one complete physical graph for exactly one conversation."""
     case_root = resolve_case_root(case_set_root, case)
+    build_root = build_dir or case_root
     conversation_id = str(case["conversation_id"])
     build_status = None
     if check_build_status:
         build_status = validate_production_build_status(
-            case_root / "build_status.json",
+            build_root / "build_status.json",
             dataset=DATASET_NAME,
             source_id=case_source_id(conversation_id),
         )
-    sqlite_path = case_root / CASE_DATA_DIRNAME / "knowledge.db"
+    sqlite_path = build_root / CASE_DATA_DIRNAME / "knowledge.db"
     if not sqlite_path.is_file():
         raise FileNotFoundError(sqlite_path)
     uri = f"{sqlite_path.resolve().as_uri()}?mode=ro"
@@ -196,6 +206,7 @@ def ingest_command(
 def _run_case(
     case_set_root: Path,
     case: dict[str, Any],
+    build_dir: Path,
     args: argparse.Namespace,
     position: int,
     total: int,
@@ -203,11 +214,11 @@ def _run_case(
     case_root = resolve_case_root(case_set_root, case)
     conversation_id = str(case["conversation_id"])
     dws_root = case_root / "dws"
-    data_dir = case_root / CASE_DATA_DIRNAME
-    status_path = case_root / "build_status.json"
-    log_path = case_root / "build.log"
+    data_dir = build_dir / CASE_DATA_DIRNAME
+    status_path = build_dir / "build_status.json"
+    log_path = build_dir / "build.log"
     command = ingest_command(args, input_dir=dws_root, conversation_id=conversation_id)
-    env = case_environment(os.environ, case_set_root, case)
+    env = case_environment(os.environ, case_set_root, case, build_dir=build_dir)
     source_id = case_source_id(conversation_id)
     improve_mode = "full" if args.with_improve else "off"
     configuration = production_build_configuration(
@@ -222,6 +233,7 @@ def _run_case(
     )
     if args.dry_run:
         return 0
+    build_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     status: dict[str, Any] = {
@@ -262,7 +274,12 @@ def _run_case(
         ingest = load_ingest_result(data_dir, source_id)
         status["ingest"] = ingest
         require_successful_ingest(ingest)
-        validate_built_case(case_set_root, case, check_build_status=False)
+        validate_built_case(
+            case_set_root,
+            case,
+            build_dir=build_dir,
+            check_build_status=False,
+        )
     except BaseException as exc:
         status.update(
             {
@@ -290,7 +307,10 @@ def _run_case(
 
 
 def run_cases(
-    case_set_root: Path, cases: list[dict[str, Any]], args: argparse.Namespace
+    case_set_root: Path,
+    cases: list[dict[str, Any]],
+    build_dirs: dict[str, Path],
+    args: argparse.Namespace,
 ) -> list[str]:
     failures: list[str] = []
     workers = min(args.case_concurrency, len(cases))
@@ -303,6 +323,7 @@ def run_cases(
                 _run_case,
                 case_set_root,
                 case,
+                build_dirs[str(case["conversation_id"])],
                 args,
                 position,
                 len(cases),
@@ -351,8 +372,18 @@ def main(argv: list[str] | None = None) -> int:
         cli = parse_args(argv)
         experiment = load_kl_build_experiment(cli.config)
         args = _runtime_options(experiment, dry_run=cli.dry_run)
-        root, cases = load_case_entries(experiment.case_set)
+        case_set = convert_output_dir(experiment)
+        root, cases = load_case_entries(case_set)
         selected = select_cases(cases, experiment.selection.conversations)
+        if cli.case_id is not None:
+            requested = normalize_sample_id(cli.case_id)
+            selected = [
+                case
+                for case in selected
+                if normalize_sample_id(str(case["conversation_id"])) == requested
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {cli.case_id}")
     except (
         OSError,
         TypeError,
@@ -366,7 +397,13 @@ def main(argv: list[str] | None = None) -> int:
         f"LoCoMo conversations selected: {len(selected)}",
         f"Build concurrency: {min(args.case_concurrency, len(selected))}",
     )
-    failures = run_cases(root, selected, args)
+    build_dirs = {
+        str(case["conversation_id"]): case_stage_output_dir(
+            experiment, str(case["conversation_id"]), "build"
+        )
+        for case in selected
+    }
+    failures = run_cases(root, selected, build_dirs, args)
     if failures:
         print(f"failed conversations: {failures}", file=sys.stderr)
         return 1

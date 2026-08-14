@@ -175,7 +175,9 @@ def test_generate_uses_khoj_chunk_content_directly(tmp_path: Path) -> None:
         },
     )
 
-    root, question_ids, prompts = _khoj_generation_inputs(ask_dir)
+    root, question_ids, prompts = _khoj_generation_inputs(
+        ask_dir, max_retrieval_length=126_500
+    )
 
     assert root == ask_dir.resolve()
     assert question_ids == [QUESTION_ID]

@@ -28,6 +28,8 @@ from kl_graph.evaluation.build_contract import retrieval_configuration
 from kl_graph.evaluation.io import atomic_write_json
 from kl_graph.evaluation.longmemeval.experiment import (
     AskExperiment,
+    case_stage_output_dir,
+    convert_output_dir,
     load_ask_experiment,
     select_entries,
 )
@@ -50,6 +52,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config", type=Path, required=True, help="LongMemEval experiment YAML"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--case-id")
     return parser.parse_args(argv)
 
 
@@ -153,6 +156,8 @@ def _result_is_complete(
 def _run_case(
     root: Path,
     entry: dict[str, Any],
+    build_dir: Path,
+    ask_dir: Path,
     experiment: AskExperiment,
     position: int,
     total: int,
@@ -163,17 +168,16 @@ def _run_case(
     question_id = entry["question_id"]
     case_root = _resolve_manifest_path(root, entry["path"], "path")
     dws_root = _resolve_manifest_path(root, entry["dws_root"], "dws_root")
-    data_dir = case_root / CASE_DATA_DIRNAME
-    build_status = validate_built_case(root, entry)
+    data_dir = build_dir / CASE_DATA_DIRNAME
+    build_status = validate_built_case(root, entry, build_dir=build_dir)
     if build_status is None:  # pragma: no cover - guarded by default validation
         raise RuntimeError(f"case {question_id} has no build status")
     build_configuration_sha256 = str(build_status["configuration_sha256"])
     retrieval_config = retrieval_configuration()
 
     question = _question(case_root, question_id)
-    results_dir = case_root / "results"
-    result_path = results_dir / f"ask_top{config.top_k}.json"
-    log_path = results_dir / "ask_server.log"
+    result_path = ask_dir / "result.json"
+    log_path = ask_dir / "ask_server.log"
     if result_path.exists():
         if experiment.run.mode == "resume" and _result_is_complete(
             result_path,
@@ -211,7 +215,7 @@ def _run_case(
     if dry_run:
         return
 
-    results_dir.mkdir(parents=True, exist_ok=True)
+    ask_dir.mkdir(parents=True, exist_ok=True)
     port = _free_port()
     env["KL_SERVER_PORT"] = str(port)
     server_command = [sys.executable, str(PROJECT_ROOT / "kl_server.py")]
@@ -259,9 +263,7 @@ def _run_case(
         if response.get("phase") != 1 or response.get("answer") not in (None, ""):
             raise RuntimeError("kl ask unexpectedly ran Phase 2")
         if len(response.get("items", [])) > config.top_k:
-            raise RuntimeError(
-                f"kl ask returned more than {config.top_k} items"
-            )
+            raise RuntimeError(f"kl ask returned more than {config.top_k} items")
         atomic_write_json(
             result_path,
             {
@@ -289,6 +291,8 @@ def _run_case(
 def _run_cases(
     root: Path,
     selected: list[dict[str, Any]],
+    build_dirs: dict[str, Path],
+    ask_dirs: dict[str, Path],
     experiment: AskExperiment,
     *,
     dry_run: bool,
@@ -309,6 +313,8 @@ def _run_cases(
                 _run_case,
                 root,
                 entry,
+                build_dirs[str(entry["question_id"])],
+                ask_dirs[str(entry["question_id"])],
                 experiment,
                 position,
                 total,
@@ -348,8 +354,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
         experiment = load_ask_experiment(args.config)
-        root, entries = _load_case_entries(experiment.case_set)
+        root, entries = _load_case_entries(convert_output_dir(experiment))
         selected = select_entries(entries, experiment.selection)
+        if args.case_id is not None:
+            selected = [
+                entry for entry in selected if str(entry["question_id"]) == args.case_id
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {args.case_id}")
     except (
         OSError,
         TypeError,
@@ -364,7 +376,26 @@ def main(argv: list[str] | None = None) -> int:
         f"LongMemEval cases selected: {len(selected)}",
         f"Case concurrency: {min(experiment.ask.case_concurrency, len(selected))}",
     )
-    failures = _run_cases(root, selected, experiment, dry_run=args.dry_run)
+    build_dirs = {
+        str(entry["question_id"]): case_stage_output_dir(
+            experiment, str(entry["question_id"]), "build"
+        )
+        for entry in selected
+    }
+    ask_dirs = {
+        str(entry["question_id"]): case_stage_output_dir(
+            experiment, str(entry["question_id"]), "ask"
+        )
+        for entry in selected
+    }
+    failures = _run_cases(
+        root,
+        selected,
+        build_dirs,
+        ask_dirs,
+        experiment,
+        dry_run=args.dry_run,
+    )
     if failures:
         print(f"failed cases: {failures}", file=sys.stderr)
         return 1

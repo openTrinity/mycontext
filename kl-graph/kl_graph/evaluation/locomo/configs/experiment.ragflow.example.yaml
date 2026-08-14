@@ -3,7 +3,6 @@ benchmark: locomo
 backend: ragflow
 
 source: ${oc.env:LOCOMO_SOURCE}
-artifact_root: ../../../../data/locomo-ragflow
 
 selection:
   conversations:
@@ -15,6 +14,7 @@ run:
   mode: resume
   output_dir: ../../../../data/locomo-ragflow-run/ask
   keep_going: true
+  case_concurrency: 3
 
 tracking:
   database: ../../../../data/evaluation/results.sqlite

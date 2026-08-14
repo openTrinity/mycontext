@@ -24,11 +24,11 @@ from kl_graph.evaluation.io import (
 from kl_graph.evaluation.khoj import KhojEvaluationClient
 from kl_graph.evaluation.longmemeval.experiment import (
     KhojAskExperiment,
+    case_stage_output_dir,
+    experiment_output_dir,
     load_khoj_ask_experiment,
+    output_dir,
     select_entries,
-)
-from kl_graph.evaluation.longmemeval.experiment import (
-    output_dir as experiment_output_dir,
 )
 from kl_graph.evaluation.longmemeval.source import (
     case_root,
@@ -46,18 +46,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config", type=Path, required=True, help="LongMemEval Khoj experiment YAML"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--case-id")
     return parser.parse_args(argv)
 
 
-def _runtime_options(experiment: KhojAskExperiment) -> argparse.Namespace:
+def _runtime_options(
+    experiment: KhojAskExperiment, *, case_id: str | None
+) -> argparse.Namespace:
     """Adapt typed YAML values to the existing ask worker boundary."""
     return argparse.Namespace(
-        artifact_root=experiment.artifact_root,
+        artifact_root=experiment_output_dir(experiment),
         base_url=experiment.khoj.base_url,
         checkpoint_every=experiment.ask.checkpoint_every,
         max_concurrent=experiment.ask.concurrency,
         max_retries=experiment.khoj.max_retries,
-        output_dir=experiment_output_dir(experiment),
+        output_dir=(
+            case_stage_output_dir(experiment, case_id, "ask")
+            if case_id is not None
+            else output_dir(experiment)
+        ),
         overwrite=experiment.run.mode == "overwrite",
         resume=experiment.run.mode == "resume",
         timeout_seconds=experiment.ask.timeout_seconds,
@@ -212,8 +219,7 @@ def _source_turn_ids(
         start = document.find(body, start + 1)
     if not matches:
         raise ValueError(
-            "Khoj chunk cannot be located in the uploaded source document: "
-            f"{filename}"
+            f"Khoj chunk cannot be located in the uploaded source document: {filename}"
         )
 
     candidates: list[list[str]] = []
@@ -221,9 +227,7 @@ def _source_turn_ids(
         chunk_end = chunk_start + len(body)
         ids = [
             turn_id
-            for (turn_id, text), turn_start in zip(
-                rendered_turns, starts, strict=True
-            )
+            for (turn_id, text), turn_start in zip(rendered_turns, starts, strict=True)
             if turn_start < chunk_end and turn_start + len(text) > chunk_start
         ]
         if ids and ids not in candidates:
@@ -413,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cli = parse_args(argv)
         experiment = load_khoj_ask_experiment(cli.config)
-        args = _runtime_options(experiment)
+        args = _runtime_options(experiment, case_id=cli.case_id)
     except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:
         print(f"error: invalid experiment configuration: {exc}", file=sys.stderr)
         return 2
@@ -421,6 +425,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source, cases = load_cases(experiment.source)
         selected = select_entries(cases, experiment.selection)
+        if cli.case_id is not None:
+            selected = [
+                case for case in selected if str(case["question_id"]) == cli.case_id
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {cli.case_id}")
         source_sha256 = source_fingerprint(source)
         if cli.dry_run:
             print(
@@ -452,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     results_path = output_dir / "results.jsonl"
+    if not args.resume:
+        atomic_write_jsonl(results_path, [])
     completed = _load_completed(results_path) if args.resume else {}
     _write_run(
         output_dir,

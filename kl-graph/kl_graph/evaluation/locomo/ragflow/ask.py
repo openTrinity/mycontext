@@ -22,6 +22,8 @@ from kl_graph.evaluation.io import (
 )
 from kl_graph.evaluation.locomo.experiment import (
     RagflowAskExperiment,
+    case_stage_output_dir,
+    experiment_output_dir,
     load_ragflow_ask_experiment,
 )
 from kl_graph.evaluation.ragflow import RagflowEvaluationClient
@@ -30,6 +32,7 @@ from ..source import (
     case_root,
     extract_dia_ids,
     load_samples,
+    normalize_sample_id,
     question_rows,
     select_samples,
     source_fingerprint,
@@ -40,16 +43,17 @@ from .build import load_state
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--case-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
 
 def _runtime_options(
-    experiment: RagflowAskExperiment, *, dry_run: bool
+    experiment: RagflowAskExperiment, *, case_id: str | None, dry_run: bool
 ) -> argparse.Namespace:
     questions = experiment.selection.questions
     return argparse.Namespace(
-        artifact_root=experiment.artifact_root,
+        artifact_root=experiment_output_dir(experiment),
         base_url=experiment.ragflow.base_url,
         candidate_count=experiment.ask.candidate_count,
         categories=questions.categories,
@@ -62,7 +66,11 @@ def _runtime_options(
         dry_run=dry_run,
         limit=questions.first,
         max_concurrent=experiment.ask.concurrency,
-        output_dir=Path(experiment.run.output_dir),
+        output_dir=(
+            case_stage_output_dir(experiment, case_id, "ask")
+            if case_id is not None
+            else Path(experiment.run.output_dir)
+        ),
         question_ids=questions.ids,
         question_id=(
             questions.ids[0]
@@ -84,7 +92,11 @@ def _resolve_output_dir(
     del selected
     candidate = args.output_dir.expanduser().resolve()
     if args.resume and not args.dry_run and not (candidate / "run.json").is_file():
-        raise FileNotFoundError(f"RAGFlow ask run does not exist: {candidate}")
+        unexpected = list(candidate.iterdir()) if candidate.is_dir() else []
+        if unexpected:
+            raise FileNotFoundError(
+                f"RAGFlow ask run has artifacts but no run.json: {candidate}"
+            )
     return candidate
 
 
@@ -292,7 +304,7 @@ def _validate_resume(
     selected: list[dict[str, Any]],
     rows: list[dict[str, Any]],
 ) -> None:
-    if not args.resume:
+    if not args.resume or not (output_dir / "run.json").is_file():
         return
     run = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
     expected = {
@@ -328,11 +340,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cli = parse_args(argv)
         experiment = load_ragflow_ask_experiment(cli.config)
-        args = _runtime_options(experiment, dry_run=cli.dry_run)
+        args = _runtime_options(experiment, case_id=cli.case_id, dry_run=cli.dry_run)
         source, samples = load_samples(experiment.source)
         selected = select_samples(samples, experiment.selection.conversations)
         source_sha256 = source_fingerprint(source)
         rows = question_rows(selected, experiment.selection.questions)
+        if cli.case_id is not None:
+            requested = normalize_sample_id(cli.case_id)
+            selected = [
+                sample
+                for sample in selected
+                if normalize_sample_id(str(sample["sample_id"])) == requested
+            ]
+            rows = [
+                row
+                for row in rows
+                if normalize_sample_id(str(row["sample_id"])) == requested
+            ]
+            if len(selected) != 1 or not rows:
+                raise ValueError(
+                    f"case is not selected or has no questions: {cli.case_id}"
+                )
         output_dir = _resolve_output_dir(args, selected)
         if cli.dry_run:
             print(
@@ -359,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     results_path = output_dir / "results.jsonl"
+    if not args.resume:
+        atomic_write_jsonl(results_path, [])
     completed = _load_completed(results_path) if args.resume else {}
     _write_run(
         output_dir,
@@ -408,9 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     ordered = _ordered(rows, completed)
     atomic_write_jsonl(results_path, ordered)
     failures = sum(row["status"] != "completed" for row in ordered)
-    status = (
-        "complete" if len(ordered) == len(rows) and failures == 0 else "incomplete"
-    )
+    status = "complete" if len(ordered) == len(rows) and failures == 0 else "incomplete"
     _write_run(
         output_dir,
         args=args,

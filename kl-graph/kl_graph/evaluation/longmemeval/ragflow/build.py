@@ -19,6 +19,7 @@ from omegaconf.errors import OmegaConfBaseException
 from kl_graph.evaluation.io import atomic_write_json
 from kl_graph.evaluation.longmemeval.experiment import (
     RagflowBuildExperiment,
+    experiment_output_dir,
     load_ragflow_build_experiment,
     select_entries,
 )
@@ -40,6 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config", type=Path, required=True, help="LongMemEval RAGFlow experiment YAML"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--case-id")
     return parser.parse_args(argv)
 
 
@@ -48,7 +50,7 @@ def _runtime_options(
 ) -> argparse.Namespace:
     """Adapt typed YAML values to the existing build worker boundary."""
     return argparse.Namespace(
-        artifact_root=experiment.artifact_root,
+        artifact_root=experiment_output_dir(experiment),
         base_url=experiment.ragflow.base_url,
         case_concurrency=experiment.build.case_concurrency,
         chunk_method=experiment.build.chunk_method,
@@ -62,8 +64,7 @@ def _runtime_options(
         keep_going=experiment.run.keep_going,
         parse_timeout=experiment.build.parse_timeout_seconds,
         poll_seconds=experiment.build.poll_seconds,
-        # A compatible remote Dataset is immutable and always reusable.
-        resume=True,
+        resume=experiment.run.mode == "resume",
     )
 
 
@@ -72,7 +73,7 @@ def _utc_now() -> str:
 
 
 def _state_path(artifact_root: Path, question_id: str) -> Path:
-    return case_root(artifact_root, question_id) / "ragflow.json"
+    return case_root(artifact_root, question_id) / "build" / "ragflow.json"
 
 
 def load_state(artifact_root: Path, question_id: str) -> dict[str, Any]:
@@ -380,6 +381,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source, cases = load_cases(experiment.source)
         selected = select_entries(cases, experiment.selection)
+        if cli.case_id is not None:
+            selected = [
+                case for case in selected if str(case["question_id"]) == cli.case_id
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {cli.case_id}")
         source_sha256 = source_fingerprint(source)
         client = (
             None

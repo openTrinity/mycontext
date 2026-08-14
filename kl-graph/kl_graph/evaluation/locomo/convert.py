@@ -19,7 +19,7 @@ from urllib.parse import quote
 from omegaconf.errors import OmegaConfBaseException
 
 from .cases import CASE_SET_FORMAT, DATASET_NAME
-from .experiment import load_convert_experiment
+from .experiment import convert_output_dir, load_convert_experiment
 
 SCHEMA_VERSION = 1
 _SESSION_FORMATS = ("%I:%M %p on %d %B, %Y", "%I:%M %p on %B %d, %Y")
@@ -27,7 +27,10 @@ _SESSION_KEY = re.compile(r"^session_(\d+)$")
 
 
 def convert(
-    input_path: Path, output_dir: Path, *, overwrite: bool = False
+    input_path: Path,
+    output_dir: Path,
+    *,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     raw_input = input_path.expanduser().resolve()
     source = _resolve_source(raw_input)
@@ -379,13 +382,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
         experiment = load_convert_experiment(args.config)
+        output = convert_output_dir(experiment)
         if args.dry_run:
             print(f"source={_resolve_source(experiment.source)}")
-            print(f"case_set={experiment.case_set}")
+            print(f"case_set={output}")
             return 0
         manifest = convert(
             experiment.source,
-            experiment.case_set,
+            output,
             overwrite=experiment.convert.reconvert,
         )
     except (OSError, TypeError, ValueError, OmegaConfBaseException) as exc:

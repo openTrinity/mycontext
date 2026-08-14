@@ -4,17 +4,16 @@
 LongMemEval case 对应一张独立图”的方案：每个 case 都有自己的 `KL_DATA_DIR`，
 SQLite、Qdrant、LadybugDB 和 ingestion checkpoint 不会在 case 之间共享。
 
-完整流程由一次数据准备和四个评估阶段组成：
+完整流程先准备一次数据，再由 pipeline case worker 跑完四个评估阶段：
 
 ```text
 LongMemEval JSON
     │
     └─ convert.py        数据准备：拆分 case，生成 DWS 输入
           │
-          ├─ Phase 1: kl_graph/build.py  建图
-          ├─ Phase 2: kl_graph/ask.py    检索 Top-K
-          ├─ Phase 3: generate.py    生成回答
-          └─ Phase 4: score.py       评估回答
+          └─ case workers: Build → Ask → Generate → Score
+                         │
+                         └─ aggregate Ask/Generate/Score
 ```
 
 这里的 Phase 1–4 是评估流水线的阶段，不是 KL Ask 内部的 Phase 1/Phase 2。
@@ -49,15 +48,21 @@ set +a
 
 ## 一键流水线：pipeline.py
 
-`pipeline.py` 按固定顺序调用现有阶段，不在编排层重新实现任何评估逻辑：
+`pipeline.py` 按 case 调用现有阶段，最后聚合全量实验结果：
 
 ```text
-KL Graph: Convert → Build → Ask → Generate → Score
-Khoj:               Build → Ask → Generate → Score
-RAGFlow:             Build → Ask → Generate → Score
+KL Graph: Convert once → each case(Build → Ask → Generate → Score) → Aggregate
+Khoj:                each case(Build → Ask → Generate → Score) → Aggregate
+RAGFlow:              each case(Build → Ask → Generate → Score) → Aggregate
 ```
 
 YAML 流水线通过必填的 `backend: kl_graph|khoj|ragflow` 选择后端。
+`run.case_concurrency` 控制同时运行多少个完整 case worker；每个 worker 内仍严格
+按照 Build → Ask → Generate → Score 顺序执行。pipeline 调用阶段时始终传入一个
+明确的 `--case-id`，因此不会与 `build.case_concurrency` 或
+`ask.case_concurrency` 相乘。后两者只在单独运行对应阶段、一次选择多个 case 时
+生效。`build.concurrency` 是单个 ingest 内部的 extraction 并发，资源峰值可能达到
+`run.case_concurrency × build.concurrency`。
 
 推荐通过 OmegaConf YAML 保存实验参数：
 
@@ -75,7 +80,7 @@ python -m kl_graph.evaluation.longmemeval.pipeline \
 YAML 支持 `${oc.env:NAME}`，API Key 不进入配置文件。`run.mode: resume` 时流水线
 复用 source 指纹和时区匹配的 Convert 结果及完整 Build；Ask 会校验已有 artifact，
 Generate 会根据 prompt 指纹只重跑输入发生变化的 case，完整且配置匹配的 Score
-也会跳过。完全展开且不含凭证的实验配置会保存到 `run.output_dir` 下的
+也会跳过。完全展开且不含凭证的实验配置会保存到实验根目录下的
 `experiment.resolved.json`。
 
 YAML 是实验参数的唯一来源。所有字段都必须显式填写；缺字段、未知字段和非法数值
@@ -87,8 +92,7 @@ Score 的可变运行参数集中在 `score` 配置中；官方 judge prompt、s
 
 ```yaml
 score:
-  output: ../../../../data/longmemeval/score-results.jsonl
-  metrics_output: ../../../../data/longmemeval/score-metrics.json
+  output_dir: ../../../../data/longmemeval-kl/score
   concurrency: 10
   judge:
     model: ${oc.env:LONGMEM_EVAL_MODEL}
@@ -122,8 +126,9 @@ python -m kl_graph.evaluation.longmemeval.convert \
   --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
-`convert.py` 会直接通过 OmegaConf 读取同一份 YAML 中的 `source`、`case_set`、
-`convert.timezone` 和 `convert.reconvert`。相对路径以 YAML 所在目录为基准。
+`convert.py` 会直接通过 OmegaConf 读取同一份 YAML 中的 `source`、
+`convert.timezone` 和 `convert.reconvert`；输出固定派生为实验根目录下的
+`convert/`。相对路径以 YAML 所在目录为基准。
 旧的 `INPUT OUTPUT --timezone ...` 调用方式不再支持。
 
 目标目录已存在且 `convert.reconvert: false` 时，转换器拒绝覆盖。确认需要重新生成
@@ -143,8 +148,9 @@ python -m kl_graph.evaluation.longmemeval.kl_graph.build \
   --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
-`build.case_concurrency` 控制同时运行多少个独立 case，`build.concurrency` 控制
-每个 ingest 子进程内部的 extraction 并发。`build.keep_cache`、
+单独运行 Build 时，`build.case_concurrency` 控制同时运行多少个独立 case；
+`build.concurrency` 控制每个 ingest 子进程内部的 extraction 并发。
+`build.keep_cache`、
 `build.with_improve` 和 `run.keep_going` 也直接控制对应行为，不再有代码默认值。
 
 重复运行会跳过状态完整且配置兼容的图。只有明确设置 `build.fresh: true` 才会向
@@ -176,12 +182,12 @@ python -m kl_graph.evaluation.longmemeval.kl_graph.ask \
   --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
-`run.mode: resume` 会跳过配置匹配且结构完整的 `ask_top{ask.top_k}.json`，并重新
+`run.mode: resume` 会跳过配置匹配且结构完整的 `ask/result.json`，并重新
 运行缺失、损坏或 reranker/build 配置不匹配的 case；`overwrite` 则替换所有选中
-case 的结果。case 并发、server 启动超时和请求超时分别由
+case 的结果。单独运行 Ask 时的 case 并发、server 启动超时和请求超时分别由
 `ask.case_concurrency`、`ask.server_start_timeout_seconds` 和
 `ask.request_timeout_seconds` 指定。临时 Server 日志保存在
-`results/ask_server.log`。
+case 的 `ask/ask_server.log`。
 
 ## Phase 3：generate.py
 
@@ -205,11 +211,12 @@ python -m kl_graph.evaluation.longmemeval.generate \
   --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
-输出路径由根级 `hypotheses` 显式指定。每完成一个 case 都会原子更新文件；
+每个 case 输出到 `<question-id>/generate/hypotheses.jsonl`，全量汇总到
+`generate/hypotheses.jsonl`。每完成一个 case 都会原子更新文件；
 `run.mode: resume` 会同时核对生成配置和每个 case 的 prompt SHA256，Ask 结果变化
 时只丢弃并重跑对应的旧回答。`overwrite` 会全部重跑。provider、模型、URL、
 temperature、token 上限、上下文窗口、并发、超时和重试次数全部来自 `generate`
-段。运行清单保存在 `<hypotheses>.run.json`。
+段。运行清单保存在同目录的 `run.json`。
 
 ## Phase 4：score.py
 
@@ -224,17 +231,15 @@ python -m kl_graph.evaluation.longmemeval.score \
   --config kl_graph/evaluation/longmemeval/configs/experiment.example.yaml
 ```
 
-`score.py` 从 YAML 的 `source`、`hypotheses`、`selection`、`run` 和 `score` 段读取
-reference、答案路径、题目子集、输出路径和全部 judge 参数。启用 turn recall 时，
-KL 要求 `case_set`，Khoj 从 `run.output_dir` 读取 Ask artifacts；两者都会校验
+`score.py` 从 YAML 的 `source`、`selection`、`run` 和 `score` 段读取
+reference、题目子集、输出路径和全部 judge 参数。答案与检索路径都从实验目录
+推导；各后端都会校验
 `score.retrieval.turn_recall.k <= ask.top_k`。旧的位置参数和评分参数不再支持。
-RAGFlow 外部结果仍可通过根级 `hypotheses` 复用最终答案 Score。
-
-逐题和汇总输出路径由 YAML 显式指定，例如：
+逐题和汇总输出位于：
 
 ```text
-score-results.jsonl
-score-metrics.json
+score/scored.jsonl
+score/metrics.json
 ```
 
 `run.mode: resume` 会跳过完整且参数匹配的评分；缺失、部分完成或参数不匹配的
@@ -253,33 +258,32 @@ GPT-4o judge 分数。需要与官方结果严格对比时，应将 judge endpoi
 按示例 YAML 运行时，主要结构如下：
 
 ```text
-data/longmemeval/
-├── manifest.json
-├── cases/
-│   └── QUESTION_ID/
-│       ├── manifest.json
-│       ├── evaluation.jsonl
-│       ├── dws/chat/
-│       ├── kl_data/
-│       ├── build.log
-│       ├── build_status.json
-│       └── results/
-│           ├── ask_top5.json
-│           └── ask_server.log
-├── hypotheses.jsonl
-├── hypotheses.jsonl.run.json
-├── score-results.jsonl
-└── score-metrics.json
+data/longmemeval-kl/
+├── experiment.yaml
+├── experiment.resolved.json
+├── convert/
+├── QUESTION_ID/
+│   ├── build/
+│   ├── ask/
+│   ├── generate/
+│   └── score/
+├── ask/
+├── generate/
+│   ├── hypotheses.jsonl
+│   └── run.json
+└── score/
+    ├── scored.jsonl
+    ├── metrics.json
+    └── run.json
 ```
 
-- `manifest.json`：整个 case set 的来源、统计信息和 case 顺序。
+- `convert/manifest.json`：整个 case set 的来源、统计信息和 case 顺序。
 - `dws/chat/`：只包含 user turn，是唯一会传给 ingestion 的 benchmark 输入。
 - `evaluation.jsonl`：完整源对话、问题和 Gold 数据，仅供生成与评分使用。
-- `kl_data/`：该 case 独立的 SQLite、向量库、图数据库和 ingestion checkpoint。
-- `ask_top{K}.json`：检索与 rerank 后的配置 Top-K。
-- `hypotheses.jsonl`：所有 case 的最终回答，顺序与顶层 manifest 一致。
-- `hypotheses.jsonl.run.json`：生成配置、Prompt 指纹和输出指纹。
-- `score-results.jsonl`：逐题 judge 结果；`score-metrics.json` 是汇总指标。
+- `QUESTION_ID/build/kl_data/`：该 case 独立的存储和 ingestion checkpoint。
+- `QUESTION_ID/ask/result.json`：检索与 rerank 后的配置 Top-K。
+- `generate/hypotheses.jsonl`：所有 case 的最终回答。
+- `score/scored.jsonl`：逐题 judge 结果；`score/metrics.json` 是汇总指标。
 
 ## 目录内文件
 
@@ -329,8 +333,8 @@ export RAGFLOW_API_KEY=your-api-key
   --config kl_graph/evaluation/longmemeval/configs/experiment.ragflow.example.yaml
 ```
 
-Build 状态位于 YAML `artifact_root` 下的 `cases/QUESTION_ID/ragflow.json`，Ask 固定
-写到 `run.output_dir`。Generate 直接使用 GraphRAG 合成文本和普通 chunk 生成答案；
+Build 状态位于 `<experiment>/QUESTION_ID/build/ragflow.json`，Ask 写到对应 case 的
+`ask/`。Generate 直接使用 GraphRAG 合成文本和普通 chunk 生成答案；
 Score 计算 `turn_recall@K` 时只取前 K 个普通 vector chunks，GraphRAG 合成项不参与
 召回排名，也不占用 K。
 
@@ -361,8 +365,7 @@ export KHOJ_API_TOKEN=optional-bearer-token
   --config kl_graph/evaluation/longmemeval/configs/experiment.khoj.example.yaml
 ```
 
-Build 状态位于 YAML `artifact_root` 下的 `cases/QUESTION_ID/khoj.json`。Ask run
-固定写到 `run.output_dir`，Generate 直接读取其中的 `run.json`、`results.jsonl` 和
-`responses/*.json`，生成根级 `hypotheses` 指定的文件，再交给统一 Score。Khoj Ask
+Build 状态位于 `<experiment>/QUESTION_ID/build/khoj.json`。Ask、Generate 和 Score
+先写入对应 case 目录，最后再汇总到实验根目录的同名阶段目录。Khoj Ask
 还会把每个 server chunk 映射回上传文档中的 `source_turn_ids`；因此 Score 可以和
 KL Graph 一样计算 `turn_recall@K`，其中 `K` 不得超过 `ask.top_k`。

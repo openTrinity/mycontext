@@ -60,6 +60,8 @@ from kl_graph.evaluation.build_contract import (
 from kl_graph.evaluation.longmemeval.experiment import (
     BuildExperiment,
     KLBuildConfig,
+    case_stage_output_dir,
+    convert_output_dir,
     load_build_experiment,
     select_entries,
 )
@@ -94,6 +96,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="print resolved case paths, environment, and commands without writing",
     )
+    parser.add_argument("--case-id")
     return parser.parse_args(argv)
 
 
@@ -222,16 +225,17 @@ def validate_built_case(
     case_set: Path,
     entry: dict[str, Any],
     *,
+    build_dir: Path | None = None,
     check_build_status: bool = True,
 ) -> dict[str, Any] | None:
     """Require a complete production build for one LongMemEval case."""
     question_id = str(entry["question_id"])
-    case_root = _resolve_manifest_path(case_set, entry["path"], "path")
-    data_dir = case_root / CASE_DATA_DIRNAME
+    build_root = build_dir or _resolve_manifest_path(case_set, entry["path"], "path")
+    data_dir = build_root / CASE_DATA_DIRNAME
     build_status = None
     if check_build_status:
         build_status = validate_production_build_status(
-            case_root / BUILD_STATUS_FILENAME,
+            build_root / BUILD_STATUS_FILENAME,
             dataset="longmemeval",
             source_id=case_source_id(question_id),
         )
@@ -297,6 +301,7 @@ def _terminate_active_processes() -> None:
 def _build_case(
     case_set: Path,
     entry: dict[str, Any],
+    build_dir: Path,
     experiment: BuildExperiment,
     *,
     position: int,
@@ -304,11 +309,10 @@ def _build_case(
     dry_run: bool,
 ) -> int:
     question_id = entry["question_id"]
-    case_root = _resolve_manifest_path(case_set, entry["path"], "path")
     dws_root = _resolve_manifest_path(case_set, entry["dws_root"], "dws_root")
-    data_dir = case_root / CASE_DATA_DIRNAME
-    status_path = case_root / BUILD_STATUS_FILENAME
-    log_path = case_root / BUILD_LOG_FILENAME
+    data_dir = build_dir / CASE_DATA_DIRNAME
+    status_path = build_dir / BUILD_STATUS_FILENAME
+    log_path = build_dir / BUILD_LOG_FILENAME
     config = experiment.build
     command = _ingest_command(config, input_dir=dws_root, question_id=question_id)
     env = _case_environment(
@@ -399,7 +403,12 @@ def _build_case(
         ingest = load_ingest_result(data_dir, source_id)
         status["ingest"] = ingest
         require_successful_ingest(ingest)
-        validate_built_case(case_set, entry, check_build_status=False)
+        validate_built_case(
+            case_set,
+            entry,
+            build_dir=build_dir,
+            check_build_status=False,
+        )
     except Exception as exc:
         status.update(
             state="failed",
@@ -423,6 +432,7 @@ def _build_case(
 def _run_builds(
     case_set: Path,
     selected: list[dict[str, Any]],
+    build_dirs: dict[str, Path],
     experiment: BuildExperiment,
     *,
     dry_run: bool,
@@ -443,6 +453,7 @@ def _run_builds(
                 _build_case,
                 case_set,
                 entry,
+                build_dirs[str(entry["question_id"])],
                 experiment,
                 position=position,
                 total=total,
@@ -503,7 +514,11 @@ def _pending_entries(
     for entry in selected:
         question_id = str(entry["question_id"])
         try:
-            status = validate_built_case(case_set, entry)
+            status = validate_built_case(
+                case_set,
+                entry,
+                build_dir=case_stage_output_dir(experiment, question_id, "build"),
+            )
         except (OSError, TypeError, ValueError, RuntimeError):
             pending.append(entry)
             continue
@@ -526,8 +541,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
         experiment = load_build_experiment(args.config)
-        case_set, entries = _load_case_entries(experiment.case_set)
+        case_set, entries = _load_case_entries(convert_output_dir(experiment))
         selected = select_entries(entries, experiment.selection)
+        if args.case_id is not None:
+            selected = [
+                entry for entry in selected if str(entry["question_id"]) == args.case_id
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {args.case_id}")
         pending = _pending_entries(case_set, selected, experiment)
     except (
         OSError,
@@ -548,8 +569,18 @@ def main(argv: list[str] | None = None) -> int:
     if not pending:
         return 0
     try:
+        build_dirs = {
+            str(entry["question_id"]): case_stage_output_dir(
+                experiment, str(entry["question_id"]), "build"
+            )
+            for entry in pending
+        }
         failures = _run_builds(
-            case_set, pending, experiment, dry_run=args.dry_run
+            case_set,
+            pending,
+            build_dirs,
+            experiment,
+            dry_run=args.dry_run,
         )
     except KeyboardInterrupt:
         return 130

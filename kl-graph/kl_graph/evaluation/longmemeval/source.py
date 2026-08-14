@@ -9,11 +9,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from kl_graph.config import PROJECT_ROOT
+from kl_graph.evaluation.io import artifact_stem
 from kl_graph.evaluation.longmemeval.convert import (
     DEFAULT_TIMEZONE,
     _required_list,
     _required_text,
-    case_dir_name,
     message_id,
     parse_longmemeval_date,
 )
@@ -180,4 +180,4 @@ def document_fingerprint(case: dict[str, Any]) -> str:
 
 
 def case_root(artifact_root: Path, question_id: str) -> Path:
-    return artifact_root.expanduser().resolve() / "cases" / case_dir_name(question_id)
+    return artifact_root.expanduser().resolve() / artifact_stem(question_id)

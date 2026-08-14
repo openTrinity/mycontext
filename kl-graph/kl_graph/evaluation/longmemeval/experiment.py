@@ -25,7 +25,9 @@ from pydantic import (
     model_validator,
 )
 
-EXPERIMENT_SCHEMA_VERSION = 2
+from kl_graph.evaluation.io import artifact_stem
+
+EXPERIMENT_SCHEMA_VERSION = 3
 BENCHMARK_NAME = "longmemeval"
 PROMPT_RESERVE_TOKENS = 1_000
 
@@ -45,8 +47,10 @@ class SelectionConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _require_one_mode(self) -> SelectionConfig:
-        modes = int(self.all is True) + int(self.first is not None) + int(
-            self.cases is not None
+        modes = (
+            int(self.all is True)
+            + int(self.first is not None)
+            + int(self.cases is not None)
         )
         if modes != 1:
             raise ValueError("set exactly one of all=true, first, or cases")
@@ -62,6 +66,7 @@ class RunConfig(_StrictModel):
     mode: Literal["resume", "overwrite"]
     output_dir: NonEmptyText
     keep_going: bool
+    case_concurrency: PositiveInt
 
 
 class ConvertConfig(_StrictModel):
@@ -149,6 +154,7 @@ class RagflowAskConfig(_StrictModel):
 
 
 class GenerateConfig(_StrictModel):
+    output_dir: NonEmptyText
     concurrency: PositiveInt
     provider: NonEmptyText
     model: NonEmptyText
@@ -188,8 +194,7 @@ class RetrievalConfig(_StrictModel):
 
 
 class ScoreConfig(_StrictModel):
-    output: NonEmptyText
-    metrics_output: NonEmptyText
+    output_dir: NonEmptyText
     concurrency: PositiveInt
     judge: JudgeConfig
     retrieval: RetrievalConfig
@@ -210,9 +215,6 @@ _ROOT_KEYS = {
     "benchmark",
     "backend",
     "source",
-    "case_set",
-    "artifact_root",
-    "hypotheses",
     "selection",
     "run",
     "convert",
@@ -230,14 +232,13 @@ _ROOT_KEYS = {
 class ConvertExperiment:
     config_path: Path
     source: Path
-    case_set: Path
+    run: RunConfig
     convert: ConvertConfig
 
 
 @dataclass(frozen=True)
 class BuildExperiment:
     config_path: Path
-    case_set: Path
     selection: SelectionConfig
     run: RunConfig
     build: KLBuildConfig
@@ -246,7 +247,6 @@ class BuildExperiment:
 @dataclass(frozen=True)
 class AskExperiment:
     config_path: Path
-    case_set: Path
     selection: SelectionConfig
     run: RunConfig
     ask: KLAskConfig
@@ -256,7 +256,6 @@ class AskExperiment:
 class KhojBuildExperiment:
     config_path: Path
     source: Path
-    artifact_root: Path
     selection: SelectionConfig
     run: RunConfig
     khoj: KhojConnectionConfig
@@ -267,7 +266,6 @@ class KhojBuildExperiment:
 class KhojAskExperiment:
     config_path: Path
     source: Path
-    artifact_root: Path
     selection: SelectionConfig
     run: RunConfig
     khoj: KhojConnectionConfig
@@ -278,7 +276,6 @@ class KhojAskExperiment:
 class RagflowBuildExperiment:
     config_path: Path
     source: Path
-    artifact_root: Path
     selection: SelectionConfig
     run: RunConfig
     ragflow: RagflowConnectionConfig
@@ -289,7 +286,6 @@ class RagflowBuildExperiment:
 class RagflowAskExperiment:
     config_path: Path
     source: Path
-    artifact_root: Path
     selection: SelectionConfig
     run: RunConfig
     ragflow: RagflowConnectionConfig
@@ -301,8 +297,6 @@ class GenerateExperiment:
     backend: BackendName
     config_path: Path
     source: Path
-    case_set: Path | None
-    hypotheses: Path
     selection: SelectionConfig
     run: RunConfig
     ask_top_k: int
@@ -314,8 +308,6 @@ class ScoreExperiment:
     backend: BackendName
     config_path: Path
     source: Path
-    case_set: Path | None
-    hypotheses: Path
     selection: SelectionConfig
     run: RunConfig
     ask_top_k: int | None
@@ -328,8 +320,6 @@ class KLExperiment:
     backend: Literal["kl_graph"]
     config_path: Path
     source: Path
-    case_set: Path
-    hypotheses: Path
     selection: SelectionConfig
     run: RunConfig
     convert: ConvertConfig
@@ -344,8 +334,6 @@ class KhojExperiment:
     backend: Literal["khoj"]
     config_path: Path
     source: Path
-    artifact_root: Path
-    hypotheses: Path
     selection: SelectionConfig
     run: RunConfig
     khoj: KhojConnectionConfig
@@ -360,8 +348,6 @@ class RagflowExperiment:
     backend: Literal["ragflow"]
     config_path: Path
     source: Path
-    artifact_root: Path
-    hypotheses: Path
     selection: SelectionConfig
     run: RunConfig
     ragflow: RagflowConnectionConfig
@@ -407,11 +393,11 @@ def _reject_keys(config: DictConfig, backend: BackendName, keys: set[str]) -> No
 
 def _validate_backend_keys(config: DictConfig, backend: BackendName) -> None:
     if backend == "kl_graph":
-        _reject_keys(config, backend, {"artifact_root", "khoj", "ragflow"})
+        _reject_keys(config, backend, {"khoj", "ragflow"})
     elif backend == "khoj":
-        _reject_keys(config, backend, {"case_set", "convert", "ragflow"})
+        _reject_keys(config, backend, {"convert", "ragflow"})
     else:
-        _reject_keys(config, backend, {"case_set", "convert", "khoj"})
+        _reject_keys(config, backend, {"convert", "khoj"})
 
 
 def _required_text(config: DictConfig, key: str) -> str:
@@ -440,12 +426,6 @@ def _executable_path(config_path: Path, value: str) -> Path:
 
 def _path(config_path: Path, config: DictConfig, key: str) -> Path:
     return _config_path(config_path, _required_text(config, key))
-
-
-def _optional_path(config_path: Path, config: DictConfig, key: str) -> Path | None:
-    if OmegaConf.select(config, key) is None:
-        return None
-    return _path(config_path, config, key)
 
 
 def _section(config: DictConfig, key: str, model: type[_StrictModel]) -> Any:
@@ -510,7 +490,7 @@ def load_convert_experiment(path: Path) -> ConvertExperiment:
     return ConvertExperiment(
         config_path=config_path,
         source=_path(config_path, raw, "source"),
-        case_set=_path(config_path, raw, "case_set"),
+        run=_section(raw, "run", RunConfig),
         convert=_section(raw, "convert", ConvertConfig),
     )
 
@@ -521,7 +501,6 @@ def load_build_experiment(path: Path) -> BuildExperiment:
     _validate_backend_keys(raw, backend)
     return BuildExperiment(
         config_path=config_path,
-        case_set=_path(config_path, raw, "case_set"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         build=_section(raw, "build", KLBuildConfig),
@@ -534,7 +513,6 @@ def load_ask_experiment(path: Path) -> AskExperiment:
     _validate_backend_keys(raw, backend)
     return AskExperiment(
         config_path=config_path,
-        case_set=_path(config_path, raw, "case_set"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         ask=_section(raw, "ask", KLAskConfig),
@@ -548,7 +526,6 @@ def load_khoj_build_experiment(path: Path) -> KhojBuildExperiment:
     return KhojBuildExperiment(
         config_path=config_path,
         source=_path(config_path, raw, "source"),
-        artifact_root=_path(config_path, raw, "artifact_root"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         khoj=_section(raw, "khoj", KhojConnectionConfig),
@@ -563,7 +540,6 @@ def load_khoj_ask_experiment(path: Path) -> KhojAskExperiment:
     return KhojAskExperiment(
         config_path=config_path,
         source=_path(config_path, raw, "source"),
-        artifact_root=_path(config_path, raw, "artifact_root"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         khoj=_section(raw, "khoj", KhojConnectionConfig),
@@ -578,7 +554,6 @@ def load_ragflow_build_experiment(path: Path) -> RagflowBuildExperiment:
     return RagflowBuildExperiment(
         config_path=config_path,
         source=_path(config_path, raw, "source"),
-        artifact_root=_path(config_path, raw, "artifact_root"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         ragflow=_ragflow_connection(config_path, raw),
@@ -593,7 +568,6 @@ def load_ragflow_ask_experiment(path: Path) -> RagflowAskExperiment:
     return RagflowAskExperiment(
         config_path=config_path,
         source=_path(config_path, raw, "source"),
-        artifact_root=_path(config_path, raw, "artifact_root"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         ragflow=_ragflow_connection(config_path, raw),
@@ -608,8 +582,6 @@ def load_generate_experiment(path: Path) -> GenerateExperiment:
         backend=backend,
         config_path=config_path,
         source=_path(config_path, raw, "source"),
-        case_set=_optional_path(config_path, raw, "case_set"),
-        hypotheses=_path(config_path, raw, "hypotheses"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         ask_top_k=_ask_top_k(raw),
@@ -627,8 +599,6 @@ def load_score_experiment(path: Path) -> ScoreExperiment:
         backend=backend,
         config_path=config_path,
         source=_path(config_path, raw, "source"),
-        case_set=_optional_path(config_path, raw, "case_set"),
-        hypotheses=_path(config_path, raw, "hypotheses"),
         selection=_section(raw, "selection", SelectionConfig),
         run=_section(raw, "run", RunConfig),
         ask_top_k=ask_top_k,
@@ -644,7 +614,6 @@ def load_experiment(path: Path) -> Experiment:
     config_path, raw, backend = _load_raw(path)
     _validate_backend_keys(raw, backend)
     source = _path(config_path, raw, "source")
-    hypotheses = _path(config_path, raw, "hypotheses")
     selection = _section(raw, "selection", SelectionConfig)
     run = _section(raw, "run", RunConfig)
     generate = _section(raw, "generate", GenerateConfig)
@@ -656,8 +625,6 @@ def load_experiment(path: Path) -> Experiment:
             backend="kl_graph",
             config_path=config_path,
             source=source,
-            case_set=_path(config_path, raw, "case_set"),
-            hypotheses=hypotheses,
             selection=selection,
             run=run,
             convert=_section(raw, "convert", ConvertConfig),
@@ -676,8 +643,6 @@ def load_experiment(path: Path) -> Experiment:
             backend="khoj",
             config_path=config_path,
             source=source,
-            artifact_root=_path(config_path, raw, "artifact_root"),
-            hypotheses=hypotheses,
             selection=selection,
             run=run,
             khoj=_section(raw, "khoj", KhojConnectionConfig),
@@ -698,8 +663,6 @@ def load_experiment(path: Path) -> Experiment:
         backend="ragflow",
         config_path=config_path,
         source=source,
-        artifact_root=_path(config_path, raw, "artifact_root"),
-        hypotheses=hypotheses,
         selection=selection,
         run=run,
         ragflow=_ragflow_connection(config_path, raw),
@@ -742,8 +705,61 @@ def output_dir(
 
 
 def score_output(experiment: ScoreExperiment | Experiment) -> Path:
-    return _config_path(experiment.config_path, experiment.score.output)
+    return score_output_dir(experiment) / "scored.jsonl"
 
 
 def score_metrics_output(experiment: ScoreExperiment | Experiment) -> Path:
-    return _config_path(experiment.config_path, experiment.score.metrics_output)
+    return score_output_dir(experiment) / "metrics.json"
+
+
+def experiment_output_dir(experiment: Any) -> Path:
+    """Return the directory containing aggregate outputs and per-case runs."""
+    root = output_dir(experiment).parent
+    other_roots: list[Path] = []
+    generate = getattr(experiment, "generate", None)
+    if generate is not None:
+        other_roots.append(
+            _config_path(experiment.config_path, generate.output_dir).parent
+        )
+    score = getattr(experiment, "score", None)
+    if score is not None:
+        other_roots.append(
+            _config_path(experiment.config_path, score.output_dir).parent
+        )
+    if any(path != root for path in other_roots):
+        raise ValueError(
+            "run.output_dir, generate.output_dir, and score.output_dir must "
+            "share one experiment directory"
+        )
+    return root
+
+
+def convert_output_dir(experiment: Any) -> Path:
+    return output_dir(experiment).parent / "convert"
+
+
+def case_stage_output_dir(
+    experiment: Any,
+    case_id: str,
+    stage: Literal["build", "ask", "generate", "score"],
+) -> Path:
+    return output_dir(experiment).parent / artifact_stem(case_id) / stage
+
+
+def generate_output_dir(experiment: GenerateExperiment | Experiment) -> Path:
+    return _config_path(experiment.config_path, experiment.generate.output_dir)
+
+
+def hypotheses_output(
+    experiment: GenerateExperiment | ScoreExperiment | Experiment,
+) -> Path:
+    generate = getattr(experiment, "generate", None)
+    if generate is not None:
+        directory = _config_path(experiment.config_path, generate.output_dir)
+    else:
+        directory = output_dir(experiment).parent / "generate"
+    return directory / "hypotheses.jsonl"
+
+
+def score_output_dir(experiment: ScoreExperiment | Experiment) -> Path:
+    return _config_path(experiment.config_path, experiment.score.output_dir)

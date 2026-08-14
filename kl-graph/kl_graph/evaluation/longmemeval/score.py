@@ -17,6 +17,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -29,13 +30,15 @@ from kl_graph.evaluation.longmemeval.convert import message_id
 from kl_graph.evaluation.longmemeval.experiment import (
     ScoreConfig,
     ScoreExperiment,
+    case_stage_output_dir,
+    convert_output_dir,
+    experiment_output_dir,
+    hypotheses_output,
     load_score_experiment,
     score_metrics_output,
     score_output,
+    score_output_dir,
     select_entries,
-)
-from kl_graph.evaluation.longmemeval.experiment import (
-    output_dir as experiment_output_dir,
 )
 from kl_graph.evaluation.longmemeval.generate import _read_item_source_units
 from kl_graph.evaluation.longmemeval.kl_graph.build import (
@@ -54,6 +57,8 @@ QUESTION_TYPES = (
     "temporal-reasoning",
     "knowledge-update",
 )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Score LongMemEval hypotheses with the official judge prompts."
@@ -65,6 +70,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="LongMemEval experiment YAML",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--case-id")
+    parser.add_argument("--aggregate-cases", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -209,12 +216,12 @@ def _turn_recall_metric(k: int) -> str:
 
 
 def _read_top_k_items(
-    case_root: Path,
+    ask_dir: Path,
     question_id: str,
     k: int,
     artifact_top_k: int,
 ) -> list[dict[str, Any]]:
-    path = case_root / "results" / f"ask_top{artifact_top_k}.json"
+    path = ask_dir / "result.json"
     artifact = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(artifact, dict) or artifact.get("question_id") != question_id:
         raise ValueError(f"ask result question ID mismatch: {question_id}")
@@ -232,22 +239,21 @@ def _read_top_k_items(
 
 
 def _retrieved_user_turn_ids(
-    case_root: Path,
+    build_dir: Path,
+    ask_dir: Path,
     question_id: str,
     source_roles: dict[str, str],
     k: int,
     artifact_top_k: int,
 ) -> list[str]:
-    database = (case_root / CASE_DATA_DIRNAME / "knowledge.db").resolve()
+    database = (build_dir / CASE_DATA_DIRNAME / "knowledge.db").resolve()
     if not database.is_file():
         raise FileNotFoundError(f"case {question_id} has not been built: {database}")
 
     retrieved: list[str] = []
     seen: set[str] = set()
     with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
-        for item in _read_top_k_items(
-            case_root, question_id, k, artifact_top_k
-        ):
+        for item in _read_top_k_items(ask_dir, question_id, k, artifact_top_k):
             for turn_id in _read_item_source_units(connection, item, question_id):
                 role = source_roles.get(turn_id)
                 if role is None:
@@ -351,6 +357,8 @@ def _score_retrieved_turns(
 
 def _score_retrieval_case(
     case_root: Path,
+    build_dir: Path,
+    ask_dir: Path,
     question_id: str,
     k: int,
     *,
@@ -370,7 +378,12 @@ def _score_retrieval_case(
         return row
 
     retrieved_turn_ids = _retrieved_user_turn_ids(
-        case_root, question_id, source_roles, k, artifact_top_k
+        build_dir,
+        ask_dir,
+        question_id,
+        source_roles,
+        k,
+        artifact_top_k,
     )
     return _score_retrieved_turns(row, retrieved_turn_ids, k)
 
@@ -393,9 +406,7 @@ def _aggregate_retrieval_rows(
             continue
         value = row[metric]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError(
-                f"eligible row has no {metric}: {row['question_id']}"
-            )
+            raise TypeError(f"eligible row has no {metric}: {row['question_id']}")
         score = float(value)
         eligible_scores.append(score)
         by_type[str(row["question_type"])].append(score)
@@ -428,6 +439,7 @@ def _aggregate_retrieval_rows(
 
 
 def _score_retrieval_rows(
+    experiment: ScoreExperiment,
     case_set: Path,
     entries: list[dict[str, Any]],
     question_ids: list[str],
@@ -443,6 +455,8 @@ def _score_retrieval_rows(
     return [
         _score_retrieval_case(
             _resolve_manifest_path(case_set, by_id[question_id]["path"], "path"),
+            case_stage_output_dir(experiment, question_id, "build"),
+            case_stage_output_dir(experiment, question_id, "ask"),
             question_id,
             k,
             artifact_top_k=artifact_top_k,
@@ -483,9 +497,7 @@ def _read_native_retrieval_items(
     ):
         raise ValueError(f"RAGFlow ask run has incompatible Top-K semantics: {ask_dir}")
     if run.get("source_sha256") != source_fingerprint(source):
-        raise ValueError(
-            f"native LongMemEval source changed after the {label} ask run"
-        )
+        raise ValueError(f"native LongMemEval source changed after the {label} ask run")
     if run.get("question_ids") != question_ids:
         raise ValueError(f"{label} ask question IDs/order differ from Score selection")
     if run.get("top_k") != artifact_top_k:
@@ -560,12 +572,10 @@ def _score_native_retrieval_rows(
     rows: list[dict[str, Any]] = []
     for question_id in question_ids:
         reference = references[question_id]
-        question_type, is_abstention, gold_turn_ids, source_roles = (
-            _retrieval_targets(
-                reference,
-                question_id,
-                is_abstention=question_id.endswith("_abs"),
-            )
+        question_type, is_abstention, gold_turn_ids, source_roles = _retrieval_targets(
+            reference,
+            question_id,
+            is_abstention=question_id.endswith("_abs"),
         )
         row = _retrieval_row(
             question_id=question_id,
@@ -640,11 +650,7 @@ def score_is_complete(
     """Return whether persisted Score artifacts exactly match this config."""
     judge = config.judge
     turn_recall = config.retrieval.turn_recall
-    if (
-        not hypotheses.is_file()
-        or not output.is_file()
-        or not metrics_output.is_file()
-    ):
+    if not hypotheses.is_file() or not output.is_file() or not metrics_output.is_file():
         return False
     try:
         hypothesis_rows = list(json_lines(hypotheses))
@@ -733,6 +739,7 @@ async def _score_one(
     score = int("yes" in response.lower())
     scored = {
         **hypothesis,
+        "question_type": question_type,
         "autoeval_label": {
             "model": model,
             "label": bool(score),
@@ -751,6 +758,19 @@ def _record_tracked_score(
     expected_ids: list[str],
 ) -> None:
     if experiment.tracking is None:
+        return
+    database = Path(experiment.tracking.database)
+    if score_run_exists(
+        database=database,
+        benchmark="longmemeval",
+        backend=experiment.backend,
+        source_sha256=source_fingerprint(experiment.source),
+        config_path=experiment.config_path,
+        resolved_config_path=experiment_output_dir(experiment)
+        / "experiment.resolved.json",
+        artifact_dir=metrics_path.parent,
+    ):
+        print(f"tracked run already exists; skipped ({database})", flush=True)
         return
     turn_recall = experiment.score.retrieval.turn_recall
     retrieval_metric = _turn_recall_metric(turn_recall.k)
@@ -772,7 +792,7 @@ def _record_tracked_score(
             }
 
     run_id = record_score_run(
-        database=Path(experiment.tracking.database),
+        database=database,
         benchmark="longmemeval",
         backend=experiment.backend,
         source_sha256=source_fingerprint(experiment.source),
@@ -785,9 +805,117 @@ def _record_tracked_score(
         cases=cases(),
     )
     print(
-        f"tracked run: {run_id} ({Path(experiment.tracking.database)})",
+        f"tracked run: {run_id} ({database})",
         flush=True,
     )
+
+
+def _score_metrics_from_rows(
+    scored_rows: list[dict[str, Any]],
+    score_config: ScoreConfig,
+    retrieval_metrics: dict[str, Any] | None,
+) -> dict[str, Any]:
+    by_type: dict[str, list[int]] = defaultdict(list)
+    abstention_scores: list[int] = []
+    for row in scored_rows:
+        question_id = str(row.get("question_id") or "")
+        question_type = str(row.get("question_type") or "")
+        label = row.get("autoeval_label") or {}
+        value = label.get("label")
+        if question_type not in QUESTION_TYPES or not isinstance(value, bool):
+            raise ValueError(f"invalid scored row: {question_id}")
+        score = int(value)
+        by_type[question_type].append(score)
+        if question_id.endswith("_abs"):
+            abstention_scores.append(score)
+    all_scores = [score for values in by_type.values() for score in values]
+    task_scores = [fmean(by_type[name]) for name in QUESTION_TYPES if by_type[name]]
+    judge = score_config.judge
+    metrics: dict[str, Any] = {
+        "metric_model": judge.model,
+        "base_url": judge.base_url,
+        "concurrency": score_config.concurrency,
+        "judge": {
+            **judge.model_dump(),
+            "label_parser": "official_substring_yes",
+        },
+        "questions": len(all_scores),
+        "task_averaged_accuracy": round(fmean(task_scores), 4),
+        "overall_accuracy": _accuracy(all_scores),
+        "abstention_accuracy": _accuracy(abstention_scores),
+        "abstention_questions": len(abstention_scores),
+        "by_question_type": {
+            name: {
+                "accuracy": _accuracy(by_type[name]),
+                "count": len(by_type[name]),
+            }
+            for name in QUESTION_TYPES
+        },
+    }
+    if retrieval_metrics is not None:
+        metrics["retrieval"] = retrieval_metrics
+    return metrics
+
+
+def _aggregate_case_scores(
+    experiment: ScoreExperiment,
+    reference_by_id: dict[str, dict[str, Any]],
+    expected_ids: list[str],
+) -> int:
+    scored_rows: list[dict[str, Any]] = []
+    retrieval_rows: list[dict[str, Any]] = []
+    for question_id in expected_ids:
+        case_dir = case_stage_output_dir(experiment, question_id, "score")
+        run = json.loads((case_dir / "run.json").read_text(encoding="utf-8"))
+        if run.get("status") != "complete" or run.get("question_ids") != [question_id]:
+            raise RuntimeError(f"case Score is incomplete: {case_dir}")
+        rows = list(json_lines(case_dir / "scored.jsonl"))
+        if len(rows) != 1 or rows[0].get("question_id") != question_id:
+            raise RuntimeError(f"case Score row mismatch: {case_dir}")
+        scored_rows.extend(rows)
+        retrieval = rows[0].get("retrieval")
+        if retrieval is not None:
+            if not isinstance(retrieval, dict):
+                raise TypeError(f"invalid case retrieval row: {question_id}")
+            retrieval_rows.append(retrieval)
+
+    turn_recall = experiment.score.retrieval.turn_recall
+    retrieval_metrics = (
+        _aggregate_retrieval_rows(retrieval_rows, turn_recall.k)
+        if turn_recall.enabled
+        else None
+    )
+    metrics = _score_metrics_from_rows(scored_rows, experiment.score, retrieval_metrics)
+    output_dir = score_output_dir(experiment)
+    output = score_output(experiment)
+    metrics_path = score_metrics_output(experiment)
+    atomic_write_jsonl(output, scored_rows)
+    atomic_write_json(metrics_path, metrics)
+    atomic_write_json(
+        output_dir / "run.json",
+        {
+            "status": "complete",
+            "completed_at": datetime.now().astimezone().isoformat(),
+            "question_ids": expected_ids,
+            "questions": len(scored_rows),
+            "case_runs": [
+                str(case_stage_output_dir(experiment, value, "score"))
+                for value in expected_ids
+            ],
+            "execution_order": "case",
+        },
+    )
+    _record_tracked_score(
+        experiment,
+        metrics_path,
+        metrics,
+        {str(row["question_id"]): row for row in scored_rows},
+        reference_by_id,
+        expected_ids,
+    )
+    print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
+    print(f"aggregated Score: {output_dir}", flush=True)
+    return 0
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -797,29 +925,59 @@ async def main(argv: list[str] | None = None) -> int:
         score_config = experiment.score
         judge = score_config.judge
         turn_recall = score_config.retrieval.turn_recall
-
-        hypotheses_path = experiment.hypotheses
+        if args.case_id is not None and args.aggregate_cases:
+            raise ValueError("--case-id and --aggregate-cases are mutually exclusive")
         reference_path = resolve_source(experiment.source)
-        for path in (hypotheses_path, reference_path):
-            if not path.is_file():
-                raise FileNotFoundError(path)
-
-        hypotheses = _load_hypotheses(hypotheses_path)
+        if not reference_path.is_file():
+            raise FileNotFoundError(reference_path)
         reference_by_id = _load_references(reference_path)
         selected_references = select_entries(
-            [
-                {"question_id": question_id}
-                for question_id in reference_by_id
-            ],
+            [{"question_id": question_id} for question_id in reference_by_id],
             experiment.selection,
         )
+        if args.case_id is not None:
+            selected_references = [
+                row
+                for row in selected_references
+                if str(row["question_id"]) == args.case_id
+            ]
+            if len(selected_references) != 1:
+                raise ValueError(f"case is not selected: {args.case_id}")
         expected_ids = [str(row["question_id"]) for row in selected_references]
+        if args.aggregate_cases:
+            if args.dry_run:
+                print(f"aggregate case Scores: {len(expected_ids)}", flush=True)
+                return 0
+            return _aggregate_case_scores(experiment, reference_by_id, expected_ids)
+
+        hypotheses_path = (
+            case_stage_output_dir(experiment, args.case_id, "generate")
+            / "hypotheses.jsonl"
+            if args.case_id is not None
+            else hypotheses_output(experiment)
+        )
+        if not hypotheses_path.is_file():
+            raise FileNotFoundError(hypotheses_path)
+        hypotheses = _load_hypotheses(hypotheses_path)
         hypothesis_ids = [row["question_id"] for row in hypotheses]
         if hypothesis_ids != expected_ids:
             raise ValueError("hypothesis IDs/order do not match experiment selection")
 
-        output = score_output(experiment)
-        metrics_path = score_metrics_output(experiment)
+        case_score_dir = (
+            case_stage_output_dir(experiment, args.case_id, "score")
+            if args.case_id is not None
+            else score_output_dir(experiment)
+        )
+        output = (
+            case_score_dir / "scored.jsonl"
+            if args.case_id is not None
+            else score_output(experiment)
+        )
+        metrics_path = (
+            case_score_dir / "metrics.json"
+            if args.case_id is not None
+            else score_metrics_output(experiment)
+        )
         if experiment.run.mode == "resume" and score_is_complete(
             hypotheses_path,
             output=output,
@@ -827,15 +985,19 @@ async def main(argv: list[str] | None = None) -> int:
             selected_ids=set(expected_ids),
             config=score_config,
         ):
-            if experiment.tracking is not None and not score_run_exists(
-                database=Path(experiment.tracking.database),
-                benchmark="longmemeval",
-                backend=experiment.backend,
-                source_sha256=source_fingerprint(experiment.source),
-                config_path=experiment.config_path,
-                resolved_config_path=experiment_output_dir(experiment)
-                / "experiment.resolved.json",
-                artifact_dir=metrics_path.parent,
+            if (
+                args.case_id is None
+                and experiment.tracking is not None
+                and not score_run_exists(
+                    database=Path(experiment.tracking.database),
+                    benchmark="longmemeval",
+                    backend=experiment.backend,
+                    source_sha256=source_fingerprint(experiment.source),
+                    config_path=experiment.config_path,
+                    resolved_config_path=experiment_output_dir(experiment)
+                    / "experiment.resolved.json",
+                    artifact_dir=metrics_path.parent,
+                )
             ):
                 existing_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
                 existing_scored = {
@@ -860,10 +1022,9 @@ async def main(argv: list[str] | None = None) -> int:
             if experiment.ask_top_k is None:  # pragma: no cover - schema invariant
                 raise RuntimeError("Ask Top-K is required for retrieval scoring")
             if experiment.backend == "kl_graph":
-                if experiment.case_set is None:  # pragma: no cover - schema invariant
-                    raise RuntimeError("case_set is required for KL retrieval scoring")
-                case_set, entries = _load_case_entries(experiment.case_set)
+                case_set, entries = _load_case_entries(convert_output_dir(experiment))
                 retrieval_rows = _score_retrieval_rows(
+                    experiment,
                     case_set,
                     entries,
                     hypothesis_ids,
@@ -871,8 +1032,13 @@ async def main(argv: list[str] | None = None) -> int:
                     experiment.ask_top_k,
                 )
             elif experiment.backend in {"khoj", "ragflow"}:
+                ask_dir = (
+                    case_stage_output_dir(experiment, args.case_id, "ask")
+                    if args.case_id is not None
+                    else experiment_output_dir(experiment) / "ask"
+                )
                 retrieval_rows = _score_native_retrieval_rows(
-                    experiment_output_dir(experiment),
+                    ask_dir,
                     reference_path,
                     reference_by_id,
                     hypothesis_ids,
@@ -885,9 +1051,7 @@ async def main(argv: list[str] | None = None) -> int:
                     f"unsupported retrieval backend: {experiment.backend}"
                 )
             retrieval_by_id = {str(row["question_id"]): row for row in retrieval_rows}
-            retrieval_metrics = _aggregate_retrieval_rows(
-                retrieval_rows, turn_recall.k
-            )
+            retrieval_metrics = _aggregate_retrieval_rows(retrieval_rows, turn_recall.k)
         print(
             f"questions={len(hypotheses)} model={judge.model} "
             f"{retrieval_metric}="
@@ -913,8 +1077,6 @@ async def main(argv: list[str] | None = None) -> int:
             max_retries=judge.max_retries,
         )
 
-        by_type: dict[str, list[int]] = defaultdict(list)
-        abstention_scores: list[int] = []
         semaphore = asyncio.Semaphore(score_config.concurrency)
         tasks = [
             asyncio.create_task(
@@ -939,13 +1101,10 @@ async def main(argv: list[str] | None = None) -> int:
                 total=len(tasks),
                 desc="LongMemEval scoring",
             ):
-                question_id, question_type, score, scored = await future
+                question_id, _question_type, _score, scored = await future
                 if retrieval_by_id:
                     scored["retrieval"] = retrieval_by_id[question_id]
                 scored_by_id[question_id] = scored
-                by_type[question_type].append(score)
-                if question_id.endswith("_abs"):
-                    abstention_scores.append(score)
                 atomic_write_jsonl(
                     output,
                     (
@@ -962,40 +1121,30 @@ async def main(argv: list[str] | None = None) -> int:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await client.close()
 
-        all_scores = [score for values in by_type.values() for score in values]
-        task_scores = [fmean(by_type[name]) for name in QUESTION_TYPES if by_type[name]]
-        metrics = {
-            "metric_model": judge.model,
-            "base_url": judge.base_url,
-            "concurrency": score_config.concurrency,
-            "judge": {
-                **judge.model_dump(),
-                "label_parser": "official_substring_yes",
-            },
-            "questions": len(all_scores),
-            "task_averaged_accuracy": round(fmean(task_scores), 4),
-            "overall_accuracy": _accuracy(all_scores),
-            "abstention_accuracy": _accuracy(abstention_scores),
-            "abstention_questions": len(abstention_scores),
-            "by_question_type": {
-                name: {
-                    "accuracy": _accuracy(by_type[name]),
-                    "count": len(by_type[name]),
-                }
-                for name in QUESTION_TYPES
-            },
-        }
-        if retrieval_metrics is not None:
-            metrics["retrieval"] = retrieval_metrics
-        atomic_write_json(metrics_path, metrics)
-        _record_tracked_score(
-            experiment,
-            metrics_path,
-            metrics,
-            scored_by_id,
-            reference_by_id,
-            expected_ids,
+        ordered_scored = [scored_by_id[value] for value in expected_ids]
+        metrics = _score_metrics_from_rows(
+            ordered_scored, score_config, retrieval_metrics
         )
+        atomic_write_json(metrics_path, metrics)
+        atomic_write_json(
+            case_score_dir / "run.json",
+            {
+                "status": "complete",
+                "completed_at": datetime.now().astimezone().isoformat(),
+                "question_ids": expected_ids,
+                "questions": len(ordered_scored),
+                "metrics_path": "metrics.json",
+            },
+        )
+        if args.case_id is None:
+            _record_tracked_score(
+                experiment,
+                metrics_path,
+                metrics,
+                scored_by_id,
+                reference_by_id,
+                expected_ids,
+            )
         print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
         print(f"scored hypotheses: {output}", flush=True)
         print(f"metrics: {metrics_path}", flush=True)

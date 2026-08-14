@@ -51,7 +51,10 @@ from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from kl_graph.evaluation.longmemeval.experiment import load_convert_experiment
+from kl_graph.evaluation.longmemeval.experiment import (
+    convert_output_dir,
+    load_convert_experiment,
+)
 
 DATASET_NAME = "longmemeval"
 SCHEMA_VERSION = 3
@@ -601,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     experiment = load_convert_experiment(args.config)
     manifest = convert(
         experiment.source,
-        experiment.case_set,
+        convert_output_dir(experiment),
         overwrite=experiment.convert.reconvert,
         timezone_name=experiment.convert.timezone,
     )

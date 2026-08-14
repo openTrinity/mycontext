@@ -25,23 +25,27 @@ from omegaconf.errors import OmegaConfBaseException
 
 from kl_graph.evaluation.io import atomic_write_json, atomic_write_jsonl, json_lines
 from kl_graph.evaluation.locomo.cases import (
+    CASE_DATA_DIRNAME,
     case_set_fingerprint,
-    graph_data_dirs,
     load_case_entries,
     resolve_case_root,
     select_cases,
 )
 from kl_graph.evaluation.locomo.experiment import (
     ScoreExperiment,
+    case_stage_output_dir,
+    convert_output_dir,
+    experiment_output_dir,
     load_score_experiment,
 )
 from kl_graph.evaluation.locomo.source import (
     load_samples,
+    normalize_sample_id,
     question_rows,
     select_samples,
     source_fingerprint,
 )
-from kl_graph.evaluation.results import record_score_run
+from kl_graph.evaluation.results import record_score_run, score_run_exists
 
 CATEGORY_NAMES = {
     1: "Multi Hop",
@@ -187,9 +191,7 @@ def score_answer_rows(
             ),
             "answer_score": _mean(bucket["answer"]),
             "global_evidence_recall": _mean(bucket["global"]),
-            "global_evidence_recall_nonempty_gold": _mean(
-                bucket["global_nonempty"]
-            ),
+            "global_evidence_recall_nonempty_gold": _mean(bucket["global_nonempty"]),
             "global_complete_evidence_recall": _mean(bucket["global_complete"]),
         }
     all_answer = [score for bucket in buckets.values() for score in bucket["answer"]]
@@ -488,7 +490,9 @@ def _parse_json_output(output: str) -> Any | None:
         return json.loads(output)
     except json.JSONDecodeError:
         pass
-    starts = [position for position in (output.find("{"), output.find("[")) if position >= 0]
+    starts = [
+        position for position in (output.find("{"), output.find("[")) if position >= 0
+    ]
     if not starts:
         return None
     start = min(starts)
@@ -592,15 +596,31 @@ def _dedupe_references(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--case-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
 
-def _runtime_options(experiment: ScoreExperiment) -> argparse.Namespace:
+def _runtime_options(
+    experiment: ScoreExperiment, *, case_id: str | None
+) -> argparse.Namespace:
     return argparse.Namespace(
-        answers_dir=experiment.generate_output_dir,
-        ask_dir=Path(experiment.run.output_dir),
-        output_dir=Path(experiment.score.output_dir),
+        answers_dir=(
+            case_stage_output_dir(experiment, case_id, "generate")
+            if case_id is not None
+            else experiment.generate_output_dir
+        ),
+        ask_dir=(
+            case_stage_output_dir(experiment, case_id, "ask")
+            if case_id is not None
+            else Path(experiment.run.output_dir)
+        ),
+        case_id=case_id,
+        output_dir=(
+            case_stage_output_dir(experiment, case_id, "score")
+            if case_id is not None
+            else Path(experiment.score.output_dir)
+        ),
         # Score has no incremental work to resume. Recompute its deterministic
         # derived artifacts after Ask/Generate have resumed to completion.
         overwrite=True,
@@ -617,14 +637,28 @@ def _record_tracked_score(
     if experiment.tracking is None:
         return
     recall_k = experiment.score.recall_k
-    run_id = record_score_run(
-        database=Path(experiment.tracking.database),
+    database = Path(experiment.tracking.database)
+    resolved_config_path = (
+        experiment_output_dir(experiment) / "experiment.resolved.json"
+    )
+    if score_run_exists(
+        database=database,
         benchmark="locomo",
         backend=experiment.backend,
         source_sha256=source_fingerprint(experiment.source),
         config_path=experiment.config_path,
-        resolved_config_path=Path(experiment.run.output_dir)
-        / "experiment.resolved.json",
+        resolved_config_path=resolved_config_path,
+        artifact_dir=output_dir,
+    ):
+        print(f"tracked run already exists; skipped ({database})", flush=True)
+        return
+    run_id = record_score_run(
+        database=database,
+        benchmark="locomo",
+        backend=experiment.backend,
+        source_sha256=source_fingerprint(experiment.source),
+        config_path=experiment.config_path,
+        resolved_config_path=resolved_config_path,
         artifact_dir=output_dir,
         metrics=report,
         recall_k=recall_k,
@@ -642,7 +676,7 @@ def _record_tracked_score(
         ),
     )
     print(
-        f"tracked run: {run_id} ({Path(experiment.tracking.database)})",
+        f"tracked run: {run_id} ({database})",
         flush=True,
     )
 
@@ -651,20 +685,23 @@ def _score_kl(experiment: ScoreExperiment, args: argparse.Namespace) -> int:
     ask_dir = args.ask_dir.expanduser().resolve()
     answers_dir = args.answers_dir.expanduser().resolve() if args.answers_dir else None
     ask_run = _load_json(ask_dir / "run.json")
-    if (
-        ask_run.get("backend") != "kl_graph"
-        or ask_run.get("benchmark") != "locomo"
-    ):
+    if ask_run.get("backend") != "kl_graph" or ask_run.get("benchmark") != "locomo":
         raise ValueError("configured Ask directory is not a kl_graph LoCoMo run")
     if ask_run.get("status") != "complete":
         raise RuntimeError(f"Ask run is not complete: {ask_dir}")
     dataset_dir = Path(str(ask_run["dataset"])).expanduser().resolve()
-    if experiment.case_set is None or dataset_dir != experiment.case_set.resolve():
+    configured_case_set = convert_output_dir(experiment)
+    if dataset_dir != configured_case_set.resolve():
         raise ValueError("Ask run case set differs from the configured case_set")
     _, case_entries = load_case_entries(dataset_dir)
-    expected_cases = select_cases(
-        case_entries, experiment.selection.conversations
-    )
+    expected_cases = select_cases(case_entries, experiment.selection.conversations)
+    if args.case_id is not None:
+        requested = normalize_sample_id(args.case_id)
+        expected_cases = [
+            case
+            for case in expected_cases
+            if normalize_sample_id(str(case["conversation_id"])) == requested
+        ]
     expected_run_selection = {
         "conversations": [str(case["conversation_id"]) for case in expected_cases],
         "categories": experiment.selection.questions.categories,
@@ -710,6 +747,13 @@ def _score_kl(experiment: ScoreExperiment, args: argparse.Namespace) -> int:
         results,
         dataset_dir,
         args.recall_k,
+        graph_data_dirs={
+            str(case["conversation_id"]): case_stage_output_dir(
+                experiment, str(case["conversation_id"]), "build"
+            )
+            / CASE_DATA_DIRNAME
+            for case in expected_cases
+        },
     )
     retrieval_scored = [
         _score_retrieval_row(row, args.recall_k) for row in retrieval_rows
@@ -759,7 +803,8 @@ def _score_kl(experiment: ScoreExperiment, args: argparse.Namespace) -> int:
             "metrics_path": "metrics.json",
         },
     )
-    _record_tracked_score(experiment, output_dir, report, scored_rows)
+    if args.case_id is None:
+        _record_tracked_score(experiment, output_dir, report, scored_rows)
     print(json.dumps(report.get("overall") or {}, ensure_ascii=False, sort_keys=True))
     print(f"Results: {output_dir}")
     return 0
@@ -787,10 +832,12 @@ def _resolve_retrieval(
     results: list[dict[str, Any]],
     dataset_dir: Path,
     recall_k: int,
+    *,
+    graph_data_dirs: dict[str, Path],
 ) -> list[dict[str, Any]]:
     gold_by_id = {row["id"]: row for row in _load_gold(dataset_dir)}
     resolver = ConversationEvidenceResolver(
-        graph_data_dirs=graph_data_dirs(dataset_dir),
+        graph_data_dirs=graph_data_dirs,
         dia_id_by_message=_load_dia_id_map(dataset_dir),
     )
     rows: list[dict[str, Any]] = []
@@ -1214,11 +1261,7 @@ def _khoj_retrieval_row(
     sample_id = str(gold["sample_id"])
     items = [item for item in raw_items[:recall_k] if isinstance(item, dict)]
     dia_ids = _unique_dia_ids(
-        [
-            item
-            for item in items
-            if str(item.get("source_sample_id") or "") == sample_id
-        ]
+        [item for item in items if str(item.get("source_sample_id") or "") == sample_id]
     )
     recall, complete = retrieval_scores(gold["evidence"], dia_ids)
     return {
@@ -1242,9 +1285,7 @@ def _ragflow_retrieval_row(
         raise TypeError(f"response items is not a list: {gold['id']}")
     items = [item for item in raw_items if isinstance(item, dict)]
     graph_items = [item for item in items if item.get("type") == "graph"]
-    vector_items = [item for item in items if item.get("type") != "graph"][
-        :recall_k
-    ]
+    vector_items = [item for item in items if item.get("type") != "graph"][:recall_k]
     combined_ids = _unique_dia_ids([*graph_items, *vector_items])
     graph_ids = _unique_dia_ids(graph_items)
     vector_ids = _unique_dia_ids(vector_items)
@@ -1252,9 +1293,7 @@ def _ragflow_retrieval_row(
         gold["evidence"], combined_ids
     )
     graph_recall, graph_complete = retrieval_scores(gold["evidence"], graph_ids)
-    vector_recall, vector_complete = retrieval_scores(
-        gold["evidence"], vector_ids
-    )
+    vector_recall, vector_complete = retrieval_scores(gold["evidence"], vector_ids)
     return {
         **gold,
         **result,
@@ -1394,17 +1433,20 @@ def _score_remote(
 
     _, samples = load_samples(source)
     selected = select_samples(samples, experiment.selection.conversations)
-    gold = {
-        str(row["id"]): row
-        for row in question_rows(selected, experiment.selection.questions)
-    }
+    selected_rows = question_rows(selected, experiment.selection.questions)
+    if args.case_id is not None:
+        requested = normalize_sample_id(args.case_id)
+        selected_rows = [
+            row
+            for row in selected_rows
+            if normalize_sample_id(str(row["sample_id"])) == requested
+        ]
+    gold = {str(row["id"]): row for row in selected_rows}
     results = list(json_lines(ask_dir / "results.jsonl"))
     result_ids = [str(result.get("id") or "") for result in results]
     if result_ids != list(gold) or len(result_ids) != len(set(result_ids)):
         raise RuntimeError("Ask result IDs/order differ from the configured selection")
-    row_builder = (
-        _khoj_retrieval_row if backend == "khoj" else _ragflow_retrieval_row
-    )
+    row_builder = _khoj_retrieval_row if backend == "khoj" else _ragflow_retrieval_row
     retrieval_rows: list[dict[str, Any]] = []
     for result in results:
         row_id = str(result.get("id") or "")
@@ -1462,7 +1504,8 @@ def _score_remote(
             "metrics_path": "metrics.json",
         },
     )
-    _record_tracked_score(experiment, output_dir, report, scored_rows)
+    if args.case_id is None:
+        _record_tracked_score(experiment, output_dir, report, scored_rows)
     print(json.dumps(report.get("overall") or {}, ensure_ascii=False, sort_keys=True))
     print(f"Results: {output_dir}")
     return 0
@@ -1472,7 +1515,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cli = parse_args(argv)
         experiment = load_score_experiment(cli.config)
-        args = _runtime_options(experiment)
+        args = _runtime_options(experiment, case_id=cli.case_id)
         if experiment.score.recall_k > experiment.ask_top_k:
             raise ValueError("score.recall_k exceeds ask.top_k")
         if cli.dry_run:

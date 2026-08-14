@@ -41,6 +41,8 @@ from kl_graph.evaluation.locomo.cases import (
 )
 from kl_graph.evaluation.locomo.experiment import (
     KLAskExperiment,
+    case_stage_output_dir,
+    convert_output_dir,
     load_kl_ask_experiment,
 )
 from kl_graph.evaluation.locomo.kl_graph.build import validate_built_case
@@ -48,6 +50,7 @@ from kl_graph.evaluation.locomo.runtime.servers import (
     ProductionGraphServers,
     route_port,
 )
+from kl_graph.evaluation.locomo.source import normalize_sample_id
 
 LLM_BASE_URL = str(cfg.services.llm_flash.base_url or "")
 LLM_MODEL = str(cfg.services.llm_flash.model)
@@ -63,6 +66,7 @@ RERANK_WINDOW = int(cfg.pipelines.query.reranking.window)
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--case-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -88,7 +92,7 @@ def _runtime_options(
             selected_conversations[0] if len(selected_conversations) == 1 else None
         ),
         conversations=selected_conversations,
-        dataset=experiment.case_set,
+        dataset=convert_output_dir(experiment),
         dry_run=dry_run,
         limit=questions.first,
         max_concurrent=experiment.ask.concurrency,
@@ -109,10 +113,9 @@ async def main(argv: list[str] | None = None) -> int:
     try:
         cli = parse_args(argv)
         experiment = load_kl_ask_experiment(cli.config)
-        dataset_dir, entries = load_case_entries(experiment.case_set)
-        selected_cases = select_cases(
-            entries, experiment.selection.conversations
-        )
+        dataset = convert_output_dir(experiment)
+        dataset_dir, entries = load_case_entries(dataset)
+        selected_cases = select_cases(entries, experiment.selection.conversations)
         selected_conversations = [
             str(case["conversation_id"]) for case in selected_cases
         ]
@@ -130,8 +133,6 @@ async def main(argv: list[str] | None = None) -> int:
         return 2
     args.dataset = dataset_dir
     args.case_set_fingerprint = case_set_fingerprint(dataset_dir)
-    output_dir = _resolve_output_dir(args, dataset_dir)
-
     rows = _select_rows(
         dataset_dir,
         conversations=set(args.conversations),
@@ -139,10 +140,36 @@ async def main(argv: list[str] | None = None) -> int:
         question_ids=set(args.question_ids or []),
         limit=args.limit,
     )
+    if cli.case_id is not None:
+        requested = normalize_sample_id(cli.case_id)
+        selected_cases = [
+            case
+            for case in selected_cases
+            if normalize_sample_id(str(case["conversation_id"])) == requested
+        ]
+        rows = [
+            row
+            for row in rows
+            if normalize_sample_id(str(row["conversation_id"])) == requested
+        ]
+        if len(selected_cases) != 1 or not rows:
+            raise ValueError(f"case is not selected or has no questions: {cli.case_id}")
+        args.conversations = [str(selected_cases[0]["conversation_id"])]
+        args.conversation = args.conversations[0]
+        args.output_dir = case_stage_output_dir(experiment, cli.case_id, "ask")
+    output_dir = _resolve_output_dir(args, dataset_dir)
     case_by_conversation = cases_by_conversation(dataset_dir)
     selected_conversations = sorted({row["conversation_id"] for row in rows})
     selected_cases = [case_by_conversation[value] for value in selected_conversations]
-    args.build_configuration_sha256 = _validate_inputs(dataset_dir, selected_cases)
+    build_dirs = {
+        str(case["conversation_id"]): case_stage_output_dir(
+            experiment, str(case["conversation_id"]), "build"
+        )
+        for case in selected_cases
+    }
+    args.build_configuration_sha256 = _validate_inputs(
+        dataset_dir, selected_cases, build_dirs
+    )
     if cli.dry_run:
         _print_plan(args, dataset_dir, output_dir, len(rows), len(selected_cases))
         return 0
@@ -166,6 +193,7 @@ async def main(argv: list[str] | None = None) -> int:
         output_dir,
         dataset_dir,
         case_by_conversation,
+        build_dirs,
     )
     statuses = _status_counts(results)
     _log_event(
@@ -179,11 +207,18 @@ async def main(argv: list[str] | None = None) -> int:
 
 
 def _validate_inputs(
-    case_set_root: Path, cases: list[dict[str, Any]]
+    case_set_root: Path,
+    cases: list[dict[str, Any]],
+    build_dirs: dict[str, Path],
 ) -> dict[str, str]:
     fingerprints: dict[str, str] = {}
     for case in cases:
-        status = validate_built_case(case_set_root, case)
+        conversation_id = str(case["conversation_id"])
+        status = validate_built_case(
+            case_set_root,
+            case,
+            build_dir=build_dirs[conversation_id],
+        )
         if status is None:  # pragma: no cover - guarded by default validation
             raise RuntimeError("case has no build status")
         fingerprints[str(case["conversation_id"])] = str(status["configuration_sha256"])
@@ -194,9 +229,19 @@ def _resolve_output_dir(args: argparse.Namespace, case_set_dir: Path) -> Path:
     del case_set_dir
     candidate = args.output_dir.expanduser().resolve()
     if args.resume and not args.dry_run and not (candidate / "run.json").is_file():
-        raise FileNotFoundError(
-            f"run does not exist or has no run.json: {candidate}"
+        unexpected = (
+            [
+                path.name
+                for path in candidate.iterdir()
+                if not path.name.startswith("experiment.resolved")
+            ]
+            if candidate.is_dir()
+            else []
         )
+        if unexpected:
+            raise FileNotFoundError(
+                f"run has artifacts but no run.json: {candidate}: {unexpected}"
+            )
     return candidate
 
 
@@ -253,7 +298,7 @@ def _validate_resume_configuration(
     output_dir: Path, args: argparse.Namespace, questions: int
 ) -> None:
     """Prevent a resumed run from silently mixing retrieval protocols."""
-    if not args.resume:
+    if not args.resume or not (output_dir / "run.json").is_file():
         return
     run = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
     expected = {
@@ -287,8 +332,11 @@ async def _run_questions(
     output_dir: Path,
     dataset_dir: Path,
     case_by_conversation: dict[str, dict[str, Any]],
+    build_dirs: dict[str, Path],
 ) -> list[dict[str, Any]]:
     results_path = output_dir / "results.jsonl"
+    if not args.resume:
+        atomic_write_jsonl(results_path, [])
     completed = _load_existing(results_path) if args.resume else {}
     started_at = datetime.now().astimezone().isoformat()
     _write_run(
@@ -348,6 +396,7 @@ async def _run_questions(
             dataset_dir,
             [case_by_conversation[conversation_id]],
             server_dir,
+            build_dirs=build_dirs,
         ):
             pending = [asyncio.create_task(run_one(row)) for row in pending_rows]
             try:

@@ -58,7 +58,8 @@ Common sections:
 
 - `source`: native `locomo10.json`, usually `${oc.env:LOCOMO_SOURCE}`.
 - `selection`: conversation selection plus question category/ID/limit filters.
-- `run`: Ask output directory, `resume|overwrite`, and failure policy.
+- `run`: Ask output directory, `resume|overwrite`, failure policy, and pipeline
+  case concurrency.
 - `build`, `ask`, `generate`, `score`: all stage parameters.
 - `generate.output_dir` and `score.output_dir`: explicit derived-output paths.
 
@@ -91,6 +92,14 @@ run. For KL graph construction, database deletion is controlled separately by
 The pipeline writes a credential-free `experiment.resolved.json` in
 `run.output_dir`. It records resolved paths, source fingerprint, selected IDs,
 and the effective experiment values.
+
+`run.case_concurrency` controls how many complete conversation workers run at
+once. Each worker still runs Build -> Ask -> Generate -> Score in order and
+passes one explicit `--case-id` to every stage. Stage-level settings remain
+useful when a stage is run directly: `build.case_concurrency` controls multiple
+Build cases, while `ask.concurrency` controls questions inside one conversation.
+During a pipeline run, the maximum Ask request concurrency is therefore roughly
+`run.case_concurrency * ask.concurrency`.
 
 ## Environment
 

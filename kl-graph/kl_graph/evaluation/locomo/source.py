@@ -125,9 +125,7 @@ def transcript_fingerprint(sample: dict[str, Any]) -> str:
     return hashlib.sha256(render_transcript(sample).encode("utf-8")).hexdigest()
 
 
-def document_name(
-    sample_id: str, *, dataset_prefix: str, source_sha256: str
-) -> str:
+def document_name(sample_id: str, *, dataset_prefix: str, source_sha256: str) -> str:
     return (
         f"{artifact_stem(dataset_prefix)}-"
         f"{artifact_stem(normalize_sample_id(sample_id))}-{source_sha256[:8]}.txt"
@@ -176,6 +174,4 @@ def extract_dia_ids(content: str) -> list[str]:
 
 
 def case_root(artifact_root: Path, sample_id: str) -> Path:
-    return artifact_root.expanduser().resolve() / "cases" / normalize_sample_id(
-        sample_id
-    )
+    return artifact_root.expanduser().resolve() / normalize_sample_id(sample_id)

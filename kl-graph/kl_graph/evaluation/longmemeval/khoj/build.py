@@ -20,6 +20,7 @@ from kl_graph.evaluation.io import artifact_stem, atomic_write_json
 from kl_graph.evaluation.khoj import KhojEvaluationClient
 from kl_graph.evaluation.longmemeval.experiment import (
     KhojBuildExperiment,
+    experiment_output_dir,
     load_khoj_build_experiment,
     select_entries,
 )
@@ -40,6 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config", type=Path, required=True, help="LongMemEval Khoj experiment YAML"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--case-id")
     return parser.parse_args(argv)
 
 
@@ -48,14 +50,13 @@ def _runtime_options(
 ) -> argparse.Namespace:
     """Adapt typed YAML values to the existing build worker boundary."""
     return argparse.Namespace(
-        artifact_root=experiment.artifact_root,
+        artifact_root=experiment_output_dir(experiment),
         base_url=experiment.khoj.base_url,
         case_concurrency=experiment.build.case_concurrency,
         document_prefix=experiment.build.document_prefix,
         dry_run=dry_run,
         keep_going=experiment.run.keep_going,
-        # A compatible Khoj document build is immutable and always reusable.
-        resume=True,
+        resume=experiment.run.mode == "resume",
         timeout_seconds=experiment.build.timeout_seconds,
         max_retries=experiment.khoj.max_retries,
     )
@@ -66,7 +67,7 @@ def _utc_now() -> str:
 
 
 def _state_path(artifact_root: Path, question_id: str) -> Path:
-    return case_root(artifact_root, question_id) / "khoj.json"
+    return case_root(artifact_root, question_id) / "build" / "khoj.json"
 
 
 def load_state(artifact_root: Path, question_id: str) -> dict[str, Any]:
@@ -306,6 +307,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source, cases = load_cases(experiment.source)
         selected = select_entries(cases, experiment.selection)
+        if cli.case_id is not None:
+            selected = [
+                case for case in selected if str(case["question_id"]) == cli.case_id
+            ]
+            if len(selected) != 1:
+                raise ValueError(f"case is not selected: {cli.case_id}")
         source_sha256 = source_fingerprint(source)
         if args.dry_run:
             server: dict[str, Any] = {}
