@@ -620,6 +620,31 @@ export function registerIpc(deps: IpcDependencies): void {
       const input = parse(mediaAvatarsInputSchema, payload)
       let fetched = 0
       let failed = 0
+      /**
+       * 最值得告诉用户的那个失败原因（见契约里 `avatarFetchResultSchema.reason`）。
+       *
+       * ★★ 选取判据是**优先级**而不是"最后一个" —— 一批里可能既有
+       * "对方没设头像"（用户什么都不用做）又有"客户端没权限"
+       * （唯一有效的出路是换客户端）。报后者，因为它是唯一**可执行**的那个。
+       *
+       * ★ `not_permitted` 排第一：它是终态**且**有明确出路。
+       * `failed` 第二（值得等一下再试）。三个"用户什么都做不了"的排最后 ——
+       * 它们更接近"正常"而不是"故障"。
+       */
+      const REASON_PRIORITY = [
+        "not_permitted",
+        "failed",
+        "not_attempted",
+        "not_reachable",
+        "not_set",
+      ] as const
+      let reason: (typeof REASON_PRIORITY)[number] | null = null
+      const noteReason = (next: string | null): void => {
+        const at = REASON_PRIORITY.indexOf(next as (typeof REASON_PRIORITY)[number])
+        if (at === -1) return
+        const now = reason === null ? Infinity : REASON_PRIORITY.indexOf(reason)
+        if (at < now) reason = REASON_PRIORITY[at] ?? null
+      }
       for (const externalId of input.externalIds) {
         /**
          * ★ `nick` 必须传下去。
@@ -655,17 +680,21 @@ export function registerIpc(deps: IpcDependencies): void {
             },
             input.channelId,
           )
-          if (result.path === null) failed += 1
-          else fetched += 1
+          if (result.path === null) {
+            failed += 1
+            noteReason(result.reason)
+          } else fetched += 1
         } catch (error) {
           failed += 1
+          // 这一层兜的是渠道层之外的意外（如 SQLite 写失败）→ 可重试
+          noteReason("failed")
           logger.warn("avatar fetch failed", {
             externalId: externalId.slice(0, 8),
             detail: error instanceof Error ? error.message : String(error),
           })
         }
       }
-      return { fetched, failed }
+      return { fetched, failed, reason }
     }),
   )
 

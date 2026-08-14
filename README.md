@@ -6,6 +6,12 @@
 
 **English** | [中文](#mycontext我的上下文)
 
+## Developer preview
+
+MyContext is currently in _developer preview_ and is iterating rapidly. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
+
+Local data lives in an on-disk SQLite vault under versioned migrations. A migration can require you to re-run collection, and some changes may not be reversible — so do not treat this build as the only home for anything you cannot re-derive.
+
 ## Your work already has context. MyContext makes it usable.
 
 MyContext is a persistent personal work context layer for every individual. It is designed to connect the signals scattered across instant messaging, documents, calendars, meetings, approvals, local activity, and other work sources, then continuously organize them into a private, evolving view of what you know, who you work with, and what you are working on.
@@ -88,6 +94,12 @@ Licensed under the [Elastic License 2.0](./LICENSE) — a source-available licen
 # MyContext（我的上下文）
 
 [中文](#mycontext我的上下文) | [English](#mycontext)
+
+## 开发者预览
+
+MyContext 目前处于**开发者预览**阶段，迭代很快。**会有破坏兼容性的改动。**
+
+本地数据存在磁盘上的 SQLite vault 里，跟着版本化迁移走。一次迁移可能要求你重新跑一遍采集，而某些改动是不可逆的 —— 所以不要把这个版本当成任何「重新生成不出来的东西」的唯一存放处。
 
 ## 你的工作本来就有上下文，MyContext 让它真正可用
 

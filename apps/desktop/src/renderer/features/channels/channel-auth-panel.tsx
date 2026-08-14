@@ -540,6 +540,68 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
           </Button>
         </Tooltip>
       ) : null}
+      {/*
+        ── ★★★ 刷新头像**失败时说清为什么** ──────────────────────
+
+        ## 用户报的问题
+
+        「钉钉授权后头像没获取到，且刷新头像也没用」。
+
+        ## 根因（实测，本机随包渠道客户端）
+
+        ```
+        $ dws contact user get-self
+        server_error_code: ENTERPRISE_NOT_AUTHORIZED
+        operation:          contact/get_current_user_profile
+        ```
+
+        钉钉没有开放的按 id 取头像接口，只能绕「共同群成员详情里的
+        avatarMediaId」，而那条链路的每一步都在 `contact` 家族上
+        （找人 → 找共同群 → 读成员详情）。所以这份客户端下头像
+        **永远**取不到 —— 不是抖动。
+
+        ## 为什么"点了没反应"
+
+        改动前这个权限墙被归成 `failed`（**可重试**），而界面上
+        **一个字都不说**：`force` 确实重试了、服务端照样拒，
+        于是用户看到的就是"什么都没发生"。
+
+        那是本仓库最贵的那类故障（CLAUDE.md 第 4 节）：真实的失败
+        被显示成"正常"。
+
+        ## ★ 所以这里按 reason 分两类话说
+
+        · `not_permitted` → **有出路**：换一份有权限的客户端（指向设置页）；
+        · 其余（没设头像 / 没有共同群）→ 说清"这是正常的"，
+          免得用户反复点那个按钮。
+
+        ★ 成功时**什么都不显示** —— 头像自己会变，那就是反馈。
+        再加一句"成功了"是噪声。
+      */}
+      {refreshAvatar.data !== undefined && refreshAvatar.data.fetched === 0 ? (
+        <p
+          className={`typography-body-small-400 ${
+            refreshAvatar.data.reason === "not_permitted"
+              ? "text-[var(--status-warning)]"
+              : "text-[var(--text-base-tertiary)]"
+          }`}
+        >
+          {refreshAvatar.data.reason === "not_permitted"
+            ? t("avatarMiss.notPermitted", {
+                defaultValue:
+                  "当前渠道客户端没有通讯录权限，取不到头像 —— 在下面「自备客户端」里换一份有权限的即可。",
+              })
+            : refreshAvatar.data.reason === "not_set"
+              ? t("avatarMiss.notSet", { defaultValue: "这个账号在平台上没有设置头像。" })
+              : refreshAvatar.data.reason === "not_reachable"
+                ? t("avatarMiss.notReachable", {
+                    defaultValue: "平台上取不到这个账号的头像（没有可读的共同群）。",
+                  })
+                : t("avatarMiss.failed", {
+                    defaultValue: "这次没取到，稍后再试。",
+                  })}
+        </p>
+      ) : null}
       {channel.capabilities?.isolatedCredentials === true && accountConnected ? (
         <>
           <Tooltip content={t("actions.signOutHint")} placement="top">

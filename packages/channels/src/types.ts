@@ -743,6 +743,40 @@ export type ChannelAvatarMiss =
   | "not_reachable"
   /** 缺少定位所需的信息，一次请求都没发出。**可重试** */
   | "not_attempted"
+  /**
+   * 当前渠道客户端**没有这个能力**（服务端在权限层就拒了）。终态。
+   *
+   * ## ★★★ 为什么它必须与 `failed` 分开（这修的是一个真实的静默故障）
+   *
+   * 实测（本机随包客户端，`dws contact user get-self`）：
+   *
+   * ```
+   * server_error_code: ENTERPRISE_NOT_AUTHORIZED
+   * operation:          contact/get_current_user_profile
+   * ```
+   *
+   * 而钉钉取头像的**每一条路**都要过 `contact` 家族
+   * （`contact user search` → `chat search-common --nicks` → 成员详情），
+   * 所以这份客户端下头像**永远取不到** —— 那不是抖动。
+   *
+   * 归 `failed` 的后果（改动前就是）：
+   * · `failed` 是**可重试**的 ⇒ 每 6 小时对每个人重试一遍永远失败的事；
+   * · 界面上只是"没有头像" ⇒ 用户点「刷新头像」，`force` 确实重试了、
+   *   服务端照样拒，于是**点了毫无变化**。而那条日志是 `warn` 级、
+   *   在界面上一个字都没有。
+   *
+   * 用户报的正是这个：「钉钉授权后头像没获取到，且刷新头像也没用」。
+   *
+   * ## ★ 为什么是终态，但**与 `not_set` / `not_reachable` 不同**
+   *
+   * 那两个说的是"这个人没有头像可取"（对方的事实）；这个说的是
+   * "我们没有权限去取"（我们的能力）。出路完全不同：
+   * 前两个用户什么都做不了，而这个**换一份有权限的渠道客户端就好了**。
+   *
+   * ★ 而它仍然是终态：在**当前这份客户端**下重试永远无效。
+   * 换客户端会走重新授权，那条路会清 miss（见 `AvatarMissReason` 的映射）。
+   */
+  | "not_permitted"
   /** 查了但失败（网络 / 下载）。**可重试** */
   | "failed"
 

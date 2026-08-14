@@ -115,5 +115,11 @@
     "noSpeakDescription": "飞书数据不会进入自动回复或发消息链路，也不申请任何写权限。",
     "credentialsTitle": "授权目录独立隔离",
     "credentialsDescription": "授权由飞书官方 CLI 完成，凭据只保存在本应用的独立用户目录。"
+  },
+  "avatarMiss": {
+    "notPermitted": "当前渠道客户端没有通讯录权限，取不到头像 —— 在下面「自备客户端」里换一份有权限的即可。",
+    "notSet": "这个账号在平台上没有设置头像。",
+    "notReachable": "平台上取不到这个账号的头像（没有可读的共同群）。",
+    "failed": "这次没取到，稍后再试。"
   }
 }

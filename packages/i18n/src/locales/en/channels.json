@@ -115,5 +115,11 @@
     "noSpeakDescription": "Lark data never enters the auto-reply or send path, and no write scopes are requested.",
     "credentialsTitle": "Isolated authorization directory",
     "credentialsDescription": "The official Lark CLI handles authorization; credentials stay inside this app's isolated user directory."
+  },
+  "avatarMiss": {
+    "notPermitted": "This channel client lacks contacts permission, so avatars cannot be fetched — switch to a client that has it under \"custom client\" below.",
+    "notSet": "This account has no avatar set on the platform.",
+    "notReachable": "The platform will not return this account’s avatar (no readable shared group).",
+    "failed": "Could not fetch it this time; try again later."
   }
 }

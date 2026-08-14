@@ -675,7 +675,33 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
         第二条是这一块存在的主要理由：那是一个**当前完全不可见**的缺口，
         而它决定了检索与画像的上限。见 `readGraphLag` 的判据注释。
       */}
-      <TrendsSection building={building} />
+      {/*
+        ── ★★★ 三块统计图**暂时下线**（「最近在忙什么」/「从这些内容里学到了
+        什么」/「拿全了没」）─────────────────────────────────────
+
+        产品决定：现阶段不显示、**也不拉取**这部分数据。
+
+        ## ★★ 为什么是注释掉这一行，而不是给组件加一个 `enabled={false}`
+
+        `useDashboardTrends` 在 `TrendsSection` **内部**，所以不渲染这个组件
+        就自然不发那次 IPC —— 而 `dashboard.trends` 那一次调用在主进程侧是
+        一段真实开销（`dashboard-trends.service.ts` 里 9 个 COUNT(*) +
+        图库聚合）。加一个 `enabled` 开关的话组件仍然挂载、hook 仍然跑，
+        只是把结果丢掉，那不满足「不想拉取这部分数据」。
+
+        ## ★ 为什么**保留** `TrendsSection` 与整条数据链，而不是删掉
+
+        它是"暂时不显示"而不是"不要了"。删掉的话恢复它要重写：
+        三张图的判据（`hasData` 用 `days.length > 0` 而不是 `summary !== null`、
+        `warnBelow={0.6}` 那个阈值的实测理由、`data-range-scope="trends"`
+        为什么是必须的）都记在那个函数的注释里，而那些是踩过的坑。
+
+        ★ 所以 `TrendsSection` / `useDashboardTrends` / `dashboardTrends` IPC
+        全部原样留着，只断开这一处调用。恢复 = 把下面那一行的注释去掉。
+        `tests/unit/desktop/dashboard-trends-data.test.ts` 那 19 条也保持绿，
+        它们锁的是服务层判据（与显不显示无关）。
+      */}
+      {/* <TrendsSection building={building} /> */}
 
       {/*
         ── 它认识的人与事 ───────────────────────────────────
@@ -956,6 +982,33 @@ const TrendChart = lazy(() => import("./trend-chart.js"))
  * 切周期会让**整页**重渲染（含 ego 图那张 canvas 与事实列表）——
  * 而实际变的只有这一块。
  */
+/**
+ * 三块统计图（「最近在忙什么」/「从这些内容里学到了什么」/「拿全了没」）。
+ *
+ * ## ★★★ 它现在**没有调用点** —— 暂时下线，不是废弃
+ *
+ * 产品决定：现阶段不显示、也不拉取这部分数据。调用点在上面被注释掉了
+ * （那一行的注释里写了为什么是"注释调用点"而不是"给组件加 enabled 开关"）。
+ *
+ * ## ★★ 为什么用 eslint-disable 而不是改名成 `_TrendsSection`
+ *
+ * `no-unused-vars` 只放行 `^_` 开头的名字，但 React 的
+ * `react-hooks/rules-of-hooks` 要求**组件名首字母大写** —— 改成
+ * `_TrendsSection` 之后它里面两个 hook 立刻报"不在组件里调用 hook"。
+ * 两条规则在这里互相矛盾，而改名那一侧会引入两个新错误换掉一个旧的。
+ *
+ * 所以显式 disable 一行，并把理由写在这里：读者看到的是"停用中"，
+ * 而不是一个绕过门禁的技巧。
+ *
+ * ★ 恢复它 = 去掉调用点那一行的注释 + 删掉下面那行 eslint-disable。
+ * 两处都在原地，不用去 git 历史里翻。
+ *
+ * ★ 里面那些判据全部保留（`hasData` 为什么用 `days.length > 0` 而不是
+ * `summary !== null`、`warnBelow={0.6}` 那个阈值的实测理由、
+ * `data-range-scope="trends"` 为什么是必须的）—— 那些是踩过的坑，
+ * 删掉等于恢复时重新踩一遍。
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- 暂时下线（见上），恢复时连同调用点一起解注释
 function TrendsSection({ building }: { building: boolean }) {
   const [days, setDays] = useState<number>(30)
   const trends = useDashboardTrends(days, building)

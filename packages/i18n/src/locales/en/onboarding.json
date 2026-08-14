@@ -180,7 +180,9 @@
     "sourceExpired": "{{channel}} sign-in has expired. Reconnect it and its conversations will show up here.",
     "sourceCannotEnumerate": "This channel can't list conversations yet — nothing to pick for it here. Its conversations show up after the first read.",
     "sourceNotReady": "{{channel}} is still getting ready. This will refresh on its own in a moment.",
-    "sourceFailed": "Couldn't read conversations from {{channel}}: {{reason}}"
+    "sourceFailed": "Couldn't read conversations from {{channel}}: {{reason}}",
+    "savedSince": "Currently in effect: since {{date}}",
+    "savedSinceOnlyGrows": "Currently in effect: since {{date}} — the scope only grows, so saving can only move it earlier."
   },
   "attentionStep": {
     "title": "What your persona watches",

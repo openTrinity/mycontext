@@ -180,7 +180,9 @@
     "sourceExpired": "{{channel}} 的登录已过期，重新连接后这里才会有它的会话。",
     "sourceCannotEnumerate": "这个渠道暂时列不出会话，这一步不用为它做选择 —— 读过一轮之后它的会话会出现在这里。",
     "sourceNotReady": "{{channel}} 还在准备中，稍等一下这里会自己刷新。",
-    "sourceFailed": "{{channel}} 这次没读到会话：{{reason}}"
+    "sourceFailed": "{{channel}} 这次没读到会话：{{reason}}",
+    "savedSince": "当前生效：从 {{date}} 起",
+    "savedSinceOnlyGrows": "当前生效：从 {{date}} 起 —— 范围只增不减，保存只会让它更早。"
   },
   "attentionStep": {
     "title": "数字分身监听范围",

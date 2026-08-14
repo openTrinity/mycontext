@@ -1478,10 +1478,45 @@ export const contactAvatarViewSchema = z.object({
 
 export type ContactAvatarView = z.infer<typeof contactAvatarViewSchema>
 
-/** `mediaAvatarsFetch` 的结果：只有计数，路径由重读缓存那条通道给。 */
+/**
+ * `mediaAvatarsFetch` 的结果：计数 + **一个可执行的失败原因**。
+ *
+ * ## ★★★ 为什么必须带 `reason`（只有计数说不出"该怎么办"）
+ *
+ * 原来这里只有 `fetched` / `failed`。于是「刷新头像」点完之后渲染层
+ * 只知道"失败了 1 个" —— 而失败的**性质**决定了用户该做什么：
+ *
+ * | reason | 用户该做什么 |
+ * |---|---|
+ * | `not_set` | 什么都不用做（对方自己没设头像，钉钉也显示文字头像） |
+ * | `not_reachable` | 什么都不用做（没有共同群，取不到） |
+ * | `not_permitted` | **换一份有权限的渠道客户端**（唯一有效的出路） |
+ * | `failed` | 等一会儿再试（网络 / 限流） |
+ * | `not_attempted` | 缺花名，等会话标题采到之后自然会有 |
+ *
+ * 实测（本机随包客户端）：`dws contact user get-self` 返回
+ * `ENTERPRISE_NOT_AUTHORIZED`，而钉钉取头像的每一步都在 `contact` 家族上
+ * —— 于是头像**永远**取不到。用户点「刷新头像」，`force` 确实重试了、
+ * 服务端照样拒，而界面上**一个字都没说**。那正是用户报的
+ * 「授权后头像没获取到，且刷新头像也没用」。
+ *
+ * ★ 只报**一个**原因而不是逐人一份：这条通道的调用方有两种 ——
+ * 批量补齐（几十人，不看结果）与「刷新头像」（**一个人**，要看结果）。
+ * 给后者一个数组会让它写 `result.reasons[0]`，而那在批量那条路上
+ * 是任意一个人的原因。所以语义定成"最值得说的那一个"（见服务层的选取判据）。
+ */
 export const avatarFetchResultSchema = z.object({
   fetched: z.number(),
   failed: z.number(),
+  /**
+   * 最值得告诉用户的那个失败原因；`null` = 没有失败，或失败原因不明。
+   *
+   * ★ 可空而不是给一个"unknown"值：`null` 的含义是"没什么要说的"，
+   * 而一个 `"unknown"` 会诱导界面去显示一句无用的提示。
+   */
+  reason: z
+    .enum(["not_set", "not_reachable", "not_attempted", "not_permitted", "failed"])
+    .nullable(),
 })
 
 export type AvatarFetchResult = z.infer<typeof avatarFetchResultSchema>

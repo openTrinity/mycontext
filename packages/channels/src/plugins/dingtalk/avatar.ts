@@ -84,6 +84,32 @@ export type AvatarMissReason =
   | "group_unreadable"
   | "download_failed"
   | "lookup_skipped"
+  /**
+   * 这份渠道客户端**对这个企业没开通** `contact` 家族的能力。**终态**。
+   *
+   * ## ★★★ 实测（本机随包客户端）
+   *
+   * ```
+   * $ dws contact user get-self
+   * server_error_code: ENTERPRISE_NOT_AUTHORIZED
+   * operation:          contact/get_current_user_profile
+   * ```
+   *
+   * 而上面文件头那条链路的**每一步**都在 `contact` / `chat search-common`
+   * 上（找人 → 找共同群 → 读成员详情），所以这份客户端下头像
+   * **永远取不到**。
+   *
+   * ## ★★ 为什么不能归 `download_failed`（改动前的实际行为）
+   *
+   * 那个是**可重试**的，于是：
+   * · 每 6 小时对每个人重试一遍一件永远失败的事；
+   * · 用户点「刷新头像」→ `force` 确实重试 → 服务端照样拒 →
+   *   **点了毫无变化**，而界面上一个字都没说。
+   *
+   * 用户报的就是这个。分出一个终态之后，界面才能说出
+   * "这份客户端没有通讯录权限，换一份"这句**可执行**的话。
+   */
+  | "not_permitted"
 
 export type AvatarResult =
   | { ok: true; path: string; mediaId: string; groupExternalId: string }
@@ -315,7 +341,46 @@ export async function fetchAvatar(
   }
 
   if (found === null) {
-    const search = await findViaCommonGroups(cli, input)
+    /**
+     * ★★★ 权限墙要单独认出来（`PERMISSION_REQUIRED`）。
+     *
+     * `findViaCommonGroups` 里那两条命令（`chat search-common` 与成员详情）
+     * 都可能被服务端在**权限层**拒掉。实测本机随包客户端：
+     * `contact` 家族整族返回 `ENTERPRISE_NOT_AUTHORIZED`，而 `cli.ts` 的
+     * `SERVER_ERROR_CODES` 已经把它分类成 `PERMISSION_REQUIRED` 并抛出。
+     *
+     * 不接这个抛的后果（改动前）：它一路穿到 `media.service.ts` 的兜底
+     * catch，被记成 `failed`（**可重试**）—— 于是每 6 小时重试一遍一件
+     * 永远失败的事，而用户点「刷新头像」也只是再撞一次墙、界面无声。
+     *
+     * ## ★★ 判据是 `retryable === false`，**不是**某一个具体的错误码
+     *
+     * 我第一版只认 `PERMISSION_REQUIRED`，而 CDP 实测立刻撞到第二个码：
+     *
+     * ```
+     * WARN [Main:Media] avatar fetch threw
+     *   {"detail":"还没绑定渠道身份，拒绝执行渠道命令…"}
+     * ```
+     *
+     * 那是 `CHANNEL_IDENTITY_UNAVAILABLE`（`retryable: false`）—— 同一个形状
+     * （终态被记成可重试的 `failed`），而列举码的写法漏了它。
+     *
+     * `AppError.retryable` 就是"重试有没有意义"这个问题的答案，而它由
+     * 抛错的那一侧负责回答。按它判之后，将来新增的任何终态码都自动进这条路 ——
+     * 而列举码的写法需要有人记得回来加一行（那正是漏掉第二个码的原因）。
+     *
+     * ★ 网络抖动 / 限流是 `retryable: true`，仍然原样抛出 → 由
+     * `media.service.ts` 记成可重试的 `failed`。那些**确实**值得重试。
+     */
+    let search: CommonGroupSearch
+    try {
+      search = await findViaCommonGroups(cli, input)
+    } catch (error) {
+      if (isAppError(error) && error.retryable === false) {
+        return { ok: false, reason: "not_permitted", detail: error.message }
+      }
+      throw error
+    }
     if (search.kind === "no_avatar") return { ok: false, reason: "no_avatar_set" }
     // 缺花名 = 没查过，**不是**终态（花名可能只是还没采到）
     if (search.kind === "skipped") return { ok: false, reason: "lookup_skipped" }
@@ -393,6 +458,8 @@ export async function fetchAvatar(
  * · `group_unreadable`→ `failed`         （可重试 → 可重试）
  * · `lookup_skipped`  → `not_attempted`  （可重试 → 可重试）
  * · `download_failed` → `failed`         （可重试 → 可重试）
+ * · `not_permitted`   → `not_permitted`  （终态 → 终态，且**出路不同**：
+ *   前三个用户什么都做不了，这个换一份有权限的客户端就好了）
  */
 const MISS_MAP: Record<AvatarMissReason, ChannelAvatarMiss> = {
   no_avatar_set: "not_set",
@@ -400,6 +467,8 @@ const MISS_MAP: Record<AvatarMissReason, ChannelAvatarMiss> = {
   group_unreadable: "failed",
   lookup_skipped: "not_attempted",
   download_failed: "failed",
+  // ★ 终态 → 终态。它与 `failed` 分开的理由见 `AvatarMissReason.not_permitted`
+  not_permitted: "not_permitted",
 }
 
 /**

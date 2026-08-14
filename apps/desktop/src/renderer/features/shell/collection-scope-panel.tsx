@@ -79,6 +79,20 @@ function toDraft(
     since === undefined ? null : Math.max(1, Math.round((midnightToday() - since) / 86_400_000))
   return {
     rangeDays,
+    /**
+     * ★★★ 把**绝对下界**也带下去（`savedSince`）—— 见 `SourcesDraft.savedSince`。
+     *
+     * 上面那个 `rangeDays` 换算有一个无法回避的问题：「近 30 天」是相对
+     * **点下去那一刻**的，而库里存的是绝对时间戳。于是前天选的「近 30 天」
+     * 今天读回来是 **32 天** —— 匹配不上任何预设（30/90/180/365），
+     * 于是**一个筹码都不高亮**，用户以为自己没选过。
+     *
+     * 而"仍然显示近 30 天"更糟：那句话在今天指的是另一个区间。
+     *
+     * 所以 `rangeDays` 保留（它是"保存时要用的天数"），另外把绝对值也给出去，
+     * 由界面显示成一个具体日期 —— 那是唯一在任何一天读起来都对的表达。
+     */
+    ...(since === undefined ? {} : { savedSince: since }),
     customRange: null,
     chatKinds: [...((scope?.chatKinds ?? ["direct", "group"]) as ("direct" | "group")[])],
     conversationIds: [...(scope?.conversationIds ?? [])],

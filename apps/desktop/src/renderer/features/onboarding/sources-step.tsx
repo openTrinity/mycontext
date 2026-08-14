@@ -53,6 +53,37 @@ const RANGES: readonly { days: number | null; labelKey: string }[] = [
   { days: null, labelKey: "sourcesStep.rangeAll" },
 ]
 
+/**
+ * 把一个时间戳格式化成**用户所在语言**的日期（含时分）。
+ *
+ * ## ★★ 为什么带时分
+ *
+ * 用户原话：「应该显示已选的是 5月31号17点到 6月29号17点」—— 也就是他关心
+ * 具体到小时的边界。而库里存的 `since` 是**当天 00:00**
+ * （`midnightToday() - N 天`，那个对齐是刻意的：见 `midnightToday` 的注释
+ * —— 不对齐会让同一天内重复保存算出不同的 since，进而反复触发清语料 +
+ * 删图重建）。
+ *
+ * 所以时分显示出来一定是 `00:00`，而那**正好说明**了一件事：
+ * 边界是"那一天的开始"，不是"那一刻"。写成不带时分的话，用户会问
+ * "6 月 13 日那天的消息算不算" —— 而 `00:00` 直接回答了。
+ *
+ * ## ★ 用 `Intl` 而不是自己拼 `${m} 月 ${d} 日`
+ *
+ * 自己拼就把中文写死进代码，英文界面会显示"6 月 13 日"。
+ * `Intl.DateTimeFormat` 跟着 `navigator.language` 走，而那正是 i18n
+ * 已经在用的判据。
+ */
+function formatDay(at: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(at))
+}
+
 /** 群人数档位。见 `inMemberBucket`。 */
 export type MemberBucket = "all" | "0-100" | "101-200" | "201+"
 
@@ -89,6 +120,34 @@ export function inMemberBucket(memberCount: number | null, bucket: MemberBucket)
 export interface SourcesDraft {
   /** 往前多少天；null = 不限。与 `customRange` 互斥 */
   rangeDays: number | null
+  /**
+   * **已保存**的时间下界（unix ms）；`undefined` = 库里还没有值。
+   *
+   * ## ★★★ 为什么必须把它带下来（这修的是一个真实的误导）
+   *
+   * 「近 30 天」这几个字是相对**点下去那一刻**的。存进库的是一个绝对
+   * 时间戳（`midnightToday() - 30 天`），而下次打开面板时
+   * `toDraft` 又把它换算回天数 —— 于是：
+   *
+   * · 前天选的「近 30 天」，今天读回来是 **32 天**；
+   * · 32 匹配不上任何预设（30/90/180/365），所以**一个筹码都不高亮**；
+   * · 用户看到的是"我明明选过，怎么什么都没选中"。
+   *
+   * 实测（探针）：`toScopeDraft({since: 两天前的午夜-30天})` 返回
+   * `rangeDays: 32`，而 `[30,90,180,365,null].includes(32) === false`。
+   *
+   * ★ 而"再显示成近 30 天"也是错的：那句话在今天读起来指的是**另一个**
+   * 区间（今天往回 30 天），与库里真正生效的下界差两天。用户按那句话
+   * 理解自己的学习范围，就会以为前天到今天这两天的历史没被学 ——
+   * 而实际上学了。
+   *
+   * 所以正确的做法是**显示绝对日期**（"从 6 月 13 日起"），
+   * 那是唯一在任何一天读起来都对的表达。
+   *
+   * ★ 它**不参与保存**：保存走 `rangeDays`（用户这次的选择）。
+   * 这个字段只回答"库里现在生效的是哪一天"。
+   */
+  savedSince?: number | undefined
   /**
    * 自定义日期区间（`YYYY-MM-DD`）。
    *
@@ -279,6 +338,55 @@ export function SourcesStep({
   )
   const visibleChosen = value.conversationIds.filter((id) => visibleIds.has(id))
 
+  /**
+   * 「库里现在生效的下界」那句话；`null` = 不显示。
+   *
+   * ## ★★ 判据：有已保存的值，**且**用户这次还没动过时间范围
+   *
+   * 动过之后那个旧下界就不是"将要生效的"了 —— 继续显示它会让用户以为
+   * 保存没生效。所以 `dirty` 时不显示（这一次的选择由高亮的筹码表达）。
+   *
+   * ★ `dirty` 的判据是"这次的选择与已保存的那一天**对不上**"，
+   * 而不是一个 `useState` 标记：面板可能被重新挂载（切渠道、query 刷新），
+   * 那时 state 会丢而库里的值不会。
+   *
+   * ★★ 这句话必须带上「只会更早」：只增不减的语义下，用户看到
+   * "现在从 6 月 13 日起"、又选了「近 7 天」，会以为范围被收窄 ——
+   * 而实际下界不动（`mergeScopeOnlyGrowing` 取 min）。不说这一句，
+   * 那个"选了却没变"读起来就是一个 bug。
+   */
+  const savedSinceText = (() => {
+    const saved = value.savedSince
+    if (saved === undefined) return null
+    // 自定义区间那一栏自己就显示两个绝对日期，不用再补一句
+    if (custom !== null) return null
+    /**
+     * 这次的选择会算出哪一天（与 `CollectionScopePanel.submit` 同一个算法：
+     * 当天 00:00 减天数）。★ 两处必须一致，否则这句话会在"什么都没改"时
+     * 也判成 dirty。
+     */
+    const midnight = new Date()
+    midnight.setHours(0, 0, 0, 0)
+    const wouldBe =
+      value.rangeDays === null ? null : midnight.getTime() - value.rangeDays * 86_400_000
+    /**
+     * ★ 比到**天**而不是毫秒：库里的值是某天的 00:00，而这次算出来的也是
+     * 某天的 00:00 —— 但那两个"某天"可能因为保存时刻不同而差几天。
+     * 差 0 天 = 用户这次选的与已保存的是同一天 ⇒ 不算 dirty。
+     */
+    const dirty = wouldBe === null || Math.abs(wouldBe - saved) >= 86_400_000
+    if (!dirty) {
+      return t("sourcesStep.savedSince", {
+        defaultValue: "当前生效：从 {{date}} 起",
+        date: formatDay(saved),
+      })
+    }
+    return t("sourcesStep.savedSinceOnlyGrows", {
+      defaultValue: "当前生效：从 {{date}} 起 —— 范围只增不减，保存只会让它更早。",
+      date: formatDay(saved),
+    })
+  })()
+
   /** 一组的全选/全不选。已经全选了就变成全不选（同一个按钮两个方向）。 */
   const toggleAll = (items: readonly ChannelConversationView[]) => {
     const ids = items.map((item) => item.externalId)
@@ -363,6 +471,35 @@ export function SourcesStep({
               </button>
             ))}
           </div>
+        )}
+        {/*
+          ── ★★★ 「库里现在生效的下界」——**绝对日期** ────────────────
+
+          ## 为什么必须显示它
+
+          上面那些筹码（近 30 / 90 天）说的是"从**点下去那一刻**往回数"。
+          存进库的是一个绝对时间戳，所以过几天再打开这个面板：
+
+          · 前天选的「近 30 天」→ 换算回来是 **32 天** → 匹配不上任何预设
+            → **一个筹码都不高亮**，用户以为自己没选过；
+          · 而"仍然显示近 30 天"更糟：那句话在今天指的是**另一个**区间
+            （今天往回 30 天），与真正生效的下界差两天。用户会以为
+            前天到今天这两天没被学 —— 而实际学了。
+
+          绝对日期是唯一在任何一天读起来都对的表达。
+
+          ★ 只在**有已保存的值**且**用户这次还没改**时显示：
+          改了之后那个旧下界就不是"将要生效的"了，继续显示它会让人
+          以为保存不生效（`dirty` 判据见下）。
+
+          ★ 只增不减：所以这句话还要说清"保存只会让它更早" ——
+          否则用户看到"现在是 6 月 13 日起"、选了「近 7 天」、
+          会以为范围被收窄到 7 天，而实际下界不动。
+        */}
+        {savedSinceText === null ? null : (
+          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {savedSinceText}
+          </p>
         )}
       </StepSection>
 

@@ -32,10 +32,23 @@ import type { SqliteDatabase } from "../database.js"
  * 新值必须与契约那侧逐字一致。
  */
 export type AvatarMissReason =
-  // 契约值（当前写入的都是这四个）
+  // 契约值（当前写入的都是这五个）
   | "not_set"
   | "not_reachable"
   | "not_attempted"
+  /**
+   * 这份渠道客户端没有取头像所需的能力（服务端在权限层拒）。**终态**。
+   *
+   * ★ 必须与 `failed` 分开：`failed` 在 `RETRIABLE` 里（6 小时后重试），
+   * 而这个在当前客户端下重试永远无效 —— 实测钉钉随包客户端整族
+   * `contact` 返回 `ENTERPRISE_NOT_AUTHORIZED`。归 `failed` 的后果是
+   * 每 6 小时对每个人重试一遍一件永远失败的事，而界面上一个字都没说
+   * （用户报的「刷新头像也没用」）。
+   *
+   * ★ 它仍然**能**被 `force` 绕过（用户换了客户端之后点刷新就该重试）——
+   * 那条路整段跳过缓存判定，见 `MediaService.fetchAvatar` 里那段。
+   */
+  | "not_permitted"
   | "failed"
   // 历史值：头像契约化之前的钉钉词汇，只出现在旧行里
   | "no_common_group"
