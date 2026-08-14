@@ -45,6 +45,35 @@ action.
   discovered at load time (Case B′ below).
 - The tier strings are a stable contract with the wrapper; they are not renamed.
 
+#### What "next round" / "next ingest" means
+
+Throughout this doc, recovery happens on **the next `POST /ingest` for the same
+`source_id`** — nothing else triggers it, and in particular **`POST /ingest/stop`
+is not required** (stop is orthogonal; see below). The tier is a pre-flight hint
+about what *that* call will do.
+
+Two request facts decide resume-vs-skip; the rest of the request body does not:
+
+- **`source_id` is the checkpoint key.** `classify_recovery` looks up the
+  checkpoint `WHERE source_id=?` (`recovery.py`), so the next ingest must target
+  the **same `source_id`** to see this recovery state at all. A different
+  `source_id` is a different namespace — its own tier, usually `ok`.
+- **`source_hash` (a stat-based fingerprint of the source export dir) decides
+  resume vs. fresh round** on load (`checkpoint.py`, `_load`): if the hash
+  **matches**, the interrupted round resumes (done steps are skipped); if it
+  **differs**, the checkpoint normally resets to a fresh `batch_id` — **except**
+  once Phase A has committed (`phase_a.persist_chunks=done`) and the round is not
+  yet `ingest.complete`, the committed durable workset is the retry authority and
+  the round resumes **even if the source changed**.
+- **Other params are irrelevant to recovery.** `concurrency` and `improve_mode`
+  do not affect the tier, nor resume-vs-skip. They only shape the run once it
+  proceeds.
+
+So: after a crash (OOM / kill -9 / power loss), the operator just re-issues
+`POST /ingest` with the same `source_id`. A `cleanup`-tier round will
+auto-**skip** (graph preserved, `checkpoint.reset()`), and the round after that
+accumulates cleanly. No stop, no `--fresh-db`.
+
 ### `POST /ingest/stop` (graceful quiesce)
 
 Cancels the running ingest task (waits up to 30 s), then closes all SQLite /
@@ -218,6 +247,62 @@ re-derived automatically on the next round. Recovering that round's data
 requires a **snapshot restore** — the wrapper's pre-round backup keyed on
 `ingestion_id` (design §3/§4.3). kl performs no lossy logical deletion and holds
 no copy of its own.
+
+#### Why there is no "partially seen" case
+
+One might expect an interrupted round to leave *some* units seen and others not,
+needing its own tier. It cannot: **marking units seen is atomic per round.**
+Phase A's `insert_chunks_with_units` writes the chunks, the unit "seen" marks,
+the `ingest_batches` workset row, **and** the `phase_a.persist_chunks` checkpoint
+step in a **single SQLite transaction** (`pipeline.py` `_persist_chunks`). So a
+round is **all-seen or none-seen**:
+
+- **Died before that commit** → zero units seen, chunks absent → **Case A**
+  (re-parsing sources is safe; nothing was lost).
+- **Committed** → *every* unit of the round is seen at once. There is no
+  per-message partial commit, hence no partial-seen tier to classify.
+
+That also means "**seen but not yet extracted**" is the **normal** mid-round
+state, not a failure: between Phase A's commit and Phase B finishing, all of the
+round's units are seen while their facts are still pending. It is recoverable
+because resume does **not** re-parse sources — `_load_workset` hydrates Phase B's
+input directly from the durable workset (`get_ingest_batch` + surviving `chunks`
+rows). A crash here with the workset row **intact** (`state='ready'`) is just a
+*Healthy resume* (the non-rescue table above), precisely because re-parsing is
+avoided when units are already seen.
+
+The loss only bites when the workset row **also** vanishes (Case B′ / B″ / C /
+D): the seen-but-unextracted units can no longer be rebuilt — re-parsing filters
+them all out as seen, and the ledger holds seen-flags, not chunk text. That is
+exactly what skip-with-warning captures. The unit of loss is therefore always
+**the whole interrupted round**, never a subset of its messages — which is why a
+single `skipped` outcome (plus the snapshot-restore path) is sufficient and no
+finer-grained "partial" recovery tier exists.
+
+---
+
+## Scenario guide: what to do in each situation
+
+Operator/wrapper-facing. Every "run ingest" below means **`POST /ingest` with the
+same `source_id`** (see *What "next round" means*). Nothing here needs
+`--fresh-db`; kl never suggests it.
+
+| Scenario | Symptom | Do this | Why |
+|----------|---------|---------|-----|
+| **Process crashed mid-ingest** (OOM / kill -9 / power loss) | `/status` may still read `running` from before the crash; server restarted | Just **run ingest again** (same `source_id`). No stop needed. | Checkpoint + workset are durable; a matching `source_hash` resumes from the first unfinished step. Extraction cache avoids re-billing already-extracted chunks. |
+| **Job wedged / hung** (no progress, want the process to let go of files) | `state='running'`, no advancement | **`POST /ingest/stop`**, then run ingest again. | Stop cancels the task (≤30 s) and releases DB/vector handles. It's reversible — the round identity and workset are untouched; the re-issued ingest resumes normally. |
+| **`recovery_tier: "resume"`** before re-ingesting | recovery-info reports `resume` | **Run ingest** (same `source_id`). Optionally have the wrapper snapshot first. | Case A / Case B-with-source rebuild the workset (Phase A is idempotent) and continue. Expected outcome `success`. *Caveat:* a `resume` can still turn into a skip if the source's units are all already seen (Case B′) — the wrapper snapshot is cheap insurance. |
+| **`recovery_tier: "cleanup"`** before re-ingesting | recovery-info reports `cleanup` (Cases C / D / B-source-gone) | If that round's data matters, **restore the wrapper's pre-round snapshot** for this `ingestion_id` first *(not yet implemented — see Status note above)*; then **run ingest**. | The broken round **cannot** be rebuilt; the next ingest will auto-**skip** it (`state='done'`, `outcome='skipped'`, warning), `checkpoint.reset()`, and keep accumulating. The skipped round's facts are lost unless restored from a snapshot. |
+| **`recovery_tier: "ok"`** | no anomaly | **Run ingest** normally. | Fresh load or healthy resume; nothing to rescue. |
+| **You want a pre-round backup** | before any risky round | **`GET /ingest/recovery-info`** → copy the `store_paths` as a unit, keyed to `ingestion_id`; quiesce with **`POST /ingest/stop`** first so files aren't mid-write. | kl owns identity + quiesce only; the wrapper owns the copy. *(Wrapper backup/restore is not yet implemented — Status note above.)* |
+| **Round reported `outcome: "skipped"`** | `/status` shows `skipped` + warning | Read the `warning`; restore a snapshot only if that round's data is needed. Otherwise **nothing to do** — the next round already accumulates cleanly. | Skip is the designed safe outcome, not an error. The graph was preserved. |
+| **Round reported `outcome: "partial"`** | `extraction_failed > 0`, `failures_url` set | Fetch `GET /ingest/{run_id}/failures`; re-run ingest to retry failed items. | Partial = per-item extraction failures (distinct from a skipped round). Cache keeps successful items from re-billing. |
+| **Confidential / no-permission conversation** | server-side source refused | **Leave it out of scope; do not retry with different creds/params.** Record as unreadable, not `0`. | Access refusal is a boundary, not a recoverable failure (AGENTS.md §5). |
+
+**Never** reach for `--fresh-db` as a recovery step. It is a real, deliberate
+manual full-database rebuild flag; as *recovery advice* it would destroy the
+long-lived accumulated graph. Recovery advice is always "skip this round; restore
+a snapshot if that round's data is needed."
 
 ---
 
