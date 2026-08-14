@@ -48,6 +48,8 @@ class FactType(str, Enum):
 
     DECISION = "DECISION"
     DELEGATE = "DELEGATE"
+    REQUEST = "REQUEST"
+    ACTION_ITEM = "ACTION_ITEM"
     STATUS = "STATUS"
     CAUSAL = "CAUSAL"
     OPINION = "OPINION"
@@ -319,6 +321,8 @@ class Fact:
     fact_type: FactType = FactType.GENERAL
     timestamp: int = 0
     confidence: float = 0.8
+    subject_entity_id: str | None = None
+    object_entity_id: str | None = None
     source_chunk_id: str = ""
     source_unit_id: str | None = None
     extraction_item_id: str | None = None

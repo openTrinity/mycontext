@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from kl_graph.config import cfg, DATA_DIR
+from kl_graph.config import DATA_DIR, cfg
 from kl_graph.utils.litellm_config import (
     connection_from_service,
     litellm,
@@ -35,6 +35,7 @@ LLM_MAX_RETRIES = int(cfg.pipelines.ingestion.extraction.max_retries)
 LLM_MODEL = _FLASH_CONNECTION.model
 LLM_TIMEOUT = _FLASH_CONNECTION.timeout
 PROMPT_LANGUAGE = str(cfg.pipelines.ingestion.extraction.prompt_language)
+CURRENT_USER = str(cfg.application.current_user or "").strip()
 EXTRACTION_CACHE_PATH = DATA_DIR / "extraction_cache.db"
 EXTRACTION_CACHE_MAX_ENTRIES = int(
     cfg.pipelines.ingestion.extraction.cache_max_entries
@@ -42,7 +43,7 @@ EXTRACTION_CACHE_MAX_ENTRIES = int(
 from kl_graph.ingest.extraction_cache import ExtractionCacheStore
 from kl_graph.models.types import Chunk, ExtractionItem
 
-EXTRACTION_SCHEMA_VERSION = "extraction-v2"
+EXTRACTION_SCHEMA_VERSION = "extraction-v5"
 Extractable = Chunk | ExtractionItem
 
 logger = logging.getLogger(__name__)
@@ -470,7 +471,10 @@ class ExtractedFact(BaseModel):
         description="Natural language statement preserving all specifics"
     )
     fact_type: str = Field(
-        description="One of: DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"
+        description=(
+            "One of: DECISION, DELEGATE, REQUEST, ACTION_ITEM, STATUS, CAUSAL, "
+            "OPINION, GENERAL"
+        )
     )
     confidence: float = Field(
         default=0.9,
@@ -520,6 +524,20 @@ ENTITY DESCRIPTION:
 FACT RULES:
 - Use OPINION for a subjective judgment, preference, or prediction; use the
   other types for claims presented as objective facts
+- Extract every person's requests and assignments, regardless of recipient.
+- Use REQUEST for an information-seeking or conversational ask: a question,
+  clarification, confirmation, status check, or other ask resolved by a simple
+  reply in the current exchange.
+- Use ACTION_ITEM only when all three are true: the target explicitly asks or
+  assigns a recipient to act; that recipient is the action's actual actor; and
+  the action is still outstanding with an observable completion result.
+- Only after classifying REQUEST or ACTION_ITEM, set subject=requester and
+  object=recipient/assignee. Resolve pronouns from chat metadata; emit one fact
+  per assignee when there are several.
+- "I'll check/chase it" is the speaker's own plan. "I sent the file" or a file
+  attachment is a completed action. Neither is a directed ACTION_ITEM.
+- Use DELEGATE only to report or record established ownership or division of
+  work when nobody is being asked in the utterance.
 - Each fact is a single, atomic claim
 - Preserve ALL specific details (numbers, dates, versions, decisions)
 - Include temporal bounds (生效/失效) if the message indicates when something started/ended
@@ -559,7 +577,7 @@ Example output:
 {"实体":[{"名称":"张三","类型":"Person","描述":"负责排查线上问题"},{"名称":"SystemA","类型":"System"}],"事实":[{"主体":"张三","客体":"SystemA","内容":"张三负责SystemA的线上问题排查","事类":"STATUS","置信":0.9}]}
 
 类型: Person, System, Project, Organization, Location, Document, Event, Unknown
-事类: DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"""
+事类: DECISION, DELEGATE, REQUEST, ACTION_ITEM, STATUS, CAUSAL, OPINION, GENERAL"""
 
 SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 
@@ -580,6 +598,16 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 
 事实规则：
 - 主观判断、偏好或预测使用OPINION；作为客观事实陈述的内容使用其他类型
+- 抽取所有人的请求和指派，不限接收人。
+- 索取信息或对话性请求使用REQUEST：包括提问、澄清、确认、进度询问，以及其他能在当前对话中
+  通过简单回复结束的请求。
+- 只有同时满足三个条件才使用ACTION_ITEM：目标消息明确要求或指派接收人执行动作；
+  该接收人是动作的实际执行人；动作尚未完成且有可观察的完成结果。
+- 只有判定为REQUEST或ACTION_ITEM后，才设置主体=请求人、客体=接收人/执行人。
+  代词根据聊天元数据消歧；多个执行人分别输出事实。
+- “我去确认”“我来处理”“我催一下”是发送者自己的计划；“文件发你了”或文件附件是已完成动作。
+  两者都不是发给接收人的ACTION_ITEM。
+- 仅在陈述或记录已经确定的职责、归属或分工，且当前话语没有在要求某人做事时，才使用DELEGATE。
 - 每条事实是单一原子性声明
 - 保留所有具体细节（数字、日期、版本、决策）
 - 如消息指出时间范围，填写生效/失效
@@ -615,7 +643,7 @@ SYSTEM_PROMPT_CN = """你是一个知识抽取助手。
 {"实体":[{"名称":"张三","类型":"Person","描述":"负责排查线上问题"},{"名称":"SystemA","类型":"System"}],"事实":[{"主体":"张三","客体":"SystemA","内容":"张三负责SystemA的线上问题排查","事类":"STATUS","置信":0.9}]}
 
 类型取值：Person, System, Project, Organization, Location, Document, Event, Unknown
-事类取值：DECISION, DELEGATE, STATUS, CAUSAL, OPINION, GENERAL"""
+事类取值：DECISION, DELEGATE, REQUEST, ACTION_ITEM, STATUS, CAUSAL, OPINION, GENERAL"""
 
 SYSTEM_PROMPT = {
     "zh": SYSTEM_PROMPT_CN,
@@ -1110,6 +1138,7 @@ class LLMExtractor:
             msg.prompt_version,
             msg.strategy_version,
             EXTRACTION_SCHEMA_VERSION,
+            f"current-user={CURRENT_USER}",
         ))
 
     def _cache_key(self, msg: Extractable) -> str:

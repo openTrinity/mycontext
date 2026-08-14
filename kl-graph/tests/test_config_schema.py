@@ -13,6 +13,7 @@ from kl_graph.config import PROJECT_ROOT, AppConfig, cfg, load_config
 
 EXPECTED_LEAVES = {
     "application.debug",
+    "application.current_user",
     "application.data_dir",
     "application.dws_export_dir",
     "server.port",
@@ -119,7 +120,6 @@ EXPECTED_LEAVES = {
     "pipelines.query.fusion.rrf_k",
     "pipelines.query.reranking.window",
     "pipelines.query.reranking.top_k",
-    "pipelines.query.global_search.current_user",
     "pipelines.query.global_search.levels",
     "pipelines.query.global_search.map_budget",
     "pipelines.query.global_search.reduce_budget",

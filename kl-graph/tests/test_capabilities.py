@@ -34,6 +34,8 @@ def test_server_capabilities_hide_experimental_communities(monkeypatch) -> None:
     assert result["commands"]["ask"]["fact_types"] == [
         "DECISION",
         "DELEGATE",
+        "REQUEST",
+        "ACTION_ITEM",
         "STATUS",
         "CAUSAL",
         "OPINION",

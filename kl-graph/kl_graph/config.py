@@ -51,6 +51,7 @@ class _ConfigModel(BaseModel):
 
 class ApplicationConfig(_ConfigModel):
     debug: bool = False
+    current_user: str
     data_dir: str
     dws_export_dir: str
 
@@ -315,7 +316,6 @@ class RerankingConfig(_ConfigModel):
 
 
 class GlobalSearchConfig(_ConfigModel):
-    current_user: str
     levels: str
     map_budget: int
     reduce_budget: int

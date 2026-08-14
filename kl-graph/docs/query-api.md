@@ -16,7 +16,8 @@ gate is enabled and a full improvement refreshes them.
 ## Conventions
 
 - Timestamps are Unix epoch milliseconds. Timeline date filters use
-  `YYYY-MM-DD`.
+  `YYYY-MM-DD`. `/requests` and `/todos` interpret their date in the explicitly
+  supplied IANA timezone and use a half-open local-day interval.
 - Stored IDs are bare IDs. Interactive graph responses namespace them as
   `ent:<id>`, `fact:<id>`, `cnk:<id>`, and `comm:<id>` so node types cannot
   collide.
@@ -43,6 +44,8 @@ gate is enabled and a full improvement refreshes them.
 | `/members` | List the entity or fact members of a community |
 | `/context` | Read a fact, its source chunk, entities, and nearby chat context |
 | `/timeline` | Read an entity's facts over time |
+| `/requests` | Read requests addressed to the configured current user on one day |
+| `/todos` | Read actionable items addressed to the configured current user on one day |
 | `/graph_hop` | Continue the interactive graph walk returned by `/ask` |
 | `/chunk` | Batch-read full chunk content by ID |
 | `/path` | Find shortest graph paths between two entities |
@@ -65,7 +68,7 @@ used by the running process:
       "caller_intent": true,
       "synthesize_default": false,
       "entity_types": ["PERSON", "SYSTEM", "PROJECT", "ORGANIZATION", "LOCATION", "DOCUMENT", "EVENT", "UNKNOWN"],
-      "fact_types": ["DECISION", "DELEGATE", "STATUS", "CAUSAL", "OPINION", "GENERAL"]
+      "fact_types": ["DECISION", "DELEGATE", "REQUEST", "ACTION_ITEM", "STATUS", "CAUSAL", "OPINION", "GENERAL"]
     },
     "global-search": {
       "enabled": false,
@@ -227,6 +230,37 @@ and latency. If no date range is supplied for an entity with degree greater
 than 200, the server automatically limits results to the last 90 days and sets
 `auto_filtered` to `true`.
 
+### `POST /requests`
+
+```json
+{
+  "date": "2026-08-14",
+  "timezone": "Asia/Shanghai",
+  "limit": 100
+}
+```
+
+Resolves `KL_CURRENT_USER` to an exact `Person` entity, then returns `REQUEST`
+facts whose `object_entity_id` is that entity and whose timestamp falls within
+the requested local day. Self-requests and facts without a resolved requester
+are excluded. Each result includes the requester, recipient, and source chunk,
+unit, and extraction-item IDs. The endpoint returns `503` when
+`KL_CURRENT_USER` is unset and `404` when its exact `Person` entity does not
+exist.
+
+Existing facts are not retroactively assigned participant roles when the
+SQLite schema is upgraded. Rebuild or re-ingest with the current extraction
+schema before using this endpoint against an older database.
+
+### `POST /todos`
+
+Accepts the same request body and current-user configuration as `/requests`,
+but returns `ACTION_ITEM` facts under the `todos` key. An action item is a
+concrete requested or assigned action with an observable completion result;
+questions, status checks, conversational troubleshooting, and unassigned advice
+remain `REQUEST` facts and are excluded. These are todo candidates: completion,
+cancellation, acceptance, and due-date lifecycle are not tracked.
+
 ## Batch exact neighbors
 
 ### `POST /neighbors`
@@ -370,4 +404,3 @@ limited to 1–8. Set `all_paths` to return all shortest paths. `edge_types` can
 restrict traversal; `null` uses the graph backend's default relation set. The
 response contains resolved endpoints, node/edge sequences, hop counts,
 `path_count`, and whether the search was exhausted.
-

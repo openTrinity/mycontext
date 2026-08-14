@@ -52,6 +52,8 @@ def _render_content(
     title: str,
     quoted: dict | None,
     timestamp: int = 0,
+    *,
+    current_user: str = "",
 ) -> str:
     """Render a chat message's chunk text with direction + inlined reply.
 
@@ -75,6 +77,9 @@ def _render_content(
         title: Scope title. For a direct chat this is the counterparty's display
             name; for a group it is the group name.
         quoted: The record's ``quotedMessage`` dict, or ``None``.
+        current_user: Current user's display name. Direct-chat scopes identify
+            the counterparty but carry no recipient field, so this is required
+            to render incoming-message direction without guessing.
 
     Returns:
         The rendered chunk text. The body is always the final line(s), so the
@@ -86,18 +91,35 @@ def _render_content(
         - The quoted body is inlined **verbatim** — no truncation, no
           media/``@``-noise stripping and no whitespace trimming (human
           decision).
-        - Self-chats (a direct scope whose title equals the sender) still render
-          a complete ``sender → receiver`` relationship rather than collapsing
-          to the sender alone (human decision).
+        - A direct scope's title is the current user's counterparty, not the
+          recipient of every message. When the sender is that counterparty,
+          ``current_user`` supplies the missing recipient.
+        - If a direct message's direction cannot be resolved, the header keeps
+          the conversation title and sender but deliberately omits an arrow.
     """
     lines: list[str] = []
 
     if chat_kind == "direct":
-        # A 1:1 chat's counterparty is the scope title. We do not try to work
-        # out whether the sender *is* the counterparty; a complete
-        # sender → receiver relationship is always rendered (incl. self-chats).
-        receiver = title or sender
-        lines.append(_stamp(f"[私聊] {sender} → {receiver}", timestamp))
+        # A 1:1 scope title is the current user's counterparty; it is not a
+        # per-message receiver. DWS does not export a receiver field, so use the
+        # configured current user to resolve incoming messages. Outgoing
+        # direction remains inferable without it because sender != counterparty.
+        current_user = current_user.strip()
+        receiver = ""
+        if title and current_user and sender == current_user:
+            receiver = title
+        elif title and current_user and sender == title:
+            receiver = current_user
+        elif title and not current_user and sender != title:
+            receiver = title
+
+        if receiver:
+            header = f"[私聊] {sender} → {receiver}"
+        elif title:
+            header = f"[私聊: {title}] {sender}"
+        else:
+            header = f"[私聊] {sender}"
+        lines.append(_stamp(header, timestamp))
     elif title:
         lines.append(_stamp(f"[群聊: {title}] {sender}", timestamp))
     else:
@@ -120,13 +142,14 @@ def _render_content(
     return "\n".join(lines)
 
 
-def load_all_messages(chat_dir: Path) -> list[Chunk]:
+def load_all_messages(chat_dir: Path, *, current_user: str = "") -> list[Chunk]:
     """Load all chat messages from a DWS ``chat`` source directory.
 
     Reads ``<chat_dir>/records.jsonl`` (type ``message``) and links each to its
     conversation scope in ``scopes.jsonl`` for the chat title + kind. Each
     message's ``content`` is rendered with a direction header and the inlined
-    quoted message (:func:`_render_content`).
+    quoted message (:func:`_render_content`). ``current_user`` resolves the
+    otherwise absent recipient for incoming direct messages.
 
     Messages are returned **grouped by conversation** — a concatenation of
     per-conversation runs, each sorted by timestamp — rather than one global
@@ -186,6 +209,7 @@ def load_all_messages(chat_dir: Path) -> list[Chunk]:
             title,
             None,
             timestamp=to_unix_ms(data.get("createTime")),
+            current_user=current_user,
         )
         if isinstance(quoted, dict):
             q_sender = (quoted.get("sender") or "").strip()
@@ -198,6 +222,7 @@ def load_all_messages(chat_dir: Path) -> list[Chunk]:
             content=_render_content(
                 content, sender, chat_kind, title, quoted,
                 timestamp=to_unix_ms(data.get("createTime")),
+                current_user=current_user,
             ),
             source_type="message",
             timestamp=to_unix_ms(data.get("createTime")),

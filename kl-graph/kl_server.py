@@ -20,9 +20,10 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,7 +68,7 @@ from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, cfg
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 QUERY_MAX_CONCURRENCY = int(cfg.pipelines.query.max_concurrency)
-CURRENT_USER = str(cfg.pipelines.query.global_search.current_user or "")
+CURRENT_USER = str(cfg.application.current_user or "")
 COMMUNITIES_ENABLED = bool(cfg.pipelines.experimental.communities.enabled)
 ASK_SYNTHESIZE_DEFAULT = bool(cfg.pipelines.query.ask.synthesize)
 
@@ -1019,6 +1020,16 @@ class TimelineRequest(BaseModel):
     limit: int = 30
 
 
+class RequestsRequest(BaseModel):
+    """Requests addressed to the configured current user on one local day."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    date: str = Field(description="Local calendar day in YYYY-MM-DD form")
+    timezone: str = Field(default="Asia/Shanghai", min_length=1)
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
 class GraphHopRequest(BaseModel):
     node_id: str  # "ent:.." | "fact:.."
     # Omit or pass {} for the first hop; otherwise echo the prior response cursor.
@@ -1168,6 +1179,8 @@ async def get_capabilities():
             "path",
             "search",
             "timeline",
+            "requests",
+            "todos",
         )
     }
     commands["expand"]["deprecated"] = True
@@ -2742,6 +2755,129 @@ def _entity_timeline_impl(req: TimelineRequest):
             for f in facts
         ],
         "latency_ms": round(latency),
+    }
+
+
+@app.post("/requests")
+async def requests_for_current_user(req: RequestsRequest):
+    """Return requests addressed to ``KL_CURRENT_USER`` on one local day."""
+    async with _query_sema():
+        return await asyncio.to_thread(_requests_for_current_user_impl, req)
+
+
+@app.post("/todos")
+async def todos_for_current_user(req: RequestsRequest):
+    """Return actionable items addressed to ``KL_CURRENT_USER`` on one day."""
+    async with _query_sema():
+        return await asyncio.to_thread(_todos_for_current_user_impl, req)
+
+
+def _requests_for_current_user_impl(req: RequestsRequest):
+    """Resolve the current user exactly, then filter role-aware REQUEST facts."""
+    return _directed_facts_for_current_user_impl(
+        req, fact_type=FactType.REQUEST, result_key="requests"
+    )
+
+
+def _todos_for_current_user_impl(req: RequestsRequest):
+    """Resolve the current user exactly, then filter ACTION_ITEM facts."""
+    return _directed_facts_for_current_user_impl(
+        req, fact_type=FactType.ACTION_ITEM, result_key="todos"
+    )
+
+
+def _directed_facts_for_current_user_impl(
+    req: RequestsRequest, *, fact_type: FactType, result_key: str
+):
+    """Return one directed fact type addressed to the exact current user."""
+    if not state.ready:
+        raise HTTPException(503, "Server not ready")
+    if not CURRENT_USER:
+        raise HTTPException(503, "KL_CURRENT_USER is not configured")
+
+    try:
+        local_date = datetime.strptime(req.date, "%Y-%m-%d").date()  # noqa: DTZ007
+    except ValueError as exc:
+        raise HTTPException(400, f"Invalid date: {req.date}") from exc
+    try:
+        timezone = ZoneInfo(req.timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(400, f"Invalid timezone: {req.timezone}") from exc
+
+    start = datetime.combine(local_date, datetime.min.time(), tzinfo=timezone)
+    end = datetime.combine(
+        local_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone
+    )
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+
+    current_user = state.sqlite_conn.execute(
+        """SELECT id, name, entity_type FROM entities
+           WHERE name = ? AND entity_type = ?
+           ORDER BY mention_count DESC LIMIT 1""",
+        (CURRENT_USER, "Person"),
+    ).fetchone()
+    if not current_user:
+        raise HTTPException(
+            404, f"Configured current-user Person entity not found: {CURRENT_USER}"
+        )
+
+    rows = state.sqlite_conn.execute(
+        """SELECT f.id, f.text, f.fact_type, f.timestamp, f.confidence,
+                  f.subject_entity_id, requester.name, requester.entity_type,
+                  f.object_entity_id, recipient.name, recipient.entity_type,
+                  f.source_chunk_id, f.source_unit_id, f.extraction_item_id
+           FROM facts AS f
+           LEFT JOIN entities AS requester ON requester.id = f.subject_entity_id
+           LEFT JOIN entities AS recipient ON recipient.id = f.object_entity_id
+           WHERE f.fact_type = ? AND f.object_entity_id = ?
+             AND f.subject_entity_id IS NOT NULL
+             AND f.subject_entity_id <> f.object_entity_id
+             AND f.timestamp >= ? AND f.timestamp < ?
+           ORDER BY f.timestamp ASC, f.id ASC
+           LIMIT ?""",
+        (fact_type.value, current_user[0], start_ms, end_ms, req.limit),
+    ).fetchall()
+
+    results = []
+    for row in rows:
+        results.append(
+            {
+                "id": row[0],
+                "text": row[1],
+                "type": row[2],
+                "timestamp": row[3],
+                "confidence": row[4],
+                "requester": {
+                    "id": row[5],
+                    "name": row[6],
+                    "type": row[7],
+                },
+                "recipient": {
+                    "id": row[8],
+                    "name": row[9],
+                    "type": row[10],
+                },
+                "provenance": {
+                    "source_chunk_id": row[11],
+                    "source_unit_id": row[12],
+                    "extraction_item_id": row[13],
+                },
+            }
+        )
+
+    return {
+        "current_user": {
+            "id": current_user[0],
+            "name": current_user[1],
+            "type": current_user[2],
+        },
+        "date": req.date,
+        "timezone": req.timezone,
+        "start_timestamp": start_ms,
+        "end_timestamp": end_ms,
+        result_key: results,
+        "count": len(results),
     }
 
 

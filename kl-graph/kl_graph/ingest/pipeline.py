@@ -40,6 +40,7 @@ ENTITY_DESCRIPTION_SUMMARIZE = bool(
 )
 GENERIC_SOURCES = tuple(cfg.pipelines.ingestion.generic_sources)
 KEEP_EXTRACTION_CACHE = bool(cfg.pipelines.ingestion.keep_extraction_cache)
+CURRENT_USER = str(cfg.application.current_user or "").strip()
 EXTRACTION_CACHE_MAX_ENTRIES = int(
     cfg.pipelines.ingestion.extraction.cache_max_entries
 )
@@ -370,13 +371,26 @@ def map_fact_type(raw_type: str) -> FactType:
     mapping = {
         "INFORMATION": FactType.GENERAL,
         "FACT": FactType.GENERAL,
-        "TASK": FactType.DELEGATE,
+        "TASK": FactType.ACTION_ITEM,
+        "TODO": FactType.ACTION_ITEM,
+        "ACTION": FactType.ACTION_ITEM,
         "ASSIGNMENT": FactType.DELEGATE,
         "UPDATE": FactType.STATUS,
         "PROGRESS": FactType.STATUS,
         "PLAN": FactType.DECISION,
     }
     return mapping.get(raw, FactType.GENERAL)
+
+
+def _participant_entity_id(
+    raw_name: object, all_entities: dict[str, Entity]
+) -> str | None:
+    """Resolve one normalized extraction participant to an existing entity."""
+    name = str(raw_name or "").strip().lstrip("@").strip()
+    if not name:
+        return None
+    entity_id = entity_id_from_name(name)
+    return entity_id if entity_id in all_entities else None
 
 
 def _is_chat(chunk: Chunk) -> bool:
@@ -1560,6 +1574,7 @@ class IngestionPipeline:
             if s.skip:
                 return
             seen_fact_ids = {fact.id for fact in self.all_facts}
+            all_entities = getattr(self, "all_entities", {})
             duplicate_count = 0
             for item, msg, result in self._extraction_records():
                 raw_facts = result.get("facts", [])
@@ -1596,6 +1611,12 @@ class IngestionPipeline:
                         fact_type=fact_type,
                         timestamp=msg.timestamp,
                         confidence=confidence,  # LLM-generated, clamped to [0,1]
+                        subject_entity_id=_participant_entity_id(
+                            raw.get("subject_entity"), all_entities
+                        ),
+                        object_entity_id=_participant_entity_id(
+                            raw.get("object_entity"), all_entities
+                        ),
                         source_chunk_id=msg.id,
                         source_unit_id=item.source_unit_id,
                         extraction_item_id=item.id,
@@ -2002,7 +2023,10 @@ class IngestionPipeline:
         # actual chat chunk unit — session slices (<=1024 tokens, headers intact,
         # provenance in metadata). C1/C6: a slice's deterministic id is what the
         # extraction cache and fact ids key on downstream.
-        raw_messages = load_all_messages(self.messages_dir)
+        raw_messages = load_all_messages(
+            self.messages_dir,
+            current_user=CURRENT_USER,
+        )
         chat_units = [
             SourceUnit(
                 source_id=self.source_id,

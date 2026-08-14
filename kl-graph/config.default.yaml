@@ -8,6 +8,8 @@
 application:
   # Enable expensive diagnostic integrity checks; disabled in normal operation.
   debug: ${oc.env:KL_DEBUG,0}
+  # Display name used to identify the owner in chat direction and personal queries.
+  current_user: ${oc.env:KL_CURRENT_USER,""}
   # Runtime-data directory; an empty value resolves to <project>/data.
   data_dir: ${oc.env:KL_DATA_DIR,""}
   # Root directory containing the DingTalk DWS export to ingest.
@@ -329,8 +331,6 @@ pipelines:
 
     # Map/reduce search across hierarchical community summaries.
     global_search:
-      # User identity supplied to global-search prompting when available.
-      current_user: ${oc.env:KL_CURRENT_USER,""}
       # Compatibility setting; levels are currently discovered dynamically.
       levels: "${oc.env:KL_GLOBAL_SEARCH_LEVELS,\"L0,L1,L2,L3\"}"
       # Approximate input-token budget for each map prompt batch.

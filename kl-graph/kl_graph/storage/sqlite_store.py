@@ -180,6 +180,8 @@ class SQLiteStore(KnowledgeStore):
                 fact_type TEXT DEFAULT 'GENERAL',
                 timestamp INTEGER DEFAULT 0,
                 confidence REAL DEFAULT 0.8,
+                subject_entity_id TEXT,
+                object_entity_id TEXT,
                 source_chunk_id TEXT NOT NULL,
                 source_unit_id TEXT,
                 extraction_item_id TEXT,
@@ -395,6 +397,16 @@ class SQLiteStore(KnowledgeStore):
             self.conn.execute("ALTER TABLE facts ADD COLUMN source_unit_id TEXT")
         if "extraction_item_id" not in cols:
             self.conn.execute("ALTER TABLE facts ADD COLUMN extraction_item_id TEXT")
+        if "subject_entity_id" not in cols:
+            self.conn.execute("ALTER TABLE facts ADD COLUMN subject_entity_id TEXT")
+        if "object_entity_id" not in cols:
+            self.conn.execute("ALTER TABLE facts ADD COLUMN object_entity_id TEXT")
+        # Created after the additive migration above so opening an old database
+        # cannot fail while the indexed columns are still absent.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_facts_request_recipient "
+            "ON facts(fact_type, object_entity_id, timestamp)"
+        )
 
     def _ensure_community_columns(self) -> None:
         """Add community columns missing from a pre-existing database.
@@ -1268,8 +1280,9 @@ class SQLiteStore(KnowledgeStore):
         self.conn.executemany(
             """INSERT OR IGNORE INTO facts
                (id, text, fact_type, timestamp, confidence, source_chunk_id,
-                source_unit_id, extraction_item_id, embedding_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_unit_id, extraction_item_id, embedding_id,
+                subject_entity_id, object_entity_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     f.id,
@@ -1281,6 +1294,8 @@ class SQLiteStore(KnowledgeStore):
                     f.source_unit_id,
                     f.extraction_item_id,
                     f.embedding_id,
+                    f.subject_entity_id,
+                    f.object_entity_id,
                 )
                 for f in facts
             ],

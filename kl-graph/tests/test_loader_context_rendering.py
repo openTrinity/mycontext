@@ -72,9 +72,29 @@ def _msg(mid: str, conv: str, scope: str, sender: str, content: str, ts_ms: int 
 
 # ─── R1: the pure render helper ──────────────────────────────────────────────
 
-def test_render_direct_no_reply():
-    """Direct chat renders a sender → counterparty header above the body."""
-    out = _render_content("你看一下", "孙亮", "direct", "小周", None)
+def test_render_direct_outgoing_message():
+    """Current user sending to the scope counterparty renders user → title."""
+    out = _render_content(
+        "你看一下",
+        "小周",
+        "direct",
+        "孙亮",
+        None,
+        current_user="小周",
+    )
+    assert out == "[私聊] 小周 → 孙亮\n你看一下"
+
+
+def test_render_direct_incoming_message():
+    """Counterparty sending to the current user must not render title → title."""
+    out = _render_content(
+        "你看一下",
+        "孙亮",
+        "direct",
+        "孙亮",
+        None,
+        current_user="小周",
+    )
     assert out == "[私聊] 孙亮 → 小周\n你看一下"
 
 
@@ -126,9 +146,23 @@ def test_render_self_quote():
 
 def test_render_self_chat_keeps_complete_relationship():
     """Self-chat still renders a full sender → receiver pair (human decision)."""
-    out = _render_content("备忘", "孙亮", "direct", "孙亮", None)
+    out = _render_content(
+        "备忘",
+        "孙亮",
+        "direct",
+        "孙亮",
+        None,
+        current_user="孙亮",
+    )
     assert out == "[私聊] 孙亮 → 孙亮\n备忘"
     assert "→" in out, "must NOT collapse to sender-only"
+
+
+def test_render_direct_incoming_without_current_user_omits_arrow():
+    """An unknown recipient is left unknown instead of rendering title → title."""
+    out = _render_content("你看一下", "孙亮", "direct", "孙亮", None)
+    assert out == "[私聊: 孙亮] 孙亮\n你看一下"
+    assert "→" not in out
 
 
 def test_render_media_only_quote_still_names_replied_to():
@@ -300,14 +334,17 @@ def test_loader_renders_direct_and_group_from_scope():
                 _msg("g1", "cg", "sg", "赵辰", "开始了", base_ts),
             ],
             scopes=[
-                {"id": "sd", "type": "chat", "data": {"title": "小周", "chat_kind": "direct"}},
+                {"id": "sd", "type": "chat", "data": {"title": "孙亮", "chat_kind": "direct"}},
                 {"id": "sg", "type": "chat", "data": {"title": "项目讨论", "chat_kind": "group"}},
             ],
         )
-        by_id = {m.id: m for m in load_all_messages(d)}
+        by_id = {m.id: m for m in load_all_messages(d, current_user="小周")}
         assert by_id["d1"].content == "[私聊] 孙亮 → 小周 · 2023-11-15 06:13\n你看一下"
         assert by_id["g1"].content == "[群聊: 项目讨论] 赵辰 · 2023-11-15 06:13\n开始了"
         assert by_id["d1"].metadata.get("chat_kind") == "direct"
+        assert by_id["d1"].metadata["extraction_target_content"].startswith(
+            "[私聊] 孙亮 → 小周"
+        )
 
 
 def test_loader_renders_reply_and_keeps_reply_to():

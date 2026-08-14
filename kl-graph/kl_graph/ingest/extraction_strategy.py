@@ -11,7 +11,7 @@ from kl_graph.models.types import Chunk, ExtractionItem
 
 CHAT_CONTEXT_WINDOW = 3
 PROMPT_LANGUAGE = str(cfg.pipelines.ingestion.extraction.prompt_language)
-PROMPT_VERSION = f"{PROMPT_LANGUAGE}-source-aware-v5"
+PROMPT_VERSION = f"{PROMPT_LANGUAGE}-source-aware-v6"
 
 
 class ExtractionStrategy(Protocol):
