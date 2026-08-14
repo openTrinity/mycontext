@@ -409,3 +409,89 @@ describe("范围权威（readCollectionScope）的三态", () => {
     vault.close()
   })
 })
+
+/**
+ * ── ★★★ 时间闸不许被会话闸挡住（飞书那个真实缺口）────────────────
+ *
+ * ## 缺陷是什么
+ *
+ * `persist()` 里那段范围过滤原来整个包在 `if (scope.restricted)` 里面，
+ * 而 `restricted` 的语义是"设了**会话**白名单"。于是
+ * 「配了 since、但没配 conversationIds」这个组合下 `since` **完全失效**。
+ *
+ * ## ★★ 那不是假想的组合，它是飞书那一行的**真实形状**
+ *
+ * `DistillSourceService.syncTimeWindowToSources()` 给每个非主渠道库写
+ * `{since, until, chatKinds}` 而**刻意不带 `conversationIds`** ——
+ * 理由本身是对的（跨渠道复制 `cid…` 会按一批不存在的 id 过滤 → 恒零，
+ * 比超采更糟）。所以每一个非主渠道天然处在这个组合下。
+ *
+ * 实测（改动前的探针）：配 `since = 30 天前`，一条 100 天前的消息
+ * **照样落库**。按 CLAUDE.md 第 5 节那是隐私问题，不是"多采点没坏处"。
+ *
+ * ## 反证
+ *
+ * 把 `persist()` 里那段闸重新包回 `if (scope.restricted)` ⇒ 这两条转红。
+ */
+describe("★★★ 只配了时间范围（没配会话白名单）时，时间闸仍然生效", () => {
+  /** 一页两条：一条在 30 天内、一条 100 天前，同一个会话。 */
+  function twoAgesPage(): ChannelPullPage {
+    const base = mixedPage()
+    const first = base.messages[0]
+    if (first === undefined) throw new Error("fixture broken")
+    return {
+      ...base,
+      conversations: base.conversations.slice(0, 1),
+      messages: [
+        { ...first, externalId: "msgFAKE0011==", contentText: "30 天内", sentAt: START - 60_000 },
+        {
+          ...first,
+          externalId: "msgFAKE0012==",
+          contentText: "100 天前",
+          sentAt: START - 100 * 86_400_000,
+        },
+      ],
+      itemCount: 2,
+    }
+  }
+
+  it("★★★ 100 天前那条**不落库**（since = 30 天前）", async () => {
+    const { vault, service } = setup({
+      // ★ 关键：`picked` 不传 ⇒ 不写 conversationIds，只写 since。
+      //   `setup` 只有在 `picked !== undefined` 时才写那一行，所以这里
+      //   要自己写。
+      page: twoAgesPage,
+    })
+    new DistillSourceRepository(vault.db).upsert(
+      "chat",
+      { enabled: true, scope: { since: START - 30 * 86_400_000 } },
+      START,
+    )
+
+    await service.tickPull()
+
+    const texts = vault.db
+      .prepare<[], { content_text: string }>("SELECT content_text FROM messages ORDER BY sent_at")
+      .all()
+      .map((row) => row.content_text)
+    expect(texts).toEqual(["30 天内"])
+    vault.close()
+  })
+
+  it("★★ 而「不限时间」时两条都落库（闸只在真的设了界时收紧）", async () => {
+    const { vault, service } = setup({ page: twoAgesPage })
+    // 配了范围行但**不设** since —— 那是"不限"
+    new DistillSourceRepository(vault.db).upsert("chat", { enabled: true, scope: {} }, START)
+
+    await service.tickPull()
+
+    /**
+     * ★ 这一条是上一条的**必要配对**：只写上一条的话，最省事的"修法"是
+     * 把时间闸写成恒收紧 —— 而那会让选了"不限"的用户静默少采一批历史。
+     */
+    const count =
+      vault.db.prepare<[], { c: number }>("SELECT count(*) AS c FROM messages").get()?.c ?? 0
+    expect(count).toBe(2)
+    vault.close()
+  })
+})

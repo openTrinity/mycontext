@@ -78,3 +78,18 @@ export type {
  */
 export { buildConsumerStatuses, buildDomainStatuses } from "./topology-view.js"
 export type { ConsumerStatus, DomainStatus, TopologyViewInput } from "./topology-view.js"
+
+/**
+ * 生产者骨架 —— 三个域共用的四件事（范围闸 / 丢弃计数 / 落库 / 覆盖面记账）。
+ *
+ * ★ 它修的是两个真实的隐私缺口：文档那条路压根没有闸，
+ * 而聊天那条路的时间闸被会话闸挡住了（`if (scope.restricted)` 套在外面）。
+ * 见 `producer.ts` 文件头。
+ */
+export { ProducerRunner, admitByScope } from "./producer.js"
+export type {
+  DomainProducer,
+  ProducerRunResult,
+  CoverageAccounting,
+  ScopeAdmission,
+} from "./producer.js"

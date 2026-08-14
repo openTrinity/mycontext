@@ -41,6 +41,7 @@ import {
   OutboxConsumer,
   runCycle,
   checkTopologyConsistency,
+  admitByScope,
   buildConsumerStatuses,
   buildDomainStatuses,
   type ConsumerOutcome,
@@ -68,7 +69,6 @@ import {
   SelfIdentityRepository,
   readCollectionScope,
   isConversationInScope,
-  isSentAtInScope,
   /**
    * ★ 三个域共用的范围判定（三态语义只有一份实现）。
    * 上面那三个是 chat 专用的既有名字（`readCollectionScope` 现在也只是
@@ -1622,18 +1622,24 @@ export class IngestService {
        * 后者要去看渠道解析）。合成一个数字会让后者永远查不出来。
        */
       const docScope = this.domainScopeOrWarn("doc")
-      const bounded = typeof docScope.since === "number" || docScope.until !== undefined
-      let droppedUnknownTime = 0
-      const inScope = listed.items.filter((item) => {
-        const occurredAt = item.updatedAt ?? item.createdAt
-        if (occurredAt === null || occurredAt === undefined) {
-          // 时间未知：设了界 → 挡（隐私侧）；没设界 → 放行（本来全放行）
-          if (!bounded) return true
-          droppedUnknownTime += 1
-          return false
-        }
-        return isOccurredAtInScope(docScope, occurredAt)
+      /**
+       * ★★ 闸门判据走 `admitByScope` —— 与聊天那条路**同一个函数**。
+       *
+       * 内联一份的代价已经付过：这条路原来压根没有闸，而聊天那条路的
+       * 时间闸被会话闸挡住了。两个缺陷的形状相同（判据有多份、其中一份漂了），
+       * 所以判据只能有一处。
+       *
+       * ★ `partitionOf` 给**空间**（`workspaceId`）而不是 null：文档确实按
+       * 空间分区（`document_coverage` 就是按它分的）。虽然 `DistillScope`
+       * 现在没有空间白名单字段（那是 G6），但给对了之后将来加白名单
+       * 不需要再动这里。
+       */
+      const admittedDocs = admitByScope<(typeof listed.items)[number]>(docScope, listed.items, {
+        partitionOf: (item) => item.workspaceId ?? "",
+        occurredAtOf: (item) => item.updatedAt ?? item.createdAt,
       })
+      const inScope = admittedDocs.kept
+      const droppedUnknownTime = admittedDocs.droppedUnknownTime
       const droppedNow = listed.items.length - inScope.length
       if (droppedNow > 0) {
         /**
@@ -3619,40 +3625,64 @@ export class IngestService {
      * 状态页上完全同形 —— 那正是这个代码库里最贵的那类静默降级
      * （CLAUDE.md 第 4 节）。所以累计进 `droppedOutOfScope` 并进快照。
      */
-    const scope = readCollectionScope(this.options.db)
-    let scopedPage = page
-    if (scope.restricted) {
-      const kept = page.messages.filter(
-        (message) =>
-          isConversationInScope(scope, message.conversationExternalId) &&
-          isSentAtInScope(scope, message.sentAt),
-      )
-      const dropped = page.messages.length - kept.length
-      if (dropped > 0) {
-        this.droppedOutOfScope += dropped
-        this.lastDroppedAt = this.options.clock.now()
-        this.options.logger.info("ingest dropped out-of-scope messages", {
-          /**
-           * ★★ 必须带渠道。这条日志说的是「丢了 N 条数据」，而多渠道下
-           * 不带渠道就**没法回答"谁丢的"** —— 实测排查时撞到过：日志里
-           * `dropped: 9, kept: 0, allowed: 0`，而当时钉钉与飞书两路都在跑，
-           * 只能靠时间戳去猜是哪一路，猜错了方向白查一轮。
-           *
-           * 丢数据的日志不带来源，等于知道出血却不知道伤口在哪。
-           */
-          channelId: this.options.plugin.meta.id,
-          dropped,
-          kept: kept.length,
-          allowed: scope.allow.size,
-          /**
-           * ★ 把"为什么丢"也说出来：`allowed: 0` + `restricted` 才是
-           * 「白名单是空的，一条都不许过」，而 `restricted: false` 时
-           * 丢弃只可能来自时间窗。两者的处置完全不同。
-           */
-          restricted: scope.restricted,
-        })
-      }
-      scopedPage = { ...page, messages: kept }
+    /**
+     * ★★★ 闸门判据走 `admitByScope`（`@mycontext/ingest`）—— **唯一**一份实现。
+     *
+     * ## 这一行修的是一个真实的隐私缺口
+     *
+     * 这段原来是内联的，且整段包在 `if (scope.restricted)` 里面 ——
+     * 而 `restricted` 的语义是"设了**会话**白名单"。于是
+     * 「配了 since、但没配 conversationIds」这个组合下 `since` **完全失效**。
+     *
+     * ★ 那不是假想的组合，它是**飞书那一行的真实形状**：
+     * `DistillSourceService.syncTimeWindowToSources()` 给每个非主渠道库写
+     * `{since, until, chatKinds}` 而**刻意不带 `conversationIds`**
+     * （跨渠道复制 `cid…` 会按一批不存在的 id 过滤 → 恒零，比超采更糟）。
+     *
+     * 实测（探针，本次改动前）：配 `since = 30 天前`，一条 100 天前的消息
+     * **照样落库**。按 CLAUDE.md 第 5 节那是隐私问题。
+     *
+     * 现在两道闸**并列**：`isPartitionInScope` 自己处理"没设白名单就放行"
+     * （它内部判 `restricted`），时间闸独立生效 —— 所以这里**不再**包
+     * `if (scope.restricted)`。
+     *
+     * ## 为什么用 `admitByScope` 而不是整段搬进 `ProducerRunner`
+     *
+     * 这条路的调度（水位 / 窗队列 / 截断二分）绑在 `runPull` 上，而水位算错
+     * 是这条链路上最贵的错误。搬整段等于给那段最难的逻辑动手术；
+     * 而共用**判据**已经拿到了全部收益（判据只有一份，漂不了）。
+     */
+    const scope = readDomainScope(this.options.db, "chat")
+    const admitted = admitByScope<(typeof page.messages)[number]>(scope, page.messages, {
+      partitionOf: (message) => message.conversationExternalId,
+      occurredAtOf: (message) => message.sentAt,
+    })
+    const scopedPage = { ...page, messages: [...admitted.kept] }
+    if (admitted.dropped > 0) {
+      this.droppedOutOfScope += admitted.dropped
+      this.lastDroppedAt = this.options.clock.now()
+      this.options.logger.info("ingest dropped out-of-scope messages", {
+        /**
+         * ★★ 必须带渠道。这条日志说的是「丢了 N 条数据」，而多渠道下
+         * 不带渠道就**没法回答"谁丢的"** —— 实测排查时撞到过：日志里
+         * `dropped: 9, kept: 0, allowed: 0`，而当时钉钉与飞书两路都在跑，
+         * 只能靠时间戳去猜是哪一路，猜错了方向白查一轮。
+         *
+         * 丢数据的日志不带来源，等于知道出血却不知道伤口在哪。
+         */
+        channelId: this.options.plugin.meta.id,
+        dropped: admitted.dropped,
+        kept: admitted.kept.length,
+        allowed: scope.restricted ? scope.allow.size : null,
+        /**
+         * ★ 把"为什么丢"也说出来：`allowed: 0` + `restricted` 才是
+         * 「白名单是空的，一条都不许过」，而 `restricted: false` 时
+         * 丢弃只可能来自时间窗。两者的处置完全不同。
+         */
+        restricted: scope.restricted,
+        since: scope.since,
+        until: scope.until,
+      })
     }
 
     /**
@@ -3703,10 +3733,7 @@ export class IngestService {
      * 那时越界丢弃是正常工作（用户就是选了个子集），照常推水位。
      */
     const scopeNotReady =
-      scopedPage.messages.length === 0 &&
-      page.messages.length > 0 &&
-      scope.restricted &&
-      scope.allow.size === 0
+      scopedPage.messages.length === 0 && page.messages.length > 0 && collectsNothing(scope)
     if (scopedPage.messages.length === 0 && page.messages.length > 0) {
       return { changed: [] as MessageRow[], unchanged: 0, scopeNotReady }
     }
