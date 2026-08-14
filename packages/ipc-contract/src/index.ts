@@ -150,6 +150,8 @@ export type {
   AttentionScopeSaveInput,
   AttentionScopeDisableInput,
   ChatCoverageInput,
+  ChatCoverageRequest,
+  CoverageDomain,
   ChatCoverageView,
   ChatCoverageDayView,
   DistillSourceView,

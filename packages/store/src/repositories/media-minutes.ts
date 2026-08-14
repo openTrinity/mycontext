@@ -407,4 +407,66 @@ export class MinutesCoverageRepository {
       )
       .run(channelId, input.drained ? 1 : 0, input.earliestStartedAt, input.listedTotal, input.at)
   }
+
+  /**
+   * 按天聚合**已入库的听记**（给覆盖面读出口用）。
+   *
+   * ## ★★★ 为什么这一份从 `minutes` 表现算，而不是从 `minutes_coverage` 读
+   *
+   * `minutes_coverage` 是**每渠道一行**（`drained` / `earliestStartedAt` /
+   * `listedTotal`），它回答"上一轮抽干了吗"，**回答不了**"8 月 12 日那天
+   * 有几场"。而用户问的是后者（「显示出来要多少和共已经有了多少了，
+   * 不管是消息还是听记，文档等」）。
+   *
+   * 加一张 per-day 表是另一个选择，但它需要一次迁移 + 一条写入路径，
+   * 而**真值已经在 `minutes` 表里**（走 `idx_minutes_started` 索引一次
+   * GROUP BY）。听记的量级是几十到几百场（比消息小三个数量级），
+   * 现算比维护第二份计数更可靠 —— 后者会出现"表里说 12 场、库里 13 场"
+   * 那种对不上，而那正是本仓库最忌讳的形状。
+   *
+   * ## ★★ `drained` 是**整个渠道**的结论，不是每天的
+   *
+   * 听记采集是**全量列举**（没有时间窗语义，见 `ChannelMinutes` 注释），
+   * 所以"抽干"这件事只对整轮成立，不存在"8 月 12 日那天抽干了"。
+   * 调用方把 `minutes_coverage.drained` 摊到每一天上 —— 那不是造假，
+   * 而是那个事实的真实粒度就是整个渠道。
+   *
+   * ★ 分桶用 `started_at`（会议**发生**的时间）而不是 `fetched_at`：
+   * 与 `toMinutesChangelogEntry` 的 `occurredAt` 同一个判据。用抓取时间
+   * 会让三个月前的会议全落到今天那一格。
+   *
+   * ★ `started_at IS NULL` 的行**排除**（不落到今天）：一场没有开始时间的
+   * 会议归到哪一天都是编的。少一行让界面说"这天没有"，那是诚实的。
+   */
+  listDaysFromMinutes(
+    channelId: string,
+    fromDay: string,
+    toDay: string,
+  ): { dayBucket: string; localCount: number }[] {
+    return this.db
+      .prepare<[string, string, string], { day_bucket: string; local_count: number }>(
+        `SELECT date(started_at / 1000, 'unixepoch', 'localtime') AS day_bucket,
+                count(*) AS local_count
+           FROM minutes
+          WHERE channel_id = ? AND started_at IS NOT NULL
+            AND date(started_at / 1000, 'unixepoch', 'localtime') >= ?
+            AND date(started_at / 1000, 'unixepoch', 'localtime') <= ?
+          GROUP BY day_bucket
+          ORDER BY day_bucket`,
+      )
+      .all(channelId, fromDay, toDay)
+      .map(toMinutesDay)
+  }
+}
+
+/**
+ * ★ 具名 mapper：`better-sqlite3` 的 `.all()` 不把 `prepare<>` 的行类型
+ * 透传出来，内联箭头函数里的 `row` 是隐式 any（与本文件既有的 `toMedia`
+ * 同一个理由 —— 那不是风格，是唯一不写 `as any` 的办法）。
+ */
+function toMinutesDay(row: { day_bucket: string; local_count: number }): {
+  dayBucket: string
+  localCount: number
+} {
+  return { dayBucket: row.day_bucket, localCount: row.local_count }
 }

@@ -39,7 +39,7 @@ import type {
   AttentionScopeView,
   AttentionScopeSaveInput,
   AttentionScopeDisableInput,
-  ChatCoverageInput,
+  ChatCoverageRequest,
   ChatCoverageView,
   DistillSourceId,
   DistillScopeInput,
@@ -243,7 +243,14 @@ export interface MyContextApi {
      * （实际采到了什么）。两者刷新时机不同，混在一起会让保存配置的请求
      * 顺带重算一遍聚合。
      */
-    chatCoverage(input: ChatCoverageInput): Promise<Result<ChatCoverageView>>
+    /**
+     * 覆盖面（三个域共用；`domain` 可省 = chat）。
+     *
+     * ★ 入参类型是 `ChatCoverageRequest`（解析**之前**的形状）而不是
+     * `ChatCoverageInput` —— 后者是解析之后的，`domain` 在那里必填。
+     * 用错会逼着每个调用点都写 `domain: "chat"`。
+     */
+    chatCoverage(input: ChatCoverageRequest): Promise<Result<ChatCoverageView>>
     /**
      * 数字分身的**监听范围**（盯哪些会话的实时消息）。
      * ★ 与 `sources()`（学它哪些历史）是两件事，见契约里那段注释。

@@ -618,17 +618,39 @@ export const distillSourceSaveInputSchema = z.object({
 export const distillSourceResetInputSchema = z.object({ kind: distillSourceKindSchema })
 
 /**
- * 聊天覆盖面的查询入参。
+ * 覆盖面的查询入参（**三个域共用**）。
  *
  * `fromDay` / `toDay` 是 `YYYY-MM-DD`（闭区间）。★ 用日期字符串而不是
  * 时间戳：那个"一天"的边界必须与写入侧算出来的 `day_bucket` **完全一致**，
  * 而让读侧传时间戳就等于让它再做一次时区换算 —— 换算差一小时，
  * 覆盖面就整体偏一天，且数字都"看起来对"。
+ *
+ * ## ★★★ 为什么加 `domain` 而不是给文档/听记各开一个新通道
+ *
+ * 用户要的是「显示出来要多少和共已经有了多少了，**不管是消息还是听记，
+ * 文档等**」。而修复前只有消息那一条有读出口：`document_coverage`（v29）
+ * 表在写、**apps 侧零调用**（聚合方法一处都没被用过），听记只有一个
+ * `drained` 布尔塞在快照里。
+ *
+ * 「两类能回答、一类不能」是最难解释的状态 —— 用户会以为文档那栏坏了。
+ *
+ * 而三张表的**读接口是同构的**（都是 `listDays` / `summarize`，
+ * 共用 `CoverageRepositoryBase` 的五条判据）。各开一个通道意味着
+ * 三份 IPC handler + 三个 hook + 三个组件，而它们只差一个表名 ——
+ * 那种重复会让"改一处忘两处"成为默认结果。
  */
+export const coverageDomainSchema = z.enum(["chat", "minutes", "doc"])
+export type CoverageDomain = z.infer<typeof coverageDomainSchema>
+
 export const chatCoverageInputSchema = z.object({
   channelId: z.string().min(1),
   fromDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   toDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  /**
+   * 查哪个域。**缺省 `chat`** —— 既有调用方（`useChatCoverage`）不传它，
+   * 而它们要的正是聊天那张表。
+   */
+  domain: coverageDomainSchema.default("chat"),
 })
 
 export const chatCoverageDaySchema = z.object({
@@ -636,6 +658,16 @@ export const chatCoverageDaySchema = z.object({
   localCount: z.number(),
   /** 这一天**全部**在范围内的会话都抽干了吗（MIN 语义，不是 MAX） */
   drained: z.boolean(),
+  /**
+   * 这一天还有几个**分区**没抽干。
+   *
+   * ★ 名字保留 `pendingConversations`（既有调用方在用），而它对文档域
+   * 的含义是"还有几个**空间**没抽干" —— 分区语义按域不同
+   * （聊天按会话、文档按空间），但"还有几个没齐"这个问题是同一个。
+   *
+   * ★ 听记域恒 0：`minutes_coverage` 不按分区分（它是全量列举，
+   * 没有"某个分区抽干了"这件事）。报 0 而不是编一个数是诚实的。
+   */
   pendingConversations: z.number(),
 })
 
@@ -656,7 +688,26 @@ export const chatCoverageViewSchema = z.object({
   pendingConversations: z.number(),
 })
 
-export type ChatCoverageInput = z.infer<typeof chatCoverageInputSchema>
+/**
+ * 覆盖面查询的入参。
+ *
+ * ★★ 用 `z.output` 而不是 `z.infer`（两者对这个 schema **不等价**）：
+ * `domain` 有 `.default("chat")`，所以**解析之后**它一定有值 ——
+ * 而服务层拿到的正是解析之后的对象（`parse(chatCoverageInputSchema, …)`），
+ * 那里不该再写一次 `?? "chat"`（两处缺省值早晚会漂）。
+ *
+ * 调用侧（渲染层）要的是**解析之前**的形状（`domain` 可省），
+ * 那是下面的 `ChatCoverageRequest`。
+ */
+export type ChatCoverageInput = z.output<typeof chatCoverageInputSchema>
+/**
+ * 调用侧的入参（`domain` 可省 —— 省了就是 chat）。
+ *
+ * ★ 必须与 `ChatCoverageInput` 分开：既有调用方（`useChatCoverage`）
+ * 不传 `domain`，而解析后的类型里它是必填的。用同一个类型会逼着
+ * 每个调用点都写 `domain: "chat"` —— 那正是 `.default()` 要省掉的事。
+ */
+export type ChatCoverageRequest = z.input<typeof chatCoverageInputSchema>
 export type ChatCoverageView = z.infer<typeof chatCoverageViewSchema>
 export type ChatCoverageDayView = z.infer<typeof chatCoverageDaySchema>
 

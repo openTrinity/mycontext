@@ -26,6 +26,8 @@ import {
   AttentionCoverageRepository,
   AttentionScopeRepository,
   ChatCoverageRepository,
+  DocumentCoverageRepository,
+  MinutesCoverageRepository,
   ConversationRepository,
   DistillSourceRepository,
   SettingsRepository,
@@ -538,7 +540,21 @@ export class DistillSourceService {
   }
 
   /**
-   * 读某个渠道的聊天覆盖面（「这段日期已有多少 / 齐没齐」）。
+   * 读某个渠道**某个域**的覆盖面（「这段日期已有多少 / 齐没齐」）。
+   *
+   * ## ★★★ 三个域走**同一个方法**（G4）
+   *
+   * 修复前只有 chat 有读出口：`document_coverage`（v29）表在写而 apps 侧
+   * **零调用**（`listDays`/`summarize` 一处都没被用过），听记只有一个
+   * `drained` 布尔塞在快照里。而用户要的是「不管是消息还是听记，文档等」。
+   *
+   * 「两类能回答、一类不能」是最难解释的状态 —— 用户会以为文档那栏坏了。
+   *
+   * 各写一份的代价是三份 handler + 三个 hook + 三个组件，而它们只差一个
+   * 表名（三张表共用 `CoverageRepositoryBase` 的五条判据）。
+   *
+   * ★ 方法名保留 `chatCoverage`：IPC 通道名与既有调用方都用它，
+   * 改名是一次无谓的破坏性变更。`input.domain` 缺省 `chat`。
    *
    * ★ 放在这个服务里而不是 IPC 层：per-channel 的库解析已经在这里了
    * （`save`/`list` 都要），让 IPC 层再学一遍"哪个渠道对应哪个 db"
@@ -550,13 +566,12 @@ export class DistillSourceService {
    * 前者说"还没开始采"，后者说"这段时间没有消息"。
    */
   chatCoverage(input: ChatCoverageInput): ChatCoverageView {
-    const db =
-      input.channelId === this.options.primaryChannelId
-        ? this.db
-        : (this.sourceDbs.get(input.channelId) ?? null)
+    const db = this.dbForChannel(input.channelId)
     if (db === null) {
       return { days: [], localCount: 0, dayCount: 0, drainedDays: 0, pendingConversations: 0 }
     }
+    if (input.domain === "doc") return this.documentCoverage(db, input)
+    if (input.domain === "minutes") return this.minutesCoverage(db, input)
     const repo = new ChatCoverageRepository(db)
     /**
      * ★★★ 存量数据必须从 `messages` 回填一次 —— 而判据**不能**是"表是空的"。
@@ -608,6 +623,93 @@ export class DistillSourceService {
       dayCount: summary.days,
       drainedDays: summary.drainedDays,
       pendingConversations: summary.pendingConversations,
+    }
+  }
+
+  /**
+   * 文档域的覆盖面（v29 `document_coverage`）。
+   *
+   * ## ★★ 与聊天那侧的三处**刻意不同**
+   *
+   * ① **分区是空间**（知识库 / 云盘目录）而不是会话 —— 所以
+   *    `pendingConversations` 在这个域里读作"还有几个空间没抽干"。
+   *    字段名保留是因为契约里那一个名字被三个域共用（换名字要动既有调用方），
+   *    而"还有几个分区没齐"这个问题在三个域上是同一个；
+   * ② **每次都重建真值**（`rebuildFromDocuments`）而不是走一次性标记 ——
+   *    文档量比消息小两三个数量级（一条 GROUP BY 走 channel_id 索引），
+   *    不需要 chat 那套 `backfilled.*` 标记。而 chat 那侧必须有标记：
+   *    36296 条消息重建一次是可感的开销；
+   * ③ 重建**失败不抛**：与 chat 同一条理由（覆盖面是派生物，
+   *    读不出来该显示"还没有数据"，而不是让整页打不开）。
+   */
+  private documentCoverage(db: SqliteDatabase, input: ChatCoverageInput): ChatCoverageView {
+    const repo = new DocumentCoverageRepository(db)
+    try {
+      repo.rebuildFromDocuments(input.channelId, this.options.clock.now())
+    } catch (error) {
+      this.options.logger.warn("document coverage rebuild failed", {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    }
+    const days = repo.listDays(input.channelId, input.fromDay, input.toDay)
+    const summary = repo.summarize(input.channelId, input.fromDay, input.toDay)
+    return {
+      days: days.map((day) => ({
+        dayBucket: day.dayBucket,
+        localCount: day.localCount,
+        drained: day.drained,
+        // ★ 空间 → 契约里那个共用字段（见上面 ①）
+        pendingConversations: day.pendingSpaces,
+      })),
+      localCount: summary.localCount,
+      dayCount: summary.days,
+      drainedDays: summary.drainedDays,
+      pendingConversations: summary.pendingSpaces,
+    }
+  }
+
+  /**
+   * 听记域的覆盖面。
+   *
+   * ## ★★★ 这一份从 `minutes` 表**现算**，因为 `minutes_coverage` 答不了
+   *
+   * `minutes_coverage` 是**每渠道一行**（`drained` / `earliestStartedAt` /
+   * `listedTotal`）—— 它回答"上一轮抽干了吗"，回答不了"8 月 12 日那天有
+   * 几场"。而用户问的正是后者。
+   *
+   * 加一张 per-day 表要一次迁移 + 一条写入路径，而真值已经在 `minutes` 表里
+   * （走 `idx_minutes_started` 一次 GROUP BY，量级是几十到几百场）。
+   * 维护第二份计数会出现"表里说 12 场、库里 13 场"那种对不上。
+   *
+   * ## ★★ `drained` 是**整个渠道**的结论，摊到每一天上
+   *
+   * 听记采集是全量列举（没有时间窗语义，见 `ChannelMinutes` 注释），
+   * 所以"抽干"只对整轮成立 —— 不存在"某一天抽干了"。摊开不是造假，
+   * 而是那个事实的真实粒度就是整个渠道。
+   *
+   * ★ `coverage === null`（还没跑过一轮）时 `drained` 取 **false** 而不是
+   * true：那时我们不知道齐没齐，而 false 让界面说"还在回溯"（诚实），
+   * true 会说"已采完"（把"不知道"讲成"没问题"）。
+   *
+   * ★ `pendingConversations` 恒 0：听记不按分区分，编一个数不如报 0。
+   */
+  private minutesCoverage(db: SqliteDatabase, input: ChatCoverageInput): ChatCoverageView {
+    const repo = new MinutesCoverageRepository(db)
+    const overall = repo.get(input.channelId)
+    const drained = overall?.drained ?? false
+    const rows = repo.listDaysFromMinutes(input.channelId, input.fromDay, input.toDay)
+    return {
+      days: rows.map((row) => ({
+        dayBucket: row.dayBucket,
+        localCount: row.localCount,
+        drained,
+        pendingConversations: 0,
+      })),
+      localCount: rows.reduce((sum, row) => sum + row.localCount, 0),
+      dayCount: rows.length,
+      // ★ 整轮抽干 ⇒ 这些天都算齐；没抽干 ⇒ 一天都不算齐（见上面那段）
+      drainedDays: drained ? rows.length : 0,
+      pendingConversations: 0,
     }
   }
 

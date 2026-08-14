@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { resolveLanguage } from "@mycontext/i18n"
 import type {
+  CoverageDomain,
   AuthMode,
   AuthProgress,
   ChannelConversationListView,
@@ -393,15 +394,25 @@ export function useChatCoverage(
   fromDay: string,
   toDay: string,
   enabled = true,
+  /**
+   * 查哪个域。缺省 `chat`（既有调用方不传它）。
+   *
+   * ★★ `domain` **必须进 queryKey** —— 否则三个域会共用同一份缓存：
+   * 先渲染消息那一行、再渲染文档那一行时，后者会直接拿到前者的结果
+   * （react-query 认为是同一个 query），于是文档那栏显示的是消息的条数。
+   * 而两个数字都"看起来对"，没有任何东西会报错。
+   */
+  domain: CoverageDomain = "chat",
 ) {
   return useQuery({
-    queryKey: ["distill", "chatCoverage", channelId ?? "primary", fromDay, toDay] as const,
+    queryKey: ["distill", "chatCoverage", channelId ?? "primary", domain, fromDay, toDay] as const,
     queryFn: async () =>
       unwrap(
         await window.mycontext.distill.chatCoverage({
           channelId: channelId ?? "dingtalk",
           fromDay,
           toDay,
+          domain,
         }),
       ),
     enabled: enabled && channelId !== undefined,

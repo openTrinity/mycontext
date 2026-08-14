@@ -16,6 +16,7 @@
  * 好看但没有意义的比例。
  */
 import { useMemo } from "react"
+import type { CoverageDomain } from "@mycontext/ipc-contract"
 import { useChatCoverage } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
@@ -35,6 +36,25 @@ function toDayBucket(at: number): string {
   return `${year}-${month}-${day}`
 }
 
+/**
+ * 每个域的**量词**与名字。
+ *
+ * ## ★★ 为什么必须按域给量词，而不是统一说"条"
+ *
+ * 「已有 300 条文档」是错的中文（文档按**篇**、会议按**场**）。
+ * 而这不只是文案洁癖：三栏并排显示时，量词是用户区分
+ * "这一行讲的是哪类数据"的**唯一**线索 —— 三行都说"条"读起来像
+ * 同一个数字被显示了三遍。
+ *
+ * ★ `label` 也在这里给：界面上那三行需要一个标题，而把它交给调用方
+ * 会让三处各写一份（然后其中一处漂成"文件"）。
+ */
+const DOMAIN_WORDS: Record<CoverageDomain, { label: string; unit: string }> = {
+  chat: { label: "消息", unit: "条" },
+  minutes: { label: "会议听记", unit: "场" },
+  doc: { label: "文档", unit: "篇" },
+}
+
 export function ScopeCoverage({
   channelId,
   /**
@@ -46,10 +66,19 @@ export function ScopeCoverage({
    */
   rangeDays,
   customRange,
+  /**
+   * 查哪个域。缺省 `chat`（既有调用方不传它）。
+   *
+   * ★ 三个域走**同一个组件**：它们只差一个域名与两个量词（条/场/篇），
+   * 而"分母拿不到所以不给百分比"这条判据三个域完全一样。各写一个组件
+   * 会让那条判据有三处可以漂 —— 而漂的方向是"某一栏编了个百分比"。
+   */
+  domain = "chat",
 }: {
   channelId: string | null
   rangeDays: number | null
   customRange?: { from: string; to: string } | null
+  domain?: CoverageDomain
 }) {
   const { t } = useDynamicTranslation("settings")
   const range = useMemo(() => {
@@ -87,6 +116,7 @@ export function ScopeCoverage({
     range.fromDay,
     range.toDay,
     channelId !== null,
+    domain,
   )
 
   if (channelId === null) return null
@@ -99,13 +129,23 @@ export function ScopeCoverage({
    * 采集还没跑到，也可能是那几天真的没消息。把它说成"0 条消息"
    * 就是把一个我们不知道的事讲成事实（v27 迁移注释里同一个取舍）。
    */
+  const words = DOMAIN_WORDS[domain]
   if (data === undefined || data.dayCount === 0) {
     return (
       <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
         {coverage.isPending
-          ? t("status.scope.coverage.loading", { defaultValue: "正在统计已有的数据…" })
+          ? t("status.scope.coverage.loading", {
+              defaultValue: "正在统计已有的{{label}}…",
+              label: words.label,
+            })
           : t("status.scope.coverage.empty", {
-              defaultValue: "这段日期还没有记账数据 —— 采集跑过之后这里会显示每天已有多少。",
+              /**
+               * ★ 空态也要说清**是哪个域**空的：三行并排时一句不带域名的
+               * "还没有记账数据"会让用户不知道是哪一类没采到。
+               */
+              defaultValue:
+                "{{label}}：这段日期还没有记账数据 —— 采集跑过之后这里会显示每天已有多少。",
+              label: words.label,
             })}
       </p>
     )
@@ -116,9 +156,11 @@ export function ScopeCoverage({
     <div className="flex flex-col gap-1">
       <p className="typography-caption-400 text-[var(--text-base-secondary)]">
         {t("status.scope.coverage.summary", {
-          defaultValue: "{{from}} 起已有 {{count}} 条消息，覆盖 {{days}} 天",
+          defaultValue: "{{label}}：{{from}} 起已有 {{count}} {{unit}}，覆盖 {{days}} 天",
+          label: words.label,
           from: range.fromDay,
           count: data.localCount.toLocaleString(),
+          unit: words.unit,
           days: data.dayCount,
         })}
       </p>

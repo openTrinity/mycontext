@@ -24,12 +24,23 @@
  */
 import { useMemo, useState } from "react"
 import { Button, Disclosure } from "@mycontext/design"
-import type { DistillScopeInput, DistillSourceId } from "@mycontext/ipc-contract"
+import type { CoverageDomain, DistillScopeInput, DistillSourceId } from "@mycontext/ipc-contract"
 import { useDistillSources, useSaveDistillSource } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { SourcesStep, type SourcesDraft } from "../onboarding/sources-step.js"
 import { ScopeCoverage } from "./scope-coverage.js"
+
+/**
+ * 有覆盖面读出口的三个域，**按用户关心的顺序**。
+ *
+ * ★ 顺序不是随手写的：消息是主体（量级最大、用户最关心），
+ * 听记与文档是补充。让文档排第一会让人以为它是主要数据源。
+ *
+ * ★ 与 `CoverageDomain` 同源（那是契约里的枚举），所以加一个域时
+ * 类型会提示这里要不要跟着加 —— 而不是静默少一行。
+ */
+const COVERAGE_DOMAINS: readonly CoverageDomain[] = ["chat", "minutes", "doc"]
 
 /** 主渠道 id —— 它的白名单走 `scope.conversationIds`（存量形状）。 */
 const PRIMARY_CHANNEL_ID = "dingtalk"
@@ -116,6 +127,20 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
   const enabledSources = useMemo<readonly DistillSourceId[]>(
     () => (sources.data ?? []).filter((item) => item.enabled).map((item) => item.kind),
     [sources.data],
+  )
+  /**
+   * 哪些源开着 —— 覆盖面按它过滤（关掉的源不显示那一行）。
+   *
+   * ★ `sources.data` 还没回来时**当成全开**（`Set` 由 enabledSources 构造，
+   * 那时它是空的 → 一行都不显示 → 首帧闪一下空白再补上三行）。
+   * 所以判据写成"数据没回来就先都显示"，避免那次闪动。
+   */
+  const enabledKinds = useMemo(
+    () =>
+      sources.data === undefined
+        ? new Set<string>(COVERAGE_DOMAINS)
+        : new Set<string>(enabledSources),
+    [sources.data, enabledSources],
   )
 
   /**
@@ -258,11 +283,26 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           ★ 覆盖面放在**编辑器之前**：用户打开这块最先想知道的是
           "我现在有多少"，而不是先面对一堆勾选框。
         */}
-        <ScopeCoverage
-          channelId={channelId}
-          rangeDays={effective?.rangeDays ?? null}
-          customRange={effective?.customRange ?? null}
-        />
+        {/*
+          ★★★ 三个域**各一行**（G4）。
+          
+          修复前只有消息那一行：`document_coverage`（v29）表在写而没人读，
+          听记只有一个 `drained` 布尔塞在快照里。而用户要的是
+          「不管是消息还是听记，文档等」—— 而"两类能回答、一类不能"
+          是最难解释的状态（用户会以为文档那栏坏了）。
+
+          ★ 只勾了的源才显示：用户关掉文档源之后还给他一行"文档 0 篇"
+          读起来像坏了，而事实是他自己关的。判据取 `sources` 里的 enabled。
+        */}
+        {COVERAGE_DOMAINS.filter((domain) => enabledKinds.has(domain)).map((domain) => (
+          <ScopeCoverage
+            key={domain}
+            domain={domain}
+            channelId={channelId}
+            rangeDays={effective?.rangeDays ?? null}
+            customRange={effective?.customRange ?? null}
+          />
+        ))}
         {effective === null ? null : (
           <ScopeEditor
             channelId={channelId}
