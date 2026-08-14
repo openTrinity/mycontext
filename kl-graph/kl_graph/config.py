@@ -256,6 +256,20 @@ class CommunityIdentityConfig(_ConfigModel):
     levels: CommunityIdentityLevelsConfig = CommunityIdentityLevelsConfig()
 
 
+class IncrementalLeidenTunables(_ConfigModel):
+    """Tunables for incremental Leiden maintenance (HIT-Leiden).
+
+    Consumed by :mod:`kl_graph.periodic.incremental_leiden`. Separate from the
+    frozen GraphRAG knobs in :mod:`kl_graph.periodic.community_detection`, which
+    govern the full hierarchical rebuild.
+    """
+
+    gamma: float = Field(default=1.0, gt=0)
+    max_levels: int = Field(default=16, gt=0)
+    seed: int = Field(default=0xC0FFEE, ge=0)
+    min_gain: float = Field(default=1e-12, ge=0)
+
+
 class IncrementalConfig(_ConfigModel):
     """Per-batch improvement strategies.
 
@@ -265,6 +279,7 @@ class IncrementalConfig(_ConfigModel):
 
     similarity_strategy: str
     community_strategy: str
+    leiden: IncrementalLeidenTunables = IncrementalLeidenTunables()
 
 
 class SimilarityConfig(_ConfigModel):
@@ -331,6 +346,7 @@ class QueryPipelineConfig(_ConfigModel):
     phase2_context_limit: int
     max_concurrency: int
     dedup_enabled: bool
+    fact_near_dup_threshold: float = 0.9
     confidence: ConfidenceConfig
     fusion: FusionConfig
     reranking: RerankingConfig
