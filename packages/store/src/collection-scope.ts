@@ -1,7 +1,21 @@
 /**
- * 「用户在引导里选的采集范围」—— **唯一权威**。
+ * 「用户在引导里选的**聊天**采集范围」—— 四处调用方的**唯一权威**。
  *
- * ## ★★ 为什么要单独一个模块，而不是各处自己读 `distill_sources`
+ * ## ★★★ 这一层现在是 `readDomainScope(db, "chat")` 的薄封装
+ *
+ * 三态语义（没配过 / 显式关 / 配了值）已经收敛进 `domain-scope.ts` ——
+ * 那里是三个域共用的一份实现，而这个文件保留下来的理由**只有一个**：
+ * `readCollectionScope` / `CollectionScope` / `isConversationInScope` /
+ * `isSentAtInScope` 这四个名字被采集、蒸馏、forge、导出四处调用。
+ *
+ * 改签名就要同时改那四处 —— 而它们不一致过一次，后果是库里 55% 的消息
+ * 属于用户没勾的会话（见下面那段实测）。所以这一层**不动名字、不动签名**，
+ * 只把实现转过去。
+ *
+ * ★ 也就是说：新代码请直接用 `readDomainScope`（它支持 minutes/doc），
+ * 这四个名字留给既有调用方。
+ *
+ * ## ★★ 为什么当初要单独一个模块，而不是各处自己读 `distill_sources`
  *
  * 修复前有**四份**各自实现的 `scopedConversationIds()`（采集、蒸馏、forge、
  * 导出各一份），语义微妙地不一致：
@@ -33,14 +47,26 @@
  * 比一次 CLI 调用便宜几个数量级，没有缓存的理由。
  */
 import type { SqliteDatabase } from "./database.js"
-import type { DistillScope } from "./repositories/onboarding.js"
+import {
+  isOccurredAtInScope,
+  isPartitionInScope,
+  readDomainScope,
+  type DomainScope,
+} from "./domain-scope.js"
 
-/** 采集范围的判定结果。用 `restricted` 区分"没配"与"配了空"（见文件头）。 */
+/**
+ * 采集范围的判定结果。用 `restricted` 区分"没配"与"配了空"（见文件头）。
+ *
+ * ★ 它现在是 `DomainScope` 的**别名式子集**（少一个 `unset`）。
+ * 不直接 `= DomainScope` 是刻意的：`unset` 是新语义，四处既有调用方
+ * 都不该被迫认识它。而 `DomainScope` 结构上包含 `CollectionScope` 的全部
+ * 字段，所以 `readDomainScope` 的返回值可以直接当它用。
+ */
 export interface CollectionScope {
   /**
    * 是否设了会话白名单。
    *
-   * `false` = 用户没配过范围 → 不设限；
+   * `false` = 不设限；
    * `true` = `allow` 就是全部许可的会话（**可能为空** = 一个都不许）。
    */
   restricted: boolean
@@ -57,16 +83,17 @@ export interface CollectionScope {
 /**
  * 判断一个会话是否在范围内。
  *
- * 抽成函数而不是让调用方写 `!scope.restricted || scope.allow.has(id)` ——
- * 那个表达式里有一个 `!` 与一个短路，抄错一次就是一次泄漏（而且不报错）。
+ * ★ 转发到 `isPartitionInScope` —— 判据只有一份。这个名字保留是因为
+ * 四处调用方都用它，而"会话"在 chat 语境下比"分区"好读。
  */
 export function isConversationInScope(scope: CollectionScope, externalId: string): boolean {
-  if (!scope.restricted) return true
-  return scope.allow.has(externalId)
+  return isPartitionInScope(scope as DomainScope, externalId)
 }
 
 /**
  * 判断一条消息的业务时间是否在范围内。
+ *
+ * ★ 同样转发（`isOccurredAtInScope`）。
  *
  * ★ `since === null`（显式不限）与 `since === undefined`（没配过）都放行。
  * 只有配了具体值才卡 —— 与 `backfillSince` 的三态语义一致。
@@ -75,23 +102,21 @@ export function isConversationInScope(scope: CollectionScope, externalId: string
  * "现在"的消息 —— 不卡的话选了历史区间的用户会持续收到今天的消息。
  */
 export function isSentAtInScope(scope: CollectionScope, sentAt: number): boolean {
-  if (typeof scope.since === "number" && sentAt < scope.since) return false
-  if (scope.until !== undefined && sentAt > scope.until) return false
-  return true
+  return isOccurredAtInScope(scope as DomainScope, sentAt)
 }
 
 /**
- * 读当前的采集范围。
+ * 读当前的**聊天**采集范围。
+ *
+ * ★★ 实现已转到 `readDomainScope(db, "chat")` —— 三态语义在那里只有一份。
+ * 这个函数保留的唯一理由是四处调用方用它的名字与签名（见文件头）。
+ *
+ * 下面这些判据都还成立，只是判据的**实现**搬到了 `domain-scope.ts`：
  *
  * ## chat 源被关掉时返回「一个都不许」
  *
- * 这是相对修复前的**行为变更**，也是修复的一部分：源关掉的语义只能是
- * "不要采聊天"，不可能是"采全部聊天"。修复前它被当成不限（见文件头），
- * 于是取消勾选那个开关反而放开了全部限制。
- *
- * 注意与 `minutesEnabled()` / `documentsEnabled()` 的三态判断不同：那两处
- * 要区分"没配过"（默认开）与"显式关"，因为引导默认勾了它们。而 chat 源
- * 的 `enabled` 由引导第 3 步显式写入。
+ * 源关掉的语义只能是"不要采聊天"，不可能是"采全部聊天"。更早的一版把它
+ * 当成不限，于是取消勾选那个开关反而放开了全部限制。
  *
  * ## ★★ 「表里没有这一行」也是「一个都不采」
  *
@@ -100,68 +125,14 @@ export function isSentAtInScope(scope: CollectionScope, sentAt: number): boolean
  * `distill_sources` 是空的 → 读成"不限" → 采集把**全部**会话都拉回来，
  * 而用户刚刚明确表达的是"我要归零"。方向正好相反，且不报错。
  *
- * 现在的判据是「**没有明确说要采什么，就什么都不采**」。代价是老库
- * （从没走过引导第 3 步的）会停采，而那恰恰是对的：用户没选过范围，
- * 我们就不该替他决定去采他的全部聊天记录 —— 按 CLAUDE.md 第 5 节，
- * 「严格遵守用户在引导里选的范围」的默认值只能是空，不能是全部。
- * 走一遍引导（或在设置里存一次范围）就会恢复。
+ * 现在这条由 `DOMAIN_SCOPE_DEFAULTS.chat = "collect-nothing"` 表达 ——
+ * 而 minutes/doc 的方向相反（`collect-all`，引导默认勾了它们）。
+ * 两个方向都对，代价不对称的方向不同（见 `domain-scope.ts` 文件头）。
+ *
+ * ★ `unset` 字段**刻意不透出**：`CollectionScope` 没有它，所以既有调用方
+ * 的类型不变。要用它的新代码（chat 的 `scopeNotReady` 判据）直接调
+ * `readDomainScope`。
  */
 export function readCollectionScope(db: SqliteDatabase): CollectionScope {
-  const row = db
-    .prepare<
-      [string],
-      { enabled: number; scope_json: string | null }
-    >("SELECT enabled, scope_json FROM distill_sources WHERE kind = ?")
-    .get("chat")
-
-  /**
-   * 表里没有这一行 = 用户还没说过要采什么（全新库 / 刚被清空 / 跳过了
-   * 引导第 3 步）→ **一个都不采**（见上面那段：默认值只能是空）。
-   */
-  if (row === undefined) {
-    return {
-      restricted: true,
-      allow: new Set(),
-      since: undefined,
-      until: undefined,
-      enabled: true,
-    }
-  }
-
-  const enabled = row.enabled === 1
-  let scope: DistillScope
-  try {
-    scope = row.scope_json === null || row.scope_json === "" ? {} : JSON.parse(row.scope_json)
-  } catch {
-    /**
-     * 坏 JSON 按**最严**处理（`restricted: true` + 空白名单 = 一个都不采）。
-     *
-     * 与 `OnboardingRepository` 里"坏 JSON 按缺省"相反，是刻意的：那里是
-     * 为了让引导页还能打开（读路径，宽容无害），而这里决定的是"要不要去
-     * 采一个会话"。判据不可靠时采全部是隐私问题，不采只是没数据。
-     */
-    return { restricted: true, allow: new Set(), since: undefined, until: undefined, enabled }
-  }
-
-  // 源关掉 → 一个都不许（见上面那段）。
-  if (!enabled) {
-    return {
-      restricted: true,
-      allow: new Set(),
-      since: undefined,
-      until: undefined,
-      enabled: false,
-    }
-  }
-
-  const ids = scope.conversationIds
-  return {
-    // ★ 判据是"这个键存在"，不是"它非空"—— 空数组是"一个都不勾"，不是"不限"。
-    restricted: ids !== undefined,
-    allow: new Set(ids ?? []),
-    // 缺字段 = 用户选了"不限"（引导页对不限就是不写这个键）
-    since: scope.since ?? null,
-    until: scope.until,
-    enabled: true,
-  }
+  return readDomainScope(db, "chat")
 }

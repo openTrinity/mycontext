@@ -2206,6 +2206,26 @@ export const ingestSnapshotSchema = z.object({
       stale: z.boolean(),
       /** 需要全量重建（历史已被裁剪过） */
       needsFullRebuild: z.boolean(),
+      /**
+       * 这个消费者**在这套代码里接线了吗**（来自 `ConsumerSpec.wiring`）。
+       *
+       * ## ★★★ 为什么它与 `absent` 必须分开
+       *
+       * 两者都表现为"这个消费者没在跑"，而用户该做的事完全相反：
+       *
+       * | | 含义 | 出路 |
+       * |---|---|---|
+       * | `absent` | 这套**部署**里没注册（如 kl 服务没起） | 起服务，或忽略 |
+       * | `unwired` | 这套**代码**里压根没接（产品决定） | 什么都不用做 |
+       *
+       * `local-index-vector` 是后者：实现齐全（`createVectorHandler`），
+       * 而 apps 侧零引用 —— 因为 embedding 是远程付费调用。
+       * 把它显示成 `absent` 会让用户去找"为什么向量服务没起来"，
+       * 而那个服务从来就不存在。
+       */
+      wiring: z.enum(["wired", "unwired"]),
+      /** `unwired` 时说清**为什么没接**；`wired` 时为 null */
+      unwiredReason: z.string().nullable(),
       /** 最近一次错误；null = 没出错过 */
       lastError: z.string().nullable(),
     }),

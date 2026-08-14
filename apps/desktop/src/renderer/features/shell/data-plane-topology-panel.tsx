@@ -47,10 +47,16 @@ type DomainStatusView = IngestSnapshot["domains"][number]
  *
  * ★ 顺序即优先级，而且刻意让"结构性问题"压过"落后多少"：
  * 一个 `absent` 的消费者报"落后 8000 条"是误导（它压根不该追）。
+ *
+ * ★★ `unwired` 排在**最前面**：它是"这套代码没接这个消费者"（产品决定），
+ * 比 `absent`（这套部署没起它）更根本 —— 一个没接线的消费者当然也没注册，
+ * 所以两个条件同时成立，而先报 `absent` 会让用户去找"为什么那个服务没起来"，
+ * 而那个服务从来就不存在。
  */
 function consumerState(
   consumer: ConsumerStatusView,
-): "absent" | "rebuild" | "stale" | "waiting" | "lagging" | "ok" {
+): "unwired" | "absent" | "rebuild" | "stale" | "waiting" | "lagging" | "ok" {
+  if (consumer.wiring === "unwired") return "unwired"
   if (consumer.absent) return "absent"
   // 需要全量重建 = 历史已被裁剪，增量补不回来 —— 比 stale 更严重
   if (consumer.needsFullRebuild) return "rebuild"
@@ -60,8 +66,9 @@ function consumerState(
   return "ok"
 }
 
-/** 状态 → 颜色。★ `waiting` 是**中性**的：按依赖顺序干活不是故障。 */
+/** 状态 → 颜色。★ `waiting` 与 `unwired` 都是**中性**的：都不是故障。 */
 const STATE_TONE: Record<ReturnType<typeof consumerState>, string> = {
+  unwired: "text-[var(--text-base-tertiary)]",
   absent: "text-[var(--text-base-tertiary)]",
   rebuild: "text-[var(--status-error)]",
   stale: "text-[var(--status-warning)]",
@@ -133,18 +140,27 @@ function ConsumerRow({ consumer }: { consumer: ConsumerStatusView }) {
    * 那是这一整块存在的理由（见文件头）。
    */
   const detail =
-    state === "absent"
-      ? t("status.topology.absent", { defaultValue: "未注册（这套部署里没有它）" })
-      : state === "rebuild"
-        ? t("status.topology.rebuild", { defaultValue: "需要全量重建（历史已裁剪）" })
-        : state === "waiting"
-          ? t("status.topology.waiting", {
-              defaultValue: "在等 {{upstream}}",
-              upstream: consumer.waitingForUpstream ?? "",
-            })
-          : state === "ok"
-            ? t("status.topology.caughtUp", { defaultValue: "已追平" })
-            : t("status.topology.lag", { defaultValue: "落后 {{lag}} 条", lag: consumer.lag })
+    state === "unwired"
+      ? /**
+         * ★★★ 说清**为什么没接**，而不是"未启用"。
+         *
+         * 「未启用」读起来像"去设置里打开它"，而这里根本没有那个开关 ——
+         * `unwiredReason` 才是用户需要的那句话（如"向量检索要远程
+         * embedding，本期不默认开启"）。与域的 `absentReason` 同一条判据。
+         */
+        (consumer.unwiredReason ?? t("status.topology.unwired", { defaultValue: "本期未接入" }))
+      : state === "absent"
+        ? t("status.topology.absent", { defaultValue: "未注册（这套部署里没有它）" })
+        : state === "rebuild"
+          ? t("status.topology.rebuild", { defaultValue: "需要全量重建（历史已裁剪）" })
+          : state === "waiting"
+            ? t("status.topology.waiting", {
+                defaultValue: "在等 {{upstream}}",
+                upstream: consumer.waitingForUpstream ?? "",
+              })
+            : state === "ok"
+              ? t("status.topology.caughtUp", { defaultValue: "已追平" })
+              : t("status.topology.lag", { defaultValue: "落后 {{lag}} 条", lag: consumer.lag })
 
   return (
     <div className="flex items-baseline justify-between gap-3">
@@ -162,7 +178,13 @@ function ConsumerRow({ consumer }: { consumer: ConsumerStatusView }) {
           ★★ `required` 决定"落后了要不要紧"：true = 历史不能裁（丢了补不回来）。
           只在落后/等待时显示 —— 追平时它是一句废话。
         */}
-        {consumer.required && state !== "ok" && state !== "absent" && (
+        {/*
+          ★★ `required` 决定"落后了要不要紧"：true = 历史不能裁（丢了补不回来）。
+          只在落后/等待时显示 —— 追平时它是一句废话，而 absent / unwired 时
+          它是**误导**（一个没接线的消费者"不可裁剪"读起来像个待办，
+          而实际它不注册游标、压根不参与裁剪判据）。
+        */}
+        {consumer.required && state !== "ok" && state !== "absent" && state !== "unwired" && (
           <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
             {t("status.topology.required", { defaultValue: "不可裁剪" })}
           </span>

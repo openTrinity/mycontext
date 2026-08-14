@@ -48,6 +48,14 @@ export interface ConsumerStatus {
   lag: number
   waitingForUpstream: string | null
   absent: boolean
+  /**
+   * 这个消费者在**这套代码**里接线了吗（来自声明，不是运行时）。
+   *
+   * ★ 与 `absent`（这套**部署**里没注册）分开 —— 见契约里那段表格：
+   * 前者的出路是"什么都不用做"，后者是"起服务"。
+   */
+  wiring: "wired" | "unwired"
+  unwiredReason: string | null
   stale: boolean
   needsFullRebuild: boolean
   lastError: string | null
@@ -132,6 +140,8 @@ export function buildConsumerStatuses(input: TopologyViewInput): readonly Consum
       lag: absent ? 0 : Math.max(0, input.head - cursor.ackedSeq),
       waitingForUpstream: waitingById.get(spec.id) ?? null,
       absent,
+      wiring: spec.wiring,
+      unwiredReason: spec.unwiredReason ?? null,
       stale: stale.has(spec.id),
       needsFullRebuild: cursor?.needsFullRebuild ?? false,
       lastError: cursor?.lastError ?? null,

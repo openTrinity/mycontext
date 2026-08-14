@@ -33,6 +33,15 @@ import {
   ConsumerCursorRepository,
   type SqliteDatabase,
 } from "@mycontext/store"
+/**
+ * ★ 用**导出的常量**而不是字符串字面量读这两个游标。
+ *
+ * 原来这里写的是 `cursors.get("graph-build")` —— 而 `graph-build` 那时
+ * 压根不在 `CONSUMERS` 声明里，于是 `topology.test.ts` 那条
+ * "id 必须与真实常量一致"的门禁**管不到它**：把它拼错一个字母不会有任何
+ * 东西报错，只会让界面永久显示"图谱消化了 0%"（读到一个不存在的游标）。
+ */
+import { GRAPH_BUILD_CONSUMER_ID, GRAPH_SYNC_CONSUMER_ID } from "@mycontext/knowledge-feed"
 import type { DashboardTrends, DashboardTrendsInput } from "@mycontext/ipc-contract"
 import { readGraphAggregates, type GraphAggregates } from "./graph-query.service.js"
 
@@ -224,8 +233,8 @@ export class DashboardTrendsService {
          * （只差 36，正常）而 build 停在 2,871 —— 只报一个"图谱落后"
          * 会把人引向错误的排查方向（卡住的是建图，不是导出）。
          */
-        build: cursors.get("graph-build")?.ackedSeq ?? 0,
-        export: cursors.get("graph-export")?.ackedSeq ?? 0,
+        build: cursors.get(GRAPH_BUILD_CONSUMER_ID)?.ackedSeq ?? 0,
+        export: cursors.get(GRAPH_SYNC_CONSUMER_ID)?.ackedSeq ?? 0,
       },
       coverage: {
         factsTimestamped: graph?.factsTimestamped ?? { done: 0, total: 0 },

@@ -226,6 +226,33 @@ export interface ConsumerSpec {
   routed: boolean
   /** 一句话说明这个消费者干什么（状态页/文档直接用） */
   purpose: string
+  /**
+   * 这个消费者**在这套代码里接线了吗**。
+   *
+   * ## ★★★ 为什么需要这个字段（它表达的是 G7 那个真实状态）
+   *
+   * `local-index-vector` 有完整实现（`createVectorHandler`）与 id 常量，
+   * 而 **apps 侧零引用** —— 也就是"有实现、从来没跑过"。这既不是 bug
+   * （embedding 是远程付费调用，接不接是产品决定），也不是待办
+   * （标 planned 是一个不会兑现的承诺）。
+   *
+   * 不表达它的代价：它要么不在声明里（那么"我们有没有向量检索"只能靠
+   * grep 回答），要么在声明里但状态页会显示一个永远 `absent` 的消费者
+   * —— 而 `absent` 的含义是"这套部署没起它"（像 kl 服务没起），
+   * 与"我们压根没接"是两件事。
+   *
+   * ★ 与 `DomainSpec.producedBy` 同一手法：让"没接"成为**声明里的
+   * 一等公民**，而不是让读者去比对两个文件。
+   */
+  wiring: "wired" | "unwired"
+  /**
+   * `unwired` 时说清**为什么没接**。
+   *
+   * ★ 与 `purpose` 分开：前者是"它该干什么"，这是"为什么现在不干"。
+   * 界面必须能显示后者 —— 否则"没接"与"接了但坏了"在用户眼里同形
+   * （`DomainSpec.absentReason` 是同一条判据）。
+   */
+  unwiredReason?: string
 }
 
 export const CONSUMERS: readonly ConsumerSpec[] = [
@@ -235,7 +262,37 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
     required: true,
     dependsOn: [],
     routed: false,
+    wiring: "wired",
     purpose: "全文索引：让搜索能命中",
+  },
+  {
+    /**
+     * ★★ 有实现、**没接线**（G7）。
+     *
+     * `createVectorHandler` 与 `VECTOR_CONSUMER_ID` 都在
+     * `local-index.ts` 里导出，而 apps 侧零引用 —— grep 全仓只有
+     * `packages/ingest/src/index.ts` 的 re-export。
+     *
+     * 声明它（而不是不写）的理由：不写的话"我们有没有向量检索"这个问题
+     * 只能靠 grep 回答；而 `wiring: "unwired"` 让状态页能把它与
+     * `absent`（这套部署没起它，如 kl 服务没起）区分开 —— 后者是环境问题、
+     * 前者是产品决定，用户该做的事完全不同。
+     */
+    id: "local-index-vector",
+    domains: null,
+    /**
+     * ★ `required: false` —— 一个没接线的消费者**绝不能**阻塞裁剪。
+     * 标 true 会让 `retainableSeq()` 把它算进"活跃必需消费者"，
+     * 于是 changelog 永远裁不动（它的 acked_seq 恒 0）。
+     * 而它没注册过游标，所以实际上进不了那个集合 —— 但声明必须与
+     * "接上之后也不该阻塞"这个意图一致（embedding 落后是常态）。
+     */
+    required: false,
+    dependsOn: [],
+    routed: false,
+    wiring: "unwired",
+    unwiredReason: "向量检索要远程 embedding（按量付费），本期不默认开启",
+    purpose: "向量索引：让语义检索能命中",
   },
   {
     id: "graph-export",
@@ -243,7 +300,41 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
     required: false,
     dependsOn: [],
     routed: false,
+    wiring: "wired",
     purpose: "物化四件套喂知识图谱（外部消费者，落后可裁）",
+  },
+  {
+    /**
+     * ★★★ 这一行**原来漏了**（G2），而它的水位正是仪表盘那句
+     * 「图谱只消化了 X%」的分子（`dashboard-trends.service.ts` 直接按
+     * 字符串 `"graph-build"` 读它）。
+     *
+     * 漏声明的三个后果：
+     * ① 状态页拓扑卡**看不到它** —— 而它恰恰是最容易卡住的那个
+     *    （建图是小时级，Phase A 会全量重跑向量化）；
+     * ② `buildConsumerStatuses` 按 `CONSUMERS` 遍历，所以游标表里有行、
+     *    界面上没有这一行；
+     * ③ 只能靠硬编码字符串读它，而 `topology.test.ts` 那条
+     *    "id 必须与真实常量一致"的门禁管不到它。
+     *
+     * ★ 与 `graph-export` **必须分开**两个游标：导出的语义是"数据准备到哪"
+     * （1 秒），建图是"图里真的有到哪"（2 小时）。合并会让"数据准备好了"
+     * 被记成"图已经建好了" —— 一个静默的谎。
+     */
+    id: "graph-build",
+    domains: ["chat", "minutes", "doc"],
+    /** 落后不该阻止裁剪：图谱要历史时重新全量导出即可（与 graph-export 同理）。 */
+    required: false,
+    /**
+     * ★ 建图读的是**已导出**的四件套，所以不许跑在导出前面。
+     * 这条边原来是**隐式**成立的（同一个 `FeedService` 顺序调用），
+     * 声明它的价值是：顺序从"记得写对"变成"算出来的"，
+     * 且状态页能说出「建图在等导出」而不是「建图没进展」。
+     */
+    dependsOn: ["graph-export"],
+    routed: false,
+    wiring: "wired",
+    purpose: "把导出的四件套喂给 kl 建图（抽 fact / 实体 / 社群）",
   },
   {
     id: "distill",
@@ -255,7 +346,32 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
      */
     dependsOn: ["graph-export"],
     routed: false,
+    wiring: "wired",
     purpose: "把新消息切成蒸馏窗口，产出画像语料",
+  },
+  {
+    /**
+     * ★★ 这一行也**原来漏了**（G2）。`distill.service.ts` 里
+     * `WORK_CONSUMER_ID = "distill-work"` 会真的注册游标（两处：
+     * `maybeRefreshWorkLayer` 与手动 ack 那条路）。
+     *
+     * ★ `dependsOn: ["distill"]` —— work 层抽的是长期结论（职责、规矩），
+     * 引用的是蒸馏的产出。抢跑会引用还不存在的结论，而它会照常"成功"。
+     * 这条边同样原来是隐式的（同一个 service 内的调用顺序）。
+     */
+    id: "distill-work",
+    domains: ["chat"],
+    /**
+     * `required: false` —— 它落后**不该**阻止裁剪历史。work 层抽的是长期
+     * 结论，漏掉一段中间历史只会让它少几条证据；而让一个可能被用户关掉的
+     * 消费者卡住整个 Outbox 的清理水位，代价是库无限增长。
+     * 这与 `distill.service.ts` 里 register 时的取舍必须一致。
+     */
+    required: false,
+    dependsOn: ["distill"],
+    routed: false,
+    wiring: "wired",
+    purpose: "从蒸馏产出里抽长期结论（职责、规矩）",
   },
   {
     id: "persona-inbox",
@@ -263,6 +379,7 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
     required: false,
     dependsOn: [],
     routed: true,
+    wiring: "wired",
     purpose: "把关心范围内的新消息投给数字分身管控层",
   },
 ]
@@ -299,6 +416,13 @@ export function checkTopologyConsistency(
     domains?: readonly DomainSpec[]
     producers?: readonly ProducerSpec[]
     consumers?: readonly ConsumerSpec[]
+    /**
+     * `consumer_cursors` 里**实际注册过**的 id（判据⑤用）。
+     *
+     * ★ 由调用方传而不是这一层去读库：这个文件必须保持"纯声明、不启动
+     * 管线就能测"。不传 = 跳过判据⑤（纯声明自检仍然有效）。
+     */
+    registeredConsumerIds?: readonly string[]
   } = {},
 ): readonly string[] {
   const domains = input.domains ?? DOMAINS
@@ -351,6 +475,43 @@ export function checkTopologyConsistency(
       if (absent.has(domain)) {
         problems.push(`消费者 ${consumer.id} 声明消费 ${domain}，但那个域没有生产者`)
       }
+    }
+  }
+
+  /**
+   * ④ `unwired` 必须说清为什么（与域的 `absentReason` 同一条判据）。
+   *
+   * 不说的话状态页只能显示"这个消费者没在跑"，而那与"这套部署没起它"
+   * （`absent`）、"它卡住了"（stale）在用户眼里同形 —— 三者该做的事完全不同。
+   */
+  for (const consumer of consumers) {
+    if (consumer.wiring === "unwired" && (consumer.unwiredReason ?? "") === "") {
+      problems.push(`消费者 ${consumer.id} 标了 unwired 但没写 unwiredReason`)
+    }
+  }
+
+  /**
+   * ⑤ **库里注册过的消费者都必须在声明里**（这一条修的是 G2）。
+   *
+   * ## ★★★ 为什么这条判据必须存在，且必须收一个外部输入
+   *
+   * 把拓扑变成**数据**的代价是"漏一行不会编译失败"。而 G2 正是这么发生的：
+   * `graph-build` 与 `distill-work` 都会真的往 `consumer_cursors` 注册，
+   * 却都不在 `CONSUMERS` 里。后果不是报错，而是**状态页少两行** ——
+   * 一个卡住的建图消费者在界面上根本不存在。
+   *
+   * 判据只能靠"库里实际有哪些 id"来立，而这一层**刻意不读库**
+   * （它是纯声明、不启动管线就能测）。所以 id 由调用方传进来：
+   * · 单测传一组已知 id（门禁）；
+   * · 状态页/自检传 `ConsumerCursorRepository.list()` 的真实结果。
+   *
+   * ★ 反向**不报**（声明了但库里没有）：那是正常状态 —— `graph-export`
+   * 在没起 kl 服务的部署里就不注册，而 `local-index-vector` 压根没接线。
+   * 那两种情况分别由 `absent`（运行时）与 `wiring`（声明）表达。
+   */
+  for (const id of input.registeredConsumerIds ?? []) {
+    if (!consumers.some((consumer) => consumer.id === id)) {
+      problems.push(`游标表里有消费者 ${id}，但 CONSUMERS 里没有声明它`)
     }
   }
 

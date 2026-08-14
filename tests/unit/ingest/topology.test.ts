@@ -27,8 +27,9 @@ import {
   type ConsumerSpec,
   type CycleRunnable,
 } from "@mycontext/ingest"
-import { FTS_CONSUMER_ID } from "@mycontext/ingest"
+import { FTS_CONSUMER_ID, VECTOR_CONSUMER_ID } from "@mycontext/ingest"
 import { DISTILL_CONSUMER_ID } from "@mycontext/distill"
+import { GRAPH_BUILD_CONSUMER_ID, GRAPH_SYNC_CONSUMER_ID } from "@mycontext/knowledge-feed"
 import { PERSONA_CONSUMER_ID } from "@mycontext/persona"
 
 /** 造一个只记"被调过"的假 runnable。 */
@@ -109,6 +110,85 @@ describe("拓扑声明：id 必须与真实常量一致", () => {
     const routed = CONSUMERS.filter((spec) => spec.routed).map((spec) => spec.id)
     expect(routed).toEqual([PERSONA_CONSUMER_ID])
   })
+
+  /**
+   * ── ★★★ G2：**会注册游标的消费者都必须在声明里** ──────────────
+   *
+   * `graph-build` 与 `distill-work` 原来都**不在** `CONSUMERS` 里，而它们
+   * 都会真的往 `consumer_cursors` 注册。后果不是报错，而是状态页**少两行**
+   * —— 一个卡住的建图消费者在界面上根本不存在，而它恰恰是最容易卡住的
+   * 那个（建图是小时级，Phase A 会全量重跑向量化）。
+   */
+  it("★★★ graph-build / graph-export 都在声明里（它们会真的注册游标）", () => {
+    const ids = CONSUMERS.map((spec) => spec.id)
+    expect(ids).toContain(GRAPH_BUILD_CONSUMER_ID)
+    expect(ids).toContain(GRAPH_SYNC_CONSUMER_ID)
+    /**
+     * ★ `distill-work` 的 id 常量在 `distill.service.ts` 里是**私有的**
+     * （`const WORK_CONSUMER_ID`，没导出），所以这里只能写字面量。
+     * 那个字面量由下一条源码断言兜住。
+     */
+    expect(ids).toContain("distill-work")
+  })
+
+  it("★★★ `distill-work` 的字面量与 distill.service 里那个常量一致", async () => {
+    /**
+     * 上一条只能写字面量（那个常量没导出）。这一条去源码里核对它 ——
+     * 否则 `WORK_CONSUMER_ID` 被改名之后，声明里那一行会静默指向一个
+     * 不存在的游标，而表现是"work 层永远显示未注册"。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/distill.service.ts", "utf8")
+    expect(src).toContain('WORK_CONSUMER_ID = "distill-work"')
+  })
+
+  it("★★ 新增的两条依赖边：build 依赖 export、work 依赖 distill", () => {
+    /**
+     * 这两条边原来是**隐式**成立的（同一个 service 内的顺序调用）。
+     * 声明它们让顺序从"记得写对"变成"算出来的"，且状态页能说出
+     * 「建图在等导出」而不是「建图没进展」—— 两者数字同形、出路不同。
+     *
+     * ★ 判据的实质：建图读的是**已导出**的四件套。跑在导出前面就是拿旧
+     * 快照建图，而它会照常"成功"（那是本仓库最贵的那类静默降级）。
+     */
+    const by = new Map(CONSUMERS.map((spec) => [spec.id, spec]))
+    expect(by.get(GRAPH_BUILD_CONSUMER_ID)?.dependsOn).toEqual([GRAPH_SYNC_CONSUMER_ID])
+    expect(by.get("distill-work")?.dependsOn).toEqual([DISTILL_CONSUMER_ID])
+  })
+
+  it("★★★ 拓扑序把这两条新边也算对了", () => {
+    const order = resolveConsumerOrder()
+    expect(order.indexOf(GRAPH_SYNC_CONSUMER_ID)).toBeLessThan(
+      order.indexOf(GRAPH_BUILD_CONSUMER_ID),
+    )
+    expect(order.indexOf(DISTILL_CONSUMER_ID)).toBeLessThan(order.indexOf("distill-work"))
+  })
+
+  it("★★ 没接线的消费者标 unwired 且说清原因（G7）", () => {
+    /**
+     * `local-index-vector` 有完整实现（`createVectorHandler`）而 apps 侧
+     * 零引用。它既不是 bug（embedding 是远程付费调用，接不接是产品决定），
+     * 也不是待办（标 planned 是一个不会兑现的承诺）。
+     *
+     * ★★ `unwired` 与 `absent` 必须分开：后者是"这套**部署**没起它"
+     * （如 kl 服务没起，出路是起服务），前者是"这套**代码**没接它"
+     * （出路是什么都不用做）。混成一个会让用户去找一个从来不存在的服务。
+     */
+    const vector = CONSUMERS.find((spec) => spec.id === VECTOR_CONSUMER_ID)
+    expect(vector).toBeDefined()
+    expect(vector?.wiring).toBe("unwired")
+    expect(vector?.unwiredReason ?? "").not.toBe("")
+    /**
+     * ★ 没接线的**绝不能** required：标 true 会让 `retainableSeq()` 把它
+     * 算进"活跃必需消费者"，而它的 acked_seq 恒 0 ⇒ changelog 永远裁不动。
+     */
+    expect(vector?.required).toBe(false)
+  })
+
+  it("★ 只有那一个是 unwired（不许悄悄多一个没接的）", () => {
+    const unwired = CONSUMERS.filter((spec) => spec.wiring === "unwired").map((spec) => spec.id)
+    expect(unwired).toEqual([VECTOR_CONSUMER_ID])
+  })
 })
 
 describe("生产者声明：两个范围各有归属", () => {
@@ -147,8 +227,24 @@ describe("resolveConsumerOrder：顺序是算出来的", () => {
      * 而那比起不来糟得多。
      */
     const cyclic: ConsumerSpec[] = [
-      { id: "a", domains: null, required: false, dependsOn: ["b"], routed: false, purpose: "" },
-      { id: "b", domains: null, required: false, dependsOn: ["a"], routed: false, purpose: "" },
+      {
+        id: "a",
+        domains: null,
+        required: false,
+        dependsOn: ["b"],
+        routed: false,
+        wiring: "wired",
+        purpose: "",
+      },
+      {
+        id: "b",
+        domains: null,
+        required: false,
+        dependsOn: ["a"],
+        routed: false,
+        wiring: "wired",
+        purpose: "",
+      },
     ]
     expect(() => resolveConsumerOrder(cyclic)).toThrow(/成环/)
   })
@@ -166,6 +262,7 @@ describe("resolveConsumerOrder：顺序是算出来的", () => {
         required: false,
         dependsOn: ["nobody"],
         routed: false,
+        wiring: "wired",
         purpose: "",
       },
     ]
@@ -328,11 +425,75 @@ describe("拓扑自检：声明与事实必须一致", () => {
           required: false,
           dependsOn: [],
           routed: false,
+          wiring: "wired",
           purpose: "测试",
         },
       ],
     })
     expect(problems.some((p) => p.includes("contact"))).toBe(true)
+  })
+
+  /**
+   * ── ★★★ 判据⑤：库里注册过的消费者都必须在声明里（这条修的是 G2）──
+   *
+   * 把拓扑变成**数据**的代价是"漏一行不会编译失败"，而 G2 正是这么发生的。
+   * 这条判据是唯一能在**结构上**防止它复发的东西：它拿"库里实际有哪些 id"
+   * 去比对声明，而不是靠人记得两边一起改。
+   */
+  it("★★★ 游标表里有一个没声明的消费者 → 被抓到", () => {
+    const problems = checkTopologyConsistency({
+      registeredConsumerIds: ["local-index-fts", "某个没声明的消费者"],
+    })
+    expect(problems.some((p) => p.includes("某个没声明的消费者"))).toBe(true)
+  })
+
+  it("★★★ 真实的六个 id 全都能通过（反证：删掉声明里任一行就红）", () => {
+    /**
+     * ★ 这里列的是**会真的注册游标**的全部 id（我 grep 过
+     * `cursors.register(` 的每一个调用点）。`local-index-vector` 不在其中
+     * —— 它没接线（`wiring: "unwired"`），所以从不注册。
+     *
+     * 反证：把 `CONSUMERS` 里 `graph-build` 那一行删掉 ⇒ 这条转红。
+     * 而在这一轮改动**之前**，这条用例本来就是红的（那正是 G2）。
+     */
+    const problems = checkTopologyConsistency({
+      registeredConsumerIds: [
+        FTS_CONSUMER_ID,
+        DISTILL_CONSUMER_ID,
+        PERSONA_CONSUMER_ID,
+        GRAPH_SYNC_CONSUMER_ID,
+        GRAPH_BUILD_CONSUMER_ID,
+        "distill-work",
+      ],
+    })
+    expect(problems).toEqual([])
+  })
+
+  it("★★ 反向**不报**：声明了但库里没有是正常状态", () => {
+    /**
+     * `graph-export` 在没起 kl 服务的部署里就不注册；
+     * `local-index-vector` 压根没接线。两者分别由 `absent`（运行时）
+     * 与 `wiring`（声明）表达 —— 把它们也报成问题会让自检永远是红的，
+     * 而"一条老是红的门禁"会被人加 skip，然后它就永远不响了。
+     */
+    expect(checkTopologyConsistency({ registeredConsumerIds: [] })).toEqual([])
+  })
+
+  it("★★ unwired 必须写 unwiredReason（否则「没接」与「坏了」同形）", () => {
+    const problems = checkTopologyConsistency({
+      consumers: [
+        {
+          id: "x",
+          domains: null,
+          required: false,
+          dependsOn: [],
+          routed: false,
+          wiring: "unwired",
+          purpose: "测试",
+        },
+      ],
+    })
+    expect(problems.some((p) => p.includes("unwiredReason"))).toBe(true)
   })
 
   it("★★ `attention-stream` 不算 changelog 生产者（它产的是路由判断）", () => {

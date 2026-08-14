@@ -43,6 +43,22 @@ export { withTransaction, openConnection } from "./tx.js"
  * 而修复前那四处各有一份实现且语义已经漂了（见 collection-scope.ts 文件头）。
  */
 export { readCollectionScope, isConversationInScope, isSentAtInScope } from "./collection-scope.js"
+/**
+ * 三个域**共用**的范围判定（三态语义只有一份实现）。
+ *
+ * ★ `readCollectionScope` 现在是 `readDomainScope(db, "chat")` 的薄封装。
+ * 新代码用这一组（它支持 minutes/doc，且透出 `unset` —— chat 的
+ * `scopeNotReady` 判据要它）；上面那三个名字留给四处既有调用方。
+ */
+export {
+  readDomainScope,
+  isPartitionInScope,
+  isOccurredAtInScope,
+  collectsNothing,
+  domainScopeDefault,
+  DOMAIN_SCOPE_DEFAULTS,
+} from "./domain-scope.js"
+export type { DomainScope, DomainScopeDefault, ScopedDomain } from "./domain-scope.js"
 export { CORPUS_MESSAGE_PREDICATE, corpusMessagePredicate } from "./corpus-predicate.js"
 export type { CollectionScope } from "./collection-scope.js"
 export { purgeOutOfScopeMessages } from "./purge-scope.js"

@@ -45,6 +45,7 @@ const SPECS: readonly ConsumerSpec[] = [
     required: true,
     dependsOn: [],
     routed: false,
+    wiring: "wired",
     purpose: "全文索引",
   },
   {
@@ -53,6 +54,7 @@ const SPECS: readonly ConsumerSpec[] = [
     required: false,
     dependsOn: [],
     routed: false,
+    wiring: "wired",
     purpose: "喂图谱",
   },
   {
@@ -61,6 +63,7 @@ const SPECS: readonly ConsumerSpec[] = [
     required: true,
     dependsOn: ["graph-export"],
     routed: false,
+    wiring: "wired",
     purpose: "画像语料",
   },
 ]

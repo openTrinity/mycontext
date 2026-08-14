@@ -1207,7 +1207,26 @@ describe("★★ 听记采集尊重引导里选的时间范围", () => {
     vault.close()
   })
 
-  it("坏 JSON 的 scope 按「没配过」处理（不让手改过的库停采）", async () => {
+  /**
+   * ## ★★★ 坏 JSON 按**最严**处理（这一条的方向改过，理由在下面）
+   *
+   * 这条用例原来断言的是「按『没配过』处理 → 照采、不传时间窗」，
+   * 理由写的是"不让手改过的库停采"。那个理由**只看到了一半代价**：
+   *
+   * · 停采的代价：没数据（可恢复 —— 在设置里重存一次范围就好）；
+   * · 照采的代价：用户可能选的是"只学最近 30 天"，而 JSON 坏掉之后
+   *   不传时间窗就把**全部历史**采回来了 —— 按 CLAUDE.md 第 5 节
+   *   那是隐私事故，**不可撤回**。
+   *
+   * 两者不对称，所以方向必须是"最严"。而这也让两个域**一致**了：
+   * chat 那侧（`readCollectionScope` → `readDomainScope`）一直是最严，
+   * 只有听记这条 catch 返回 `{}` 是照采 —— 同一个"坏 JSON"在两个域上
+   * 被解读成相反的方向，而那种不一致本身就是缺陷。
+   *
+   * ★ 停采的**静默**问题另有出路（不是靠放宽方向）：
+   * `IngestService.domainScopeOrWarn` 会记一条 warn 并写清恢复办法。
+   */
+  it("★★ 坏 JSON 的 scope → 整轮不采（最严），而不是当成「没配过」照采", async () => {
     const clock = new ManualClock(START)
     const { plugin, specs } = makeRecordingPlugin()
     const { vault, service } = makeService(plugin, clock)
@@ -1219,8 +1238,13 @@ describe("★★ 听记采集尊重引导里选的时间范围", () => {
 
     await service.tickMinutes()
 
-    expect(specs).toHaveLength(1)
-    expect(specs[0]?.since).toBeUndefined()
+    /**
+     * 一次渠道调用都不该发：范围读不出来时，"拉回来再说"就已经晚了
+     * （拉回来的东西可能整段超出用户选的范围）。
+     *
+     * 反证：把 `minutesEnabled` 里的 `!scope.unreadable` 去掉 ⇒ 这一条转红。
+     */
+    expect(specs).toHaveLength(0)
     vault.close()
   })
 })

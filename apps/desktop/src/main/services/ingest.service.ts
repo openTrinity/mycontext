@@ -40,6 +40,7 @@ import {
   normalize,
   OutboxConsumer,
   runCycle,
+  checkTopologyConsistency,
   buildConsumerStatuses,
   buildDomainStatuses,
   type ConsumerOutcome,
@@ -68,6 +69,15 @@ import {
   readCollectionScope,
   isConversationInScope,
   isSentAtInScope,
+  /**
+   * ★ 三个域共用的范围判定（三态语义只有一份实现）。
+   * 上面那三个是 chat 专用的既有名字（`readCollectionScope` 现在也只是
+   * `readDomainScope(db, "chat")` 的薄封装）。
+   */
+  readDomainScope,
+  isOccurredAtInScope,
+  collectsNothing,
+  type DomainScope,
   purgeOutOfScopeMessages,
   type CollectionScope,
   type PurgeReport,
@@ -768,6 +778,13 @@ export class IngestService {
    */
   private lastCycle: readonly ConsumerOutcome[] = []
   /**
+   * 上一次报过的拓扑自检问题（拼成一个串）。
+   *
+   * ★ 只为**日志去重**存在：`snapshot()` 被界面按秒轮询，不去重会让同一句
+   * "声明漏了 xx" 每秒刷一条，把真正的异常淹掉。空串 = 当前没有问题。
+   */
+  private lastTopologyProblems = ""
+  /**
    * 会话目录的缓存（三路合并实测 4.8s，比扫描周期还长 —— 不能每轮重取）。
    * null = 还没取过或已过期。
    */
@@ -1275,7 +1292,7 @@ export class IngestService {
    *   `(channel_id, external_id)` 唯一键 + upsert 的正文守卫 ——
    *   重复列同一条听记不产生 Outbox seq。
    * · **但要传时间范围**：抽干历史会碰到用户明确排除掉的时间段，
-   *   而那是隐私边界（CLAUDE.md 第 5 节）。见 `minutesTimeRange`。
+   *   而那是隐私边界（CLAUDE.md 第 5 节）。见 `domainTimeRange`。
    *
    * ## ★ 抽干的截断要落库
    *
@@ -1323,79 +1340,119 @@ export class IngestService {
    * 一行 `enabled:false`（见那里的 back-fill）—— 于是"没配过"与"显式关"
    * 在它眼里同形。所以这里直接查原始表，用「有没有这一行」区分两者。
    */
-  private minutesEnabled(): boolean {
-    const row = this.options.db
-      .prepare<[string], { enabled: number }>("SELECT enabled FROM distill_sources WHERE kind = ?")
-      .get("minutes")
-    return row === undefined ? true : row.enabled === 1
-  }
-
   /**
-   * 听记源的时间范围（用户在引导第 3 步选的）。
+   * 读某个域的范围，并在 `scope_json` **读不出来**时记一条 warn。
    *
-   * ## ★★ 为什么必须有这个，以及为什么**不能**用 `readCollectionScope`
+   * ## ★★★ 为什么"按最严处理"必须配一条日志
    *
-   * 听记采集从前完全不看采集范围。只取首页时这件事被"覆盖面太小"掩盖了；
-   * 一旦抽干历史，就会把用户明确排除掉的时间段整段采回来 ——
-   * 按 CLAUDE.md 第 5 节那是隐私问题，不是"多采点没坏处"。
+   * 坏 JSON 走最严（一条都不采）是对的方向 —— 判据不可靠时采全部是隐私
+   * 事故（用户可能选的是"只学最近 30 天"），不采只是没数据。
    *
-   * `readCollectionScope`（store 的唯一权威）**只读 `kind = 'chat'` 那一行**
-   * （函数名里没有 chat，但实现写死了）。而引导对**每个**源各写一行 scope
-   * （见 `onboarding-view.tsx` 的保存循环：非 chat 源写 `{since, until}`）。
-   * 拿 chat 的范围去卡听记在这个应用里恰好等价（引导给两者写的是同一对
-   * since/until），但那是**巧合而不是契约** —— 用户将来能分源配范围时
-   * 就错了，而错的方向是"采了不该采的"。
+   * 但停采这个方向有一个真实代价：它**静默**。用户看到的是"文档一直是 0 篇"，
+   * 而日志里一个字都没有 —— 那正是本仓库最贵的那类故障（CLAUDE.md 第 4 节）。
    *
-   * ## 三态与 `minutesEnabled` 保持一致
+   * 所以这个包装做的唯一一件事就是：**让那个状态留痕**。
    *
-   * 没有这一行（没配过）→ 不限。所以返回的两个值都可能是 undefined，
-   * 渠道层据此决定传不传 `--start/--end`。
+   * ★★ 它**不参与闸门判断** —— 那由 `collectsNothing` 覆盖
+   * （`readDomainScope` 对坏 JSON 已经返回 `restricted: true` + 空白名单）。
+   * 我一开始在两个 `*Enabled()` 里各加了一个 `&& !scope.unreadable`，
+   * 反证时发现去掉它**一条用例都不红** —— 死代码。这个字段只为日志存在。
    *
-   * ★ 直接查原始表而不是 `DistillSourceRepository.list()`：同 `minutesEnabled`
-   * 的理由 —— 那个方法对缺失的 kind 会合成一行，于是"没配过"不可辨识。
+   * ★ 更早的实现在这一点上两个域是矛盾的：chat 按最严（对），
+   * 而 `minutesTimeRange` 的 catch 返回 `{}` = 不限时间照采（错，超范围）。
+   * 那条"不让手改过的库停采"的理由只看到了停采的代价，没看到超范围的代价。
+   * 现在两个域都按最严 + 都留痕。
    */
-  private minutesTimeRange(): { since?: number; until?: number } {
-    const row = this.options.db
-      .prepare<
-        [string],
-        { scope_json: string | null }
-      >("SELECT scope_json FROM distill_sources WHERE kind = ?")
-      .get("minutes")
-    if (row?.scope_json === undefined || row.scope_json === null || row.scope_json === "") {
-      return {}
+  private domainScopeOrWarn(domain: "chat" | "minutes" | "doc"): DomainScope {
+    const scope = readDomainScope(this.options.db, domain)
+    if (scope.unreadable) {
+      this.options.logger.warn("distill source scope unreadable; collecting nothing for safety", {
+        channelId: this.options.plugin.meta.id,
+        domain,
+        // ★ 说清出路：这个状态用户自己能修（在设置里重存一次范围）
+        hint: "重新在设置页保存一次该数据源的范围即可恢复",
+      })
     }
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(row.scope_json)
-    } catch {
-      // 坏 JSON 按"没配过"处理（不限）。与 onboarding 仓储的 parseJson 同一个
-      // 口径：一个手改过的库不该让采集整个停下。
-      return {}
-    }
-    if (typeof parsed !== "object" || parsed === null) return {}
-    const scope = parsed as { since?: unknown; until?: unknown }
-    return {
-      ...(typeof scope.since === "number" && Number.isFinite(scope.since)
-        ? { since: scope.since }
-        : {}),
-      ...(typeof scope.until === "number" && Number.isFinite(scope.until)
-        ? { until: scope.until }
-        : {}),
-    }
+    return scope
   }
 
   /**
-   * 文档源是否开启。判据与听记完全一样（见 `minutesEnabled`）：
-   * **没配过 = 默认开**（引导默认勾了它），**显式配成关**才不采。
+   * 听记源本轮该不该跑。
    *
-   * ★ 同样不能用 `DistillSourceRepository.list()` 判 —— 它对缺失的 kind 会
+   * ★★ 判据走 `readDomainScope(db, "minutes")` —— 三态语义只有一份实现
+   * （见 `@mycontext/store` 的 `domain-scope.ts` 文件头）。
+   *
+   * 「没配过 = 默认开」这个方向由 `DOMAIN_SCOPE_DEFAULTS.minutes =
+   * "collect-all"` 表达，而不再是这里一个 `row === undefined ? true` ——
+   * 那种写法让同一个问题在三个域上有三处答案，加第四个域时会出现第四处。
+   *
+   * ★★★ 两个条件：`enabled`（用户关了没有）与 `collectsNothing`
+   * （这个域现在该不该一条都不采）。只判第一个的话
+   * `DOMAIN_SCOPE_DEFAULTS` 里的方向对这个域是**装饰性的** —— 反证过：
+   * 把 doc 的缺省从 collect-all 改成 collect-nothing，9 条用例一条都不红。
+   * 那正是"声明写着一件事、代码不执行它"的形态。
+   *
+   * ★★ 坏 JSON **不需要**在这里再判一次：`readDomainScope` 的 catch 已经
+   * 返回 `restricted: true` + 空白名单，`collectsNothing` 因此为真。
+   * 我一开始多写了一个 `&& !scope.unreadable`，而反证（去掉它）**没有**
+   * 任何用例转红 —— 那说明它是死代码。留着比删掉糟：一个看起来在把关、
+   * 实际不起作用的条件，会让下一个人以为坏 JSON 的处置在这里，
+   * 从而在别处漏掉它。`unreadable` 的用途只有一个：让那个状态**留痕**
+   * （见 `domainScopeOrWarn`）。
+   *
+   * ★ 仍然不能用 `DistillSourceRepository.list()` 判：它对缺失的 kind 会
    * 合成一行 `enabled:false`，于是"没配过"与"显式关"同形。
    */
+  private minutesEnabled(): boolean {
+    const scope = this.domainScopeOrWarn("minutes")
+    return scope.enabled && !collectsNothing(scope)
+  }
+
+  /**
+   * 某个域的时间范围（用户在引导里选的），转成渠道层要的形状。
+   *
+   * ## ★★★ 为什么必须按域各读一行，而**不能**用 `readCollectionScope`
+   *
+   * 听记与文档采集从前完全不看采集范围。只取首页时这件事被"覆盖面太小"
+   * 掩盖了；一旦抽干历史，就会把用户明确排除掉的时间段整段采回来 ——
+   * 按 CLAUDE.md 第 5 节那是隐私问题，不是"多采点没坏处"。
+   *
+   * `readCollectionScope` 只读 `kind = 'chat'` 那一行（函数名里没有 chat，
+   * 但实现写死了）。而引导对**每个**源各写一行 scope（见 `onboarding-view.tsx`
+   * 的保存循环：非 chat 源写 `{since, until}`）。拿 chat 的范围去卡听记在
+   * 这个应用里恰好等价（引导给两者写的是同一对 since/until），
+   * 但那是**巧合而不是契约** —— 用户将来能分源配范围时就错了，
+   * 而错的方向是"采了不该采的"。
+   *
+   * ## ★★ 一个方法服务两个域（而不是 minutes/doc 各写一份）
+   *
+   * 这两份原本会长得一模一样，而它里面有一条抄错就出错的判据：
+   * **`since: null` 与 `since: undefined` 都要转成"不传"**（前者是用户显式
+   * 选了不限，后者是没配过 —— 对渠道层是同一件事：别传 `--start`）。
+   * 而 `readDomainScope` 的 `since` 是三态（`number | null | undefined`），
+   * 直接展开进对象会把 `null` 传给渠道层。
+   *
+   * ★ 三态判断本身已经在 `readDomainScope` 里（`domain-scope.ts`），
+   * 这里只做"三态 → 渠道参数"这一次转换。
+   */
+  private domainTimeRange(domain: "minutes" | "doc"): { since?: number; until?: number } {
+    const scope = this.domainScopeOrWarn(domain)
+    return {
+      // ★ 只有**具体数字**才传。null（显式不限）与 undefined（没配过）都不传。
+      ...(typeof scope.since === "number" ? { since: scope.since } : {}),
+      ...(scope.until === undefined ? {} : { until: scope.until }),
+    }
+  }
+
+  /**
+   * 文档源本轮该不该跑。判据与听记完全一样（见 `minutesEnabled`）：
+   * **没配过 = 默认开**（`DOMAIN_SCOPE_DEFAULTS.doc = "collect-all"`），
+   * **显式配成关**才不采，而**缺省方向若是 `collect-nothing` 也不采**
+   * （后者让那个声明真的有效，不是装饰 —— 见 `minutesEnabled` 那段 ★★★）。
+   */
   private documentsEnabled(): boolean {
-    const row = this.options.db
-      .prepare<[string], { enabled: number }>("SELECT enabled FROM distill_sources WHERE kind = ?")
-      .get("doc")
-    return row === undefined ? true : row.enabled === 1
+    const scope = this.domainScopeOrWarn("doc")
+    return scope.enabled && !collectsNothing(scope)
   }
 
   /**
@@ -1510,7 +1567,102 @@ export class IngestService {
       // ① 列元信息（一轮只取首批：wiki 是全量递归，drive 取首页）。
       const listed = await documents.list({})
       if (!this.running) return totals
-      totals.listed = listed.items.length
+
+      /**
+       * ★★★ 时间闸：把**超出用户学习范围**的文档在落库前丢掉。
+       *
+       * ## 这修的是一个真实的隐私缺口
+       *
+       * 这一行之前，`runDocuments` 从头到尾**不看任何范围** —— 对比听记那侧
+       * （`domainTimeRange("minutes")` 每轮现读、透传 since/until），文档这侧
+       * 连一个读范围的方法都没有。而引导**确实**给 doc 源写了 `{since, until}`
+       * （`onboarding-view.tsx` 的保存循环对非 chat 源就写这两个字段）。
+       *
+       * 后果：用户选「学最近 30 天」，文档侧把知识库里**全部历史文档**拉回来、
+       * 落库、发 changelog、进图谱与画像。按 CLAUDE.md 第 5 节，
+       * 「严格遵守用户在引导里选的范围」—— 超范围采集是隐私问题，
+       * 不是"多采点没坏处"。
+       *
+       * ## ★★ 为什么在**这一层**丢，而不是下推给渠道 `list()`
+       *
+       * `ChannelDocuments.list()` 的契约里**没有** since/until（只有
+       * cursor/limit）—— 也就是渠道 CLI 未必支持文档按时间筛。给契约加一个
+       * 参数却不生效是最坏的形态：看起来在过滤，实际没有。
+       *
+       * 所以先在这里丢（立刻正确、与 chat/minutes 同一段判据），
+       * 代价只是**列举成本仍然花掉**（拉回来再丢）。两者代价不对称：
+       * 现在是在采不该采的数据，而这个代价只是多花几次 CLI 调用。
+       * 将来渠道自述支持时再下推。
+       *
+       * ## ★★★ 业务时间的判据必须是 `updatedAt ?? createdAt`
+       *
+       * 这个表达式与另外两处**必须一致**：`toDocumentChangelogEntry` 的
+       * `occurredAt`、`rebuildFromDocuments` 的分桶。三处漂了的话
+       * 「闸门放行的」与「覆盖面记账的」会落在不同的日期上，而两边的数字
+       * 都"看起来对"。
+       *
+       * ★ 那两处的表达式**还带第三级** `?? fetchedAt` —— 而这里**不能带**：
+       * `fetchedAt` 是"这一轮抓取的时刻"，它只存在于**库里那一行**
+       * （`persistDocuments` 写进去的），`ParsedDocumentLike` 上压根没有这个字段。
+       * 就算有也不能用：拿抓取时刻当业务时间会让每篇文档都"是今天更新的"，
+       * 于是任何 `since` 都放行 —— 闸门等于不存在。
+       *
+       * ## ★★ 两个 null 时（渠道没给任何时间）单独处理，不混进越界计数
+       *
+       * `ParsedDocumentLike.updatedAt` 的契约注释明写「取不到就 null，
+       * **不要猜一个 now**（下游按时间窗过滤会漏掉它）」—— 也就是契约作者
+       * 已经预期这一层会把它挡掉。
+       *
+       * 判据：**只在用户真的设了界的时候**才挡。没设界时（`since`/`until`
+       * 都不限）本来就全放行，此时把"时间未知"挡掉是凭空丢数据。
+       * 而设了界时按 CLAUDE.md 第 5 节走隐私那一侧（判据不可靠时不采）。
+       *
+       * ★ 计数分开记（`droppedUnknownTime`）：「超出你选的日期」与
+       * 「这篇文档渠道没给时间」是两个事实，出路也不同（前者去改范围、
+       * 后者要去看渠道解析）。合成一个数字会让后者永远查不出来。
+       */
+      const docScope = this.domainScopeOrWarn("doc")
+      const bounded = typeof docScope.since === "number" || docScope.until !== undefined
+      let droppedUnknownTime = 0
+      const inScope = listed.items.filter((item) => {
+        const occurredAt = item.updatedAt ?? item.createdAt
+        if (occurredAt === null || occurredAt === undefined) {
+          // 时间未知：设了界 → 挡（隐私侧）；没设界 → 放行（本来全放行）
+          if (!bounded) return true
+          droppedUnknownTime += 1
+          return false
+        }
+        return isOccurredAtInScope(docScope, occurredAt)
+      })
+      const droppedNow = listed.items.length - inScope.length
+      if (droppedNow > 0) {
+        /**
+         * ★ 丢弃必须**可见**：这是本仓库最贵的那类静默降级（CLAUDE.md 第 4 节）。
+         * 不记的话"范围闸挡掉了 300 篇"与"这个知识库本来只有 20 篇"
+         * 在状态页上完全同形。计数走与 chat 侧**同一对**字段
+         * （`droppedOutOfScope` / `lastDroppedAt`），所以状态页那一栏
+         * 不需要为文档再加一个数字。
+         */
+        this.droppedOutOfScope += droppedNow
+        this.lastDroppedAt = this.options.clock.now()
+        this.options.logger.info("documents dropped out of scope", {
+          channelId,
+          dropped: droppedNow,
+          // ★ 单独报：它与"超出日期"的出路不同（见上面那段）
+          droppedUnknownTime,
+          listed: listed.items.length,
+          since: docScope.since,
+          until: docScope.until,
+        })
+      }
+      /**
+       * ★ `totals.listed` 报**在范围内的**篇数，不是渠道列出的篇数。
+       *
+       * 这个数字会进快照给用户看「这一轮采到多少」。报渠道列出的总数会让
+       * 用户以为那些都进库了 —— 而其中一部分刚被闸门挡掉。
+       * 被挡掉多少由上面那条日志与 `scope.droppedOutOfScope` 回答。
+       */
+      totals.listed = inScope.length
 
       if (listed.truncated) {
         /**
@@ -1524,7 +1676,15 @@ export class IngestService {
         })
       }
 
-      if (listed.items.length > 0) {
+      /**
+       * ★ 判据是 `inScope.length`，不是 `listed.items.length`。
+       *
+       * 整轮全被闸门挡掉时（用户选了很窄的范围、而知识库全是老文档）
+       * 这里必须整块跳过 —— 否则会写一条只含 raw payload 的记录、
+       * 跑一次 `rebuildFromDocuments`，而 `documents` 一篇都没变。
+       * 那不是错误，但每一轮都白写一行 ODS 与一次全表 GROUP BY。
+       */
+      if (inScope.length > 0) {
         const now = this.options.clock.now()
         const result = persistDocuments(deps, {
           raw: [
@@ -1535,13 +1695,23 @@ export class IngestService {
               // 列举没有单一平台主键（一轮聚合了多次调用）→ 空串，
               // 幂等靠 payloadHash（见 raw_records 的 UNIQUE 与 §3.3）。
               externalId: "",
+              /**
+               * ★ 原生 payload 存**整份**（不按范围裁）。
+               *
+               * `raw_records` 是 ODS 层：它的语义是"渠道那一刻回了什么"，
+               * 而解析 bug 时的重放价值全靠这份原样。按范围裁它会让
+               * 「重放」得到一个与当初不同的输入 —— 而那正是这一层存在的理由。
+               * 越界的**业务数据**不进 `documents`（上面的闸），
+               * 这两件事分开：ODS 存真相，DWD 存范围内的那部分。
+               */
               payload: listed.rawPayload,
               payloadHash: sha256(listed.rawPayload),
               source: "dws-cli",
               fetchedAt: now,
             },
           ],
-          documents: listed.items.map((item) => ({
+          // ★ 只落**在范围内**的那些（`inScope`，不是 `listed.items`）
+          documents: inScope.map((item) => ({
             id: newId(item.updatedAt ?? now),
             channelId,
             externalId: item.externalId,
@@ -1562,7 +1732,7 @@ export class IngestService {
         /**
          * ★★ 记文档覆盖面（v29 `document_coverage`）。
          *
-         * ## 为什么记 `listed.items` 而不是 `result.changed`
+         * ## 为什么记**列到的篇数**而不是 `result.changed`
          *
          * 与 `chat_coverage` 那侧**相反**的选择，理由是两者回答的问题不同：
          * 聊天那边 `bump` 的是"这一轮新落库了多少条"（累加成总量，
@@ -1571,20 +1741,44 @@ export class IngestService {
          * 一篇文档被改了十次仍然是一篇。
          *
          * 所以这里不累加 `changed`（那会让改动频繁的空间篇数虚高到几倍），
-         * 而是直接把这一轮列到的篇数按 (空间, 天) 分组，用 `markSpaceDrained`
+         * 而是直接把这一轮列到的篇数按 (空间, 天) 分组，用 `markDrained`
          * 的 `listedTotal` 记"渠道说有多少"，真值仍由 `rebuildFromDocuments`
          * 从 `documents` 表数出来（幂等、可重跑）。
+         *
+         * ## ★★★ 但记的是 `inScope`，**不是** `listed.items`
+         *
+         * 覆盖面回答的是「用户要的那段日期，我们有多少」。把范围外的篇数
+         * 记进去会让覆盖面与 `documents` 表**永久对不上**：
+         * `listedTotal` 说这个空间这天有 300 篇，而 `rebuildFromDocuments`
+         * 从库里数出 20 篇（其余 280 篇被闸门挡了）—— 界面会显示
+         * "还差 280 篇没采到"，而那 280 篇是**用户明确不要的**。
+         * 一个永远追不平的进度比没有进度更糟。
          *
          * ★ `drained` 取 `!listed.truncated`：截断了就是没抽干。
          * 恒记 true 会把"还有更多知识库没列到"显示成"已采完"，
          * 而那正是本仓库最忌讳的静默数据缺失。
+         * ★ 这里用 `listed.truncated`（而不是范围过滤后的什么）是对的：
+         * 截断是**渠道列举**这件事的属性，与我们要不要那些篇无关。
          */
         try {
           const coverage = new DocumentCoverageRepository(this.options.db)
           /** (空间, 天) → 这一轮列到的篇数。★ 与聊天那侧同一个分桶手法。 */
           const bySpaceDay = new Map<string, number>()
-          for (const item of listed.items) {
-            // ★ 分桶判据与 `toDocumentChangelogEntry` 的 occurredAt 一致
+          for (const item of inScope) {
+            /**
+             * ★ 分桶判据与 `toDocumentChangelogEntry` 的 occurredAt 一致。
+             *
+             * ★★ 这里的第三级 `?? now` 与**上面时间闸**的表达式（只到
+             * `createdAt`）不同，而两者都对 —— 它们回答不同的问题：
+             * · 闸问「这篇在不在用户选的日期里」→ 时间未知就不能假装知道；
+             * · 分桶问「把它记到哪一天」→ 必须给一个具体的天，而库里那一行的
+             *   `fetched_at` 正是 `now`（`persistDocuments` 就是这么写的），
+             *   所以用 `now` 与 `rebuildFromDocuments` 的
+             *   `COALESCE(updated_at, created_at, fetched_at)` **算出同一天**。
+             *
+             * 走到这里的"时间未知"文档只有一种：用户**没设界**（bounded=false）
+             * 时被放行的那些。设了界的话它们在上面就被挡掉了。
+             */
             const occurredAt = item.updatedAt ?? item.createdAt ?? now
             /**
              * ★ 分隔符用 `\u0000` 而不是空格或冒号：空间 id 是渠道给的
@@ -2000,9 +2194,9 @@ export class IngestService {
     /**
      * ★★ 用户选的时间范围。**每轮现读**（不缓存）——
      * 用户改了范围下一轮就该生效，而缓存过期的方向恰好是
-     * "继续采已经被排除掉的时间段"。见 `minutesTimeRange` 的注释。
+     * "继续采已经被排除掉的时间段"。见 `domainTimeRange` 的注释。
      */
-    const range = this.minutesTimeRange()
+    const range = this.domainTimeRange("minutes")
 
     try {
       /**
@@ -4205,13 +4399,48 @@ export class IngestService {
      * 20 万行实测 6.31ms）。同一个值算两遍是白加的阻塞。
      */
     const domainHeads = changelog.headByDomain()
+    const cursorRows = consumers.list()
     const consumerStatuses = buildConsumerStatuses({
       head: changelog.head(),
       domainHeads,
-      cursors: consumers.list(),
+      cursors: cursorRows,
       staleIds: consumers.staleConsumers().map((consumer) => consumer.consumerId),
       lastCycle: this.lastCycle,
     })
+
+    /**
+     * ★★★ 拿**真实的游标表**跑一遍拓扑自检（判据⑤）。
+     *
+     * ## 为什么不能只靠单测
+     *
+     * 单测里那份 `registeredConsumerIds` 是**我手写的**（我 grep 了每个
+     * `cursors.register(` 调用点）。而将来有人加一个新消费者时，
+     * 他会加 register、可能忘了加声明，**也不会想到去改那份手写清单** ——
+     * 于是单测照绿，而状态页又少一行。那正是 G2 复发的形状。
+     *
+     * 在这里跑就没有这个问题：输入是库里真的有什么。代价是一次数组比对
+     * （游标表只有几行），比 `snapshot()` 里那 9 个 `COUNT(*)` 便宜得多。
+     *
+     * ★ 只记日志、**不抛错**：这是一个**声明**问题，让状态页因此整页打不开
+     * 比少一条自检糟得多（`checkTopologyConsistency` 返回列表而不是抛，
+     * 就是为了这个）。
+     *
+     * ★ 日志去重（`lastTopologyProblems`）：`snapshot()` 被界面按秒轮询，
+     * 不去重会让同一句话每秒刷一条，把真正的异常淹掉。
+     */
+    const problems = checkTopologyConsistency({
+      registeredConsumerIds: cursorRows.map((row) => row.consumerId),
+    })
+    const problemKey = problems.join(" | ")
+    if (problemKey !== this.lastTopologyProblems) {
+      this.lastTopologyProblems = problemKey
+      if (problems.length > 0) {
+        this.options.logger.warn("data plane topology inconsistent", {
+          channelId,
+          problems: [...problems],
+        })
+      }
+    }
 
     return {
       running: this.running,
