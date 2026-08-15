@@ -25,7 +25,7 @@ from kl_graph.ingest.llm_extractor import (
 from kl_graph.ingest.pipeline import IngestionPipeline, entity_id_from_name
 from kl_graph.models.types import Entity, EntityType
 
-FACT_TEXT = "朝声通知周乐夔和卢笛声风险评估表已更新"
+FACT_TEXT = "张三通知李四明和王五强风险评估表已更新"
 
 
 def _entities(*names: str) -> dict[str, Entity]:
@@ -42,14 +42,14 @@ def test_list_valued_object_entity_is_coerced_and_extras_survive() -> None:
     result = _validated_result_or_none(
         {
             "entities": [
-                {"name": "朝声", "entity_type": "Person"},
-                {"name": "周乐夔", "entity_type": "Person"},
-                {"name": "卢笛声", "entity_type": "Person"},
+                {"name": "张三", "entity_type": "Person"},
+                {"name": "李四明", "entity_type": "Person"},
+                {"name": "王五强", "entity_type": "Person"},
             ],
             "facts": [
                 {
-                    "subject_entity": "朝声",
-                    "object_entity": ["周乐夔", "卢笛声"],
+                    "subject_entity": "张三",
+                    "object_entity": ["李四明", "王五强"],
                     "fact_text": FACT_TEXT,
                     "fact_type": "NOTIFY",
                 }
@@ -58,10 +58,10 @@ def test_list_valued_object_entity_is_coerced_and_extras_survive() -> None:
     )
     assert result is not None, "a list-valued object must be repaired, not rejected"
     fact = result["facts"][0]
-    assert fact["subject_entity"] == "朝声"
-    assert fact["object_entity"] == "周乐夔"
+    assert fact["subject_entity"] == "张三"
+    assert fact["object_entity"] == "李四明"
     # The dropped-on-the-floor name must reappear as a co-equal participant.
-    assert "卢笛声" in fact["involved_entities"]
+    assert "王五强" in fact["involved_entities"]
 
 
 def test_list_valued_subject_entity_is_coerced() -> None:
@@ -70,7 +70,7 @@ def test_list_valued_subject_entity_is_coerced() -> None:
             "entities": [],
             "facts": [
                 {
-                    "subject_entity": ["周乐夔", "卢笛声"],
+                    "subject_entity": ["李四明", "王五强"],
                     "object_entity": None,
                     "fact_text": FACT_TEXT,
                 }
@@ -79,23 +79,23 @@ def test_list_valued_subject_entity_is_coerced() -> None:
     )
     assert result is not None
     fact = result["facts"][0]
-    assert fact["subject_entity"] == "周乐夔"
-    assert "卢笛声" in fact["involved_entities"]
+    assert fact["subject_entity"] == "李四明"
+    assert "王五强" in fact["involved_entities"]
 
 
 def test_compact_chinese_keys_with_list_object_are_coerced() -> None:
     """The repair runs inside compact-key expansion, before validation."""
     result = _validated_result_or_none(
         {
-            "实体": [{"名称": "朝声", "类型": "Person"}],
-            "事实": [{"主体": "朝声", "客体": ["周乐夔", "卢笛声"], "内容": FACT_TEXT}],
+            "实体": [{"名称": "张三", "类型": "Person"}],
+            "事实": [{"主体": "张三", "客体": ["李四明", "王五强"], "内容": FACT_TEXT}],
         }
     )
     assert result is not None
     fact = result["facts"][0]
-    assert fact["subject_entity"] == "朝声"
-    assert fact["object_entity"] == "周乐夔"
-    assert "卢笛声" in fact["involved_entities"]
+    assert fact["subject_entity"] == "张三"
+    assert fact["object_entity"] == "李四明"
+    assert "王五强" in fact["involved_entities"]
 
 
 def test_fact_edges_survives_list_valued_object_from_a_legacy_cache() -> None:
@@ -105,11 +105,11 @@ def test_fact_edges_survives_list_valued_object_from_a_legacy_cache() -> None:
     rather than trusting its input. Every named participant that became a node
     still gets its ``ABOUT`` edge.
     """
-    all_entities = _entities("朝声", "周乐夔", "卢笛声")
+    all_entities = _entities("张三", "李四明", "王五强")
     raw_fact = {
         "fact_text": FACT_TEXT,
-        "subject_entity": "朝声",
-        "object_entity": ["周乐夔", "卢笛声"],
+        "subject_entity": "张三",
+        "object_entity": ["李四明", "王五强"],
     }
     edges = IngestionPipeline._fact_edges("chunk-1", raw_fact, all_entities)
     about_targets = {e.target_id for e in edges if e.target_type == "entity"}
@@ -120,10 +120,10 @@ def test_fact_edges_survives_list_valued_object_from_a_legacy_cache() -> None:
 
 def test_coercion_is_idempotent_on_a_clean_fact() -> None:
     clean = {
-        "subject_entity": "朝声",
-        "object_entity": "周乐夔",
+        "subject_entity": "张三",
+        "object_entity": "李四明",
         "fact_text": FACT_TEXT,
-        "involved_entities": ["朝声", "周乐夔"],
+        "involved_entities": ["张三", "李四明"],
     }
     expected = dict(clean)
     coerce_fact_participants(clean)
@@ -138,7 +138,7 @@ def test_unusable_participant_values_are_dropped_not_fabricated() -> None:
     assert "subject_entity" not in fact
     assert fact["object_entity"] is None
 
-    empty = {"subject_entity": "朝声", "object_entity": [], "fact_text": FACT_TEXT}
+    empty = {"subject_entity": "张三", "object_entity": [], "fact_text": FACT_TEXT}
     coerce_fact_participants(empty)
     assert empty["object_entity"] is None
-    assert empty["subject_entity"] == "朝声"
+    assert empty["subject_entity"] == "张三"
