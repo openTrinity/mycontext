@@ -27,6 +27,7 @@ import {
   AttentionScopeRepository,
   ChatCoverageRepository,
   DocumentCoverageRepository,
+  DocumentRepository,
   MinutesCoverageRepository,
   ConversationRepository,
   DistillSourceRepository,
@@ -48,6 +49,8 @@ import type {
   ChannelConversationView,
   DistillScopeInput,
   DistillSourceView,
+  DocumentSpacesInput,
+  DocumentSpacesView,
 } from "@mycontext/ipc-contract"
 
 /**
@@ -143,12 +146,19 @@ export interface DistillSourceServiceOptions {
  * | 字段              | 不设限     | 更宽的方向          |
  * |-------------------|-----------|--------------------|
  * | `conversationIds` | undefined | 并集               |
+ * | `partitions`      | undefined | 并集               |
  * | `chatKinds`       | undefined | 并集               |
  * | `since`（下界）    | undefined | **更早**（`min`）   |
  * | `until`（上界）    | undefined | **更晚**（`max`）   |
  *
  * ★ `since` 还有第三态：`isSentAtInScope` 里 `null` 与 `undefined` 都放行。
  * 所以非 number 一律按"不设限"处理，不能只判 `undefined`。
+ *
+ * ★★ `partitions`（文档的空间白名单）走与 `conversationIds` **同一条**
+ * `widen(…, unionOf)` —— 两者是同一件事的两个域（分区白名单）。
+ * 漏掉它的后果是文档的空间白名单**不受"只增不减"保护**：每次保存
+ * 直接覆盖，于是用户在设置里改一次范围就能悄悄缩小文档的采集面，
+ * 而图谱里仍有那些空间的知识（配置说没学过、产出说学过）。
  *
  * ★ 纯函数并导出：这根"接线"若留在 `save` 里，测试就只能透过服务去打它，
  * 而本仓库已经吃过一次"两头都锁了、中间那根线是裸的"（删掉传值那一行，
@@ -164,6 +174,15 @@ export function mergeScopeOnlyGrowing(
 
   const ids = widen(before.conversationIds, incoming.conversationIds, unionOf)
   if (ids !== undefined) merged.conversationIds = ids
+  /**
+   * ★★ 分区白名单（文档的空间）走**同一条**规则 —— 见文件头那张表。
+   *
+   * 漏掉这一行的后果不是报错，而是文档的空间白名单不受"只增不减"保护：
+   * 每次保存直接覆盖，于是用户在设置里改一次范围就能悄悄缩小采集面，
+   * 而图谱里仍有那些空间的知识（配置说没学过、产出说学过）。
+   */
+  const partitions = widen(before.partitions, incoming.partitions, unionOf)
+  if (partitions !== undefined) merged.partitions = partitions
   const kinds = widen(before.chatKinds, incoming.chatKinds, unionOf)
   if (kinds !== undefined) merged.chatKinds = kinds
 
@@ -584,6 +603,37 @@ export class DistillSourceService {
     return channelId === this.options.primaryChannelId
       ? this.db
       : (this.sourceDbs.get(channelId) ?? null)
+  }
+
+  /**
+   * 库里出现过的**文档空间**（知识库 / 云盘目录）+ 各自篇数。
+   *
+   * 给「文档空间白名单」那个 picker 用（`DistillScope.partitions` 的候选集）。
+   *
+   * ## ★★ 候选集只能从**已采到的文档**反推
+   *
+   * 渠道契约里没有"列出全部知识库"这个能力（`ChannelDocuments` 只有
+   * `list` / `body` / `readableExtensions`）。所以"用户能勾哪些空间"
+   * 只能是"我们已经见过的那些" —— 而界面必须把这个限制说出来
+   * （`derivedFromCollected`），否则用户会以为某个知识库不在列表里
+   * 是我们漏读了，而真相是那个空间里的文档还没被列举到。
+   *
+   * ★ 库没挂上 → 空列表 + `derivedFromCollected: true`（而不是抛）：
+   * 那时用户看到"还没有采到任何空间"，与"这个渠道确实没有文档"
+   * 恰好是同一句话，而两者他都做不了别的事。
+   */
+  documentSpaces(input: DocumentSpacesInput): DocumentSpacesView {
+    const db = this.dbForChannel(input.channelId)
+    if (db === null) return { items: [], derivedFromCollected: true }
+    return {
+      items: new DocumentRepository(db).listSpaces(input.channelId),
+      /**
+       * ★ 恒 true（当前没有任何渠道提供空间列举）。做成字段而不是让界面
+       * 写死那句提示 —— 将来某个渠道真的提供了，这里改 false，
+       * 界面上那句限制说明自然消失，不用改渲染层。
+       */
+      derivedFromCollected: true,
+    }
   }
 
   /**

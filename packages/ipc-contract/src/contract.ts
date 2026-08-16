@@ -55,6 +55,19 @@ export const IPC_CHANNELS = {
    */
   chatCoverage: "mycontext:distill/chat-coverage",
   /**
+   * 库里出现过的**文档空间**（知识库 / 云盘目录）+ 各自篇数。
+   *
+   * ★★ 为什么它必须是一个独立通道，而不是塞进 `chatCoverage`：
+   * 那个回答"这段日期有多少"（按天聚合），这个回答"有哪些空间可勾"
+   * （按空间聚合、与日期无关）。合成一个会让调用方为了拿一个空间列表
+   * 而拉一份 90 天的日聚合。
+   *
+   * ★ 候选集只能从**已采到的文档**反推 —— 渠道契约里没有"列出全部知识库"
+   * 这个能力。所以界面必须说清"没采过的空间勾不到"
+   * （见 `DocumentRepository.listSpaces` 的注释）。
+   */
+  documentSpaces: "mycontext:distill/document-spaces",
+  /**
    * 数字分身的**监听范围**（关心范围，v28 `attention_scope`）。
    *
    * ★ 与 `distillSources` 分开：那是「学它哪些历史」，这是「盯哪些实时消息」。
@@ -553,7 +566,21 @@ export const distillScopeSchema = z.object({
   since: z.number().optional(),
   until: z.number().optional(),
   chatKinds: z.array(z.enum(["direct", "group"])).optional(),
+  /** 会话白名单（**仅 chat 源**）。★ 键名不改 —— 四处调用方在读它。 */
   conversationIds: z.array(z.string()).optional(),
+  /**
+   * **分区白名单**（域中立）。文档源用它装空间（知识库 / 云盘目录）的
+   * external_id。
+   *
+   * ★★ 与 `conversationIds` **并存**而不是替换它：那个键的名字是聊天概念，
+   * 而四处调用方读它时默认它是会话（`purgeOutOfScope` 会拿它去删
+   * `messages`）。给文档一个新键，零风险。
+   *
+   * ★ 闸门早就准备好了：`admitByScope` 在文档那条路上已经传对了空间键，
+   * 而 `readDomainScope` 原来对 doc 行读 `conversationIds`（恒 undefined）
+   * → 分区闸恒放行。也就是"能力在、白名单读不到"。
+   */
+  partitions: z.array(z.string()).optional(),
 })
 
 export type DistillScopeInput = z.infer<typeof distillScopeSchema>
@@ -710,6 +737,45 @@ export type ChatCoverageInput = z.output<typeof chatCoverageInputSchema>
 export type ChatCoverageRequest = z.input<typeof chatCoverageInputSchema>
 export type ChatCoverageView = z.infer<typeof chatCoverageViewSchema>
 export type ChatCoverageDayView = z.infer<typeof chatCoverageDaySchema>
+
+/**
+ * ── 文档空间列表（给「文档空间白名单」那个 picker）────────────────
+ *
+ * ★★★ 这里**没有** `title` —— 而那是一个刻意的、要在界面上说明的缺口。
+ *
+ * `documents.workspace_id` 只是一个 external_id，而渠道契约里没有
+ * "查这个知识库叫什么"的能力（`ChannelDocuments` 只有 list / body /
+ * readableExtensions）。编一个标题（比如拿第一篇文档的标题）会让用户
+ * 以为那就是知识库名 —— 而它其实是里面某一篇文档的名字。
+ *
+ * 所以界面只能显示 id（截断）+ 篇数，并说清"名字取不到"。
+ * 那不好看，但它是诚实的；而这个项目已经为"编一个看起来对的值"
+ * 吃过一次（仪表盘那句假的「才学了 0.0%」）。
+ */
+export const documentSpaceSchema = z.object({
+  /** 空间的 external_id。**空串** = 这个渠道的默认空间（散落的云盘文件） */
+  spaceExternalId: z.string(),
+  /** 库里这个空间下有多少篇（真值：我们自己数的） */
+  documents: z.number(),
+})
+
+export const documentSpacesViewSchema = z.object({
+  items: z.array(documentSpaceSchema),
+  /**
+   * 候选集是从**已采到的文档**反推的（渠道不提供"列出全部知识库"）。
+   *
+   * ★ 这个布尔让界面能说清那个限制：为 true 时提示"没采过的空间勾不到"。
+   * 恒 true —— 做成字段而不是让界面写死，是为了将来某个渠道真的提供了
+   * 空间列举时不用改界面（那时它为 false，提示自然消失）。
+   */
+  derivedFromCollected: z.boolean(),
+})
+
+export const documentSpacesInputSchema = z.object({ channelId: z.string().min(1) })
+
+export type DocumentSpaceView = z.infer<typeof documentSpaceSchema>
+export type DocumentSpacesView = z.infer<typeof documentSpacesViewSchema>
+export type DocumentSpacesInput = z.infer<typeof documentSpacesInputSchema>
 
 /**
  * ── 数字分身的监听范围 ────────────────────────────────────────────

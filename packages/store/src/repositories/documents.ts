@@ -239,4 +239,38 @@ export class DocumentRepository {
         .get()?.c ?? 0
     )
   }
+
+  /**
+   * 库里出现过的**空间**（知识库 / 云盘目录），带各自的篇数。
+   *
+   * ## ★★★ 为什么空间列表只能从**已采到的文档**反推
+   *
+   * 渠道契约里**没有**"列出全部知识库"这个能力（`ChannelDocuments` 只有
+   * `list` / `body` / `readableExtensions`）。所以"用户能勾哪些空间"这个
+   * 候选集只能是"我们已经见过的那些"。
+   *
+   * ★★ 这带来一个**必须在界面上说清**的限制：**没采过的空间勾不到**。
+   * 那与会话列表那侧的形状相同（会话目录是采集时顺带落库的），
+   * 但文档这侧更明显 —— 用户第一次进设置页时可能一个空间都没有。
+   *
+   * 不说的话用户会以为"我的某个知识库不在列表里 = 我们漏读了"，
+   * 而真相是"那个空间里的文档还没被列举到"。
+   *
+   * ★ 空的 `workspace_id`（NULL）归成空串那一档，`title` 给 null ——
+   * 那是"这个渠道的默认空间"（散落的云盘文件），不是"未知"。
+   * 与 `document_coverage` 的 `space_external_id` 用同一个判据
+   * （`COALESCE(workspace_id, '')`），否则两处的分区键对不上。
+   */
+  listSpaces(channelId: string): { spaceExternalId: string; documents: number }[] {
+    return this.db
+      .prepare<[string], { space: string; c: number }>(
+        `SELECT COALESCE(workspace_id, '') AS space, count(*) AS c
+           FROM documents
+          WHERE channel_id = ?
+          GROUP BY space
+          ORDER BY c DESC`,
+      )
+      .all(channelId)
+      .map((row) => ({ spaceExternalId: row.space, documents: row.c }))
+  }
 }

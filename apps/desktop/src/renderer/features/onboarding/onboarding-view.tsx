@@ -158,6 +158,10 @@ function readSources(row: OnboardingStepView | undefined): SourcesDraft {
     attentionConversationIds?: unknown
     /** 监听**模式**（这一轮新加；旧 payload 里没有 → 按勾选数推断，见下） */
     mode?: unknown
+    /** per-domain 时间窗覆盖（这一轮新加；旧 payload 里没有 → 全部跟随全局） */
+    perDomainRange?: unknown
+    /** 文档空间白名单（这一轮新加；旧 payload 里没有 → 不限） */
+    documentSpaceIds?: unknown
   }
   const strings = (value: unknown): string[] =>
     Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
@@ -212,7 +216,58 @@ function readSources(row: OnboardingStepView | undefined): SourcesDraft {
         : strings(record.attentionConversationIds).length > 0
           ? "explicit"
           : "all",
+    /**
+     * ★★ 回填 per-domain 时间窗覆盖。
+     *
+     * 逐字段校验而不是 `as`：payload 是**库里的 JSON**（用户可能手改过），
+     * 而一个坏值（`rangeDays: "去年"`）会被原样送进 `Date.now() - x`
+     * → NaN → `since: NaN` 落库 → 蒸馏窗口算出一个荒谬的范围，
+     * 而那不会报错（`readSources` 里 `customRange` 那段是同一条教训）。
+     *
+     * ★ 读不出来的域**整个丢掉**（回落"跟随全局"）而不是留一半：
+     * 跟随是安全的缺省，而一个半读出来的覆盖会让用户以为他的设置还在。
+     */
+    perDomainRange: readPerDomainRange(record.perDomainRange),
+    /** ★ 文档空间白名单：坏值 → 空数组（= 不限，与 `DEFAULT_SOURCES` 一致）。 */
+    documentSpaceIds: strings(record.documentSpaceIds),
   }
+}
+
+/**
+ * 解析 per-domain 时间窗覆盖。
+ *
+ * ★ 抽成函数而不是内联：`readSources` 已经很长，而这一段有三层校验
+ * （是对象吗 / 域名合法吗 / rangeDays 是三态吗）。内联会让那个 return
+ * 里出现一个七行的 IIFE。
+ *
+ * ★★ 返回类型是 `NonNullable<…>` 而不是可选：读不出来时返回 `{}`
+ * （= 全部跟随全局），而**不是** `undefined`。仓库开了
+ * `exactOptionalPropertyTypes`，把 undefined 赋给一个可选属性会报错 ——
+ * 而那个报错是对的：`{}` 与"这个键不存在"在下游是同一件事，
+ * 让它有两种表示形式只会多一个要判的分支。
+ */
+function readPerDomainRange(raw: unknown): NonNullable<SourcesDraft["perDomainRange"]> {
+  if (typeof raw !== "object" || raw === null) return {}
+  const out: NonNullable<SourcesDraft["perDomainRange"]> = {}
+  const isDate = (value: unknown): value is string =>
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
+  for (const domain of ["chat", "minutes", "doc"] as const) {
+    const entry = (raw as Record<string, unknown>)[domain]
+    if (typeof entry !== "object" || entry === null) continue
+    const pair = entry as { rangeDays?: unknown; customRange?: unknown }
+    // ★ `rangeDays` 是三态：number（具体天数）/ null（不限）/ 其余（读不出来 → 跳过）
+    if (typeof pair.rangeDays !== "number" && pair.rangeDays !== null) continue
+    const cr = pair.customRange
+    const custom =
+      typeof cr === "object" && cr !== null
+        ? (() => {
+            const c = cr as { from?: unknown; to?: unknown }
+            return isDate(c.from) && isDate(c.to) ? { from: c.from, to: c.to } : null
+          })()
+        : null
+    out[domain] = { rangeDays: pair.rangeDays, customRange: custom }
+  }
+  return out
 }
 
 /**
@@ -530,6 +585,51 @@ export function OnboardingView() {
             : Date.now() - sources.rangeDays * 86_400_000
       const until = custom === null ? undefined : new Date(`${custom.to}T23:59:59.999`).getTime()
       /**
+       * ★★★ **某个域单独设的范围**（修 G14）。
+       *
+       * `distill_sources` 本来就是每个 kind 一行、各有自己的 since/until，
+       * 而这个保存循环原来算**一次** since 就写给所有 kind。于是三个域的
+       * 范围被绑死 —— 最实际的后果是「学最近 90 天」把三年前写的规范文档
+       * 全部排除，而用户看不出成因（他会以为文档采集坏了）。
+       *
+       * ★ 缺键 = 跟随全局（那是缺省，绝大多数用户只想说一句"学最近 90 天"）。
+       */
+      const rangeOf = (kind: string): { since?: number; until?: number } => {
+        const override = sources.perDomainRange?.[kind as "chat" | "minutes" | "doc"]
+        if (override === undefined) {
+          return {
+            ...(since === undefined ? {} : { since }),
+            ...(until === undefined ? {} : { until }),
+          }
+        }
+        const oc = override.customRange ?? null
+        /**
+         * ★ 与全局那侧**同一套换算**（自定义区间优先、`until` 取当天
+         * 23:59:59.999）。抄两份的话"到 7 月 30 日"会在一处含那一天、
+         * 在另一处不含 —— 而两边的数字都"看起来对"。
+         */
+        if (oc !== null) {
+          return {
+            since: new Date(`${oc.from}T00:00:00`).getTime(),
+            until: new Date(`${oc.to}T23:59:59.999`).getTime(),
+          }
+        }
+        return override.rangeDays === null
+          ? {}
+          : { since: Date.now() - override.rangeDays * 86_400_000 }
+      }
+      /**
+       * 文档的**空间白名单** → `scope.partitions`（域中立的新键）。
+       *
+       * ★★ 空数组时**不写这个键** —— 与 `conversationIds` 同一条判据：
+       * `readDomainScope` 用"这个键存在吗"区分「不限」与「一个都不勾」，
+       * 写一个空数组会被读成后者（**一篇都不采**），而用户的意思是前者。
+       *
+       * ★ 落点不是 `conversationIds`：那个键被四处调用方默认当成"会话"读
+       * （`purgeOutOfScopeMessages` 会拿它去删 `messages`）。
+       */
+      const documentSpaces = sources.documentSpaceIds ?? []
+      /**
        * ★★ 会话白名单要**按渠道分桶**，而且现在**逐渠道各存一次**。
        *
        * 勾选列表是混着多个渠道的（每项带 `channelId`），而白名单存的是
@@ -564,16 +664,22 @@ export function OnboardingView() {
             scope:
               source.kind === "chat"
                 ? {
-                    ...(since === undefined ? {} : { since }),
-                    ...(until === undefined ? {} : { until }),
+                    ...rangeOf("chat"),
                     chatKinds: sources.chatKinds,
                     // ★ 只给**这个渠道自己的** id（其余源不按会话切）
                     conversationIds: ids,
                   }
-                : {
-                    ...(since === undefined ? {} : { since }),
-                    ...(until === undefined ? {} : { until }),
-                  },
+                : source.kind === "doc"
+                  ? {
+                      ...rangeOf("doc"),
+                      /**
+                       * ★★ 空数组**不写这个键**（见上面那段）：
+                       * `readDomainScope` 用"键存在吗"区分「不限」与
+                       * 「一个都不勾」，空数组会被读成后者（一篇都不采）。
+                       */
+                      ...(documentSpaces.length === 0 ? {} : { partitions: documentSpaces }),
+                    }
+                  : rangeOf(source.kind),
           })
         }
       }

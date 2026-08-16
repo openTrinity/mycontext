@@ -30,15 +30,18 @@
  * 否则用户找不到某个群会以为是我们漏读了，而真相是渠道接口就拿不到。
  */
 import { useMemo, useState } from "react"
-import { Button, Checkbox, Input, cn } from "@mycontext/design"
+import { Button, Checkbox, Disclosure, Input, cn } from "@mycontext/design"
 import type {
   AttentionModeValue,
   ChannelConversationView,
+  CoverageDomain,
   DistillSourceId,
 } from "@mycontext/ipc-contract"
 import { useChannelConversations } from "../../lib/queries.js"
-import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
+import { PerDomainRangeEditor } from "./per-domain-range-editor.js"
+import { DocumentSpacePicker } from "./document-space-picker.js"
+import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { StepSection, SubGroup } from "./step-section.js"
 
@@ -217,6 +220,50 @@ export interface SourcesDraft {
    * 而**新**草稿一律有显式值（`DEFAULT_SOURCES`）。
    */
   attentionMode?: AttentionModeValue
+  /**
+   * **某个域单独覆盖**的时间范围。缺键 = 跟随全局（上面那个 `rangeDays`）。
+   *
+   * ## ★★★ 为什么需要 per-domain 时间窗
+   *
+   * `distill_sources` 本来就是**每个 kind 一行**（`kind` 是主键），
+   * 每行的 `scope_json` 里各有 `since`/`until`。缺的一直是**引导页的表达**：
+   * 保存循环算**一次** since，然后写给每个 kind。
+   *
+   * 而三个域的合理范围天然不同：
+   *
+   * | 域 | 用户的真实意图 | 一组范围的后果 |
+   * |---|---|---|
+   * | chat | 学最近 90 天（量大、时效性强） | — |
+   * | doc | 规范文档三年前写的也有效 | 90 天限制把规范文档全排除 |
+   * | minutes | 会议听记学最近半年 | 与聊天的 90 天绑死 |
+   *
+   * `ingest.service.ts` 里那段注释自己写过这句话：「拿 chat 的范围去卡听记
+   * 在这个应用里**恰好等价**，但那是**巧合而不是契约** —— 用户将来能分源
+   * 配范围时就错了，而错的方向是采了不该采的」。这就是那个"将来"。
+   *
+   * ## ★★ 为什么是"覆盖"而不是"三个域各填一份"
+   *
+   * 绝大多数用户只想说一句"学最近 90 天"。让三个域都必填会把一个常见选择
+   * 变成三次操作，而"文档不分新旧"是一个**少数但真实**的需求。
+   */
+  perDomainRange?: Partial<
+    Record<
+      "chat" | "minutes" | "doc",
+      { rangeDays: number | null; customRange?: { from: string; to: string } | null }
+    >
+  >
+  /**
+   * 文档域的**空间白名单**（知识库 / 云盘目录的 external_id）。
+   *
+   * 空数组 / 不传 = **不限**（全部空间）。★ 与 `conversationIds` 的语义
+   * 刻意一致：那边空数组也是"一个都不勾"而不是"不限"，而这里保存时
+   * 只在非空时才写 `scope.partitions` —— 见 `onboarding-view` 的保存分支。
+   *
+   * ★ 落点是 `DistillScope.partitions`（域中立的新键），**不是**
+   * `conversationIds`：那个键被四处调用方默认当成"会话"读
+   * （`purgeOutOfScope` 会拿它去删 `messages`）。
+   */
+  documentSpaceIds?: string[]
 }
 
 export interface SourcesStepProps {
@@ -293,6 +340,41 @@ export function SourcesStep({
   )
 
   const custom = value.customRange ?? null
+
+  /**
+   * 有覆盖面 / 能单独设范围的三个域里，**用户勾选了**的那些。
+   *
+   * ★ 判据取 `enabledSources` 而不是"全部三个"：给一个关掉的源显示范围
+   * 设置等于邀请用户配一个不生效的值，而那个不一致完全看不出成因。
+   *
+   * ★ 与 `CoverageDomain` 同源（契约里的枚举），所以加一个域时类型会提示
+   * 这里要不要跟着加 —— 而不是静默少一行。
+   */
+  const enabledCoverageDomains = useMemo<readonly CoverageDomain[]>(() => {
+    const all: readonly CoverageDomain[] = ["chat", "minutes", "doc"]
+    return all.filter((domain) => value.enabledSources.includes(domain))
+  }, [value.enabledSources])
+
+  /** 有几个域单独设了范围（`Disclosure` 收起时也要能看到这件事）。 */
+  const overriddenCount = Object.keys(value.perDomainRange ?? {}).length
+
+  /**
+   * 空间 picker 读哪个渠道。
+   *
+   * ★★ 空间白名单是 **per-channel** 的（`scope_json` 按渠道库分开存），
+   * 而 `channelFilter` 是一个集合（引导第 4 步会传全部已连渠道）。
+   * 合并所有渠道的空间会让用户在一个列表里勾到另一个渠道的 id，
+   * 而那批 id 存进这个渠道库就是"按一批不存在的 id 过滤" → 一篇都采不到
+   * （与会话白名单那侧同一个坑，实测过：飞书白名单 28 个 id 里 24 个
+   * 是钉钉形状）。
+   *
+   * 所以取集合里的第一个；单元素集合（设置页那侧）就是它自己。
+   * `undefined`（不过滤）时回落 null → picker 显示"先选一个渠道"。
+   */
+  const primaryPickerChannel = useMemo<string | null>(() => {
+    if (channelFilter === undefined) return null
+    return [...channelFilter][0] ?? null
+  }, [channelFilter])
 
   const toggleConversation = (externalId: string) => {
     const next = value.conversationIds.includes(externalId)
@@ -529,6 +611,80 @@ export function SourcesStep({
             {savedSinceText}
           </p>
         )}
+
+        {/*
+          ── ★★★ 「某类数据单独设范围」（修 G14）─────────────────────
+
+          `distill_sources` 本来就是每个 kind 一行，各有自己的 since/until。
+          缺的一直是**这里的表达**：保存循环原来算一次 since 写给所有 kind。
+
+          最实际的那一例是**文档**：规范类文档三年前写的也有效，而
+          「学最近 90 天」会把它们全排除 —— 而用户完全看不出成因
+          （他会以为文档采集坏了）。
+
+          ★ 只列**勾选了的**源：给一个关掉的源显示范围设置等于邀请用户配
+          一个不生效的值，而那个不一致（"我配了却一篇都没采"）没有线索。
+        */}
+        {enabledCoverageDomains.length > 0 ? (
+          <Disclosure
+            title={t("sourcesStep.perDomain.title", { defaultValue: "单独设置某类数据的范围" })}
+            summary={
+              overriddenCount === 0
+                ? t("sourcesStep.perDomain.allInherit", { defaultValue: "都跟随上面" })
+                : t("sourcesStep.perDomain.overridden", {
+                    defaultValue: "{{count}} 类单独设了",
+                    count: overriddenCount,
+                  })
+            }
+            defaultOpen={false}
+          >
+            <PerDomainRangeEditor
+              globalRangeDays={value.rangeDays}
+              globalCustomRange={custom}
+              value={value.perDomainRange ?? {}}
+              onChange={(next) => onChange({ ...value, perDomainRange: next })}
+              domains={enabledCoverageDomains}
+            />
+          </Disclosure>
+        ) : null}
+
+        {/*
+          ── ★★★ 「文档空间白名单」（修 G6'）─────────────────────────
+
+          闸门早就准备好了（`admitByScope` 在文档那条路上传对了空间键），
+          缺的只是一个可读的白名单 —— 于是用户只能"要么全部知识库、
+          要么一个都不要"，而知识库里可能有与工作无关的空间。
+
+          ★ 只在**勾了文档源**时显示：给一个关掉的源摆一个 picker
+          等于邀请用户配一个不生效的值。
+        */}
+        {value.enabledSources.includes("doc") ? (
+          <Disclosure
+            title={t("sourcesStep.spaces.title", { defaultValue: "要学哪些知识库" })}
+            summary={
+              (value.documentSpaceIds ?? []).length === 0
+                ? t("sourcesStep.spaces.allSummary", { defaultValue: "全部" })
+                : t("sourcesStep.spaces.someSummary", {
+                    defaultValue: "已勾 {{count}} 个",
+                    count: (value.documentSpaceIds ?? []).length,
+                  })
+            }
+            defaultOpen={false}
+          >
+            <DocumentSpacePicker
+              /**
+               * ★ 传**单渠道** id：空间白名单是 per-channel 的（`scope_json`
+               * 按渠道库分开存），而 `channelFilter` 是一个集合。
+               * 取第一个而不是合并所有渠道的空间 —— 合并会让用户在
+               * 一个列表里勾到另一个渠道的空间 id，而那批 id 存进这个渠道库
+               * 就是"按一批不存在的 id 过滤" → 一篇都采不到。
+               */
+              channelId={primaryPickerChannel}
+              value={value.documentSpaceIds ?? []}
+              onChange={(next) => onChange({ ...value, documentSpaceIds: next })}
+            />
+          </Disclosure>
+        ) : null}
       </StepSection>
 
       {/* 会话：两组各自全选 */}

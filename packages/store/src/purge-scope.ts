@@ -215,3 +215,181 @@ export function purgeOutOfScopeMessages(
 
   return report
 }
+
+/** 文档侧的清理报告。★ 与消息那份分开：派生物完全不同（见下）。 */
+export interface DocumentPurgeReport {
+  /** 删掉（或将要删掉）的文档篇数 */
+  documents: number
+  /** 涉及的空间数 */
+  spaces: number
+  /** 删掉的覆盖面记账行数 */
+  coverageRows: number
+  dryRun: boolean
+}
+
+/**
+ * 清掉**越界文档**（不在空间白名单里、或超出时间范围的）。
+ *
+ * ## ★★★ 为什么这个函数必须与"加空间白名单"同时做
+ *
+ * 前向的范围闸只保证"从现在起不再采越界的"。而用户**第一次收窄空间**时，
+ * 库里已有的越界文档**不会消失** —— 于是：
+ *
+ * · 配置说"只学 3 个知识库"，而库里有 7 个知识库的文档；
+ * · 那些文档已经进了 changelog → 进了图谱与画像语料。
+ *
+ * `purge-scope.ts` 的文件头对消息写过同一句话（"只修前向路径不够"），
+ * 而那条判据对文档**同样成立**。半个隐私修复比没修更糟：用户以为
+ * 收窄生效了。
+ *
+ * ## ★★ 派生物清单（这是与消息侧唯一的实质差别）
+ *
+ * 我逐个核对过 `documents` 的下游：
+ *
+ * | 派生物 | 怎么处理 |
+ * |---|---|
+ * | `document_coverage` | **必须显式删** —— 它按 `(channel_id, space, day)` 独立主键，**没有** FK 指向 documents，所以 cascade 覆盖不到 |
+ * | FTS 索引 | **不存在** —— `messages_fts` 只索引消息（v5-search），文档没有对应虚表 |
+ * | 向量 | **不存在** —— `message_vectors` 只挂消息 |
+ * | changelog 里的 `doc` 行 | **不删** —— 那是 append-only 的变更日志，删它会让消费者的 `acked_seq` 指向空洞。它由 `RetentionRunner` 按保留策略裁 |
+ *
+ * ★ 只有第一项需要动手，而它恰恰是**最容易漏**的那种（没有 FK 保护、
+ * 漏了不报错，表现是"覆盖面说这天有 12 篇、库里 0 篇"）。
+ *
+ * @param scope 当前**文档域**的范围（`readDomainScope(db, "doc")`）。
+ * @param options.dryRun 只数不删。
+ */
+export function purgeOutOfScopeDocuments(
+  db: SqliteDatabase,
+  channelId: string,
+  scope: Pick<CollectionScope, "restricted" | "allow" | "since" | "until">,
+  options: { dryRun?: boolean } = {},
+): DocumentPurgeReport {
+  const dryRun = options.dryRun === true
+  const empty: DocumentPurgeReport = { documents: 0, spaces: 0, coverageRows: 0, dryRun }
+
+  /**
+   * ★★ 空间白名单 + 时间窗，两个条件**并列**（不是嵌套）。
+   *
+   * 这一条与 `admitByScope` 是同一个教训：把时间闸包在
+   * `if (scope.restricted)` 里面，会让「配了 since、没配白名单」这个组合下
+   * `since` 完全失效 —— 而那正是非主渠道的真实形状。
+   */
+  const clauses: string[] = []
+  const params: unknown[] = [channelId]
+
+  const allow = [...scope.allow]
+  if (scope.restricted) {
+    /**
+     * ★ `COALESCE(workspace_id, '')`：散落的云盘文件没有空间概念，
+     * 库里那一列是 NULL。而白名单里对应的是空串（与 `admitByScope` 的
+     * `item.workspaceId ?? ""` 同一个判据）—— 两处不一致会让那些文件
+     * 要么永远被删、要么永远删不掉。
+     */
+    clauses.push(
+      allow.length === 0
+        ? "1 = 1"
+        : `COALESCE(workspace_id, '') NOT IN (${allow.map(() => "?").join(",")})`,
+    )
+    params.push(...allow)
+  }
+  /**
+   * ★★ 业务时间用 `COALESCE(updated_at, created_at, fetched_at)` ——
+   * 与 `toDocumentChangelogEntry` 的 `occurredAt` 以及
+   * `document_coverage.rebuildFromDocuments` 的分桶**同一个判据**。
+   *
+   * 三处漂了的话，"闸门放行的""覆盖面记账的""这里删掉的"会是三批不同的行，
+   * 而三边的数字都"看起来对"。
+   */
+  const occurredAt = "COALESCE(updated_at, created_at, fetched_at)"
+  if (typeof scope.since === "number") {
+    clauses.push(`${occurredAt} < ?`)
+    params.push(scope.since)
+  }
+  if (scope.until !== undefined) {
+    clauses.push(`${occurredAt} > ?`)
+    params.push(scope.until)
+  }
+
+  /**
+   * ★ 一个条件都没有 = 不设限 → 直接返回空报告。
+   *
+   * 与消息那侧同一条：不设限时"越界"**没有定义**，此时删任何东西都是错的。
+   */
+  if (clauses.length === 0) return empty
+
+  const where = clauses.join(" OR ")
+  const victims = db
+    .prepare<
+      unknown[],
+      { id: string; space: string }
+    >(`SELECT id, COALESCE(workspace_id, '') AS space FROM documents WHERE channel_id = ? AND (${where})`)
+    .all(...params)
+
+  if (victims.length === 0) return empty
+
+  const spaces = new Set(victims.map((row) => row.space))
+  /**
+   * ★ 覆盖面行数**先数出来**（在删之前）：删完再数会得到 0，
+   * 而 dryRun 与真删必须报同一个数字 —— 否则"预演说删 3 行、
+   * 实际删了 3 万行"那类事故就有了空间。
+   */
+  const coverageRows = countCoverageRows(db, channelId, spaces, scope)
+  const report: DocumentPurgeReport = {
+    documents: victims.length,
+    spaces: spaces.size,
+    coverageRows,
+    dryRun,
+  }
+  if (dryRun) return report
+
+  withTransaction(db, () => {
+    const ids = victims.map((row) => row.id)
+    const CHUNK = 500
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK)
+      const ph = chunk.map(() => "?").join(",")
+      db.prepare(`DELETE FROM documents WHERE id IN (${ph})`).run(...chunk)
+    }
+    /**
+     * ★★★ 覆盖面行**必须显式删** —— 它没有 FK 指向 documents。
+     *
+     * 漏掉的表现：界面说"这个空间 8 月 12 日有 12 篇"，而库里 0 篇 ——
+     * 一个永远追不平的进度（`local_count` 是累加的，删了实体也不会回退）。
+     */
+    for (const space of spaces) {
+      db.prepare(
+        "DELETE FROM document_coverage WHERE channel_id = ? AND space_external_id = ?",
+      ).run(channelId, space)
+    }
+  })
+
+  return report
+}
+
+/** 数一下这些空间在覆盖面表里有多少行（dryRun 与真删共用，避免两个数字）。 */
+function countCoverageRows(
+  db: SqliteDatabase,
+  channelId: string,
+  spaces: ReadonlySet<string>,
+  _scope: Pick<CollectionScope, "restricted">,
+): number {
+  if (spaces.size === 0) return 0
+  const ph = [...spaces].map(() => "?").join(",")
+  try {
+    return (
+      db
+        .prepare<
+          unknown[],
+          { c: number }
+        >(`SELECT count(*) AS c FROM document_coverage WHERE channel_id = ? AND space_external_id IN (${ph})`)
+        .get(channelId, ...spaces)?.c ?? 0
+    )
+  } catch {
+    /**
+     * ★ 表不存在（v29 之前的库）→ 报 0 而不是抛：这个数字是**观测量**，
+     * 而删文档是正事。抛错会让一次正确的隐私清理整个失败。
+     */
+    return 0
+  }
+}

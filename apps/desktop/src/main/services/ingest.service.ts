@@ -78,6 +78,7 @@ import {
   collectsNothing,
   type DomainScope,
   purgeOutOfScopeMessages,
+  purgeOutOfScopeDocuments,
   type CollectionScope,
   type PurgeReport,
   type MessageRow,
@@ -3995,7 +3996,48 @@ export class IngestService {
       scope,
       options,
     )
-    if (options.dryRun === true) return report
+    /**
+     * ★★★ 文档那侧**也要清**（否则空间白名单只是半个隐私修复）。
+     *
+     * ## 为什么必须与"加空间白名单"同时做
+     *
+     * 前向的范围闸只保证"从现在起不再采越界的"。而用户**第一次收窄空间**时，
+     * 库里已有的越界文档不会消失 —— 配置说"只学 3 个知识库"，
+     * 而库里有 7 个知识库的文档，且它们已经进了 changelog → 图谱与画像语料。
+     *
+     * `purge-scope.ts` 的文件头对消息写过同一句话（"只修前向路径不够"），
+     * 那条判据对文档同样成立。半个隐私修复比没修更糟：用户以为收窄生效了。
+     *
+     * ★ 报告不合并进 `PurgeReport`：那是**消息**的报告（`messages` /
+     * `conversations` / `ftsRows` / `mediaPaths`），而文档的派生物完全不同
+     * （只有 `document_coverage`，没有 FTS 也没有向量）。塞进同一个对象
+     * 会得到"某些字段对某些域没有意义"那种最容易被读错的形状。
+     * 所以它只进日志 —— 而那正是这个数字的用途（"我收窄了，删了多少"）。
+     *
+     * ★ `dryRun` 一起传：预演必须包含文档那一半，否则用户看到的
+     * "会删 0 条"是假的（消息 0 条、文档 1200 篇）。
+     */
+    const docReport = purgeOutOfScopeDocuments(
+      this.options.db,
+      this.options.plugin.meta.id,
+      readDomainScope(this.options.db, "doc"),
+      options,
+    )
+    if (options.dryRun === true) {
+      /**
+       * ★ 预演也要把文档那半**说出来** —— 只 return 消息报告会让调用方
+       * （设置页那句"会删 N 条"）显示一个偏低的数字，而那正是
+       * "预演说删 3 条、实际删了 3 万条"那类事故的形状。
+       */
+      if (docReport.documents > 0) {
+        this.options.logger.info("scope change dry-run: documents would be purged", {
+          channelId: this.options.plugin.meta.id,
+          documents: docReport.documents,
+          spaces: docReport.spaces,
+        })
+      }
+      return report
+    }
 
     /**
      * ★ 重置回填下界，让放宽后的范围真的会被往回补。
@@ -4073,11 +4115,17 @@ export class IngestService {
       purgedConversations: report.conversations,
       purgedFtsRows: report.ftsRows,
       purgedMediaAssets: report.mediaAssets,
+      // ★ 文档那半也报出来：它与消息是两条独立的清理路径
+      purgedDocuments: docReport.documents,
+      purgedDocumentSpaces: docReport.spaces,
+      purgedDocumentCoverageRows: docReport.coverageRows,
       // ★ 两个游标都重置了要说出来 —— 下一轮会做一次全回溯，那不是异常
       cursorsReset: true,
     })
     // 清理会改变库里的条数 —— 推一次快照，否则界面上的数字要等下一批消息才更新。
-    if (report.messages > 0) this.events.emit("batch.persisted", { changed: 0 })
+    if (report.messages > 0 || docReport.documents > 0) {
+      this.events.emit("batch.persisted", { changed: 0 })
+    }
     return report
   }
 

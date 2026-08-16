@@ -421,6 +421,24 @@ export function useChatCoverage(
 }
 
 /**
+ * 库里出现过的**文档空间**（知识库 / 云盘目录）+ 各自篇数。
+ *
+ * 给「文档空间白名单」那个 picker 用。
+ *
+ * ★ 与 `useChatCoverage` **分开的 queryKey**：那个按天聚合（区间一变就
+ * 重查），这个按空间聚合、与日期无关。共用一个 key 会让改一次日期范围
+ * 就把空间列表也刷一遍（而它不会变）。
+ */
+export function useDocumentSpaces(channelId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ["distill", "documentSpaces", channelId ?? "primary"] as const,
+    queryFn: async () =>
+      unwrap(await window.mycontext.distill.documentSpaces({ channelId: channelId ?? "dingtalk" })),
+    enabled: enabled && channelId !== undefined,
+  })
+}
+
+/**
  * 数字分身的**监听范围**（盯哪些会话的实时消息）+ 它的实时流覆盖面。
  *
  * ★ 与 `useDistillSources`（学它哪些历史）分开的 queryKey —— 两者刷新时机

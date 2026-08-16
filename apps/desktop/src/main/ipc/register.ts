@@ -21,6 +21,7 @@ import {
   attentionScopeSaveInputSchema,
   attentionScopeDisableInputSchema,
   chatCoverageInputSchema,
+  documentSpacesInputSchema,
   distillSourceResetInputSchema,
   channelDataWipeInputSchema,
   clearCachesInputSchema,
@@ -422,6 +423,15 @@ export function registerIpc(deps: IpcDependencies): void {
   )
   ipcMain.handle(IPC_CHANNELS.chatCoverage, (_event, payload: unknown) =>
     attempt(() => distillSources.chatCoverage(parse(chatCoverageInputSchema, payload))),
+  )
+  /**
+   * 文档空间列表（「文档空间白名单」那个 picker 的候选集）。
+   *
+   * ★ 与 `chatCoverage` 分开：那个按天聚合、这个按空间聚合，
+   * 合成一个会让调用方为了一个空间列表拉一份 90 天的日聚合。
+   */
+  ipcMain.handle(IPC_CHANNELS.documentSpaces, (_event, payload: unknown) =>
+    attempt(() => distillSources.documentSpaces(parse(documentSpacesInputSchema, payload))),
   )
   // 数字分身的监听范围（盯哪些会话的实时消息）—— 与学习范围是两件事
   ipcMain.handle(IPC_CHANNELS.attentionScope, (_event, payload: unknown) =>

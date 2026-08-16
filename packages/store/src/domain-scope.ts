@@ -303,7 +303,26 @@ export function readDomainScope(db: SqliteDatabase, domain: ScopedDomain): Domai
     }
   }
 
-  const ids = scope.conversationIds
+  /**
+   * ★★★ 分区白名单**按域读不同的键**（这是 per-domain 范围的落点）。
+   *
+   * · `chat` → `conversationIds`（既有键，四处调用方在读它，不许改名）；
+   * · 其余域 → `partitions`（域中立的新键，文档用它装空间 external_id）。
+   *
+   * ## ★★ 为什么判据在这里，而不是让调用方自己挑键
+   *
+   * 挑键这件事错一次的方向很具体：文档那条路读了 `conversationIds`
+   * （恒 undefined）→ `restricted: false` → **分区闸恒放行**。
+   * 那正是改动前的状态：闸门已经传对了空间键（`admitByScope` 那侧），
+   * 而范围里没有可读的白名单，于是空间白名单**完全不生效**。
+   *
+   * 而它不报错 —— 用户在设置里勾了 3 个知识库，采集照样把 7 个都采回来。
+   *
+   * ★ 两个键都不存在 → `restricted: false`（不设限）。那与"用户配了但
+   * 一个都没勾"（空数组 ⇒ `restricted: true` + 空 allow）必须分开，
+   * 见 `DomainScope.restricted` 的注释。
+   */
+  const ids = domain === "chat" ? scope.conversationIds : scope.partitions
   return {
     // ★ 判据是"这个键存在"，不是"它非空"—— 空数组是"一个都不勾"，不是"不限"。
     restricted: ids !== undefined,

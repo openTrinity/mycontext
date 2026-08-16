@@ -41,6 +41,8 @@ import type {
   AttentionScopeDisableInput,
   ChatCoverageRequest,
   ChatCoverageView,
+  DocumentSpacesInput,
+  DocumentSpacesView,
   DistillSourceId,
   DistillScopeInput,
   DistillSourceView,
@@ -251,6 +253,16 @@ export interface MyContextApi {
      * 用错会逼着每个调用点都写 `domain: "chat"`。
      */
     chatCoverage(input: ChatCoverageRequest): Promise<Result<ChatCoverageView>>
+    /**
+     * 库里出现过的**文档空间**（知识库 / 云盘目录）+ 各自篇数。
+     *
+     * 给「文档空间白名单」那个 picker 用（`DistillScope.partitions` 的候选集）。
+     *
+     * ★★ 候选集从**已采到的文档**反推 —— 渠道契约里没有"列出全部知识库"
+     * 这个能力。返回值里的 `derivedFromCollected` 让界面能把这个限制说出来
+     * （"没采过的空间勾不到"），而不是让用户以为我们漏读了。
+     */
+    documentSpaces(input: DocumentSpacesInput): Promise<Result<DocumentSpacesView>>
     /**
      * 数字分身的**监听范围**（盯哪些会话的实时消息）。
      * ★ 与 `sources()`（学它哪些历史）是两件事，见契约里那段注释。

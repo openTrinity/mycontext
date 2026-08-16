@@ -61,8 +61,8 @@ export {
 export type { DomainScope, DomainScopeDefault, ScopedDomain } from "./domain-scope.js"
 export { CORPUS_MESSAGE_PREDICATE, corpusMessagePredicate } from "./corpus-predicate.js"
 export type { CollectionScope } from "./collection-scope.js"
-export { purgeOutOfScopeMessages } from "./purge-scope.js"
-export type { PurgeReport } from "./purge-scope.js"
+export { purgeOutOfScopeMessages, purgeOutOfScopeDocuments } from "./purge-scope.js"
+export type { PurgeReport, DocumentPurgeReport } from "./purge-scope.js"
 
 /**
  * 把一个 vault 清回「刚登录完、还没采过」的状态。

@@ -79,6 +79,7 @@ const api: MyContextApi = {
     sourceSave: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSourceSave, input),
     sourceReset: (input) => ipcRenderer.invoke(IPC_CHANNELS.distillSourceReset, input),
     chatCoverage: (input) => ipcRenderer.invoke(IPC_CHANNELS.chatCoverage, input),
+    documentSpaces: (input) => ipcRenderer.invoke(IPC_CHANNELS.documentSpaces, input),
     attentionScope: (input) => ipcRenderer.invoke(IPC_CHANNELS.attentionScope, input),
     attentionScopeSave: (input) => ipcRenderer.invoke(IPC_CHANNELS.attentionScopeSave, input),
     attentionScopeDisable: (input) => ipcRenderer.invoke(IPC_CHANNELS.attentionScopeDisable, input),

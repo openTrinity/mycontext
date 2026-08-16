@@ -74,8 +74,42 @@ export interface DistillScope {
   until?: number | undefined
   /** 只蒸馏这些类型的会话（仅 chat 源有意义） */
   chatKinds?: ("direct" | "group")[] | undefined
-  /** 会话白名单（空/不传 = 按 chatKinds 全选） */
+  /**
+   * 会话白名单（空/不传 = 按 chatKinds 全选）。**仅 chat 源**。
+   *
+   * ★ 刻意**不改名**成 `partitions`：这个键被采集、蒸馏、forge、导出
+   * 四处读（`readCollectionScope` / `purgeOutOfScope` / `corpus-predicate`
+   * / forge 那侧），而它们不一致过一次 —— 后果是库里 55% 的消息属于
+   * 用户没勾的会话。换名是一次大范围破坏性变更，收益只是"名字更好"。
+   */
   conversationIds?: string[] | undefined
+  /**
+   * **分区白名单**（域中立）。文档源用它装空间（知识库 / 云盘目录）的
+   * external_id。
+   *
+   * ## ★★★ 为什么加一个新键而不是复用 `conversationIds`
+   *
+   * 那个键的名字是**聊天**概念，而 `distill_sources` 是每个 kind 一行 ——
+   * 文档那一行里放一批 `wiki_xxx` 却叫 `conversationIds`，会让下一个读
+   * 这段代码的人以为文档也按会话切。而更实际的问题是：那四处调用方
+   * 读 `conversationIds` 时**默认它是会话** —— 比如 `purgeOutOfScope`
+   * 会拿它去删 `messages`。
+   *
+   * ## ★★ 闸门早就准备好了，缺的只是这个键
+   *
+   * `admitByScope` 在文档那条路上**已经传对了分区键**
+   * （`item.workspaceId ?? ""`），而 `readDomainScope` 对 doc 行读
+   * `conversationIds`（恒 undefined）→ `restricted: false` → 分区闸恒放行。
+   * 也就是说：过滤能力在，而范围里没有可读的白名单。
+   *
+   * 后果是用户只能"要么全部知识库、要么一个都不要" —— 而知识库里
+   * 可能有与工作无关的空间（个人笔记、他人共享），那些不该进画像语料。
+   *
+   * ★ 合并规则（唯一一份，在 `readDomainScope` 里）：
+   *   chat 域读 `conversationIds`；其余域读 `partitions`。
+   *   两个都不存在 → `restricted: false`（不设限）。
+   */
+  partitions?: string[] | undefined
 }
 
 export interface DistillSourceRow {
