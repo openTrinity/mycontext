@@ -15,7 +15,12 @@
  * 所以每一条用例都在断言"这两个状态**能被区分**"，而不只是"函数返回了东西"。
  */
 import { describe, expect, it } from "vitest"
-import { buildConsumerStatuses, buildDomainStatuses, type ConsumerSpec } from "@mycontext/ingest"
+import {
+  DOMAINS,
+  buildConsumerStatuses,
+  buildDomainStatuses,
+  type ConsumerSpec,
+} from "@mycontext/ingest"
 import type { ConsumerCursorRow } from "@mycontext/store"
 
 const NOW = 1_785_000_000_000
@@ -221,18 +226,41 @@ describe("消费者状态：声明部分要一起给（界面靠它解释「要�
 })
 
 describe("域状态：「没做」与「做了没数据」必须可区分", () => {
-  it("★★★ contact 报 absent + 原因，而不是一个 0", () => {
+  it("★★★ contact **整行不出现**（legacy-only），而不是显示一个永远的 0", () => {
     /**
-     * 显示 `head: 0` 而不说明原因，用户读到的是"通讯录采到了 0 条"
-     * （像是坏了）。事实是我们**不采**（PII 类命令不进白名单）。
+     * ## 这一条这一轮**换了方向**，理由在下面
+     *
+     * 原来它断言 `contact` 出现在视图里、带 `absentReason` —— 判据是
+     * "『没做』与『做了没数据』必须可区分"。那个判据没错，但它选的
+     * 出路错了：`absentReason` 能解释"为什么空"，**解释不了**
+     * "为什么这一行还在这里"。
+     *
+     * 而 contact 的真实状态是**永远不会有采集器**（PII 类命令不进白名单，
+     * CLAUDE.md §5）。给它一行的后果是用户对着一个永远不变的
+     * "通讯录 0 条、lag 0" —— 他没有任何可做的事。
+     *
+     * 现在 `kind: "legacy-only"` 让它只存在于两处：`CHANGELOG_DOMAINS`
+     * （历史库里可能真有行）与声明表（说清为什么保留）。
      */
-    const domains = new Map(
-      buildDomainStatuses({ domainHeads: { chat: 8000 } }).map((d) => [d.id, d]),
-    )
-    const contact = domains.get("contact")
+    const domains = buildDomainStatuses({ domainHeads: { chat: 8000, contact: 3 } })
+    expect(domains.map((d) => d.id)).not.toContain("contact")
+    // ★ 而三个可采域仍在（不是把整个视图过滤空了）
+    expect(domains.map((d) => d.id)).toEqual(["chat", "minutes", "doc"])
+  })
+
+  it("★★★ 但声明里 contact 仍然保留 + 仍然说清原因（历史库里可能真有行）", () => {
+    /**
+     * 过滤掉的是**界面上那一行**，不是声明本身。声明必须留着：
+     * ① `knowledge_changelog.domain` 是 TEXT 列，历史库里可能已有
+     *    `contact` 行 —— 从类型里摘掉会让读回的行变成一个类型上
+     *    不存在的值，而那只能靠 `as` 掩盖（CLAUDE.md §6）；
+     * ② 钉钉的 `capabilities.domains` 自述了 contact（它真有通讯录接口）
+     *    —— 那是渠道能力，与"我们有没有采集器"是两件事。
+     */
+    const contact = DOMAINS.find((d) => d.id === "contact")
+    expect(contact?.kind).toBe("legacy-only")
     expect(contact?.producedBy).toBe("absent")
-    expect(contact?.absentReason).not.toBeNull()
-    expect(contact?.head).toBe(0)
+    expect(contact?.absentReason ?? "").not.toBe("")
   })
 
   it("★★ active 域没有数据时 head 为 0，且**不带** absentReason", () => {
@@ -266,6 +294,43 @@ describe("域状态：「没做」与「做了没数据」必须可区分", () =
      * （那会盖住"库里真有一个没声明的域"这个真实信号）。
      */
     const domains = buildDomainStatuses({ domainHeads: { chat: 1, mystery: 999 } })
-    expect(domains.map((d) => d.id)).toEqual(["chat", "minutes", "doc", "contact"])
+    // ★ contact 不在里面是因为它 legacy-only（见上面那条），不是因为过滤逻辑坏了
+    expect(domains.map((d) => d.id)).toEqual(["chat", "minutes", "doc"])
+  })
+
+  it("★★★ 渠道没有某个域的能力时，那一行也不出（修 G17）", () => {
+    /**
+     * `minutes` 只有钉钉有（飞书的 `capabilities.domains` 是 `["chat","doc"]`，
+     * 它压根没有 minutes 契约实现）。只连飞书的部署显示"听记 0 场"
+     * 读起来像坏了 —— 而事实是这个渠道没有听记。
+     *
+     * ★ 这与 contact 那一行**形状相同、原因不同**：一个是"我们不采"，
+     * 一个是"这个渠道没有"。用户该做的事也不同（后者可以去连钉钉）。
+     */
+    const feishuOnly = buildDomainStatuses({
+      domainHeads: { chat: 100 },
+      channelDomains: ["chat", "doc"],
+    })
+    expect(feishuOnly.map((d) => d.id)).toEqual(["chat", "doc"])
+
+    // ★ 而挂着钉钉时听记那一行回来（并集语义：任一渠道有就显示）
+    const both = buildDomainStatuses({
+      domainHeads: { chat: 100 },
+      channelDomains: ["chat", "doc", "minutes"],
+    })
+    expect(both.map((d) => d.id)).toEqual(["chat", "minutes", "doc"])
+  })
+
+  it("★★ 不传 channelDomains 时**不按渠道过滤**（保留既有行为）", () => {
+    /**
+     * ★ 这一条防的是一个具体的失败模式：渠道还没授权时
+     * `capabilities` 可能是空的，而那时若按能力过滤，整块拓扑会**消失** ——
+     * 用户看到一个空白的状态页，而真相只是"还没连渠道"。
+     */
+    expect(buildDomainStatuses({ domainHeads: {} }).map((d) => d.id)).toEqual([
+      "chat",
+      "minutes",
+      "doc",
+    ])
   })
 })

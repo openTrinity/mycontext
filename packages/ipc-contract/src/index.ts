@@ -149,6 +149,7 @@ export type {
   AttentionScopeItemView,
   AttentionScopeSaveInput,
   AttentionScopeDisableInput,
+  AttentionModeValue,
   ChatCoverageInput,
   ChatCoverageRequest,
   CoverageDomain,

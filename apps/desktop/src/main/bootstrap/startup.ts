@@ -598,6 +598,19 @@ export function bootstrapApp(mainDir: string): AppContext {
         return since === null ? undefined : Math.max(0, systemClock.now() - since)
       },
     },
+    /**
+     * ★★ 建图**现在正忙**吗 —— 给 `runCycle` 里 `graph-build` /
+     * `distill-work` 那两个 runnable 用（见 `FeedServiceOptions.graphBusy`）。
+     *
+     * 真源是 kl 服务的 `status().building`。`klServer` 在下面才构造，
+     * 所以这里必须是函数（与 `autoBuild` 里那几个同一条理由）。
+     *
+     * ★ 刻意**不复用** `autoBuild.ready`：那个还含"配了模型没有"，
+     * 而这里问的只是"忙不忙"。用户手动点了建图时它同样为真，
+     * 而那时 work 层照样必须让路（kl 的 HTTP 在忙，playbook 归纳
+     * 会 524 并白花一次钱）。
+     */
+    graphBusy: (): boolean => klServer.status().building,
   })
 
   const distillSources = new DistillSourceService({
@@ -1504,6 +1517,15 @@ export function bootstrapApp(mainDir: string): AppContext {
             return result.ok
           },
         },
+        /**
+         * ★ 建图忙不忙 —— 给 `runCycle` 里 `graph-build` / `distill-work`
+         * 那两个 runnable 用（见 `FeedServiceOptions.graphBusy`）。
+         *
+         * 与 `autoBuild.ready` 用**同一个** `klRef.status().building`，
+         * 但刻意不复用那个字段：`ready` 还含"配了模型没有"，
+         * 而这里问的只是"现在忙吗"。
+         */
+        graphBusy: () => klRef?.status().building ?? false,
       })
       const channelKl = new KlServerService({
         clock: systemClock,
@@ -1805,6 +1827,23 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 而那几秒里界面上「待处理」一动不动 —— 与没收到无法区分。
      */
     onPersonaDelivered: () => persona.onDelivered(),
+    /**
+     * ★★★ work 层（`distill-work` 消费者）的驱动入口。
+     *
+     * 它原来只由 `DistillService` 内部的定时器驱动 —— 于是它声明的
+     * `dependsOn: ["distill", "graph-build"]` **没有执行力**（依赖闸在
+     * `OutboxConsumer` 里，而 work 层不是）。接进 `runCycle` 之后
+     * 那两条边从"记得写对"变成"算出来的"。
+     *
+     * ★ 函数而不是实例：`distill` 在下面才构造（它要 forge 与 llm），
+     * 而这里在它之前 —— 传实例会 TDZ。与 `getPersonaSupervisor` 同一条。
+     *
+     * ★★ 定时器**不摘**：`runCycle` 每 2 分钟一轮，而 work 层是天级的。
+     * 两条路都调 `refreshWorkLayer()`，而它内部有 `decideWorkRefresh`
+     * 攒批判据 + `workInFlight` 防重入 —— 多一条驱动路只是让它更早
+     * 被评估一次，不会多花一次钱。
+     */
+    getWorkLayer: () => distill,
   })
 
   /**

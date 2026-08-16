@@ -25,13 +25,26 @@
  *
  * 它原来嵌在学习范围那一步里（作为下半块）。拆成独立步骤后，那一段挪到
  * 这里，`sources-step` 不再引用它 —— 判据只有一份，不复制。
+ *
+ * ## ★★★ 三个互斥选项，而不是"勾选 + 一句解释"
+ *
+ * 改动前这里只有一个勾选列表 + 一句「一个都不勾 = 分身会盯全部」。
+ * 那句话是对的，但它有两个问题：
+ *
+ * ① 它要求用户从一句解释里推断出一个**反直觉**的默认值 ——
+ *    而相邻的上一步（学习范围）默认值方向恰好相反（一个都不采）；
+ * ② 第三个意图（「先都不盯」）**压根表达不出来** —— 空数组在旧存储里
+ *    与"从没配过"同形，于是那个选择没有任何落库痕迹。
+ *
+ * 现在走 `AttentionModePicker` + `SourcesDraft.attentionMode`（三态）。
  */
 import { useMemo } from "react"
-import { Button, Checkbox } from "@mycontext/design"
-import type { ChannelConversationView } from "@mycontext/ipc-contract"
+import { Checkbox } from "@mycontext/design"
+import type { AttentionModeValue, ChannelConversationView } from "@mycontext/ipc-contract"
 import { useChannelConversations } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { StepSection } from "./step-section.js"
+import { AttentionModePicker } from "./attention-mode-picker.js"
 import type { SourcesDraft } from "./sources-step.js"
 
 export interface AttentionStepProps {
@@ -66,11 +79,44 @@ export function AttentionStep({ value, onChange, channelFilter }: AttentionStepP
   }, [conversations.data, channelFilter, value.conversationIds])
 
   const chosen = new Set(value.attentionConversationIds)
+  /**
+   * 当前模式。
+   *
+   * ★★ `undefined`（存量草稿）按**勾了就 explicit、没勾就 all** 推断 ——
+   * 那与改动前的**实际效果**一致（不勾 = 放行全部），所以重进引导的
+   * 用户看到的是他上次那个选择，而不是一个被重置的默认值。
+   */
+  const mode: AttentionModeValue =
+    value.attentionMode ?? (value.attentionConversationIds.length > 0 ? "explicit" : "all")
+
+  const setMode = (next: AttentionModeValue): void => {
+    /**
+     * ★★★ 选「盯全部」时**清空名单**。
+     *
+     * 不清的话库里会既有 `mode: "all"` 又有一份具体名单 —— 而路由在
+     * `all` 下压根不看名单，于是那份名单是一个**看不出无效的**残留：
+     * 用户之后切回 explicit 会突然发现自己"盯着"几个早就忘了的群。
+     *
+     * ★ 反过来（explicit → all → explicit）会丢掉勾选，那是刻意的代价：
+     * 让用户重勾一次，比让他带着一份自己不知道的名单走要好。
+     */
+    if (next === "all") {
+      onChange({ ...value, attentionMode: "all", attentionConversationIds: [] })
+      return
+    }
+    onChange({ ...value, attentionMode: next })
+  }
+
   const toggle = (externalId: string): void => {
     const next = chosen.has(externalId)
       ? value.attentionConversationIds.filter((id) => id !== externalId)
       : [...value.attentionConversationIds, externalId]
-    onChange({ ...value, attentionConversationIds: next })
+    /**
+     * ★ 勾任何一个都隐含 `explicit`：用户在挑具体会话这个动作本身
+     * 就是"我要收窄"。不同步的话他会勾了几个却仍处于 `all` 模式，
+     * 而那时他的勾选**完全没有效果**（路由不看名单）—— 一个静默的落空。
+     */
+    onChange({ ...value, attentionMode: "explicit", attentionConversationIds: next })
   }
 
   return (
@@ -80,25 +126,6 @@ export function AttentionStep({ value, onChange, channelFilter }: AttentionStepP
         defaultValue:
           "分身只处理这些会话从现在起的新消息。与上一步的学习范围不同：它不看历史，也可以随时关掉。",
       })}
-      action={
-        value.attentionConversationIds.length > 0 ? (
-          <span className="flex items-center gap-2">
-            <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
-              {t("attentionStep.selected", {
-                defaultValue: "盯 {{count}} 个会话",
-                count: value.attentionConversationIds.length,
-              })}
-            </span>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => onChange({ ...value, attentionConversationIds: [] })}
-            >
-              {t("attentionStep.clear", { defaultValue: "取消全部监听" })}
-            </Button>
-          </span>
-        ) : undefined
-      }
     >
       {candidates.length === 0 ? (
         /**
@@ -113,30 +140,39 @@ export function AttentionStep({ value, onChange, channelFilter }: AttentionStepP
           })}
         </p>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-3">
           {/*
-            ★★ 「不勾任何一个」是一个**有意义**的选择，必须说出来。
+            ★★★ 三个互斥选项**取代**了原来那句解释性文案。
 
-            存量行为是"名单为空 → 全部放行"（迁移期的正确一侧，见
-            `AttentionRouter.route`）。所以不勾 = 分身盯所有已学习的会话。
-            不说这句，用户以为"不勾就是不启用"，而事实相反。
+            原来那句（「一个都不勾 = 分身会盯上一步所有已勾选的会话」）
+            是对的，但它要求用户从一句话里推断出一个反直觉的默认值 ——
+            而相邻的上一步（学习范围）默认值方向恰好相反。
+            更糟的是第三个意图（「先都不盯」）压根表达不出来。
           */}
-          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
-            {t("attentionStep.emptyMeaning", {
-              defaultValue: "一个都不勾 = 分身会盯上一步所有已勾选的会话（可稍后在设置里收窄）。",
-            })}
-          </p>
-          <ul className="flex flex-col gap-1">
-            {candidates.map((item) => (
-              <li key={item.externalId}>
-                <Checkbox
-                  checked={chosen.has(item.externalId)}
-                  onChange={() => toggle(item.externalId)}
-                  label={item.title ?? item.externalId.slice(0, 8)}
-                />
-              </li>
-            ))}
-          </ul>
+          <AttentionModePicker
+            value={mode}
+            onChange={setMode}
+            learnedCount={candidates.length}
+            chosenCount={value.attentionConversationIds.length}
+          />
+
+          {/*
+            ★ 勾选列表**只在 explicit 下显示**：`all` 模式下路由不看名单，
+            那时摆一个勾选列表出来就是邀请用户做一件没有效果的事。
+          */}
+          {mode === "explicit" ? (
+            <ul className="flex flex-col gap-1">
+              {candidates.map((item) => (
+                <li key={item.externalId}>
+                  <Checkbox
+                    checked={chosen.has(item.externalId)}
+                    onChange={() => toggle(item.externalId)}
+                    label={item.title ?? item.externalId.slice(0, 8)}
+                  />
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       )}
     </StepSection>

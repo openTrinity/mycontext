@@ -74,8 +74,13 @@ const AUTO_INTERVAL_MS = 6 * 60 * 60_000
  * （消费 changelog 建任务），而这个是"**抽完**到哪"。合并的话"任务已建"
  * 会被记成"结论已抽"—— 那是一个静默的谎，与 `graph-export` / `graph-build`
  * 分成两个游标是同一个理由。
+ *
+ * ★ 导出它是因为 `DataPlaneService` 要用它当 `runCycle` 的 runnable 键，
+ * 而那个键必须与 `CONSUMERS` 里那一行、与游标表里那一行**逐字相同**
+ * （写错的表现是状态页多一行 absent、少一行真实进度，且不报错）。
+ * 复制一个字面量过去就是给自己一次拼错的机会。
  */
-const WORK_CONSUMER_ID = "distill-work"
+export const WORK_CONSUMER_ID = "distill-work"
 
 /**
  * 一轮 work 层最多跑几批，防止判据出错时无限跑下去。
@@ -886,6 +891,52 @@ export class DistillService {
     void this.maybeRefreshWorkLayer().catch(() => {
       // 已在内部记过日志；这里吞掉是为了不让一个可选环节冒泡成未捕获拒绝
     })
+  }
+
+  /**
+   * ── 给 `runCycle` 的两个入口（`distill-work` 那个 runnable 用）─────
+   *
+   * ## ★★ 为什么要暴露它们
+   *
+   * work 层原来只由内部定时器与开关驱动（`maybeRefreshWorkLayer` 是
+   * `private`）。于是它声明的 `dependsOn` 对它**没有执行力** ——
+   * 它不是 `OutboxConsumer`，压根不经过依赖闸。
+   *
+   * 接进 `runCycle` 之后那两条边（`distill` 与 `graph-build`）从
+   * "记得写对"变成"算出来的"，且状态页能说出「work 在等建图」
+   * 而不是「work 没进展」。
+   *
+   * ★★★ 但"这一轮该不该真跑"的判据**留在原处**（`decideWorkRefresh`：
+   * 攒够 200 条 / 3 天 / 开关 / 有没有模型 / 退避）。`runCycle` 每 2 分钟
+   * 一轮，而 work 层是天级的 —— 把判据搬进循环等于每 2 分钟问一次要不要
+   * 花钱。所以这个方法**本身很便宜**（不该跑时读几个游标就返回）。
+   */
+
+  /** 跑一轮 work 层评估。★ 不该跑时内部早退，所以调用它是便宜的。 */
+  async refreshWorkLayer(): Promise<void> {
+    await this.maybeRefreshWorkLayer()
+  }
+
+  /**
+   * work 层游标当前到哪（`distill-work` 的 `acked_seq`）。
+   *
+   * ★ 未挂载 vault → 0。那时 `runCycle` 里那几行会算出"没在等" ——
+   * 而那正确：没挂库时什么都不该在等。
+   */
+  workSeq(): number {
+    const db = this.db
+    if (db === null) return 0
+    try {
+      return (
+        new ConsumerCursorRepository(db, this.options.clock).get(WORK_CONSUMER_ID)?.ackedSeq ?? 0
+      )
+    } catch {
+      /**
+       * ★ 读不出来报 0 而不是抛：这个值只用于**展示进度**，
+       * 而抛错会让整轮 `runCycle` 记一次 skipped（那会掩盖真正的问题）。
+       */
+      return 0
+    }
   }
 
   stop(): void {

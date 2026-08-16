@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next"
 import { resolveLanguage } from "@mycontext/i18n"
 import type {
   CoverageDomain,
+  AttentionModeValue,
   AuthMode,
   AuthProgress,
   ChannelConversationListView,
@@ -434,12 +435,21 @@ export function useAttentionScope(channelId: string | undefined, enabled = true)
   })
 }
 
-/** 把会话加进监听范围（只增：已有的起点只会变早）。 */
+/**
+ * 保存监听范围（名单只增：已有的起点只会变早；而 `mode` 是覆盖）。
+ *
+ * ★★ `mode` **必填**（不给缺省）：它存在的全部理由就是消灭"用户没表态"
+ * 这个状态，给一个缺省值等于把它又造回来。三种取值的含义见契约里
+ * `attentionModeSchema` 的注释。
+ */
 export function useSaveAttentionScope() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async (input: { channelId: string; conversationExternalIds: string[] }) =>
-      unwrap(await window.mycontext.distill.attentionScopeSave(input)),
+    mutationFn: async (input: {
+      channelId: string
+      conversationExternalIds: string[]
+      mode: AttentionModeValue
+    }) => unwrap(await window.mycontext.distill.attentionScopeSave(input)),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["attention", "scope"] })
     },

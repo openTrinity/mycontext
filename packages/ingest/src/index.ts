@@ -60,6 +60,8 @@ export {
   checkTopologyConsistency,
   resolveConsumerOrder,
   runCycle,
+  activeDomainsForChannel,
+  producerSpec,
 } from "./topology.js"
 export type {
   DataDomain,
@@ -68,6 +70,7 @@ export type {
   ConsumerSpec,
   ConsumerOutcome,
   CycleRunnable,
+  ChannelIdLike,
 } from "./topology.js"
 
 /**
@@ -78,6 +81,21 @@ export type {
  */
 export { buildConsumerStatuses, buildDomainStatuses } from "./topology-view.js"
 export type { ConsumerStatus, DomainStatus, TopologyViewInput } from "./topology-view.js"
+
+/**
+ * 生产者的**运行时视图** —— 补上消费者侧早就有、生产者侧一直没有的那张表。
+ *
+ * ★ 它修的是"谁丢的数据"这个问题读不出来：chat 与 doc 两条路原来累加进
+ * 同一对快照字段，于是「文档挡掉 300 篇」与「聊天挡掉 300 条」同形。
+ * 见 `producer-view.ts` 文件头。
+ */
+export { buildProducerStatuses, producerDomainsOf } from "./producer-view.js"
+export type {
+  ProducerStatus,
+  ProducerViewInput,
+  ProducerCounters,
+  ProducerScopeState,
+} from "./producer-view.js"
 
 /**
  * 生产者骨架 —— 三个域共用的四件事（范围闸 / 丢弃计数 / 落库 / 覆盖面记账）。

@@ -47,6 +47,7 @@ import {
   AttentionCoverageRepository,
   AttentionScopeRepository,
   routeToAttention,
+  type AttentionMode,
   type AttentionRoute,
 } from "./repositories/attention-scope.js"
 import { toDayBucket } from "./repositories/chat-coverage.js"
@@ -62,16 +63,25 @@ export interface AttentionRouterInput {
 /**
  * 路由结论 + 「这次判定生效了吗」。
  *
- * ★ `enforced` 必须与 `routed` 分开：名单为空时我们**放行**（见 `route()`），
- * 那时 `routed: true` 的含义是"没有配置所以不拦"，而不是"在范围内"。
- * 混成一个布尔会让状态页把"用户还没配监听范围"显示成"全部会话都在范围内"。
+ * ★ `enforced` 必须与 `routed` 分开：mode 为 `unset` 时我们**放行**
+ * （见 `route()`），那时 `routed: true` 的含义是"没有配置所以不拦"，
+ * 而不是"在范围内"。混成一个布尔会让状态页把"用户还没配监听范围"
+ * 显示成"全部会话都在范围内"。
  */
 export interface AttentionRouterVerdict {
   routed: boolean
   /** 不放行的原因；放行时为 null */
   reason: Exclude<AttentionRoute, { routed: true }>["reason"] | null
-  /** 名单非空 ⇒ 这次判定真的按用户配置执行了 */
+  /** 用户**表过态** ⇒ 这次判定真的按他的配置执行了 */
   enforced: boolean
+  /**
+   * 这次判定走的哪个模式（诊断与界面用，不参与判断）。
+   *
+   * ★ 报出来是因为 `routed: true` 现在有**两个**来源
+   * （`unset` 的"还没配所以不拦"与 `all` 的"用户选了全部"），
+   * 而它们在界面上该说不同的话。
+   */
+  mode: AttentionMode
 }
 
 export class AttentionRouter {
@@ -89,24 +99,84 @@ export class AttentionRouter {
   /**
    * 这条消息属于分身的关心范围吗（**并记账**）。
    *
-   * ## ★★★ 名单为空 → 放行（迁移期的正确一侧）
+   * ## ★★★ 三个模式，而不是"名单空不空"（这修的是一个方向错误）
    *
-   * `attention_scope` 是 v28 新加的表，存量用户那张表是空的。空表判成
-   * "什么都不关心"会让分身**整个静默** —— 用户看到的是"它不理人了"，
-   * 而日志里一个错都没有。那是一次静默功能回归，比"多投几个会话"糟得多。
+   * 改动前判据只有一条：`activeCount === 0` → 放行全部。而**三个不同的
+   * 用户动作**都会让那个计数归零，其中一个的方向是反的：
    *
-   * 所以判据是「名单非空才生效」。这一条与 `readCollectionScope` 的
-   * 「没配过就什么都不采」方向**相反**，而两者都对 —— 因为代价不对称的
-   * 方向不同：采集的默认值若放宽是**隐私事故**（采了用户没同意的历史），
-   * 投递的默认值若收紧是**功能消失**（分身不干活，且无从排查）。
+   * · 从没配过 → 放行（对：存量库那张表是空的，判成"什么都不关心"
+   *   会让分身**整个静默**，用户看到"它不理人了"而日志里一个错都没有）；
+   * · 引导里一个都不勾 → 放行（对：那是"不收窄"的意思）；
+   * · **设置里把全部关掉** → 旧判据也放行（**错**：用户把最后一个会话
+   *   关掉之后分身盯得更多了，而它不报错）。
    *
-   * ★ 名单空时**不记账**：那一段时间的 routed/skipped 都不代表用户配置的
+   * 三态（`AttentionMode`）把这三件事分开：前两个分别是 `unset` 与 `all`
+   * （都放行，区别只在记账与 `enforced`），第三个是 `explicit` + 空名单
+   * （**一条都不放行**）。
+   *
+   * ★ 这一条与 `readDomainScope` 的「没配过就什么都不采」方向**相反**，
+   * 而两者都对 —— 代价不对称的方向不同：采集的默认值若放宽是**隐私事故**
+   * （采了用户没同意的历史），投递的默认值若收紧是**功能消失**
+   * （分身不干活，且无从排查）。
+   *
+   * ★ `unset` 时**不记账**：那一段时间的 routed/skipped 都不代表用户配置的
    * 效果，记进去会让"范围设窄了"与"还没配范围"在覆盖面上同形。
+   * 而 `all` **要记** —— 它是一次用户决定，覆盖面该反映它的效果。
    */
   route(input: AttentionRouterInput): AttentionRouterVerdict {
-    if (this.scope.activeCount(input.channelId) === 0) {
-      return { routed: true, reason: null, enforced: false }
+    const mode = this.scope.mode(input.channelId)
+
+    /**
+     * ★★★ `unset`（存量库 / 还没表态）→ **回落到旧判据**，而不是无条件放行。
+     *
+     * ## 这一条我第一版写错了，而错法很具体
+     *
+     * 第一版写的是 `if (mode === "unset") return 放行` —— 而那会让
+     * **一个已经配好监听范围的存量库静默失去收窄效果**：
+     * 那些库里 `attention_scope` 有行、但没有 mode 键（它是这一轮新加的），
+     * 于是用户明确勾过的 3 个群变成"盯全部"。
+     *
+     * 被集成测试当场抓到（5 条转红：范围外的消息全部被放行）。
+     *
+     * ## 正确的回落是「旧判据」，也就是按名单空不空判
+     *
+     * · 名单**空** → 放行、不记账（存量升级那一档，不能让分身静默停摆）；
+     * · 名单**非空** → 按名单判（用户配过，那个配置必须继续生效）。
+     *
+     * ★ 这样 `unset` 的行为与改动前**逐字相同**，而三态带来的新能力
+     * 全部落在"用户显式写过 mode"之后：
+     * · `all` —— 放行且**记账**（那是一次决定，不是缺省）；
+     * · `explicit` + 空名单 —— **一条都不放行**（"把全部关掉"应有的效果，
+     *   而旧判据在这里方向是反的）。
+     *
+     * ★★ 而 `disable()` 现在会顺带写 `mode: "explicit"` —— 所以"逐个关到
+     * 最后一个"这条路径会落进 explicit，拿到正确的收窄语义。
+     * 那是 G11 真正被修掉的地方，不是靠改 `unset` 的方向。
+     */
+    const enforced =
+      mode === "explicit" || (mode === "unset" && this.scope.activeCount(input.channelId) > 0)
+
+    if (mode === "unset" && !enforced) {
+      return { routed: true, reason: null, enforced: false, mode }
     }
+
+    /**
+     * ★ `all`：放行、**记账**、`enforced: true`。
+     *
+     * 与 `unset` 的空名单只差记账与 enforced，而那正是要区分的两件事：
+     * 「你还没说要盯什么」与「你说了盯全部」在界面上是两句不同的话。
+     */
+    if (mode === "all") {
+      this.bump(input, true)
+      return { routed: true, reason: null, enforced: true, mode }
+    }
+
+    /**
+     * ★★★ 按名单判。`explicit` 时**名单为空就一条都不放行**。
+     *
+     * 这里刻意**不**再判一次 `activeCount === 0` → 放行 —— 那个判断正是
+     * 旧的错误方向：用户把最后一个会话关掉之后分身反而盯得更多。
+     */
     const row = this.scope.get(input.channelId, input.conversationExternalId)
     const verdict = routeToAttention({
       conversationExternalId: input.conversationExternalId,
@@ -115,8 +185,8 @@ export class AttentionRouter {
     })
     this.bump(input, verdict.routed)
     return verdict.routed
-      ? { routed: true, reason: null, enforced: true }
-      : { routed: false, reason: verdict.reason, enforced: true }
+      ? { routed: true, reason: null, enforced: true, mode }
+      : { routed: false, reason: verdict.reason, enforced: true, mode }
   }
 
   /**

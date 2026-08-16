@@ -12,10 +12,13 @@
  * 以及**监听范围可以关掉**（那与学习范围的只增不减是两回事）。
  */
 import { describe, expect, it } from "vitest"
+import { ManualClock } from "@mycontext/kernel"
 import {
+  AttentionRouter,
   AttentionScopeRepository,
   AttentionCoverageRepository,
   routeToAttention,
+  toDayBucket,
 } from "@mycontext/store"
 import { openTestVault } from "../../helpers/vault.js"
 
@@ -23,6 +26,8 @@ const CH = "dingtalk"
 const A = "cidFAKE0001=="
 const B = "cidFAKE0002=="
 const T0 = 1_780_000_000_000
+/** mode 三态那几条用的时刻。★ 与 T0 分开：那几条要造覆盖面行，读起来更清楚。 */
+const NOW = 1_785_000_000_000
 
 describe("routeToAttention：这条消息我管不管", () => {
   it("★ 在范围内且晚于起点 → 放行", () => {
@@ -335,19 +340,153 @@ describe("接线：路由挂在两条投递路的交汇点（deliverMessage）",
     expect(src).toContain("this.personaFastPath?.(message.id)")
   })
 
-  it("★★★ 名单为空时**放行**（否则是一次静默功能回归）", async () => {
+  it("★★★ mode 没配过（存量库）→ 放行且 enforced=false（否则是一次静默功能回归）", () => {
     /**
-     * `attention_scope` 是新表，存量用户那张表是空的。空表判成
-     * "什么都不关心"会让分身整个静默 —— 用户看到的是"它不理人了"，
+     * `attention_scope` 是新表，存量用户那张表是空的、也没有 mode 键。
+     * 空表判成"什么都不关心"会让分身整个静默 —— 用户看到的是"它不理人了"，
      * 而日志里一个错都没有。
      *
-     * 判据现在在 `AttentionRouter.route()`。行为侧由集成测试
-     * 「名单为空 → 放行」锁住；这里锁的是那段判据没被"顺手收紧"。
+     * ## ★★★ 这条断言的是**行为**，不是源码里有某个字符串
+     *
+     * 原来这一条是 `expect(src).toContain("activeCount(...) === 0")` ——
+     * 那锁的是一个实现细节。而那个细节这一轮**必须**变（旧判据把
+     * "把全部关掉"也读成"放行全部"，方向是反的），于是它拦不住真正的
+     * 回归、只拦住了正确的修复。
+     *
+     * 现在锁的是「存量库的行为一个字都不能变」这个真正的约束。
      */
-    const { readFileSync } = await import("node:fs")
-    const src = readFileSync("packages/store/src/attention-router.ts", "utf8")
-    expect(src).toContain("activeCount(input.channelId) === 0")
-    expect(src).toContain("enforced: false")
+    const vault = openTestVault()
+    try {
+      const router = new AttentionRouter(vault.db, new ManualClock(NOW))
+      const verdict = router.route({
+        channelId: CH,
+        conversationExternalId: "cidFAKE0001==",
+        sentAt: NOW,
+      })
+      expect(verdict.routed).toBe(true)
+      // ★ enforced=false：这不是"在范围内"，是"没有配置所以不拦"
+      expect(verdict.enforced).toBe(false)
+      expect(verdict.mode).toBe("unset")
+      /**
+       * ★★ 而且**不记账**：那一段时间的 routed/skipped 不代表任何用户配置，
+       * 记进去会让"范围设窄了"与"还没配范围"在覆盖面上同形。
+       */
+      const coverage = new AttentionCoverageRepository(vault.db).summarize(
+        CH,
+        toDayBucket(NOW - 86_400_000),
+        toDayBucket(NOW + 86_400_000),
+      )
+      expect(coverage.routed).toBe(0)
+      expect(coverage.skipped).toBe(0)
+    } finally {
+      vault.close()
+    }
+  })
+
+  it("★★★ mode 没配过但**名单非空**（存量已配好的库）→ 按名单判，不许失效", () => {
+    /**
+     * ## 这一条是集成测试当场抓到的一个真实回归
+     *
+     * 我第一版把 `unset` 写成"无条件放行"。而存量库里 `attention_scope`
+     * **有行**（用户配过），只是没有 mode 键（它是这一轮新加的）——
+     * 于是用户明确勾过的那 3 个群变成了"盯全部"。
+     *
+     * 5 条集成断言当场转红（范围外的消息全部被放行）。
+     *
+     * 所以 `unset` 的正确回落是**旧判据**（按名单空不空判），
+     * 而不是"放行"这一个分支。
+     */
+    const vault = openTestVault()
+    try {
+      const repo = new AttentionScopeRepository(vault.db)
+      // 存量形状：有名单、**没有** mode 键
+      repo.add(CH, [{ conversationExternalId: A, enabledAt: NOW - 1000, source: "user" }], NOW)
+      expect(repo.mode(CH)).toBe("unset")
+
+      const router = new AttentionRouter(vault.db, new ManualClock(NOW))
+      // 名单里的 → 放行，且 enforced=true（用户的配置**在生效**）
+      const inScope = router.route({ channelId: CH, conversationExternalId: A, sentAt: NOW })
+      expect(inScope.routed).toBe(true)
+      expect(inScope.enforced).toBe(true)
+      // ★★★ 名单外的 → **拦住**（这才是那 5 条转红的断言）
+      const outOfScope = router.route({ channelId: CH, conversationExternalId: B, sentAt: NOW })
+      expect(outOfScope.routed).toBe(false)
+      expect(outOfScope.reason).toBe("not_in_scope")
+    } finally {
+      vault.close()
+    }
+  })
+
+  it("★★★ mode=explicit + 名单为空 → **一条都不放行**（关光了不该盯得更多）", () => {
+    /**
+     * 这是旧判据方向搞反的那一格：用户在设置页把最后一个会话关掉，
+     * `activeCount` 归零，于是旧路由回到"放行全部" ——
+     * **关掉全部之后分身盯得更多了**，而它不报错。
+     */
+    const vault = openTestVault()
+    try {
+      const repo = new AttentionScopeRepository(vault.db)
+      repo.setMode(CH, "explicit", NOW)
+      const router = new AttentionRouter(vault.db, new ManualClock(NOW))
+      const verdict = router.route({
+        channelId: CH,
+        conversationExternalId: "cidFAKE0001==",
+        sentAt: NOW,
+      })
+      expect(verdict.routed).toBe(false)
+      expect(verdict.reason).toBe("not_in_scope")
+      // ★ enforced=true：这是**按用户配置**做的判断（与 unset 那档的区别）
+      expect(verdict.enforced).toBe(true)
+    } finally {
+      vault.close()
+    }
+  })
+
+  it("★★ mode=all → 放行、enforced=true、**而且记账**（它是一次用户决定）", () => {
+    /**
+     * `all` 与 `unset` 都放行，区别**只在** enforced 与记账 ——
+     * 而那正是要区分的两件事：「你还没说要盯什么」与「你说了盯全部」
+     * 在界面上是两句不同的话，覆盖面也该只反映后者。
+     */
+    const vault = openTestVault()
+    try {
+      new AttentionScopeRepository(vault.db).setMode(CH, "all", NOW)
+      const router = new AttentionRouter(vault.db, new ManualClock(NOW))
+      const verdict = router.route({
+        channelId: CH,
+        conversationExternalId: "cidFAKE0001==",
+        sentAt: NOW,
+      })
+      expect(verdict.routed).toBe(true)
+      expect(verdict.enforced).toBe(true)
+      expect(verdict.mode).toBe("all")
+      const coverage = new AttentionCoverageRepository(vault.db).summarize(
+        CH,
+        toDayBucket(NOW - 86_400_000),
+        toDayBucket(NOW + 86_400_000),
+      )
+      expect(coverage.routed).toBe(1)
+    } finally {
+      vault.close()
+    }
+  })
+
+  it("★★ 坏的 mode 值（手改过的库）→ 回落 unset，而不是抛", () => {
+    /**
+     * 回落方向只能是 `unset`（改动前的行为）：
+     * · 回落 `explicit` 会让一个手改坏的库让分身**静默停摆**；
+     * · 回落 `all` 会让"从没配过"冒充"用户选了全部"（于是覆盖面
+     *   开始记一段不代表任何配置的账）。
+     */
+    const vault = openTestVault()
+    try {
+      vault.db
+        .prepare("INSERT INTO vault_settings (key, value, updated_at) VALUES (?, ?, ?)")
+        .run(`attention.mode.${CH}`, "盯一半", new Date(NOW).toISOString())
+      expect(new AttentionScopeRepository(vault.db).mode(CH)).toBe("unset")
+    } finally {
+      vault.close()
+    }
   })
 
   it("★★ 两侧都记账（routed / skipped），且按消息业务时间分桶", async () => {

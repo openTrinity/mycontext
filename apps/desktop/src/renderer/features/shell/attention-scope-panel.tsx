@@ -67,6 +67,11 @@ export function AttentionScopePanel({
   if (channelId === null) return null
 
   const activeCount = scope.data?.activeCount ?? 0
+  /**
+   * 当前模式。`undefined`（还没读到）按 `unset` 处理 —— 那与"用户没配过"
+   * 恰好是同一句话（界面对两者要说的也是同一句）。
+   */
+  const mode = scope.data?.mode ?? "unset"
 
   const body = (
     <>
@@ -75,6 +80,33 @@ export function AttentionScopePanel({
           defaultValue:
             "它**盯**哪些会话的新消息 —— 只看实时流、不回溯历史。与上面的学习范围是两件事：这里可以随时关掉（不会删任何数据），因为它不保存历史。",
         })}
+      </p>
+
+      {/*
+        ★★★ 当前模式**必须说出来**，因为 `activeCount: 0` 有三种含义。
+
+        改动前界面只有一句「还没有勾选会话 —— 此时分身对所有已授权会话
+        的新消息都会评估一次」，而那句话对三种情况里的**两种**是错的：
+        · 用户显式选了「盯全部」→ 那不是"还没勾选"，是一个决定；
+        · 用户把全部关掉了 → 分身**不该**再评估任何会话（旧行为反了）。
+      */}
+      <p className="typography-caption-400 text-[var(--text-base-secondary)]">
+        {mode === "unset"
+          ? t("status.attention.mode.unset", {
+              defaultValue: "还没配置过监听范围 —— 分身暂时会盯所有已学习的会话。",
+            })
+          : mode === "all"
+            ? t("status.attention.mode.all", {
+                defaultValue: "当前：盯所有已学习的会话（你选的）。",
+              })
+            : activeCount === 0
+              ? t("status.attention.mode.none", {
+                  defaultValue: "当前：**都不盯** —— 分身不会处理任何新消息。",
+                })
+              : t("status.attention.mode.explicit", {
+                  defaultValue: "当前：只盯下面这 {{count}} 个会话。",
+                  count: activeCount,
+                })}
       </p>
 
       {/*
@@ -99,9 +131,14 @@ export function AttentionScopePanel({
       )}
 
       {active.length === 0 ? (
+        /**
+         * ★ 这句只说"名单是空的"这个**事实**，不再解释它的后果 ——
+         * 后果由上面那段 mode 文案负责（同一句话对三种 mode 里的两种是错的，
+         * 而那正是改动前的问题）。
+         */
         <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
           {t("status.attention.empty", {
-            defaultValue: "还没有勾选会话 —— 此时分身对**所有**已授权会话的新消息都会评估一次。",
+            defaultValue: "名单里还没有会话。",
           })}
         </p>
       ) : (
@@ -135,12 +172,56 @@ export function AttentionScopePanel({
         </ul>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="secondary" onClick={() => setPicking(!picking)}>
           {picking
             ? t("status.attention.collapse", { defaultValue: "收起" })
             : t("status.attention.add", { defaultValue: "添加会话" })}
         </Button>
+        {/*
+          ★★★ 「盯全部」与「都不盯」两个显式动作。
+
+          改动前这两件事**都表达不出来**：
+          · 「盯全部」只能靠"把名单清空"，而那与"从没配过"在库里同形；
+          · 「都不盯」压根做不到 —— 名单清空会被路由读成"放行全部"
+            （方向相反：关光了反而盯得更多）。
+
+          现在它们各是一次 `mode` 写入，与名单正交。
+        */}
+        {mode === "all" ? null : (
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={save.isPending}
+            onClick={() => {
+              // ★ 名单传空：`all` 模式下路由不看名单，留着会是看不出无效的残留
+              save.mutate({ channelId, conversationExternalIds: [], mode: "all" })
+            }}
+          >
+            {t("status.attention.watchAll", { defaultValue: "盯全部已学习的会话" })}
+          </Button>
+        )}
+        {mode === "explicit" && activeCount === 0 ? null : (
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={save.isPending}
+            onClick={() => {
+              /**
+               * ★★ 「都不盯」= `explicit` + **不动名单**。
+               *
+               * 不清名单是刻意的：`disable` 那条路已经把每一行置成
+               * `active=0`，而这里只需要把 mode 钉成 `explicit`
+               * —— 那时活跃名单为空，路由的结论就是"一条都不放行"。
+               *
+               * ★ 传空数组只是"这次不新增"，`add()` 对空数组是 no-op。
+               */
+              save.mutate({ channelId, conversationExternalIds: [], mode: "explicit" })
+            }}
+          >
+            {t("status.attention.watchNone", { defaultValue: "都不盯" })}
+          </Button>
+        )}
       </div>
 
       {picking ? (
@@ -149,7 +230,12 @@ export function AttentionScopePanel({
           alreadyActive={new Set(active.map((item) => item.conversationExternalId))}
           pending={save.isPending}
           onPick={(ids) => {
-            save.mutate({ channelId, conversationExternalIds: ids })
+            /**
+             * ★ 挑具体会话隐含 `explicit`：那个动作本身就是"我要收窄"。
+             * 不同步 mode 的话用户会加了几个会话却仍处于 `all`/`unset`，
+             * 而那时他的选择**完全没有效果**（路由不看名单）—— 一个静默落空。
+             */
+            save.mutate({ channelId, conversationExternalIds: ids, mode: "explicit" })
             setPicking(false)
           }}
         />

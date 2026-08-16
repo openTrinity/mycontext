@@ -64,7 +64,6 @@ const B = { id: "cidFAKE0002==", title: "周会同步群" }
 /** 「回上一步勾选」那句的骨架。★ 用"先选好"而非"上一步"——后者 hint 里也有。 */
 const HINT_EMPTY = /先选好学习范围/
 /** 「不勾 = 盯全部」那句的骨架 */
-const HINT_ALL = /一个都不勾/
 
 function installApi() {
   const api = {
@@ -130,8 +129,12 @@ describe("引导步骤：分身监听范围（AttentionStep）", () => {
      *
      * ★ 这一步**不含**学习范围列表（那在 SourcesStep），所以判据直接是
      * "A 出现、B 不出现"，不需要像上一版那样数出现次数。
+     *
+     * ★★ 这一轮起要显式给 `attentionMode: "explicit"` —— 勾选列表只在
+     * explicit 下显示（`all` 模式下路由不看名单，那时摆一个勾选列表出来
+     * 就是邀请用户做一件没有效果的事）。
      */
-    renderStep(draft({ conversationIds: [A.id] }))
+    renderStep(draft({ conversationIds: [A.id], attentionMode: "explicit" }))
     await waitFor(() => expect(screen.getByText(A.title)).toBeTruthy())
     expect(screen.queryByText(B.title)).toBeNull()
   })
@@ -144,21 +147,48 @@ describe("引导步骤：分身监听范围（AttentionStep）", () => {
     renderStep(draft({ conversationIds: [] }))
     // 候选为空时不查询会话标题，等文案出现即可
     await waitFor(() => expect(screen.getByText(HINT_EMPTY)).toBeTruthy())
-    // ★ 那时不该显示"不勾 = 盯全部"（还没有候选，那句话没有对象）
-    expect(screen.queryByText(HINT_ALL)).toBeNull()
+    // ★ 那时不该显示模式选择器（还没有候选，那三个选项没有对象）
+    expect(screen.queryByRole("radiogroup")).toBeNull()
   })
 
-  it("★★★ 有候选时，把「一个都不勾 = 盯全部」说出来", async () => {
+  it("★★★ 有候选时给**三个互斥选项**，而不是一句要用户推断的解释", async () => {
     /**
-     * 存量行为是"名单为空 → 全部放行"（`AttentionRouter.route()` 里那条
-     * 迁移期判据：空表判成"什么都不关心"会让分身整个静默）。
+     * ## 这一条这一轮**换了方向**，理由如下
      *
-     * 所以在引导里不勾 **不等于** 关掉分身，而恰恰是"不收窄"。
-     * 用户的直觉与此相反 —— 不说这句话，他会以为自己已经把分身关了。
+     * 原来它断言界面上有一句「一个都不勾 = 盯全部」。那句话是**对的**
+     * （旧判据：名单为空 → 放行全部），但它有两个问题：
+     *
+     * ① 它要求用户从一句解释里推断出一个**反直觉**的默认值 ——
+     *    而相邻的上一步（学习范围）默认值方向恰好相反（一个都不采）；
+     * ② 第三个意图（「先都不盯」）**压根表达不出来** —— 空数组在旧存储里
+     *    与"从没配过"同形，于是那个选择没有任何落库痕迹。
+     *
+     * 现在是三个 radio，选哪个都是一次显式的、能落库的决定。
      */
     renderStep(draft({ conversationIds: [A.id, B.id] }))
-    await waitFor(() => expect(screen.getByText(HINT_ALL)).toBeTruthy())
-    expect(screen.queryByText(HINT_EMPTY)).toBeNull()
+    await waitFor(() => expect(screen.getByRole("radiogroup")).toBeTruthy())
+    expect(screen.getAllByRole("radio")).toHaveLength(3)
+    // ★ 缺省选中的是「盯全部」（那与改动前的实际效果一致）
+    const checked = screen
+      .getAllByRole("radio")
+      .filter((el) => el.getAttribute("aria-checked") === "true")
+    expect(checked).toHaveLength(1)
+    expect(checked[0]?.textContent ?? "").toContain("盯全部")
+    // ★★ `all` 模式下**不显示**勾选列表（路由不看名单，摆出来是邀请白做工）
+    expect(screen.queryByText(A.title)).toBeNull()
+  })
+
+  it("★★★ 「先都不盯」这个选项**存在** —— 它原来表达不出来", async () => {
+    /**
+     * 旧存储里"都不盯"也是空数组，而空数组被路由读成"放行全部"
+     * （方向相反）。所以这个选项不是新增的**界面**，而是新增的**能力**。
+     */
+    renderStep(draft({ conversationIds: [A.id] }))
+    await waitFor(() => expect(screen.getByRole("radiogroup")).toBeTruthy())
+    const none = screen
+      .getAllByRole("radio")
+      .find((el) => (el.textContent ?? "").includes("都不盯"))
+    expect(none).toBeTruthy()
   })
 })
 

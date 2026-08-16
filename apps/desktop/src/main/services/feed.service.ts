@@ -150,6 +150,22 @@ export interface FeedServiceOptions {
     collectionComplete?: () => boolean
     learningRangeMs?: () => number | undefined
   }
+  /**
+   * 建图**现在正忙**吗（真源是 kl 服务的 `status().building`）。
+   *
+   * ## ★★ 为什么它不在 `autoBuild` 里面
+   *
+   * `autoBuild` 整块是**可选**的（"用户关掉自动建图"与"没接 kl"都会
+   * 让它缺席）。而"忙不忙"这个事实与自动建图开不开**无关** ——
+   * 用户手动点了建图时它同样为真，而那时 work 层照样必须让路
+   * （kl 的 HTTP 在忙，playbook 归纳会失败并白花一次钱）。
+   *
+   * 塞进 `autoBuild` 会让"关掉自动建图"顺带让这个信号消失 ——
+   * 一个静默的降级。
+   *
+   * 不给 = 恒 false（那时通常也没接 kl）。
+   */
+  graphBusy?: () => boolean
 }
 
 /** 图谱同步的默认周期。见 options 注释。 */
@@ -707,5 +723,48 @@ export class FeedService {
       lastBuiltAt: mark.at,
       syncIntervalMs: this.options.graphSyncIntervalMs ?? GRAPH_SYNC_INTERVAL_MS,
     }
+  }
+
+  /**
+   * ── 给 `runCycle` 的三个小读数 ──────────────────────────────────
+   *
+   * ## ★★ 为什么它们要单独暴露，而不是让 runnable 直接持 `GraphSyncService`
+   *
+   * `graphSync` 是 `private` 且**可为 null**（未挂载 vault 时）。让
+   * runnable 拿它就要把那个 null 判断复制过去，而漏判的表现是
+   * "状态页在未挂载时崩" —— 那比多三个两行方法糟。
+   *
+   * ★ 三个都在**未挂载时给安全值**（0 / false）：那时 `runCycle` 里
+   * 那几行会算出 `waitingForUpstream: null`（因为 `exported === 0`），
+   * 也就是"没在等" —— 而那正确：没挂 vault 时什么都不该在等。
+   */
+
+  /** 导出游标到哪（`graph-export` 的 `acked_seq`）。未挂载 → 0。 */
+  exportedSeq(): number {
+    const sync = this.graphSync
+    if (sync === null) return 0
+    // ★ `lag()` 是 head - acked，所以 acked = head - lag（避免再加一个 getter）
+    return Math.max(0, sync.head() - sync.lag())
+  }
+
+  /** 建图游标到哪（`graph-build` 的 `acked_seq`）。未挂载 → 0。 */
+  builtSeq(): number {
+    return this.graphSync?.buildWatermark().seq ?? 0
+  }
+
+  /**
+   * 建图**现在正忙**吗。
+   *
+   * ## ★★ 判据来自 kl 服务本身，不是这里猜
+   *
+   * 真源是 `klServer.status().building`（`startup.ts` 那侧注入的
+   * `graphBusy`）。猜错的方向是"以为不忙于是又触发一次建图"，
+   * 而建图的 Phase A 会**全量重跑向量化**（实测 50 min）。
+   *
+   * ★ 没注入 → false。那时也不会有人去建图（`autoBuild` 同样没注入），
+   * 所以 false 是安全的那一侧。
+   */
+  graphBusy(): boolean {
+    return this.options.graphBusy?.() ?? false
   }
 }

@@ -42,6 +42,71 @@ export interface AttentionScopeRow {
 }
 
 /**
+ * 监听范围的**模式** —— 三态，而不是"名单空不空"。
+ *
+ * ## ★★★ 为什么"名单为空"表达不了这件事（这修的是一个真实的方向错误）
+ *
+ * 改动前判据只有一条：`activeCount === 0` → 放行全部。而**三个不同的
+ * 用户动作**都会让那个计数归零：
+ *
+ * | 用户做了什么 | 表里 | 旧判断 | 用户的预期 |
+ * |---|---|---|---|
+ * | 从没配过（新装 / 存量升级） | 空 | 放行全部 | ？（他还没表态） |
+ * | 引导里一个都不勾 | 空 | 放行全部 | 「盯全部」✅ |
+ * | **设置里把全部关掉** | 有行但 `active=0` | **放行全部** | 「都不盯」❌ |
+ *
+ * 第三行是方向搞反：用户把最后一个会话关掉之后，**分身盯得更多了**。
+ * 而它不报错 —— 用户看到的是"我关光了它还在回消息"。
+ *
+ * ## 三态各自的行为
+ *
+ * · `unset` —— 放行全部、**不记账**、`enforced: false`。
+ *   这是存量库读不到那个键时的值，行为与改动前**逐字相同**
+ *   （不能破：让存量用户的分身在一次升级后静默停摆比多投几个会话糟得多）；
+ * · `all` —— 放行全部、**记账**、`enforced: true`。
+ *   它是一次**用户决定**，所以覆盖面该记、界面该说"你选了盯全部"；
+ * · `explicit` —— 按名单判。**名单为空 = 一条都不放行**（那正是
+ *   "把全部关掉"这个动作应有的效果）。
+ *
+ * ★ `unset` 与 `all` 的行为差别**只在 enforced 与记账** —— 两者都放行。
+ * 那是刻意的：把 `all` 做成"放行"而不是"写一份全量名单"，
+ * 避免替用户写一份 `enabled_at` 只能变早、只增不减的具体名单
+ * （那比一个标量难撤回得多）。
+ */
+export type AttentionMode = "unset" | "all" | "explicit"
+
+/** `vault_settings` 里那个键的前缀。★ 与 mode 的读写实现放在一处，避免拼错。 */
+export const ATTENTION_MODE_KEY_PREFIX = "attention.mode."
+
+/**
+ * 某个渠道的 mode 键。
+ *
+ * ★ 走 `vault_settings`（`SettingsRepository`）而不是新开一张表：它是
+ * **每渠道一个标量**，而新表要一次迁移 + 一条读写路径 + 一次 wipe 清单
+ * 同步。带渠道后缀的标量键是这个库里既有的做法
+ * （`chatCoverage.backfilled.<channelId>` 与 `runtimeLimits.<channelId>`
+ * 都是它）。
+ */
+export function attentionModeKey(channelId: string): string {
+  return `${ATTENTION_MODE_KEY_PREFIX}${channelId}`
+}
+
+/**
+ * 把存的字符串解析成 mode。
+ *
+ * ★★ 读不出来（null / 空 / 手改成别的值）一律回落 `unset` ——
+ * 而 `unset` 的行为与改动前**逐字相同**。这是这一层唯一能选的方向：
+ * 回落 `explicit` 会让一个手改坏的库让分身静默停摆，
+ * 回落 `all` 会让"从没配过"冒充"用户选了全部"（于是覆盖面开始记
+ * 一段不代表任何配置的账）。
+ */
+export function parseAttentionMode(raw: string | null): AttentionMode {
+  if (raw === "all") return "all"
+  if (raw === "explicit") return "explicit"
+  return "unset"
+}
+
+/**
  * 路由的输入。
  *
  * ★ 只收**判据需要的**字段，不收整个消息对象 —— 那样测试要造一堆无关字段，
@@ -205,6 +270,42 @@ export class AttentionScopeRepository {
         >("SELECT count(*) AS c FROM attention_scope WHERE channel_id = ? AND active = 1")
         .get(channelId)?.c ?? 0
     )
+  }
+
+  /**
+   * 读这个渠道的 mode。
+   *
+   * ★★ 表**不存在**时也回落 `unset`（而不是抛）：这个仓储会在
+   * `AttentionRouter` 里被逐条投递调用，而 `vault_settings` 在某些
+   * 早期库上可能还没建。抛错会打断整条投递链 —— 而回落 `unset` 的
+   * 行为与改动前逐字相同（放行、不记账）。
+   */
+  mode(channelId: string): AttentionMode {
+    try {
+      const row = this.db
+        .prepare<[string], { value: string }>("SELECT value FROM vault_settings WHERE key = ?")
+        .get(attentionModeKey(channelId))
+      return parseAttentionMode(row?.value ?? null)
+    } catch {
+      // 见上面那段：读不出来一律 unset（改动前的行为）
+      return "unset"
+    }
+  }
+
+  /**
+   * 写这个渠道的 mode。
+   *
+   * ★ `at` 收 unix ms 而 `vault_settings.updated_at` 是 ISO 文本
+   * （`SettingsRepository.set` 的签名如此）—— 转换在这里做一次，
+   * 让调用方只需要给一个时钟读数（与这个文件其余方法一致）。
+   */
+  setMode(channelId: string, mode: AttentionMode, at: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO vault_settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(attentionModeKey(channelId), mode, new Date(at).toISOString())
   }
 }
 

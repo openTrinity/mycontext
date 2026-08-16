@@ -82,6 +82,29 @@ export type DataDomain = "chat" | "minutes" | "doc" | "contact"
  */
 export interface DomainSpec {
   id: DataDomain
+  /**
+   * 这个域是**可采的业务域**，还是**仅为历史兼容保留**。
+   *
+   * ## ★★★ 为什么它不能与 `producedBy` 合成一个字段
+   *
+   * 两者回答的是不同的问题，而把 `contact` 塞进 `producedBy: "absent"`
+   * 已经暴露出这个混淆：
+   *
+   * | 字段 | 问的是 | 变了会怎样 |
+   * |---|---|---|
+   * | `producedBy` | **当前**有没有生产者 | 接上采集器就该变成 active |
+   * | `kind` | 这个域**会不会**有采集器 | 永远不变（它是安全边界的产物） |
+   *
+   * `contact` 的真实状态是后者：PII 类命令按 CLAUDE.md §5 **永远不进
+   * 白名单**，所以它不是"还没做"，是"不会做"。而 `absent` 的语义
+   * （"当前没有"）会让界面**给它一行** —— 于是用户看到一个永远
+   * "0 条、lag 0"的通讯录域，读起来像坏了。
+   *
+   * ★ 判据落在这里之后，界面按 `kind === "collectable"` 过滤，
+   * 而 `legacy-only` 的域**只在**两个地方存在：`CHANGELOG_DOMAINS`
+   * （历史库里可能真有行）与这张声明表（说清为什么保留它）。
+   */
+  kind: "collectable" | "legacy-only"
   /** 这个域**当前有没有生产者**。见上面那段 ★★★。 */
   producedBy: "active" | "absent"
   /** 一句话说明这个域装什么（状态页/文档直接用） */
@@ -93,14 +116,62 @@ export interface DomainSpec {
    * 界面必须能显示后者 —— 否则"没做"与"做了没数据"在用户眼里同形。
    */
   absentReason?: string
+  /**
+   * 哪些渠道**有能力**产这个域。`undefined` = 不限（所有渠道）。
+   *
+   * ## ★★★ 为什么域声明必须有 per-channel 维度
+   *
+   * `DOMAINS` 是**一张全局表**，而 `capabilities.domains` 是 per-channel 的：
+   * 钉钉自述 `["chat","contact","doc","minutes"]`，飞书只有 `["chat","doc"]`
+   * （它没有听记）。于是在一个只连了飞书的部署里，状态页会显示
+   * `minutes` 域"active、0 条" —— 而事实是**这个渠道没有听记**。
+   *
+   * 那与 `contact` 那个已经被 `absentReason` 解决的问题**形状完全相同**，
+   * 只是原因不同：一个是"我们不采"，一个是"这个渠道没有"。
+   * 两者用户该做的事不同（前者什么都做不了，后者可以去连另一个渠道），
+   * 所以必须能分开表达。
+   *
+   * ★ 这里存的是**声明侧的期望**，运行时仍要与 `capabilities.domains`
+   * 对账（见 `checkTopologyConsistency` 判据⑥）—— 两者不一致说明
+   * 有人加了插件却没改声明，而那种漂移不报错、只在界面上显形。
+   */
+  channels?: readonly ChannelIdLike[]
 }
 
+/**
+ * 渠道 id（这一层只当字符串用）。
+ *
+ * ★ 不 import `ChannelId`（`@mycontext/channels` 的类型）：那会让这个
+ * **纯声明**文件依赖渠道包，而它现在能被单测直接读、不启动任何管线，
+ * 正是因为它没有依赖。判据⑥收的是调用方传进来的字符串数组，
+ * 所以这里只需要一个宽类型。
+ */
+export type ChannelIdLike = string
+
 export const DOMAINS: readonly DomainSpec[] = [
-  { id: "chat", producedBy: "active", purpose: "聊天消息（单聊与群聊）" },
-  { id: "minutes", producedBy: "active", purpose: "会议听记（摘要与转写）" },
-  { id: "doc", producedBy: "active", purpose: "知识库文档与云盘文件" },
+  { id: "chat", kind: "collectable", producedBy: "active", purpose: "聊天消息（单聊与群聊）" },
+  {
+    id: "minutes",
+    kind: "collectable",
+    producedBy: "active",
+    purpose: "会议听记（摘要与转写）",
+    /**
+     * ★ 只有钉钉有听记能力（飞书插件的 `capabilities.domains` 是
+     * `["chat","doc"]`，且它压根没有 `minutes` 契约实现）。
+     * 不声明的话只连飞书的部署会显示一个"听记 0 场"，而那读起来像坏了。
+     */
+    channels: ["dingtalk"],
+  },
+  { id: "doc", kind: "collectable", producedBy: "active", purpose: "知识库文档与云盘文件" },
   {
     id: "contact",
+    /**
+     * ★★ `legacy-only` 而不是 `collectable` + `absent`：
+     * 后者的含义是"当前没有生产者"（一个可能改变的事实），
+     * 而这个域的真实状态是"永远不会有" —— PII 类命令不进白名单
+     * （CLAUDE.md §5）。界面按 `kind` 过滤，所以它不会占一行。
+     */
+    kind: "legacy-only",
     producedBy: "absent",
     purpose: "通讯录与组织关系",
     /**
@@ -114,6 +185,41 @@ export const DOMAINS: readonly DomainSpec[] = [
 /** 当前**真的有生产者**的域。消费者的 `domains` 与界面都该按它过滤。 */
 export function activeDomains(domains: readonly DomainSpec[] = DOMAINS): readonly DataDomain[] {
   return domains.filter((domain) => domain.producedBy === "active").map((domain) => domain.id)
+}
+
+/**
+ * 这个渠道当前**真的能产**的域。
+ *
+ * ## ★★ 为什么它收 `capabilities` 而不是自己去查插件
+ *
+ * 这个文件必须保持"纯声明、不启动管线就能测" —— 那是它现在能被单测
+ * 直接锁住 id 与顺序的全部理由。import 渠道插件会引入 CLI、进程、
+ * 授权状态一整条依赖。
+ *
+ * 所以判据是**两个输入的交集**：
+ * ① 声明说这个域该由哪些渠道产（`DomainSpec.channels`）；
+ * ② 渠道自述它有哪些域（`capabilities.domains`）。
+ *
+ * ★ 取交集而不是只信任一侧：只信声明会漏掉"插件加了能力但没改声明"，
+ * 只信 capabilities 会漏掉"我们还没写这个域的采集器"（`producedBy`）。
+ * 两个方向的漂移都由判据⑥报出来，而这个函数给出的是**当前能干什么**。
+ */
+export function activeDomainsForChannel(
+  channelId: ChannelIdLike,
+  capabilities: readonly string[],
+  domains: readonly DomainSpec[] = DOMAINS,
+): readonly DataDomain[] {
+  const declared = new Set(capabilities)
+  return domains
+    .filter((domain) => {
+      if (domain.kind !== "collectable") return false
+      if (domain.producedBy !== "active") return false
+      // 声明限了渠道 → 必须包含它；没限 = 不限
+      if (domain.channels !== undefined && !domain.channels.includes(channelId)) return false
+      // 渠道自述里必须有这个域（它才是运行时的真相）
+      return declared.has(domain.id)
+    })
+    .map((domain) => domain.id)
 }
 
 /**
@@ -142,6 +248,44 @@ export interface ProducerSpec {
   backfills: boolean
   /** 一句话说明它产什么（状态页/文档直接用） */
   purpose: string
+  /**
+   * **调度形状**。这是声明，不是策略。
+   *
+   * ## ★★ 为什么这件事值得进声明
+   *
+   * 三个域的调度天生不同，而"为什么听记没有水位"这个问题现在只能靠
+   * 读三个 tick 的实现来回答：
+   *
+   * | 值 | 谁 | 形状 |
+   * |---|---|---|
+   * | `watermark` | chat | 时间窗 + 水位 + 截断二分 + 回填 + 对账 |
+   * | `drain-each-round` | minutes | 每轮从 cursor=null 重新抽干 N 页 |
+   * | `tiered-listing` | doc | 分档周期（冷启动/稳态）+ 正文补齐配额 |
+   * | `stream` | attention | 实时流，**不写 changelog** |
+   *
+   * ★ 它也是 `haltsOnScopeNotReady` 的**理由**（见下）：只有 `watermark`
+   * 那种会推进一个不可回退的水位的才需要那道保护。
+   */
+  schedule: "watermark" | "drain-each-round" | "tiered-listing" | "stream"
+  /**
+   * 范围没就绪时，这个生产者要不要**中断本轮并且不推进度**。
+   *
+   * ## ★★★ 为什么只有一个生产者需要它（而不是全都要）
+   *
+   * `scopeNotReady` 修的是一次真实事故：采集器比范围行先跑（实测相差
+   * 1 秒），那一轮拉到的 9 条全被闸门丢掉，而**水位照常前移** ——
+   * 之后 `since` 之后没有新消息，就永远不再拉。用户看到"已采集 0"，
+   * 日志里一个错都没有。
+   *
+   * 关键在于"**水位照常前移**"这一步：它让那批消息永远回不来。
+   * 而另两个域每轮从头列举（`drain-each-round` / `tiered-listing`），
+   * 所以"这一轮白丢"的代价只是一轮 CLI 调用 —— 下一轮范围就绪了，
+   * 同样的数据会再列一遍。
+   *
+   * ★ 写成声明而不是散在三个 tick 里的 if：那样"为什么听记不需要它"
+   * 可查，而不必读三处实现去比对。
+   */
+  haltsOnScopeNotReady: boolean
 }
 
 export const PRODUCERS: readonly ProducerSpec[] = [
@@ -150,6 +294,9 @@ export const PRODUCERS: readonly ProducerSpec[] = [
     domains: ["chat"],
     scope: "learning",
     backfills: true,
+    schedule: "watermark",
+    /** ★ 唯一为 true 的：只有它推进一个不可回退的水位（见上面那段 ★★★）。 */
+    haltsOnScopeNotReady: true,
     purpose: "拉聊天消息，落库并发 changelog",
   },
   {
@@ -157,6 +304,8 @@ export const PRODUCERS: readonly ProducerSpec[] = [
     domains: ["minutes"],
     scope: "learning",
     backfills: true,
+    schedule: "drain-each-round",
+    haltsOnScopeNotReady: false,
     purpose: "拉会议听记（摘要 + 转写）",
   },
   {
@@ -175,6 +324,8 @@ export const PRODUCERS: readonly ProducerSpec[] = [
     domains: ["doc"],
     scope: "learning",
     backfills: true,
+    schedule: "tiered-listing",
+    haltsOnScopeNotReady: false,
     purpose: "拉知识库文档与云盘文件",
   },
   {
@@ -195,9 +346,27 @@ export const PRODUCERS: readonly ProducerSpec[] = [
     domains: ["chat"],
     scope: "attention",
     backfills: false,
+    schedule: "stream",
+    /**
+     * ★ false，而且理由与另两个域**不同**：它压根没有"进度"可推
+     * （既不推水位、也不翻页）。监听范围没配好时它的表现是
+     * `enforced: false`（放行但不记账），那由 `AttentionRouter` 表达 ——
+     * 见 `attention-router.ts` 的 mode 三态。
+     */
+    haltsOnScopeNotReady: false,
     purpose: "按监听范围把新消息路由给数字分身管控层",
   },
 ]
+
+/** 按 id 取生产者声明。找不到抛错 —— 拼错 id 的静默后果是拿不到调度语义。 */
+export function producerSpec(
+  id: string,
+  producers: readonly ProducerSpec[] = PRODUCERS,
+): ProducerSpec {
+  const spec = producers.find((producer) => producer.id === id)
+  if (spec === undefined) throw new Error(`生产者 ${id} 没有在 PRODUCERS 里声明`)
+  return spec
+}
 
 /**
  * 消费者。
@@ -341,10 +510,33 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
     domains: ["chat"],
     required: true,
     /**
-     * ★ 蒸馏引用图谱抽出的 fact —— 跑到图谱前面的话那段 fact 还不存在，
-     * 而蒸馏会照常"成功"、游标照常推进，缺失**永久且静默**。
+     * ★★★ 这里**原来是** `["graph-export"]`，而那条边贴错了消费者。
+     *
+     * ## 核对（这是删掉它的全部依据）
+     *
+     * `packages/distill/src/consumer.ts` 的 import 只有三行：
+     * `@mycontext/kernel`、`@mycontext/store`（`DistillTaskRepository` +
+     * `MessageRepository`）、`./runner.js`。它的 handler 做的唯一一件事是
+     * **把 changelog 的 seq 映射成时间窗、enqueue 进 `distill_tasks`** ——
+     * 全文**不 import 任何图谱**，不读 `knowledge.db`，不碰 fact。
+     *
+     * 真正读 kl 图库的是 `packages/distill/src/map/playbook-chunks.ts`
+     * （只读 `chunks` 表），而它由 `DistillService.maybeInducePlaybooks()`
+     * 调用 —— 那属于 **`distill-work`** 这个消费者的活。
+     *
+     * ## 留着它的代价（不是零）
+     *
+     * 平时看不出来：`graph-export` 是外部消费者，kl 服务没起时它压根不注册，
+     * 此时依赖闸不生效（`consumer.ts` 的"上游没注册就不夹"）。
+     * 但 kl **起着而导出慢**时（实测导出 1 秒、建图 2 小时），
+     * `distill` 会白等一个它不需要的上游 —— 而它要的语料就在 `messages` 表里。
+     *
+     * 而更贵的那一半是**声明说了谎**：读这一行的人会以为蒸馏读图谱，
+     * 于是排查"画像缺了一段"时去查图谱，而真因在别处。
+     *
+     * ★ 那条边真正的归属见 `distill-work` 的 `dependsOn`（下一项）。
      */
-    dependsOn: ["graph-export"],
+    dependsOn: [],
     routed: false,
     wiring: "wired",
     purpose: "把新消息切成蒸馏窗口，产出画像语料",
@@ -354,10 +546,6 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
      * ★★ 这一行也**原来漏了**（G2）。`distill.service.ts` 里
      * `WORK_CONSUMER_ID = "distill-work"` 会真的注册游标（两处：
      * `maybeRefreshWorkLayer` 与手动 ack 那条路）。
-     *
-     * ★ `dependsOn: ["distill"]` —— work 层抽的是长期结论（职责、规矩），
-     * 引用的是蒸馏的产出。抢跑会引用还不存在的结论，而它会照常"成功"。
-     * 这条边同样原来是隐式的（同一个 service 内的调用顺序）。
      */
     id: "distill-work",
     domains: ["chat"],
@@ -368,10 +556,28 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
      * 这与 `distill.service.ts` 里 register 时的取舍必须一致。
      */
     required: false,
-    dependsOn: ["distill"],
+    /**
+     * 两个上游，各自管一件事：
+     *
+     * · `distill` —— work 层抽长期结论（职责、规矩），引用的是蒸馏产出。
+     *   抢跑会引用还不存在的结论，而它会照常"成功"；
+     * · `graph-build` ★**新增** —— playbook 归纳读 kl 的 `chunks` 表
+     *   （`playbook-chunks.ts`）。建图没跑完时那张表是**旧的或空的**，
+     *   于是归纳出的"工作套路"来自一份过期快照 —— 而它同样会"成功"，
+     *   产出一份看起来很有底气的错误画像。
+     *
+     * ★★ 这条边**取代**了原来挂在 `distill` 上的 `graph-export`：
+     * 那条贴错了消费者（见上一项的核对），而正确的上游也不是 export
+     * 而是 **build** —— 导出完成只说明四件套是新的，`chunks` 表要等
+     * `kl ingest` 跑完才更新（两者相差小时级）。
+     *
+     * ★ 依赖闸是"夹上界"而不是"干等"（`consumer.ts` 的既有取舍），
+     * 所以慢建图只会让 work 层按图谱的节奏走，不会把它停住。
+     */
+    dependsOn: ["distill", "graph-build"],
     routed: false,
     wiring: "wired",
-    purpose: "从蒸馏产出里抽长期结论（职责、规矩）",
+    purpose: "从蒸馏产出里抽长期结论（职责、规矩、工作套路）",
   },
   {
     id: "persona-inbox",
@@ -423,6 +629,14 @@ export function checkTopologyConsistency(
      * 管线就能测"。不传 = 跳过判据⑤（纯声明自检仍然有效）。
      */
     registeredConsumerIds?: readonly string[]
+    /**
+     * 各渠道**自述**的域能力（判据⑥用）：`channelId → capabilities.domains`。
+     *
+     * ★ 同样由调用方传：这一层不能 import 渠道插件（那会引入 CLI、
+     * 进程与授权状态，而这个文件的全部价值在于它没有依赖）。
+     * 不传 = 跳过判据⑥。
+     */
+    channelDomains?: Readonly<Record<string, readonly string[]>>
   } = {},
 ): readonly string[] {
   const domains = input.domains ?? DOMAINS
@@ -448,6 +662,17 @@ export function checkTopologyConsistency(
     // absent 必须说清为什么 —— 否则界面只能显示"空"，与"坏了"同形
     if (domain.producedBy === "absent" && (domain.absentReason ?? "") === "") {
       problems.push(`域 ${domain.id} 标了 absent 但没写 absentReason`)
+    }
+    /**
+     * ★★ `legacy-only` 与 `producedBy: "active"` 是**矛盾**的组合。
+     *
+     * `legacy-only` 的含义是"永远不会有采集器"（安全边界），
+     * 而 `active` 的含义是"现在就有生产者在投"。同时成立说明有人接了
+     * 一个本该不接的域的采集器 —— 而 `contact` 那个域正是 PII
+     * （CLAUDE.md §5）。这一条要能**响亮地**报出来。
+     */
+    if (domain.kind === "legacy-only" && domain.producedBy === "active") {
+      problems.push(`域 ${domain.id} 标了 legacy-only（永不采集），却又标了 active（有生产者在投）`)
     }
   }
 
@@ -512,6 +737,42 @@ export function checkTopologyConsistency(
   for (const id of input.registeredConsumerIds ?? []) {
     if (!consumers.some((consumer) => consumer.id === id)) {
       problems.push(`游标表里有消费者 ${id}，但 CONSUMERS 里没有声明它`)
+    }
+  }
+
+  /**
+   * ⑥ **`DomainSpec.channels` 必须与渠道自述的能力对账**（修 G17）。
+   *
+   * ## ★★★ 为什么这一条不能省
+   *
+   * `DOMAINS` 是全局表，`capabilities.domains` 是 per-channel 的。
+   * 两者漂了之后的表现**只在界面上**：
+   *
+   * · 声明说某个域只有钉钉能产，而飞书插件后来加了那个能力
+   *   → 飞书那侧永远不显示它（用户以为功能没做）；
+   * · 声明没限渠道，而某个渠道压根没有那个能力
+   *   → 那个渠道显示"听记 0 场"（读起来像坏了，事实是它没有听记）。
+   *
+   * 两个方向都不报错，所以判据必须显式。
+   *
+   * ★ 只报**声明限了渠道、而那个渠道自述有这个能力**这一个方向
+   *   （声明比事实更窄）。反方向（渠道没这个能力、而声明没限它）
+   *   **不报** —— 那是常态：`doc` 域两个渠道都有，将来第三个渠道
+   *   可能没有，而那时正确的做法是给它加 `channels` 限定，
+   *   不是让自检对每一个"这个渠道恰好没有"都报一次。
+   *
+   * ★ `legacy-only` 的域跳过：`contact` 在钉钉的 capabilities 里确实存在
+   *   （它真有通讯录接口），而我们永远不采它。那不是漂移。
+   */
+  for (const [channelId, capabilities] of Object.entries(input.channelDomains ?? {})) {
+    const declared = new Set(capabilities)
+    for (const domain of domains) {
+      if (domain.kind !== "collectable") continue
+      if (domain.channels === undefined) continue
+      if (domain.channels.includes(channelId)) continue
+      if (declared.has(domain.id)) {
+        problems.push(`域 ${domain.id} 的 channels 里没有 ${channelId}，但那个渠道自述有这个能力`)
+      }
     }
   }
 

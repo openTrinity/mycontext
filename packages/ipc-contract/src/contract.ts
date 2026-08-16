@@ -730,9 +730,31 @@ export const attentionScopeItemSchema = z.object({
   source: z.string(),
 })
 
+/**
+ * 监听范围的**模式**。三态，而不是"名单空不空"。
+ *
+ * ★★★ 为什么契约里必须有它：`items: []` 表达不了三个不同的用户动作
+ * （从没配过 / 显式选了盯全部 / 把全部关掉），而其中第三个的旧行为
+ * 方向是反的（关光了反而盯得更多）。判据的真源在
+ * `@mycontext/store` 的 `AttentionMode`，这里是它的契约投影。
+ */
+export const attentionModeSchema = z.enum(["unset", "all", "explicit"])
+export type AttentionModeValue = z.infer<typeof attentionModeSchema>
+
 export const attentionScopeViewSchema = z.object({
   items: z.array(attentionScopeItemSchema),
   activeCount: z.number(),
+  /**
+   * 当前模式。界面按它说三句**不同**的话：
+   *
+   * · `unset` —— 「还没配置监听范围（分身暂时会盯全部已学习的会话）」；
+   * · `all` —— 「你选了盯全部已学习的会话」；
+   * · `explicit` —— 「盯这 N 个」（N 可以是 0 = 都不盯）。
+   *
+   * ★ 不给它的话 `activeCount: 0` 在界面上有三种可能的含义，
+   * 而用户该做的事完全不同。
+   */
+  mode: attentionModeSchema,
   /**
    * 实时流覆盖面。★ 同样**没有**百分比 —— 分母（"本该收到多少"）
    * 与聊天覆盖面一样拿不到真值。
@@ -746,7 +768,27 @@ export const attentionScopeViewSchema = z.object({
 
 export const attentionScopeSaveInputSchema = z.object({
   channelId: z.string().min(1),
-  conversationExternalIds: z.array(z.string().min(1)).min(1),
+  /**
+   * 要盯的会话。
+   *
+   * ★★★ **允许空数组**（原来是 `.min(1)`）。
+   *
+   * 那个 `.min(1)` 逼出了一个真实的缺口：引导里"我一个都不勾"这个动作
+   * 因为调不了这个接口而**完全没有落库痕迹**（`onboarding-view` 里那句
+   * `if (…length > 0)`）。于是"从没配过"与"显式选了全部"在库里同形。
+   *
+   * 现在空数组是合法的，含义由 `mode` 决定：
+   * · `mode: "all"` + 空数组 = 「盯全部已学习的会话」；
+   * · `mode: "explicit"` + 空数组 = 「都不盯」。
+   */
+  conversationExternalIds: z.array(z.string().min(1)),
+  /**
+   * 这次保存要把模式设成什么。**必填** —— 见上。
+   *
+   * ★ 不给缺省值是刻意的：缺省会让调用方"不表态"，而这个字段存在的
+   * 全部理由就是消灭"不表态"这个状态。
+   */
+  mode: attentionModeSchema,
   /**
    * 起点。省略时由主进程用**当前时间** —— 那是"从现在开始盯"的语义，
    * 而让渲染层传 `Date.now()` 会把时钟判据分散到两个进程里。

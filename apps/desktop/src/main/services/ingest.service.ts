@@ -531,6 +531,35 @@ export interface IngestServiceOptions {
    */
   onPersonaDelivered?: () => void
   /**
+   * **外部驱动**的那三个消费者（`graph-export` / `graph-build` /
+   * `distill-work`）的 runnable。
+   *
+   * ## ★★★ 为什么必须注入进来（这修的是"声明有、执行没有"）
+   *
+   * `CONSUMERS` 声明了 7 个消费者，而 `runSharedConsumersOnce` 原来只驱动
+   * **3 个**。另外三个各自跑在 `FeedService` 的定时器与 `DistillService`
+   * 的调用里 —— 于是它们声明的 `dependsOn` **没有执行力**：
+   * 依赖闸在 `OutboxConsumer` 里，而那三个都不是 `OutboxConsumer`
+   * （它们自己读写游标，压根不经过闸）。
+   *
+   * `topology.ts` 里那句「顺序从『记得写对』变成『算出来的』」对这三条边
+   * 还没兑现。而将来有人把 `tickGraphSync` 里的两步拆开，那条边就断了，
+   * 而**声明仍然说它在**。
+   *
+   * ## ★★ 为什么是注入而不是这里 import 那两个 service
+   *
+   * `IngestService` 不认识 `FeedService`（依赖方向是 dataPlane → feed）。
+   * 反过来接会形成循环，而且会让采集器在单测里必须造一个 feed
+   * （它要导出目录、kl 配置、Python 环境）。
+   *
+   * 不给 = 那三个消费者在 `runCycle` 里报 `absent: true` ——
+   * 与"这套部署没起 kl 服务"同一个表达（正确）。
+   *
+   * ★ 用 `() => Map` 而不是 `Map`：runnable 依赖的 service 是**挂载后**
+   * 才有的（`attach()`），构造时取一次会永远拿到空的。
+   */
+  externalRunnables?: () => ReadonlyMap<string, CycleRunnable>
+  /**
    * 采集轮询周期（可配置，来自设置页 → `dh_settings.ingestIntervals`）。
    *
    * ★ `probeBaseMs` 默认 **10 秒**（用户可在 5–120s 间调）。它是探针的
@@ -904,22 +933,29 @@ export class IngestService {
        */
       required: true,
       /**
-       * ★★★ 蒸馏**不许跑在图谱导出前面**。
+       * ## ★★★ 这里原来是 `dependsOn: ["graph-export"]`，而那条边**贴错了消费者**
        *
-       * 用户原话：「forge 蒸馏可能还会引用 kl-graph 第二阶段的 fact 之类的」
-       * 「每个消费者都根据当前/当前一些消费者一起干活」。
+       * 原来的理由写的是「蒸馏引用图谱抽出来的 fact」。核对源码之后那句话
+       * 是错的：`packages/distill/src/consumer.ts` 的 import 只有三行
+       * （kernel / store 的两个 repository / ./runner.js），它的 handler 做的
+       * 唯一一件事是把 changelog 的 seq 映射成时间窗、enqueue 进
+       * `distill_tasks` —— **全文不 import 任何图谱**、不读 `knowledge.db`。
        *
-       * 判据：蒸馏引用图谱抽出来的 fact。若蒸馏游标到了 seq=1000 而
-       * graph-export 只到 200，那 200–1000 那段的 fact **还不存在** ——
-       * 蒸馏会照常"成功"，只是画像里缺了那一段知识，而且游标已经推过去，
-       * **永远不会重来**。不报错、不重试，与"那段时间没内容"完全同形。
+       * 真正读 kl 图库的是 `map/playbook-chunks.ts`（只读 `chunks` 表），
+       * 而它属于 **`distill-work`** 那个消费者 —— 那条边现在挂在它身上
+       * （`topology.ts` 里 `distill-work.dependsOn` 有 `graph-build`，
+       * 而且上游是 **build** 不是 export：chunks 要等 `kl ingest` 跑完才更新，
+       * 两者相差小时级）。
        *
-       * ★ 实现是把批次上界夹到上游（不是整轮不干活）：
-       * 慢的图谱不会把蒸馏停死，只会让它按图谱的进度跟着走。
-       * ★ graph-export 没注册时不夹 —— 那说明这套部署没起 kl 服务，
-       * 夹成 0 会让蒸馏永久停住（静默功能回归）。
+       * ## 留着它的代价（不是零）
+       *
+       * kl 服务没起时闸不生效（上游没注册就不夹），所以平时看不出来。
+       * 但 kl 起着而导出慢时（实测导出 1 秒、建图 2 小时），蒸馏会白等一个
+       * 它不需要的上游 —— 而它要的语料就在 `messages` 表里。
+       *
+       * ★ 这里**不再传 `dependsOn`**，与 `CONSUMERS` 里那一行一致
+       * （`topology.test.ts` 有一条门禁锁住两者相同）。
        */
-      dependsOn: ["graph-export"],
     })
 
     const supervisor = options.personaSupervisor
@@ -2772,9 +2808,23 @@ export class IngestService {
    * · 每个消费者这一轮干了什么会**返回**（含"在等哪个上游"），
    *   而不是只写日志 —— 状态页因此能显示"蒸馏在等图谱"而不是"没进展"。
    *
-   * ★ `graph-export` 不在这个 map 里：它由 kl 服务侧推进（外部消费者）。
-   * `runCycle` 对缺席的消费者记 `absent: true` 并继续 —— 而它作为
-   * `distill` 的上游仍然通过 `OutboxConsumer.dependsOn` 那道闸起作用。
+   * ## ★★★ 七个消费者**全部**走这一轮（修 G12）
+   *
+   * 这个 map 原来只有三个（fts / distill / persona-inbox），而
+   * `graph-export` / `graph-build` / `distill-work` 各自跑在别处的定时器里。
+   * 后果不是报错，而是它们声明的 `dependsOn` **没有执行力** ——
+   * 依赖闸在 `OutboxConsumer` 里，而那三个都不是 `OutboxConsumer`。
+   *
+   * 现在它们由 `externalRunnables` 注入（见那个字段的注释：
+   * `IngestService` 不认识 `FeedService`，所以只能注入）。
+   *
+   * ★★ 而**周期没有统一**：那三个的 `runOnce()` 内部各自判"这一轮该不该
+   * 真干活"（`decideAutoBuild` / `decideWorkRefresh`），不该干时立刻返回。
+   * 统一周期的话就是每 2 分钟问一次"要不要建图"，而建图是小时级的。
+   *
+   * ★★★ 也正因为顺序执行，那三个的 `runOnce()` **必须立即返回** ——
+   * 一个 await 到建图完成的实现会把整轮堵住两小时，而 `local-index-fts`
+   * 排在同一轮里且它 `required: true`（落后时历史不能裁）。
    */
   async runSharedConsumersOnce(): Promise<readonly ConsumerOutcome[]> {
     const runnables = new Map<string, CycleRunnable>([
@@ -2783,6 +2833,14 @@ export class IngestService {
     ])
     if (this.personaConsumer !== null) {
       runnables.set(PERSONA_CONSUMER_ID, this.personaConsumer)
+    }
+    /**
+     * ★ 外部 runnable 现取（见 `externalRunnables` 的注释：它们依赖的
+     * service 是挂载后才有的）。没给 / 还没挂载 → 那三个报 `absent: true`，
+     * 与"这套部署没起 kl 服务"同一个表达。
+     */
+    for (const [id, runnable] of this.options.externalRunnables?.() ?? []) {
+      runnables.set(id, runnable)
     }
     const outcomes = await runCycle(runnables)
     /**

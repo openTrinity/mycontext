@@ -24,6 +24,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { BrandWordmark, Button } from "@mycontext/design"
 import type {
+  AttentionModeValue,
   ChannelSummary,
   DistillSourceId,
   OnboardingStepId,
@@ -85,18 +86,34 @@ const DEFAULT_SOURCES: SourcesDraft = {
   // 缺省只勾**已接入**的两个：勾上未接入的等于给一个不会兑现的承诺
   enabledSources: ["chat", "minutes"],
   /**
-   * ★★ 缺省**不勾任何监听会话**，而它的含义是"盯全部已学习的会话"。
-   *
-   * 判据在 `AttentionRouter.route()`：名单为空 → 放行（迁移期的正确一侧，
-   * 否则存量用户的分身会整个静默）。所以这个空数组不是"关掉分身"，
-   * 而是"不收窄"—— 界面上必须把这句话说出来（见 `AttentionSection` 里那段
-   * `attentionEmptyMeaning`），否则用户会以为不勾就等于不启用。
+   * ★★ 缺省**不勾任何监听会话**，而它的含义由下面的 `attentionMode` 说清。
    *
    * ★ 为什么不缺省勾全部：那样保存时会写一份**具体的**名单进
    * `attention_scope`，而 `enabled_at` 只能变早、名单只增 ——
    * 等于替用户做了一个比"不收窄"更难撤回的决定。
    */
   attentionConversationIds: [],
+  /**
+   * ★★★ 缺省 `"all"`（盯全部已学习的会话），而且这个值是**显式**的。
+   *
+   * ## 为什么缺省是"全部"而不是"都不盯"
+   *
+   * 与学习范围的缺省（`collect-nothing`，一个都不采）方向**相反**，
+   * 而两者都对 —— 代价不对称的方向不同：
+   * · 采集的默认值若放宽 = **隐私事故**（采了用户没同意的历史）；
+   * · 投递的默认值若收紧 = **功能消失**（分身不干活，且用户无从排查）。
+   *
+   * ## ★★ 但它必须是**显式的** `"all"`，不是 `undefined`
+   *
+   * 那是这一整个改动的要点：`undefined`（"没表态"）与 `"all"`
+   * （"我选了全部"）在旧存储里同形，于是三个不同的用户意图挤在一个
+   * 空数组里 —— 其中「都不盯」压根表达不出来，而「把全部关掉」的
+   * 旧行为方向是反的（关光了反而盯得更多）。
+   *
+   * 界面上这个缺省对应 picker 的第一项被选中，用户看到的是一个
+   * **已经做出的选择**，而不是一句要他推断的解释。
+   */
+  attentionMode: "all",
 }
 
 /**
@@ -139,6 +156,8 @@ function readSources(row: OnboardingStepView | undefined): SourcesDraft {
     enabledSources?: unknown
     /** 监听会话（v29 这一轮新加；旧 payload 里没有 → `strings()` 给空数组） */
     attentionConversationIds?: unknown
+    /** 监听**模式**（这一轮新加；旧 payload 里没有 → 按勾选数推断，见下） */
+    mode?: unknown
   }
   const strings = (value: unknown): string[] =>
     Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
@@ -176,6 +195,23 @@ function readSources(row: OnboardingStepView | undefined): SourcesDraft {
      * 监听会话，而用户没有做过那个选择。
      */
     attentionConversationIds: strings(record.attentionConversationIds),
+    /**
+     * ★★ 回填监听**模式**。
+     *
+     * 旧 payload 里没有这个键，此时按"勾了就 explicit、没勾就 all"推断 ——
+     * 那与改动前的**实际效果**一致（不勾 = 放行全部），所以重进引导的
+     * 用户看到的是他上次那个选择，而不是一个被重置的默认值。
+     *
+     * ★ 不认识的值（手改过的 payload）也回落到推断，而不是原样带上 ——
+     * 一个非法的 mode 传到契约层会被 zod 拒掉，而那时整步保存失败，
+     * 用户看到的是"下一步点了没反应"。
+     */
+    attentionMode:
+      record.mode === "all" || record.mode === "explicit"
+        ? record.mode
+        : strings(record.attentionConversationIds).length > 0
+          ? "explicit"
+          : "all",
   }
 }
 
@@ -555,18 +591,41 @@ export function OnboardingView() {
        * 步骤顺序保证了 sources 的 `saveSource` 已经先跑过（上一步），
        * 所以这里的并入不会被它覆盖。
        *
-       * ## ★★ 空数组时**不调**这个接口
+       * ## ★★★ 空数组也**必须**保存（这修的是一个真实的表达缺口）
        *
-       * 契约要求 `conversationExternalIds` 至少一个（`.min(1)`）。
-       * 语义上空 = "不收窄"（名单为空 → 路由放行全部）。调一次空的保存
-       * 既会报错，也会让人以为"存了一个空名单"（而表本就是空的）。
+       * 改动前这里是 `if (sources.attentionConversationIds.length > 0)` ——
+       * 理由是契约要求至少一个（`.min(1)`）。而那个组合逼出了一个缺口：
+       * 「我一个都不勾」这个动作**完全没有落库痕迹**，于是
+       * "从没配过"与"显式选了盯全部"在库里同形。
+       *
+       * 而第三个意图（「先都不盯」）压根表达不出来 —— 因为它也是空数组，
+       * 而空数组在旧路由里被读成"放行全部"（方向相反）。
+       *
+       * 现在契约允许空数组，含义由 `mode` 决定：
+       * · `all` + 空 = 盯全部已学习的会话；
+       * · `explicit` + 空 = 都不盯。
+       *
+       * ★★ 所以这里**一定要调一次** —— 哪怕名单是空的，那次调用写的是
+       * `mode`，而 mode 正是"用户表过态"这个事实本身。
        *
        * ## ★ 按渠道分桶
        *
        * `attention_scope` 是 per-channel 表，勾选列表混着多个渠道。整批塞给
        * 一个渠道 = 写进一批**不存在的 id**，路由永远命中不了且不报错。
+       *
+       * ★ 名单为空时也要**至少给一个渠道**写 mode（否则那次表态落不了地）。
+       * 判据取当前已连的渠道；一个都没有时回落主渠道 —— 那与上面
+       * 学习范围那侧的 `PRIMARY_CHANNEL_ID` 回落是同一条。
        */
-      if (sources.attentionConversationIds.length > 0) {
+      {
+        /**
+         * ★★ mode 的推断只在**存量草稿**（`attentionMode` 为 undefined）时发生。
+         * 新草稿一律有显式值（`DEFAULT_SOURCES` 给了 `"all"`，
+         * 而用户在 picker 上的每次点击都会写它）。
+         */
+        const mode: AttentionModeValue =
+          sources.attentionMode ??
+          (sources.attentionConversationIds.length > 0 ? "explicit" : "all")
         const channelOf = new Map(
           (conversationList.data?.items ?? []).map((item) => [item.externalId, item.channelId]),
         )
@@ -575,15 +634,28 @@ export function OnboardingView() {
           const channelId = channelOf.get(id) ?? PRIMARY_CHANNEL_ID
           attentionBuckets.set(channelId, [...(attentionBuckets.get(channelId) ?? []), id])
         }
+        /**
+         * ★ 名单空 ⇒ 没有桶，但 mode 仍要写。给每个**已连渠道**各写一次：
+         * mode 是 per-channel 的，只写主渠道会让飞书那侧永远停在 `unset`
+         * （于是分身在那个渠道上继续放行全部 —— 而用户明确选了别的）。
+         */
+        if (attentionBuckets.size === 0) {
+          for (const channelId of authorizedChannelIds) attentionBuckets.set(channelId, [])
+          if (attentionBuckets.size === 0) attentionBuckets.set(PRIMARY_CHANNEL_ID, [])
+        }
         for (const [channelId, ids] of attentionBuckets) {
           /**
            * ★ 不传 `enabledAt` —— 让**主进程的时钟**决定"从现在开始"
            * （见 `attentionScopeSave` 的注释）。
            */
-          saveAttention.mutate({ channelId, conversationExternalIds: ids })
+          saveAttention.mutate({ channelId, conversationExternalIds: ids, mode })
         }
+        completeStep.mutate({
+          step: "attention",
+          // ★ payload 带 mode：重进引导时要能复原那个选择（见 `readSources`）
+          payload: { ids: sources.attentionConversationIds, mode },
+        })
       }
-      completeStep.mutate({ step: "attention", payload: { ids: sources.attentionConversationIds } })
     } else if (activeId === "channel") {
       completeStep.mutate({ step: "channel" })
     } else if (activeId === "model") {

@@ -33,9 +33,18 @@ import {
   type SelfIdentityView,
 } from "@mycontext/ipc-contract"
 import { AUTO_BUILD_MIN_INTERVAL_MS } from "@mycontext/knowledge-feed"
+import { GRAPH_BUILD_CONSUMER_ID, GRAPH_SYNC_CONSUMER_ID } from "@mycontext/knowledge-feed"
 import { buildDomainStatuses } from "@mycontext/ingest"
+import type { CycleRunnable } from "@mycontext/ingest"
 import { IngestService } from "./ingest.service.js"
+import { WORK_CONSUMER_ID } from "./distill.service.js"
 import type { FeedDirs, FeedService } from "./feed.service.js"
+import {
+  createGraphBuildRunnable,
+  createGraphExportRunnable,
+  createWorkLayerRunnable,
+  type WorkLayerLike,
+} from "./data-plane-runnables.js"
 
 export interface DataPlaneOptions {
   clock: Clock
@@ -80,6 +89,26 @@ export interface DataPlaneOptions {
     documentsMs?: number
     activeScanMs?: number
   }
+  /**
+   * work 层（`distill-work` 消费者）的驱动入口。
+   *
+   * ## ★★★ 为什么它要经过这里（而不是让 DistillService 自己跑）
+   *
+   * `distill-work` 声明了 `dependsOn: ["distill", "graph-build"]`，而它
+   * 原来只由 `DistillService` 内部的定时器驱动 —— 于是那两条边**没有
+   * 执行力**（依赖闸在 `OutboxConsumer` 里，而 work 层不是）。
+   *
+   * 接进 `runCycle` 之后顺序由声明算出来，状态页也能说出
+   * 「work 在等建图」而不是「work 没进展」。
+   *
+   * ★ 用函数而不是实例：`DistillService.attach` 与 `DataPlane.attach` 的
+   * 先后由 startup 决定，传实例会拿到一个 attach 之前的 null
+   * （与 `getPersonaSupervisor` 同一条）。
+   *
+   * ★ 不给 = `distill-work` 在 `runCycle` 里报 `absent`（正确：
+   * 那说明这套部署没接 work 层）。
+   */
+  getWorkLayer?: () => WorkLayerLike | null
 }
 
 export interface DataPlaneSourceAttachment {
@@ -248,6 +277,34 @@ export class DataPlaneService {
   }
 
   /**
+   * 造那三个**外部驱动**消费者的 runnable（`graph-export` / `graph-build` /
+   * `distill-work`），给 `IngestService.runSharedConsumersOnce` 用。
+   *
+   * ## ★★ 为什么每轮现造（而不是构造时造一次存起来）
+   *
+   * runnable 是无状态的闭包，造它很便宜（三个对象字面量）；
+   * 而它捕获的 `getWorkLayer()` 必须**现取** —— work 层是 attach 之后
+   * 才有的，构造时取一次会永远拿到 null。
+   *
+   * ★ work 层没接上时**只给两个**（`distill-work` 因此在 `runCycle` 里报
+   * `absent: true`）—— 那与"这套部署没接 work 层"是同一句话，
+   * 而给一个空转的 runnable 会让状态页显示"它在跑、只是没进展"（假的）。
+   */
+  private externalRunnables(): ReadonlyMap<string, CycleRunnable> {
+    const feed = this.options.feed
+    const logger = this.options.logger.child("Cycle")
+    const map = new Map<string, CycleRunnable>([
+      [GRAPH_SYNC_CONSUMER_ID, createGraphExportRunnable(feed, logger)],
+      [GRAPH_BUILD_CONSUMER_ID, createGraphBuildRunnable(feed)],
+    ])
+    const work = this.options.getWorkLayer?.() ?? null
+    if (work !== null) {
+      map.set(WORK_CONSUMER_ID, createWorkLayerRunnable(work, feed, logger))
+    }
+    return map
+  }
+
+  /**
    * vault 挂载。`dbPath` 用于统计 WAL 体积（状态页显示）。
    *
    * `feedDirs` 只是**透传**给 `FeedService`（导出与 handoff 的落点按 vault 分）。
@@ -337,6 +394,14 @@ export class DataPlaneService {
         }
         return out
       },
+      /**
+       * ★★★ 那三个**外部驱动**消费者的 runnable（修 G12）。
+       *
+       * 传函数而不是 map：runnable 捕获的 work 层是 attach 之后才有的
+       * （见 `externalRunnables()` 的注释）。而 `IngestService` 不认识
+       * `FeedService`（依赖方向是 dataPlane → feed），所以只能从这里注入。
+       */
+      externalRunnables: () => this.externalRunnables(),
     })
 
     /**

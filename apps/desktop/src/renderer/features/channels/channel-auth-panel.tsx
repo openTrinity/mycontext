@@ -133,7 +133,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    * ## ★★ 用 `selfIdentity.openIds` 的 openId，**不是** `status.userId`
    *
    * `AuthStatus.userId` 来自 `dws auth status` 的 `user_id` —— 实测那是**数字
-   * userId**（如 `494542`），**不是** openDingTalkId（`D…` 开头）。而头像那条路
+   * userId**（如 `100001`），**不是** openDingTalkId（`D…` 开头）。而头像那条路
    * （`chat group members list-by-ids --users` / `media.selfAvatar` 落缓存的键）
    * 认的是 **openDingTalkId**。拿 userId 去查：要么服务端 `1001 Decode parameter
    * error`，要么与 `selfAvatar` 写入缓存用的键对不上 → 永远命中不到。

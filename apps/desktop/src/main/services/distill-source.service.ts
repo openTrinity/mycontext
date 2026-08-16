@@ -373,7 +373,16 @@ export class DistillSourceService {
   attentionScope(input: { channelId: string }): AttentionScopeView {
     const db = this.dbForChannel(input.channelId)
     if (db === null) {
-      return { items: [], activeCount: 0, coverage: { routed: 0, skipped: 0, days: 0 } }
+      /**
+       * ★ 库还没挂上时 `mode` 报 `unset` 而不是编一个 —— 那是"我们还不知道"，
+       * 与"用户没配过"恰好同一句话（界面对两者要说的也是同一句）。
+       */
+      return {
+        items: [],
+        activeCount: 0,
+        mode: "unset",
+        coverage: { routed: 0, skipped: 0, days: 0 },
+      }
     }
     const repo = new AttentionScopeRepository(db)
     const rows = repo.list(input.channelId)
@@ -406,7 +415,19 @@ export class DistillSourceService {
       toDayBucket(now - 30 * 86_400_000),
       toDayBucket(now),
     )
-    return { items, activeCount: repo.activeCount(input.channelId), coverage }
+    return {
+      items,
+      activeCount: repo.activeCount(input.channelId),
+      /**
+       * ★★ 从库里读**真实的** mode，不从 `activeCount` 反推。
+       *
+       * 反推是旧的错误：`activeCount === 0` 有三种可能的成因
+       * （从没配过 / 显式选了全部 / 把全部关掉），而它们在界面上
+       * 该说三句不同的话。见 `AttentionMode` 的文件内注释。
+       */
+      mode: repo.mode(input.channelId),
+      coverage,
+    }
   }
 
   /**
@@ -425,7 +446,20 @@ export class DistillSourceService {
       })
     }
     const at = this.options.clock.now()
-    const changed = new AttentionScopeRepository(db).add(
+    const scopeRepo = new AttentionScopeRepository(db)
+    /**
+     * ★★★ **先写 mode**，再写名单。
+     *
+     * 顺序有理由：mode 是"用户表态了"这个事实，而名单是那个表态的内容。
+     * 反过来的话中途失败会留下"有名单但 mode 还是 unset"——
+     * 而 `unset` 的行为是放行全部，于是用户刚刚勾的那几个会话
+     * **反而没有收窄效果**。那正是这一整个改动要消灭的方向。
+     *
+     * ★ 而"有 mode 没名单"是安全的：`explicit` + 空名单 = 都不盯
+     * （保守），`all` + 空名单 = 盯全部（正是它的语义）。
+     */
+    scopeRepo.setMode(input.channelId, input.mode, at)
+    const changed = scopeRepo.add(
       input.channelId,
       input.conversationExternalIds.map((conversationExternalId) => ({
         conversationExternalId,
@@ -496,6 +530,8 @@ export class DistillSourceService {
     this.options.logger.info("attention scope saved", {
       channelId: input.channelId,
       requested: input.conversationExternalIds.length,
+      // ★ 记 mode：它决定名单为空时的行为，而那正是最容易搞反的一处
+      mode: input.mode,
       changed,
       mergedIntoLearning,
     })
@@ -508,6 +544,18 @@ export class DistillSourceService {
    * ★★ 这个动作**是允许的**，与学习范围的「只增不减」不冲突：
    * 监听范围不存任何历史，关掉它只是"以后别管这个群"，没有已有产出
    * 会因此不自洽。把两者混成一条规则会让用户永远无法让分身停下来。
+   *
+   * ## ★★★ 关掉时**顺带把 mode 钉成 `explicit`**
+   *
+   * 这一行修的是那个方向错误：用户逐个关到最后一个之后，旧判据
+   * （`activeCount === 0` → 放行全部）会让**分身盯得更多**。
+   *
+   * 而"用户在关会话"这个动作本身就证明他在**显式管理名单** ——
+   * 所以把 mode 钉成 `explicit` 是对他意图的忠实记录，而不是替他做决定。
+   * 之后名单归零时 `explicit` 的语义（一条都不放行）正是他要的。
+   *
+   * ★ 即使 `disable` 没有命中任何行（`ok === false`）也写 mode：
+   * 那说明那个会话本来就不在名单里，而用户的意图仍然是"我在收窄"。
    */
   attentionScopeDisable(input: AttentionScopeDisableInput): true {
     const db = this.dbForChannel(input.channelId)
@@ -516,11 +564,10 @@ export class DistillSourceService {
         messageKey: "errors:channel.notReady",
       })
     }
-    const ok = new AttentionScopeRepository(db).disable(
-      input.channelId,
-      input.conversationExternalId,
-      this.options.clock.now(),
-    )
+    const repo = new AttentionScopeRepository(db)
+    const at = this.options.clock.now()
+    repo.setMode(input.channelId, "explicit", at)
+    const ok = repo.disable(input.channelId, input.conversationExternalId, at)
     this.options.logger.info("attention scope disabled", {
       channelId: input.channelId,
       changed: ok,

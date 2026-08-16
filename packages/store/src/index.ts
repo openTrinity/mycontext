@@ -120,11 +120,15 @@ export {
   AttentionScopeRepository,
   AttentionCoverageRepository,
   routeToAttention,
+  attentionModeKey,
+  parseAttentionMode,
+  ATTENTION_MODE_KEY_PREFIX,
 } from "./repositories/attention-scope.js"
 export type {
   AttentionScopeRow,
   AttentionRoute,
   AttentionRouteInput,
+  AttentionMode,
 } from "./repositories/attention-scope.js"
 /**
  * 路由器 —— 快通道与慢兜底**共用**的那道监听范围闸。

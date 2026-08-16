@@ -84,9 +84,46 @@ describe("拓扑声明：id 必须与真实常量一致", () => {
     }
   })
 
-  it("★★ 蒸馏声明依赖图谱导出（用户点名的那条依赖）", () => {
+  it("★★★ 蒸馏**不**依赖图谱导出 —— 它压根不读图谱（修 G13）", () => {
+    /**
+     * ## 这一条这一轮**换了方向**，而依据是源码
+     *
+     * 原来它断言 `dependsOn === ["graph-export"]`，理由写的是
+     * "蒸馏引用图谱抽出的 fact"。核对之后那句话是错的：
+     *
+     * `packages/distill/src/consumer.ts` 的 import 只有三行
+     * （kernel / store 的两个 repository / ./runner.js），handler 做的
+     * 唯一一件事是把 changelog 的 seq 映射成时间窗、enqueue 进
+     * `distill_tasks` —— **不 import 任何图谱**、不读 `knowledge.db`。
+     *
+     * 真正读 kl 图库的是 `map/playbook-chunks.ts`（只读 `chunks` 表），
+     * 而它属于 **`distill-work`** 那个消费者。所以那条边贴错了消费者。
+     *
+     * ## 留着它的代价（不是零）
+     *
+     * kl 服务没起时依赖闸不生效（上游没注册就不夹），所以平时看不出来。
+     * 但 kl 起着而导出慢时（导出 1 秒、建图 2 小时），`distill` 会白等一个
+     * 它不需要的上游 —— 而它要的语料就在 `messages` 表里。
+     *
+     * 更贵的那一半是**声明说了谎**：读这一行的人会以为蒸馏读图谱，
+     * 于是排查"画像缺了一段"时去查图谱，而真因在别处。
+     */
     const distill = CONSUMERS.find((spec) => spec.id === DISTILL_CONSUMER_ID)
-    expect(distill?.dependsOn).toEqual(["graph-export"])
+    expect(distill?.dependsOn).toEqual([])
+  })
+
+  it("★★★ 反证：蒸馏 handler 真的不 import 图谱（上一条的依据）", async () => {
+    /**
+     * 上一条断言的是**声明**，这一条锁的是那个声明所依据的**事实** ——
+     * 否则将来有人给蒸馏 handler 加上读图谱的代码，声明就又错了，
+     * 而没有任何东西会提醒他补回那条边。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/distill/src/consumer.ts", "utf8")
+    expect(src).not.toContain("knowledge.db")
+    expect(src).not.toContain("playbook")
+    // ★ 而它确实在做"切窗入队"这件事（没被顺手改成别的）
+    expect(src).toContain("DistillTaskRepository")
   })
 
   it("★★ required 的取舍与既有实现一致（丢了能不能补回来）", () => {
@@ -142,26 +179,40 @@ describe("拓扑声明：id 必须与真实常量一致", () => {
     expect(src).toContain('WORK_CONSUMER_ID = "distill-work"')
   })
 
-  it("★★ 新增的两条依赖边：build 依赖 export、work 依赖 distill", () => {
+  it("★★ 三条依赖边：build←export、work←distill、★work←build", () => {
     /**
-     * 这两条边原来是**隐式**成立的（同一个 service 内的顺序调用）。
+     * 前两条原来是**隐式**成立的（同一个 service 内的顺序调用）。
      * 声明它们让顺序从"记得写对"变成"算出来的"，且状态页能说出
      * 「建图在等导出」而不是「建图没进展」—— 两者数字同形、出路不同。
      *
      * ★ 判据的实质：建图读的是**已导出**的四件套。跑在导出前面就是拿旧
      * 快照建图，而它会照常"成功"（那是本仓库最贵的那类静默降级）。
+     *
+     * ## ★★★ 第三条是这一轮新加的，它**取代**了原来挂在 distill 上那条
+     *
+     * playbook 归纳读 kl 的 `chunks` 表（`map/playbook-chunks.ts`），
+     * 而那张表要等 `kl ingest` 跑完才更新 —— 所以正确的上游是
+     * **build** 而不是 export（导出完成只说明四件套是新的，两者相差小时级）。
+     *
+     * 建图没跑完时 chunks 是旧的或空的，于是归纳出的"工作套路"来自一份
+     * 过期快照 —— 而它同样会"成功"，产出一份看起来很有底气的错误画像。
      */
     const by = new Map(CONSUMERS.map((spec) => [spec.id, spec]))
     expect(by.get(GRAPH_BUILD_CONSUMER_ID)?.dependsOn).toEqual([GRAPH_SYNC_CONSUMER_ID])
-    expect(by.get("distill-work")?.dependsOn).toEqual([DISTILL_CONSUMER_ID])
+    expect(by.get("distill-work")?.dependsOn).toEqual([
+      DISTILL_CONSUMER_ID,
+      GRAPH_BUILD_CONSUMER_ID,
+    ])
   })
 
-  it("★★★ 拓扑序把这两条新边也算对了", () => {
+  it("★★★ 拓扑序把三条边都算对了（work 排在 distill 与 build 之后）", () => {
     const order = resolveConsumerOrder()
     expect(order.indexOf(GRAPH_SYNC_CONSUMER_ID)).toBeLessThan(
       order.indexOf(GRAPH_BUILD_CONSUMER_ID),
     )
     expect(order.indexOf(DISTILL_CONSUMER_ID)).toBeLessThan(order.indexOf("distill-work"))
+    // ★ 新边：work 也必须排在建图之后（它读建图产出的 chunks）
+    expect(order.indexOf(GRAPH_BUILD_CONSUMER_ID)).toBeLessThan(order.indexOf("distill-work"))
   })
 
   it("★★ 没接线的消费者标 unwired 且说清原因（G7）", () => {
@@ -393,7 +444,7 @@ describe("拓扑自检：声明与事实必须一致", () => {
      * 若这条不红，那么删掉 `PRODUCERS` 里任意一行都不会有人发现。
      */
     const problems = checkTopologyConsistency({
-      domains: [{ id: "doc", producedBy: "active", purpose: "文档" }],
+      domains: [{ id: "doc", kind: "collectable", producedBy: "active", purpose: "文档" }],
       producers: [],
       consumers: [],
     })
@@ -403,7 +454,7 @@ describe("拓扑自检：声明与事实必须一致", () => {
 
   it("★★★ 标 absent 却必须写清原因（否则「没做」与「坏了」同形）", () => {
     const problems = checkTopologyConsistency({
-      domains: [{ id: "contact", producedBy: "absent", purpose: "通讯录" }],
+      domains: [{ id: "contact", kind: "legacy-only", producedBy: "absent", purpose: "通讯录" }],
       producers: [],
       consumers: [],
     })
@@ -416,7 +467,15 @@ describe("拓扑自检：声明与事实必须一致", () => {
      * 而它永远收不到任何一条。用户读到的是"它追平了"。
      */
     const problems = checkTopologyConsistency({
-      domains: [{ id: "contact", producedBy: "absent", purpose: "通讯录", absentReason: "PII" }],
+      domains: [
+        {
+          id: "contact",
+          kind: "legacy-only",
+          producedBy: "absent",
+          purpose: "通讯录",
+          absentReason: "PII",
+        },
+      ],
       producers: [],
       consumers: [
         {
@@ -503,13 +562,15 @@ describe("拓扑自检：声明与事实必须一致", () => {
      * 而 changelog 里其实永远是空的 —— 那正是这套自检要防的形状。
      */
     const problems = checkTopologyConsistency({
-      domains: [{ id: "chat", producedBy: "active", purpose: "聊天" }],
+      domains: [{ id: "chat", kind: "collectable", producedBy: "active", purpose: "聊天" }],
       producers: [
         {
           id: "attention-stream",
           domains: ["chat"],
           scope: "attention",
           backfills: false,
+          schedule: "stream",
+          haltsOnScopeNotReady: false,
           purpose: "路由",
         },
       ],

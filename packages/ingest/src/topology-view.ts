@@ -160,16 +160,53 @@ export function buildConsumerStatuses(input: TopologyViewInput): readonly Consum
  * ★ `head` 缺省 0 而不是 undefined：`domainHeads()` 只返回**确实有数据**的域
  * （与 GROUP BY 语义一致）。界面上"这个域还没有任何条目"就是 0，
  * 而"这个域没有生产者"由 `producedBy: 'absent'` 表达 —— 两件事不能混。
+ *
+ * ## ★★★ `legacy-only` 的域**整行不出**（修 G18）
+ *
+ * `contact` 永远不会有采集器（PII 命令不进白名单，CLAUDE.md §5）。
+ * 给它一行的后果是界面上永久显示一个"通讯录 0 条、lag 0" ——
+ * 而那读起来像坏了。`absentReason` 能解释"为什么空"，但它解释不了
+ * "为什么这一行还在这里" —— 用户对一个永远不会变的行没有任何可做的事。
+ *
+ * ★ 过滤在**这一层**而不是在界面：界面有三处（状态页拓扑卡、
+ * 引导的覆盖面、将来的诊断导出），各自过滤一次就会有一处忘掉。
+ *
+ * ## ★★ 渠道能力过滤（修 G17）
+ *
+ * `channelDomains` 给了的话，再过一道"这个渠道有没有这个能力" ——
+ * 只连飞书的部署不该看到"听记 0 场"（它没有听记接口）。
+ * 不给 = 不过滤（保留既有行为，单测与不关心渠道的调用方都走这条）。
  */
 export function buildDomainStatuses(input: {
   domainHeads: Readonly<Record<string, number>>
   domains?: readonly DomainSpec[]
+  /**
+   * 当前这些渠道自述的域能力（并集）。`undefined` = 不按渠道过滤。
+   *
+   * ★ 收**并集**而不是单个渠道：状态页显示的是"这个 vault 的数据平面"，
+   * 而一个 vault 可能挂着多个渠道（钉钉 + 飞书）。任一渠道有听记能力，
+   * 听记那一行就该显示。
+   */
+  channelDomains?: readonly string[]
 }): readonly DomainStatus[] {
-  return (input.domains ?? DOMAINS).map((domain) => ({
-    id: domain.id,
-    purpose: domain.purpose,
-    producedBy: domain.producedBy,
-    absentReason: domain.absentReason ?? null,
-    head: input.domainHeads[domain.id] ?? 0,
-  }))
+  const capable = input.channelDomains === undefined ? null : new Set(input.channelDomains)
+  return (input.domains ?? DOMAINS)
+    .filter((domain) => {
+      // 见上面那段 ★★★：仅为历史兼容保留的域不占界面
+      if (domain.kind === "legacy-only") return false
+      if (capable === null) return true
+      /**
+       * ★ 声明限了渠道时才按能力过滤。没限的域（chat / doc）无条件显示 ——
+       * 那样"渠道还没授权"（capabilities 为空）不会让整块拓扑消失。
+       */
+      if (domain.channels === undefined) return true
+      return capable.has(domain.id)
+    })
+    .map((domain) => ({
+      id: domain.id,
+      purpose: domain.purpose,
+      producedBy: domain.producedBy,
+      absentReason: domain.absentReason ?? null,
+      head: input.domainHeads[domain.id] ?? 0,
+    }))
 }

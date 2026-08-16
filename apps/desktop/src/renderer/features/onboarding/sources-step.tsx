@@ -31,7 +31,11 @@
  */
 import { useMemo, useState } from "react"
 import { Button, Checkbox, Input, cn } from "@mycontext/design"
-import type { ChannelConversationView, DistillSourceId } from "@mycontext/ipc-contract"
+import type {
+  AttentionModeValue,
+  ChannelConversationView,
+  DistillSourceId,
+} from "@mycontext/ipc-contract"
 import { useChannelConversations } from "../../lib/queries.js"
 import { CHANNEL_BRAND_ICONS } from "../channels/channel-icons.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
@@ -189,6 +193,30 @@ export interface SourcesDraft {
    * 于是它不回或回得离谱，而用户完全看不出成因。
    */
   attentionConversationIds: string[]
+  /**
+   * 监听范围的**模式**（三态）。
+   *
+   * ## ★★★ 为什么名单之外还要一个模式
+   *
+   * `attentionConversationIds: []` 表达不了**三个不同的意图**，
+   * 而其中一个的旧行为方向是反的：
+   *
+   * | 用户的意图 | 旧存储 | 旧行为 |
+   * |---|---|---|
+   * | 还没表态 | `[]` | 放行全部（对） |
+   * | 显式选「盯全部」 | `[]` | 放行全部（对，但没留痕） |
+   * | 「都不盯」 | **表达不出来** | —— |
+   * | 设置里把全部关掉 | 有行 `active=0` | **放行全部**（错：关光了盯得更多） |
+   *
+   * 所以 mode 与名单是两个正交的事实：mode 说"要不要收窄"，
+   * 名单说"收窄到哪几个"。判据的真源在 `@mycontext/store` 的
+   * `AttentionMode`，这里是引导草稿里的那一份。
+   *
+   * ★ `undefined` = 这份草稿还没表态（存量的引导记录读回来就是它）——
+   * 保存时按"有没有勾选"推断一次（见 `onboarding-view` 的保存分支），
+   * 而**新**草稿一律有显式值（`DEFAULT_SOURCES`）。
+   */
+  attentionMode?: AttentionModeValue
 }
 
 export interface SourcesStepProps {

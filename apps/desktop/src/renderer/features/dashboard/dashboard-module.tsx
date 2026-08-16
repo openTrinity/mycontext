@@ -217,7 +217,7 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
   /**
    * ★★ 本人头像的 externalId 用 **openId**，不是 `status.userId`。
    *
-   * 实测 `dws auth status` 的 `user_id` 是**数字 userId**（如 `494542`），
+   * 实测 `dws auth status` 的 `user_id` 是**数字 userId**（如 `100001`），
    * 而头像那条路（`list-by-ids --users` / `media.selfAvatar` 落缓存的键）认
    * **openDingTalkId**（`D…`）。拿 userId 查恒对不上 → 头像永远命中不到、只能
    * 回落首字母。openId 从本人身份行的 `openIds` 取（与设置里「从平台获取」同源）。
