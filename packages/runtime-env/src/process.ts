@@ -23,6 +23,35 @@ import { AppError, redact, type Logger } from "@mycontext/kernel"
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 30_000
 
+/**
+ * 把命令行 args 归一成「可安全进日志的命令形状」：保留子命令与 `--flag` 名，
+ * 但把每个 flag 的**值**换成 `‹…›`。
+ *
+ * ★ 为什么这么记：定位失败命令必须知道"跑的是哪条子命令"（如
+ * `chat group members list-by-ids`），而 flag 的值经常是身份信息
+ * （openConversationId / openDingTalkId / 花名）——那些一个字都不能进日志。
+ * 位置参数（不以 `-` 开头、且不跟在 flag 后）同样可能是 id，一并 mask。
+ */
+export function maskArgValues(args: readonly string[]): string {
+  const out: string[] = []
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i] ?? ""
+    if (token.startsWith("-")) {
+      out.push(token)
+      // `--flag value` 形态：下一个非 flag token 是值 → mask 并跳过
+      const next = args[i + 1]
+      if (next !== undefined && !next.startsWith("-")) {
+        out.push("‹…›")
+        i += 1
+      }
+    } else {
+      // 裸 token：子命令名一般是小写字母/连字符；含其它字符的当值 mask
+      out.push(/^[a-z][a-z0-9-]*$/.test(token) ? token : "‹…›")
+    }
+  }
+  return out.join(" ")
+}
+
 export interface ExecSpec {
   executable: string
   args: string[]
@@ -398,6 +427,9 @@ export class ProcessRunner {
             this.logger.warn("process non-zero exit", {
               executable: spec.executable,
               exitCode: result.exitCode,
+              // ★ 记**命令形状**（子命令 + flag 名，flag 的值一律 masked）——
+              // 定位"哪条命令失败"必需，而 flag 值可能含身份信息（id/花名），不记。
+              command: maskArgValues(spec.args),
               stderr: redact({ tail: stderr.slice(-400) }),
             })
           }

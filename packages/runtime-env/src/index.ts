@@ -20,4 +20,5 @@ export {
 export type { PythonVersionProbe, ResolvedPython } from "./python.js"
 
 export { ProcessRunner } from "./process.js"
+export { maskArgValues } from "./process.js"
 export type { ExecSpec, ExecResult, SpawnSpec, DuplexSpec, DuplexHandle } from "./process.js"

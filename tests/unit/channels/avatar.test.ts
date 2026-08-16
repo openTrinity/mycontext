@@ -170,6 +170,30 @@ describe("★ 「有共同群但没设头像」不能报成「没有共同群」
     expect(result.reason).toBe("no_common_group")
   })
 
+  /**
+   * ★★ 非 openDingTalkId（userId 形态）→ **一次 list-by-ids 都不发**。
+   *
+   * 用户日志里 `list_group_member_by_ids ... Decode parameter error: 2` 刷屏，
+   * 就是拿一个非 `D` 开头的 id 当 `--users` 查、而共同群循环对每个群都调一次。
+   * 现在客户端先拦掉：不发命令，直接落 `no_common_group` 终态。
+   */
+  it("★★ id 不是 openDingTalkId（非 D 开头）→ 不发 list-by-ids，落 no_common_group", async () => {
+    const { cli, calls } = fakeCli({
+      groups: [{ openConversationId: "cidA" }, { openConversationId: "cidB" }],
+      memberByGroup: { cidA: { avatarMediaId: "@x" }, cidB: { avatarMediaId: "@y" } },
+    })
+    const result = await fetchAvatar(cli, {
+      openDingTalkId: "5024129301", // userId 形态，不是 D 开头
+      nick: "某人",
+      outputDir: outDir(),
+    })
+    // 一条 list-by-ids 都不该发（否则就是服务端 decode error 刷屏那条路）
+    expect(calls.filter((a) => a.includes("list-by-ids"))).toHaveLength(0)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe("no_common_group")
+  })
+
   it("搜到群但他不在里面（members 空）→ no_common_group", async () => {
     // 花名搜出来的群里没有他 —— 那与"没有共同群"是同一件事
     const { cli } = fakeCli({ groups: [{ openConversationId: "cidA" }], memberByGroup: {} })

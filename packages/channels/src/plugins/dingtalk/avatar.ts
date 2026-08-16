@@ -171,6 +171,23 @@ async function mediaIdFromGroup(
   openDingTalkId: string,
   signal?: AbortSignal,
 ): Promise<GroupMemberAvatar> {
+  /**
+   * ★★ `list-by-ids` 的 `--users` 只吃 **openDingTalkId**（钉钉 `D…` 开头那种）。
+   *
+   * 喂给它 userId 形态的 id，服务端必然回 `1001 / Decode parameter error: 2`
+   * （真机实测），而这个函数在"共同群"循环里对**每个群**都调一次 —— 于是一个
+   * 错 id 会刷出一串同样的报错（用户日志里那一片 `list_group_member_by_ids`）。
+   *
+   * 所以先在客户端拦一道：不是 `D` 开头就当"这个群里查不到他"跳过，不发命令。
+   * 语义上无损 —— 反正那个 id 服务端也认不了；而调用方（`fetchAvatar`）拿到
+   * `inGroup:false` 会继续走 `search-common --nicks` 那条按花名搜的兜底路。
+   *
+   * ★ 只认前缀、不做更严的校验：openDingTalkId 的其余部分是 base64 变体，
+   * 长度/字符集会随人变，唯一稳定的判据就是 `D` 前缀（实测本机全部如此）。
+   */
+  if (!openDingTalkId.startsWith("D")) {
+    return { readable: true, inGroup: false, mediaId: null }
+  }
   let payload: unknown
   try {
     payload = await cli.json<unknown>(
