@@ -316,7 +316,17 @@ function MembersPanel({ item, open }: { item: PersonaConversationView; open: boo
     }
     return map
   }, [members.data])
-  const avatars = useContactAvatars(externalIds, item.externalId, nickByPeer)
+  /**
+   * ★ `groupExternalId` **只在群聊时**传 —— 单聊的 `externalId` 不是群。
+   *
+   * 把单聊的会话 id 当群 id 传给 `list-by-ids`，服务端会拒
+   * （`1001` / `openCid or cid is required` / `Decode parameter error`），
+   * 而这个面板一进来就对**每个成员**发一次，于是刷屏（用户日志里那一串
+   * `list_group_member_by_ids` 报错）。单聊没有"共同群捷径"，靠花名搜即可
+   * （`nickByPeer` 已传下去）。判据用契约里的 `kind`，与 message-thread 同源。
+   */
+  const groupId = item.kind === "group" ? item.externalId : null
+  const avatars = useContactAvatars(externalIds, groupId, nickByPeer)
   const avatarByPeer = useMemo(() => {
     const map = new Map<string, string>()
     for (const row of avatars.data ?? []) {

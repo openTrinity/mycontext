@@ -72,6 +72,7 @@ function conversation(
 function installApi(over: {
   members?: { externalId: string; displayName: string | null; messageCount: number }[]
   hits?: { id: string; contentText: string; senderDisplayName: string | null; sentAt: number }[]
+  avatarCalls?: { groupExternalId: string | null }[]
 }): void {
   ;(globalThis as { window?: { mycontext?: unknown } }).window ??= {}
   ;(window as unknown as { mycontext: unknown }).mycontext = {
@@ -79,8 +80,14 @@ function installApi(over: {
       members: () => Promise.resolve({ ok: true as const, data: over.members ?? [] }),
       searchMessages: () => Promise.resolve({ ok: true as const, data: over.hits ?? [] }),
     },
-    // MembersPanel 会 useContactAvatars → media.avatars —— 缺 stub 会抛
-    media: { avatars: () => Promise.resolve({ ok: true as const, data: [] }) },
+    // MembersPanel 会 useContactAvatars → media.avatars —— 缺 stub 会抛。
+    // 记下每次调用的 groupExternalId：用来验"单聊不把会话 id 当群 id"。
+    media: {
+      avatars: (input: { groupExternalId: string | null }) => {
+        over.avatarCalls?.push({ groupExternalId: input.groupExternalId })
+        return Promise.resolve({ ok: true as const, data: [] })
+      },
+    },
   } as unknown as MyContextApi
 }
 
@@ -199,6 +206,37 @@ describe("★★ 成员 tab", () => {
     // ★ 不显示发言次数（"统计数量不必"）
     expect(screen.queryByText(/42 条/)).toBeNull()
     expect(screen.queryByText(/发过言的 2 人/)).toBeNull()
+  })
+
+  /**
+   * ★★ 群聊取头像时**传群 id 走共同群捷径**（externalId 是真群）。
+   *
+   * 反面用例见上面「单聊没有成员 tab」——单聊压根不渲染 MembersPanel，
+   * 所以它的会话 id 不会被当群 id 传给 `list-by-ids`（那正是用户日志里
+   * `list_group_member_by_ids` 刷屏的根因：把非群 id 当群 id 查）。
+   * 这条锁住群聊仍然走那条捷径，而 MembersPanel 里的判据是 `kind === "group"`。
+   */
+  it("★★ 群聊取头像传的是群 externalId（共同群捷径）", async () => {
+    const avatarCalls: { groupExternalId: string | null }[] = []
+    installApi({
+      members: [{ externalId: "u1", displayName: "小李", messageCount: 1 }],
+      avatarCalls,
+    })
+    wrap(
+      <ConversationSettingsDialog
+        open
+        onClose={() => undefined}
+        item={conversation({ conversationId: "g1", kind: "group", externalId: "cidGROUP0001==" })}
+        busy={false}
+        onChange={() => undefined}
+        onJumpToMessage={() => undefined}
+      />,
+    )
+    fireEvent.click(screen.getByText("成员"))
+    await screen.findByText("小李")
+    expect(avatarCalls.length).toBeGreaterThan(0)
+    // 群聊：传群 id；绝不是 null，也绝不是别的会话 id
+    expect(avatarCalls.every((c) => c.groupExternalId === "cidGROUP0001==")).toBe(true)
   })
 
   it("★ 成员可筛选", async () => {
