@@ -42,8 +42,10 @@ import {
   runCycle,
   checkTopologyConsistency,
   admitByScope,
+  ProducerRunner,
   buildConsumerStatuses,
   buildDomainStatuses,
+  buildProducerStatuses,
   type ConsumerOutcome,
   type CycleRunnable,
   persistBatch,
@@ -650,6 +652,25 @@ export class IngestService {
   readonly events = new EventEmitter()
 
   private readonly scheduler: IngestScheduler
+  /**
+   * 生产者骨架 —— 三个域**共用**的四件事（范围三态 / 闸门 / 落库 /
+   * 覆盖面记账 + 按域的丢弃计数）。
+   *
+   * ## ★★★ 它原来只在测试里跑（这是 G10 的落点）
+   *
+   * `ProducerRunner` 有完整实现与 32 条门禁，而生产代码**零引用** ——
+   * 它只出现在 `persist()` 的一句注释里。于是四件事里只有第二件
+   * （`admitByScope`）被共用，另外三件仍各写一份：丢弃计数与日志、
+   * 覆盖面按 (分区,天) 分桶、`scopeNotReady`。
+   *
+   * ★ 现在**文档与听记**两条路整段走它；**聊天**那条路只共用判据
+   * （`admitByScope`）—— 那是刻意的边界，见 `runPull` 里那段：
+   * 它推进一个不可回退的水位，而另两个域每轮从头列举。
+   *
+   * ★★ 它**有状态**（按域的丢弃计数），所以是一个字段而不是每轮 new：
+   * new 一个会让那些计数每轮归零，而它们回答的是"本进程累计挡了多少"。
+   */
+  private readonly producers: ProducerRunner
   private readonly probeInterval: AdaptiveInterval
   private readonly ftsConsumer: OutboxConsumer
   /**
@@ -904,6 +925,19 @@ export class IngestService {
       backfillPageBudget: MAX_PAGES_PER_BACKFILL_ROUND,
     })
     this.probeInterval = new AdaptiveInterval(probeBase, probeMax)
+    /**
+     * ★★★ 生产者骨架（见那个字段的注释：它原来只在测试里跑）。
+     *
+     * ★ 收 `logger` 而不是 `logger.child("Producer")`：那些日志说的是
+     * 「丢了 N 条数据」，而排查时人是按渠道找的（日志前缀已经带渠道）。
+     * 再套一层子分类会让同一件事的日志分散在两个前缀下。
+     */
+    this.producers = new ProducerRunner({
+      db: options.db,
+      clock: options.clock,
+      channelId: options.plugin.meta.id,
+      logger: options.logger,
+    })
     this.ftsConsumer = new OutboxConsumer({
       db: options.db,
       clock: options.clock,
@@ -1657,54 +1691,151 @@ export class IngestService {
        * 「这篇文档渠道没给时间」是两个事实，出路也不同（前者去改范围、
        * 后者要去看渠道解析）。合成一个数字会让后者永远查不出来。
        */
-      const docScope = this.domainScopeOrWarn("doc")
       /**
-       * ★★ 闸门判据走 `admitByScope` —— 与聊天那条路**同一个函数**。
+       * ★★★ 整段走 `ProducerRunner`（修 G10）—— 这条路是本轮真正的接线点。
        *
-       * 内联一份的代价已经付过：这条路原来压根没有闸，而聊天那条路的
-       * 时间闸被会话闸挡住了。两个缺陷的形状相同（判据有多份、其中一份漂了），
-       * 所以判据只能有一处。
+       * ## 改动前的状态：那一层只在测试里跑
        *
-       * ★ `partitionOf` 给**空间**（`workspaceId`）而不是 null：文档确实按
-       * 空间分区（`document_coverage` 就是按它分的）。虽然 `DistillScope`
-       * 现在没有空间白名单字段（那是 G6），但给对了之后将来加白名单
-       * 不需要再动这里。
+       * `ProducerRunner` 有完整实现与 32 条门禁，而 `grep` 全仓的生产代码
+       * **零引用** —— 它只出现在 `persist()` 的一句注释里。于是四件事里
+       * 只有第二件（闸门判据 `admitByScope`）被共用了，另外三件仍是各写一份：
+       *
+       * · 丢弃计数与日志（这里原来手写一遍，与 `noteDropped` 重复）；
+       * · 覆盖面按 (分区, 天) 记账（这里原来手写分桶 + 手写 NUL 分隔符）；
+       * · `scopeNotReady`（只有 chat 那条有）。
+       *
+       * ## ★★ 为什么文档这条路**适合**整段走
+       *
+       * 它没有水位（`drive recent` 按最近访问排、`wiki node list` 按目录树，
+       * 两者都不接受时间过滤），所以"这一轮白丢"的代价只是一轮 CLI 调用
+       * —— 而 chat 那条路推进一个不可回退的水位，动它的风险完全不同
+       * （见 `PRODUCERS` 里 `haltsOnScopeNotReady` 那个字段的注释）。
+       *
+       * ## ★ `accounting: "snapshot"`
+       *
+       * 文档的覆盖面是**快照量**（"这个空间这天有多少篇"）——
+       * 一篇文档被改十次仍然是一篇。用累加语义会让改动频繁的空间
+       * 篇数虚高到几倍。runner 据此把数字写进 `listedTotal` 而不是累加
+       * `local_count`（真值仍由 `rebuildFromDocuments` 从实体表数）。
        */
-      const admittedDocs = admitByScope<(typeof listed.items)[number]>(docScope, listed.items, {
-        partitionOf: (item) => item.workspaceId ?? "",
-        occurredAtOf: (item) => item.updatedAt ?? item.createdAt,
-      })
-      const inScope = admittedDocs.kept
-      const droppedUnknownTime = admittedDocs.droppedUnknownTime
-      const droppedNow = listed.items.length - inScope.length
-      if (droppedNow > 0) {
-        /**
-         * ★ 丢弃必须**可见**：这是本仓库最贵的那类静默降级（CLAUDE.md 第 4 节）。
-         * 不记的话"范围闸挡掉了 300 篇"与"这个知识库本来只有 20 篇"
-         * 在状态页上完全同形。计数走与 chat 侧**同一对**字段
-         * （`droppedOutOfScope` / `lastDroppedAt`），所以状态页那一栏
-         * 不需要为文档再加一个数字。
-         */
-        this.droppedOutOfScope += droppedNow
-        this.lastDroppedAt = this.options.clock.now()
-        this.options.logger.info("documents dropped out of scope", {
-          channelId,
-          dropped: droppedNow,
-          // ★ 单独报：它与"超出日期"的出路不同（见上面那段）
-          droppedUnknownTime,
-          listed: listed.items.length,
-          since: docScope.since,
-          until: docScope.until,
-        })
-      }
+      const now = this.options.clock.now()
+      const coverage = new DocumentCoverageRepository(this.options.db)
+      const result = this.producers.run<(typeof listed.items)[number]>(
+        {
+          domain: "doc",
+          /**
+           * ★ 分区键给**空间**（`workspaceId`）而不是 null：文档确实按空间
+           * 分区（`document_coverage` 就是按它分的），而 `scope.partitions`
+           * 现在真的有值可读（阶段 3 加的）。
+           *
+           * ★★ `toSpaceKey` 把 null/空 归成空串 —— 与
+           * `document_coverage.space_external_id` 的 `COALESCE(workspace_id,'')`
+           * 同一个判据。两处不一致会让散落的云盘文件要么永远越界、
+           * 要么永远删不掉。
+           */
+          partitionOf: (item) => toSpaceKey(item.workspaceId),
+          /**
+           * ★★ 业务时间只到 `createdAt`（**不带** `?? fetchedAt`）。
+           *
+           * `fetchedAt` 是"这一轮抓取的时刻"，拿它当业务时间会让每篇文档都
+           * "是今天更新的" —— 于是任何 `since` 都放行，闸门等于不存在。
+           * 而 `ParsedDocumentLike` 上压根没有这个字段（契约注释明写
+           * "取不到就 null，不要猜一个 now"）。
+           *
+           * ★ 两个都 null（渠道没给任何时间）的处置在 runner 里：
+           * **只在用户真的设了界时才挡**（没设界时挡掉它是凭空丢数据），
+           * 并单独计入 `droppedUnknownTime`。
+           */
+          occurredAtOf: (item) => item.updatedAt ?? item.createdAt,
+          accounting: "snapshot",
+          persist: (items) => {
+            const persisted = persistDocuments(deps, {
+              raw: [
+                {
+                  id: newId(now),
+                  channelId,
+                  resource: "doc",
+                  // 列举没有单一平台主键（一轮聚合了多次调用）→ 空串，
+                  // 幂等靠 payloadHash（见 raw_records 的 UNIQUE）。
+                  externalId: "",
+                  /**
+                   * ★ 原生 payload 存**整份**（不按范围裁）。
+                   *
+                   * `raw_records` 是 ODS 层：语义是"渠道那一刻回了什么"，
+                   * 而解析 bug 时的重放价值全靠这份原样。按范围裁它会让
+                   * 「重放」得到一个与当初不同的输入。越界的**业务数据**
+                   * 不进 `documents`（闸在 runner 里）——
+                   * ODS 存真相，DWD 存范围内的那部分。
+                   */
+                  payload: listed.rawPayload,
+                  payloadHash: sha256(listed.rawPayload),
+                  source: "dws-cli",
+                  fetchedAt: now,
+                },
+              ],
+              documents: items.map((item) => ({
+                id: newId(item.updatedAt ?? now),
+                channelId,
+                externalId: item.externalId,
+                origin: item.origin,
+                title: item.title,
+                docType: item.docType,
+                extension: item.extension,
+                url: item.url,
+                workspaceId: item.workspaceId,
+                // 列举这一步没有正文：null 会被 upsert 的 COALESCE 保留已有值
+                contentText: item.contentText,
+                updatedAt: item.updatedAt,
+                createdAt: item.createdAt,
+                fetchedAt: now,
+              })),
+            })
+            return { changed: persisted.changed.length, unchanged: persisted.unchanged }
+          },
+          account: (input) =>
+            coverage.markDrained(channelId, {
+              spaceExternalId: input.partitionId,
+              dayBucket: input.dayBucket,
+              /**
+               * ★ `drained` 在 `markDrained` 上是**必填**，而 runner 的
+               * `CoverageAccounting` 上是可选。缺省取 **false**（"没抽干"）
+               * —— 那是保守方向：报 true 会把"还有更多知识库没列到"
+               * 显示成"已采完"，而那正是本仓库最忌讳的静默数据缺失。
+               *
+               * 实际走到这里时它一定有值（上面传了 `!listed.truncated`）；
+               * 这个回落只是让类型与语义都不留一个"看起来能省"的洞。
+               */
+              drained: input.drained ?? false,
+              ...(input.listedTotal === undefined ? {} : { listedTotal: input.listedTotal }),
+              at: now,
+            }),
+        },
+        listed.items,
+        // ★ 截断了就是没抽干。恒 true 会把"还有更多知识库没列到"显示成"已采完"
+        { drained: !listed.truncated },
+      )
+
       /**
-       * ★ `totals.listed` 报**在范围内的**篇数，不是渠道列出的篇数。
+       * ★ `totals.listed` 报**在范围内的**篇数（changed + unchanged），
+       * 不是渠道列出的篇数。
        *
        * 这个数字会进快照给用户看「这一轮采到多少」。报渠道列出的总数会让
        * 用户以为那些都进库了 —— 而其中一部分刚被闸门挡掉。
-       * 被挡掉多少由上面那条日志与 `scope.droppedOutOfScope` 回答。
        */
-      totals.listed = inScope.length
+      totals.listed = result.changed + result.unchanged
+      totals.changed = result.changed
+      /**
+       * ★★ 丢弃计数**仍然进那一对既有快照字段**（存量字段，状态页在读）。
+       *
+       * runner 内部另有一份**按域分**的计数（`countersOf("doc")`），
+       * 那是 G16 的新出口。两者并存是刻意的：删旧字段的收益只是"更干净"，
+       * 代价是一次契约破坏 —— 而 v2 §12.4 已经记过一次
+       * "契约与主进程两份声明漂移"的教训。
+       */
+      if (result.droppedOutOfScope > 0) {
+        this.droppedOutOfScope += result.droppedOutOfScope
+        this.lastDroppedAt = now
+      }
 
       if (listed.truncated) {
         /**
@@ -1719,148 +1850,24 @@ export class IngestService {
       }
 
       /**
-       * ★ 判据是 `inScope.length`，不是 `listed.items.length`。
+       * ★ 真值从 `documents` 重建（幂等）。
        *
-       * 整轮全被闸门挡掉时（用户选了很窄的范围、而知识库全是老文档）
-       * 这里必须整块跳过 —— 否则会写一条只含 raw payload 的记录、
-       * 跑一次 `rebuildFromDocuments`，而 `documents` 一篇都没变。
-       * 那不是错误，但每一轮都白写一行 ODS 与一次全表 GROUP BY。
+       * 不能只靠上面那一轮：文档的守卫条件很严（四列都没变就判重），
+       * 所以存量库里 `local_count` 会永远是 0 —— 界面会说"这段日期 0 篇"
+       * 而库里有几百篇。与 `chat_coverage` 的 `rebuildFromMessages`
+       * 同一个理由，只是这里每轮都跑（文档量比消息小两三个数量级）。
+       *
+       * ★★ 它在 runner **之外**：runner 只管"这一批"，而重建是对**整张表**
+       * 的一次校准。放进 `account` 会让它每个格子跑一次全表 GROUP BY。
+       *
+       * ★ 失败不影响采集（派生物），但不静默 —— 否则"覆盖面为 0"与
+       * "重建挂了"不可区分。
        */
-      if (inScope.length > 0) {
-        const now = this.options.clock.now()
-        const result = persistDocuments(deps, {
-          raw: [
-            {
-              id: newId(now),
-              channelId,
-              resource: "doc",
-              // 列举没有单一平台主键（一轮聚合了多次调用）→ 空串，
-              // 幂等靠 payloadHash（见 raw_records 的 UNIQUE 与 §3.3）。
-              externalId: "",
-              /**
-               * ★ 原生 payload 存**整份**（不按范围裁）。
-               *
-               * `raw_records` 是 ODS 层：它的语义是"渠道那一刻回了什么"，
-               * 而解析 bug 时的重放价值全靠这份原样。按范围裁它会让
-               * 「重放」得到一个与当初不同的输入 —— 而那正是这一层存在的理由。
-               * 越界的**业务数据**不进 `documents`（上面的闸），
-               * 这两件事分开：ODS 存真相，DWD 存范围内的那部分。
-               */
-              payload: listed.rawPayload,
-              payloadHash: sha256(listed.rawPayload),
-              source: "dws-cli",
-              fetchedAt: now,
-            },
-          ],
-          // ★ 只落**在范围内**的那些（`inScope`，不是 `listed.items`）
-          documents: inScope.map((item) => ({
-            id: newId(item.updatedAt ?? now),
-            channelId,
-            externalId: item.externalId,
-            origin: item.origin,
-            title: item.title,
-            docType: item.docType,
-            extension: item.extension,
-            url: item.url,
-            workspaceId: item.workspaceId,
-            // 列举这一步没有正文：null 会被 upsert 的 COALESCE 保留已有值
-            contentText: item.contentText,
-            updatedAt: item.updatedAt,
-            createdAt: item.createdAt,
-            fetchedAt: now,
-          })),
-        })
-        totals.changed = result.changed.length
-        /**
-         * ★★ 记文档覆盖面（v29 `document_coverage`）。
-         *
-         * ## 为什么记**列到的篇数**而不是 `result.changed`
-         *
-         * 与 `chat_coverage` 那侧**相反**的选择，理由是两者回答的问题不同：
-         * 聊天那边 `bump` 的是"这一轮新落库了多少条"（累加成总量，
-         * 再由 `rebuildFromMessages` 兜底存量）；这里要回答的是
-         * "这个空间这一天**有**多少篇"，而它是一个**快照量** ——
-         * 一篇文档被改了十次仍然是一篇。
-         *
-         * 所以这里不累加 `changed`（那会让改动频繁的空间篇数虚高到几倍），
-         * 而是直接把这一轮列到的篇数按 (空间, 天) 分组，用 `markDrained`
-         * 的 `listedTotal` 记"渠道说有多少"，真值仍由 `rebuildFromDocuments`
-         * 从 `documents` 表数出来（幂等、可重跑）。
-         *
-         * ## ★★★ 但记的是 `inScope`，**不是** `listed.items`
-         *
-         * 覆盖面回答的是「用户要的那段日期，我们有多少」。把范围外的篇数
-         * 记进去会让覆盖面与 `documents` 表**永久对不上**：
-         * `listedTotal` 说这个空间这天有 300 篇，而 `rebuildFromDocuments`
-         * 从库里数出 20 篇（其余 280 篇被闸门挡了）—— 界面会显示
-         * "还差 280 篇没采到"，而那 280 篇是**用户明确不要的**。
-         * 一个永远追不平的进度比没有进度更糟。
-         *
-         * ★ `drained` 取 `!listed.truncated`：截断了就是没抽干。
-         * 恒记 true 会把"还有更多知识库没列到"显示成"已采完"，
-         * 而那正是本仓库最忌讳的静默数据缺失。
-         * ★ 这里用 `listed.truncated`（而不是范围过滤后的什么）是对的：
-         * 截断是**渠道列举**这件事的属性，与我们要不要那些篇无关。
-         */
+      if (result.changed > 0 || result.unchanged > 0) {
         try {
-          const coverage = new DocumentCoverageRepository(this.options.db)
-          /** (空间, 天) → 这一轮列到的篇数。★ 与聊天那侧同一个分桶手法。 */
-          const bySpaceDay = new Map<string, number>()
-          for (const item of inScope) {
-            /**
-             * ★ 分桶判据与 `toDocumentChangelogEntry` 的 occurredAt 一致。
-             *
-             * ★★ 这里的第三级 `?? now` 与**上面时间闸**的表达式（只到
-             * `createdAt`）不同，而两者都对 —— 它们回答不同的问题：
-             * · 闸问「这篇在不在用户选的日期里」→ 时间未知就不能假装知道；
-             * · 分桶问「把它记到哪一天」→ 必须给一个具体的天，而库里那一行的
-             *   `fetched_at` 正是 `now`（`persistDocuments` 就是这么写的），
-             *   所以用 `now` 与 `rebuildFromDocuments` 的
-             *   `COALESCE(updated_at, created_at, fetched_at)` **算出同一天**。
-             *
-             * 走到这里的"时间未知"文档只有一种：用户**没设界**（bounded=false）
-             * 时被放行的那些。设了界的话它们在上面就被挡掉了。
-             */
-            const occurredAt = item.updatedAt ?? item.createdAt ?? now
-            /**
-             * ★ 分隔符用 `\u0000` 而不是空格或冒号：空间 id 是渠道给的
-             * 字符串，可能含任何可打印字符。用一个可能出现在 id 里的分隔符，
-             * `split` 会把 id 切成两半 —— 于是 `dayBucket` 拿到 id 的后半段，
-             * 这一天的数据被记到一个不存在的日期上，而两个数字都会「看起来对」。
-             * 与聊天那侧（byDay 的 key）用的是同一个分隔符。
-             */
-            const key = `${toSpaceKey(item.workspaceId)}\u0000${toDayBucket(occurredAt)}`
-            bySpaceDay.set(key, (bySpaceDay.get(key) ?? 0) + 1)
-          }
-          for (const [key, listedTotal] of bySpaceDay) {
-            const [spaceExternalId, dayBucket] = key.split("\u0000")
-            if (spaceExternalId === undefined || dayBucket === undefined) continue
-            coverage.markDrained(channelId, {
-              spaceExternalId,
-              dayBucket,
-              // 截断了就是没抽干 —— 见上面那段
-              drained: !listed.truncated,
-              listedTotal,
-              at: now,
-            })
-          }
-          /**
-           * ★ 真值从 `documents` 重建（幂等）。
-           *
-           * 不能只靠上面那一轮：文档的守卫条件很严（四列都没变就判重），
-           * 所以存量库里 `local_count` 会永远是 0 —— 界面会说"这段日期 0 篇"
-           * 而库里有几百篇。与 `chat_coverage` 的 `rebuildFromMessages`
-           * 同一个理由，只是这里每轮都跑（文档量比消息小两三个数量级，
-           * 一条 GROUP BY 走 channel_id 索引，不需要那套 backfilled 标记）。
-           */
           coverage.rebuildFromDocuments(channelId, now)
         } catch (error) {
-          /**
-           * ★ 记账失败**不许**影响采集：这张表是给界面看的派生物，
-           * 而上面 `persistDocuments` 才是真数据。但也不静默 ——
-           * 否则"覆盖面为 0"与"记账挂了"不可区分。
-           */
-          this.options.logger.warn("document coverage bump failed", {
+          this.options.logger.warn("document coverage rebuild failed", {
             detail: error instanceof Error ? error.message : String(error),
           })
         }
@@ -2280,40 +2287,97 @@ export class IngestService {
         pages += 1
         totals.listed += page.items.length
 
-        if (page.items.length > 0) {
-          const now = this.options.clock.now()
-          const result = persistMinutes(deps, {
-            raw: [
-              {
-                id: newId(now),
-                channelId,
-                resource: "minutes",
-                /**
-                 * 列举没有单一平台主键（这是第 N 页）→ 空串，幂等靠 payloadHash。
-                 * ★ 空串而不是 null：可空列参与 UNIQUE 时那些行的唯一性
-                 * 完全不生效（见 raw-records.ts 文件头）。
-                 */
-                externalId: "",
-                payload: rawPayload,
-                payloadHash: sha256(rawPayload),
-                source: "dws-cli",
-                fetchedAt: now,
-              },
-            ],
-            minutes: page.items.map((item) => ({
-              id: newId(item.startedAt ?? now),
-              channelId,
-              externalId: item.externalId,
-              title: item.title,
-              startedAt: item.startedAt,
-              durationSec: item.durationSec,
-              summaryText: item.summaryText,
-              transcriptJson: item.transcriptJson,
-              speakersJson: item.speakersJson,
-              fetchedAt: now,
-            })),
-          })
-          totals.changed += result.changed.length
+        /**
+         * ★★★ 整段走 `ProducerRunner`（修 G10 的第二条路）。
+         *
+         * ## 这条路原来**只透传 since/until**，压根没有分区闸
+         *
+         * `runMinutes` 把 `domainTimeRange("minutes")` 传给渠道，然后把
+         * 拿到的每一页**原样落库** —— 也就是：
+         *
+         * · 渠道侧的时间过滤是**下推**的（钉钉 `--start/--end` 实测是真过滤），
+         *   所以时间那一半"恰好"是对的；
+         * · 但**没有任何本地闸** —— 渠道若忽略了参数、或将来某个渠道
+         *   不支持时间过滤，越界的听记会直接进库而没人拦。
+         *
+         * 而 CLAUDE.md §4 那条判据正是这个形状：注释里的"实测结论"有保质期，
+         * 上游 CLI 会变。下推是**优化**，本地闸才是**契约**。
+         *
+         * ## ★ `partitionOf` 返回 `null`（听记不按分区切）
+         *
+         * 听记是全量列举，没有"某个分区抽干了"这件事
+         * （`minutes_coverage` 是每渠道一行，不是 per-partition）。
+         * runner 对 null 的处置是**跳过分区闸** —— 而**不是**拿一个空串
+         * 去查白名单（那会让所有听记都被判成"不在名单里"，
+         * 于是听记整个停采而日志里只有一句"丢了 N 条"）。
+         *
+         * ★★ 也因此 `account` 不给：per-partition 的覆盖面对它没有意义。
+         * 那一侧的记账（`MinutesCoverageRepository.record`）是**每轮一次**的
+         * 整渠道快照，在这个循环之外（见下面那段）。
+         */
+        const now = this.options.clock.now()
+        const result = this.producers.run<(typeof page.items)[number]>(
+          {
+            domain: "minutes",
+            // ★ 见上面那段 ★：null = 不按分区切，runner 会跳过分区闸
+            partitionOf: () => null,
+            /**
+             * ★ 业务时间是会议**开始时间**，与 `toMinutesChangelogEntry` 的
+             * `occurredAt` 同一个判据。用 `fetchedAt` 会让三个月前的会议
+             * 全部落到今天 —— 于是任何 `since` 都放行。
+             *
+             * ★★ `startedAt` 为 null（渠道没给）的处置在 runner 里：
+             * 只在用户真的设了界时才挡，并单独计入 `droppedUnknownTime`。
+             * 那与 `listDaysFromMinutes` 排除 `started_at IS NULL` 的行
+             * 是同一条判据（一场没有开始时间的会议归到哪一天都是编的）。
+             */
+            occurredAtOf: (item) => item.startedAt,
+            persist: (items) => {
+              const persisted = persistMinutes(deps, {
+                raw: [
+                  {
+                    id: newId(now),
+                    channelId,
+                    resource: "minutes",
+                    /**
+                     * 列举没有单一平台主键（这是第 N 页）→ 空串，幂等靠 payloadHash。
+                     * ★ 空串而不是 null：可空列参与 UNIQUE 时那些行的唯一性
+                     * 完全不生效（见 raw-records.ts 文件头）。
+                     */
+                    externalId: "",
+                    payload: rawPayload,
+                    payloadHash: sha256(rawPayload),
+                    source: "dws-cli",
+                    fetchedAt: now,
+                  },
+                ],
+                minutes: items.map((item) => ({
+                  id: newId(item.startedAt ?? now),
+                  channelId,
+                  externalId: item.externalId,
+                  title: item.title,
+                  startedAt: item.startedAt,
+                  durationSec: item.durationSec,
+                  summaryText: item.summaryText,
+                  transcriptJson: item.transcriptJson,
+                  speakersJson: item.speakersJson,
+                  fetchedAt: now,
+                })),
+              })
+              return { changed: persisted.changed.length, unchanged: persisted.unchanged }
+            },
+          },
+          page.items,
+        )
+        totals.changed += result.changed
+        /**
+         * ★ 丢弃计数进那一对既有快照字段（存量字段，状态页在读）。
+         * 按域分的那份在 runner 内部（`countersOf("minutes")`）——
+         * 两者并存的理由见 `runDocuments` 里同一段。
+         */
+        if (result.droppedOutOfScope > 0) {
+          this.droppedOutOfScope += result.droppedOutOfScope
+          this.lastDroppedAt = now
         }
 
         // 服务端说没有下一页 → 抽干了。
@@ -3719,28 +3783,20 @@ export class IngestService {
     if (admitted.dropped > 0) {
       this.droppedOutOfScope += admitted.dropped
       this.lastDroppedAt = this.options.clock.now()
-      this.options.logger.info("ingest dropped out-of-scope messages", {
-        /**
-         * ★★ 必须带渠道。这条日志说的是「丢了 N 条数据」，而多渠道下
-         * 不带渠道就**没法回答"谁丢的"** —— 实测排查时撞到过：日志里
-         * `dropped: 9, kept: 0, allowed: 0`，而当时钉钉与飞书两路都在跑，
-         * 只能靠时间戳去猜是哪一路，猜错了方向白查一轮。
-         *
-         * 丢数据的日志不带来源，等于知道出血却不知道伤口在哪。
-         */
-        channelId: this.options.plugin.meta.id,
-        dropped: admitted.dropped,
-        kept: admitted.kept.length,
-        allowed: scope.restricted ? scope.allow.size : null,
-        /**
-         * ★ 把"为什么丢"也说出来：`allowed: 0` + `restricted` 才是
-         * 「白名单是空的，一条都不许过」，而 `restricted: false` 时
-         * 丢弃只可能来自时间窗。两者的处置完全不同。
-         */
-        restricted: scope.restricted,
-        since: scope.since,
-        until: scope.until,
-      })
+      /**
+       * ★★★ 计数**也走 runner**（`noteDropped`），而不只是这里加一份。
+       *
+       * ## 为什么这一行必须有（它是 4c 那一半的全部内容）
+       *
+       * 这条路刻意**不**整段走 runner（水位不变式，见上面那段）。但
+       * "丢了多少"这件事必须与另两条路进同**一个**按域计数器 ——
+       * 否则 `buildProducerStatuses` 里 chat 那一行永远是 0，
+       * 而它恰恰是量级最大的那个域。
+       *
+       * 也就是：runner 在这条路上只承担**记账**，不承担调度与落库。
+       * 那个边界写在 `PRODUCERS` 的 `schedule: "watermark"` 上。
+       */
+      this.producers.noteDroppedFor("chat", admitted.dropped, admitted.droppedUnknownTime, scope)
     }
 
     /**
@@ -4107,6 +4163,14 @@ export class IngestService {
      */
     this.droppedOutOfScope = 0
     this.lastDroppedAt = null
+    /**
+     * ★★ 按域的那份计数也要清 —— 与上面两个字段**同一条判据**。
+     *
+     * 漏掉它的后果是新出口（`buildProducerStatuses` 里每域的 dropped）
+     * 保留改范围之前的数字，而旧出口归零了 —— 于是同一件事在界面上
+     * 有两个互相矛盾的数字，且没人能说出哪个对。
+     */
+    this.producers.resetCounters()
 
     this.options.logger.info("ingest scope change applied", {
       restricted: scope.restricted,
@@ -4531,6 +4595,36 @@ export class IngestService {
      * 20 万行实测 6.31ms）。同一个值算两遍是白加的阻塞。
      */
     const domainHeads = changelog.headByDomain()
+    /**
+     * 这个渠道**自述**有哪些域（`capabilities.domains`）。
+     *
+     * ## ★★ 为什么域与生产者两张表都要按它过滤（修 G17）
+     *
+     * `DOMAINS` / `PRODUCERS` 是**全局**声明，而渠道能力是 per-channel 的：
+     * 钉钉有听记、飞书没有（它的 `capabilities.domains` 是 `["chat","doc"]`，
+     * 且压根没有 minutes 契约实现）。
+     *
+     * 不过滤的话只连飞书的部署会显示"听记 0 场、生产者就绪" ——
+     * 而事实是这个渠道没有听记。用户会去查"为什么一场都没采到"，
+     * 而那个问题没有答案。
+     *
+     * ★ 这里给的是**这个 IngestService 自己那个渠道**的能力（每个渠道一个
+     * 实例）。跨渠道的并集在 `DataPlaneService.snapshot()` 那侧合成 ——
+     * 那一层才知道挂了几个渠道。
+     */
+    /**
+     * ★★ 用 `?.` + 回落 `undefined`（= 不按渠道过滤），而不是断言它一定有。
+     *
+     * `capabilities` 在类型上是必填，但**测试与部分装配路径会给一个
+     * 精简的 plugin**（只带 `meta` 与 `ingest`）—— 而快照是状态页每 250ms
+     * 会调的路径。在那里抛 `Cannot read properties of undefined`
+     * 会让整个状态页白屏，而真因只是一个 fixture 少了一个字段。
+     *
+     * ★ 回落到"不过滤"是对的方向：那时显示全部域（与改动前一致），
+     * 而按能力过滤本来就是一个**收窄**的优化。收不到时宁可多显示一行，
+     * 也不该让整页打不开。
+     */
+    const capableDomains = this.options.plugin.capabilities?.domains
     const cursorRows = consumers.list()
     const consumerStatuses = buildConsumerStatuses({
       head: changelog.head(),
@@ -4634,7 +4728,77 @@ export class IngestService {
         domains: [...status.domains],
         dependsOn: [...status.dependsOn],
       })),
-      domains: buildDomainStatuses({ domainHeads }).map((status) => ({ ...status })),
+      domains: buildDomainStatuses({ domainHeads, channelDomains: capableDomains }).map(
+        (status) => ({
+          ...status,
+        }),
+      ),
+      /**
+       * ── ★★★ 生产者的运行时（修 G16）─────────────────────────────
+       *
+       * 消费者侧早就有这张表，生产者侧一直只有下面那个**全局** `scope`
+       * 对象（chat 与 doc 累加进同一对字段）。于是"谁丢的""范围就绪了吗"
+       * "上一轮抽干了吗"三件事都读不出来。
+       *
+       * ★ 范围**每轮现读**（不缓存）：用户改了范围下一轮就该反映，
+       * 而缓存过期的方向恰好是"显示一个早已解除的未就绪"。
+       * 三次 `SELECT` 走主键，比快照里那 9 个 `COUNT(*)` 便宜得多。
+       */
+      producers: buildProducerStatuses({
+        channelDomains: capableDomains,
+        scopes: new Map(
+          (["chat", "minutes", "doc"] as const).map((domain) => {
+            const scope = readDomainScope(this.options.db, domain)
+            return [
+              domain,
+              {
+                collectsNothing: collectsNothing(scope),
+                unset: scope.unset,
+                unreadable: scope.unreadable,
+              },
+            ]
+          }),
+        ),
+        counters: new Map(
+          /**
+           * ★ 键是**生产者 id**（不是域名）：`buildProducerStatuses` 按
+           * `PRODUCERS` 遍历，而一个生产者理论上可以投多个域。
+           * 用域名当键会让那个映射在加第二个多域生产者时静默错位。
+           */
+          [
+            ["chat-ingest", "chat"],
+            ["minutes-ingest", "minutes"],
+            ["doc-ingest", "doc"],
+          ].map(([producerId, domain]) => {
+            const c = this.producers.countersOf(domain as "chat" | "minutes" | "doc")
+            return [
+              producerId as string,
+              {
+                droppedOutOfScope: c.dropped,
+                droppedUnknownTime: c.unknownTime,
+                lastDroppedAt: c.lastAt,
+              },
+            ]
+          }),
+        ),
+        /**
+         * ★ 只有会"抽干"的两种调度才有值 —— runner 那侧会按 `schedule`
+         * 把 watermark/stream 强制报 null，所以这里给全也无害。
+         *
+         * 听记的 `drained` 来自 `minutes_coverage`（整渠道一行的快照量）；
+         * 文档的来自上一轮 `!listed.truncated`，而它没落库 ——
+         * 所以这里只能给听记那一个。文档那一档报 null（"这一轮还不知道"），
+         * 而**不是** false：false 读起来是"没抽干"（一个我们没测到的结论）。
+         */
+        drained: new Map(
+          (() => {
+            const row = new MinutesCoverageRepository(this.options.db).get(
+              this.options.plugin.meta.id,
+            )
+            return row === null ? [] : [["minutes-ingest", row.drained] as const]
+          })(),
+        ),
+      }).map((status) => ({ ...status, domains: [...status.domains] })),
 
       // 「选了 180 天但只采到 7 天」必须可见（见 IngestSnapshot 的注释）。
       backfill: {

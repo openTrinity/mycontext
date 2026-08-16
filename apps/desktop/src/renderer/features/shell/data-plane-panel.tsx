@@ -202,7 +202,15 @@ export function DataPlanePanel({
         但这里不再单独渲染它：stale 已经作为每个消费者的一个状态显示了，
         两处都画会让同一件事说两遍，而它们措辞不同就会互相矛盾。
       */}
-      <DataPlaneTopologyPanel consumers={data.consumers} domains={data.domains} />
+      {/*
+        ★ `producers` 是这一轮新加的（G16）：它回答"谁丢的数据""范围就绪了吗"
+        "上一轮抽干了吗" —— 那三件事原来只有一个全局数字，读不出来。
+      */}
+      <DataPlaneTopologyPanel
+        consumers={data.consumers}
+        domains={data.domains}
+        producers={data.producers}
+      />
 
       {/* ★ 归属判定同样只对主渠道成立（它依赖身份行）—— 见下面 SelfIdentityPanel */}
       {channel === PRIMARY_CHANNEL_ID && data.unjudged > 0 && (

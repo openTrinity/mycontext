@@ -82,6 +82,20 @@ import type {
  */
 const READY_SOURCES: ReadonlySet<DistillSourceKind> = new Set(["chat", "minutes", "doc"])
 
+/**
+ * 某个域的**分区粒度**（给界面换量词用）。
+ *
+ * ★ 提成纯函数而不是在三处 return 里各写一个字面量：那三处会漂，
+ * 而漂的表现是界面上"还有 3 个会话没齐"出现在文档那一行 ——
+ * 数字对、量词错，而没有任何东西会报错。
+ */
+function partitionKindOf(domain: "chat" | "minutes" | "doc"): "conversation" | "space" | null {
+  if (domain === "chat") return "conversation"
+  if (domain === "doc") return "space"
+  // ★ 听记是全量列举，没有分区概念 —— null 而不是编一个（见 G15）
+  return null
+}
+
 /** 采集器状态。见 `READY_SOURCES` 上方那段。 */
 function statusOf(kind: DistillSourceKind): "ready" | "planned" {
   return READY_SOURCES.has(kind) ? "ready" : "planned"
@@ -665,7 +679,20 @@ export class DistillSourceService {
   chatCoverage(input: ChatCoverageInput): ChatCoverageView {
     const db = this.dbForChannel(input.channelId)
     if (db === null) {
-      return { days: [], localCount: 0, dayCount: 0, drainedDays: 0, pendingConversations: 0 }
+      /**
+       * ★ `source` / `partitionKind` 按**这个域该有的形状**给，而不是
+       * 随手填一个 —— 界面用它们决定说哪句话，而"库还没挂上"不该让
+       * 那句话变成另一个域的措辞。
+       */
+      return {
+        days: [],
+        localCount: 0,
+        dayCount: 0,
+        drainedDays: 0,
+        pendingConversations: input.domain === "minutes" ? null : 0,
+        source: input.domain === "minutes" ? "derived" : "accounted",
+        partitionKind: partitionKindOf(input.domain),
+      }
     }
     if (input.domain === "doc") return this.documentCoverage(db, input)
     if (input.domain === "minutes") return this.minutesCoverage(db, input)
@@ -720,6 +747,9 @@ export class DistillSourceService {
       dayCount: summary.days,
       drainedDays: summary.drainedDays,
       pendingConversations: summary.pendingConversations,
+      // ★ chat 有专门的覆盖面表、写入侧逐格记账 → accounted
+      source: "accounted",
+      partitionKind: "conversation",
     }
   }
 
@@ -762,6 +792,10 @@ export class DistillSourceService {
       dayCount: summary.days,
       drainedDays: summary.drainedDays,
       pendingConversations: summary.pendingSpaces,
+      // ★ doc 也有专门的覆盖面表（v29）、写入侧逐格记账 → accounted
+      source: "accounted",
+      // ★ 分区是**空间**（知识库/云盘目录），不是会话 —— 界面据此换量词
+      partitionKind: "space",
     }
   }
 
@@ -788,7 +822,18 @@ export class DistillSourceService {
    * true：那时我们不知道齐没齐，而 false 让界面说"还在回溯"（诚实），
    * true 会说"已采完"（把"不知道"讲成"没问题"）。
    *
-   * ★ `pendingConversations` 恒 0：听记不按分区分，编一个数不如报 0。
+   * ## ★★★ `pendingConversations` 报 `null` 而不是 0（修 G15）
+   *
+   * 原来它恒 **0**，理由写的是"听记不按分区分，编一个数不如报 0"。
+   * 那句话只对了一半：0 不是编的，但它**读起来是"都齐了"** ——
+   * 而真相是"这个概念对听记不适用"。
+   *
+   * 三行覆盖面并排时用户看到「文档还有 3 个空间没齐、听记还有 0 个没齐」，
+   * 于是他以为听记比文档更完整 —— 而那两个数字压根不是同一种东西。
+   *
+   * ★ 同理 `source: "derived"`：这一份没有 `listedTotal`（渠道说有多少），
+   * 所以"库里 12 场"是不是全部只能靠**整渠道**的 `drained` 回答。
+   * 不说的话用户会以为三行是同一种精度的数字。
    */
   private minutesCoverage(db: SqliteDatabase, input: ChatCoverageInput): ChatCoverageView {
     const repo = new MinutesCoverageRepository(db)
@@ -800,13 +845,18 @@ export class DistillSourceService {
         dayBucket: row.dayBucket,
         localCount: row.localCount,
         drained,
-        pendingConversations: 0,
+        // ★ null = 这个域没有分区概念（见上面那段 ★★★），不是"0 个没齐"
+        pendingConversations: null,
       })),
       localCount: rows.reduce((sum, row) => sum + row.localCount, 0),
       dayCount: rows.length,
       // ★ 整轮抽干 ⇒ 这些天都算齐；没抽干 ⇒ 一天都不算齐（见上面那段）
       drainedDays: drained ? rows.length : 0,
-      pendingConversations: 0,
+      pendingConversations: null,
+      // ★ 从 `minutes` 表现算，没有渠道给的 listedTotal → derived
+      source: "derived",
+      // ★ 不按分区统计
+      partitionKind: null,
     }
   }
 

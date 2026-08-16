@@ -41,6 +41,7 @@ import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 
 type ConsumerStatusView = IngestSnapshot["consumers"][number]
 type DomainStatusView = IngestSnapshot["domains"][number]
+type ProducerStatusView = IngestSnapshot["producers"][number]
 
 /**
  * 一个消费者当前**最该说的那一句**。
@@ -80,9 +81,15 @@ const STATE_TONE: Record<ReturnType<typeof consumerState>, string> = {
 export function DataPlaneTopologyPanel({
   consumers,
   domains,
+  producers = [],
 }: {
   consumers: readonly ConsumerStatusView[]
   domains: readonly DomainStatusView[]
+  /**
+   * 生产者的运行时（修 G16）。缺省空数组 —— 既有调用方不传它时
+   * 那一块整个不渲染，而不是崩。
+   */
+  producers?: readonly ProducerStatusView[]
 }) {
   const { t } = useDynamicTranslation("settings")
 
@@ -91,7 +98,7 @@ export function DataPlaneTopologyPanel({
    * 而 `domains` 仍是全量声明。两者分别判空 —— 合起来判会让未登录时
    * 连"我们支持哪些域"都不显示。
    */
-  if (consumers.length === 0 && domains.length === 0) return null
+  if (consumers.length === 0 && domains.length === 0 && producers.length === 0) return null
 
   return (
     <div className="flex flex-col gap-3 border-t border-[var(--border-divider-light)] pt-3">
@@ -112,6 +119,30 @@ export function DataPlaneTopologyPanel({
         </span>
       </div>
 
+      {/*
+        ── ★★★ 生产者那一段（修 G16）─────────────────────────────────
+
+        ## 为什么它必须在消费者**之前**
+
+        数据是从生产者流向消费者的，而排查也是这个方向：「图谱落后」的
+        第一个问题是"有数据进来吗"。把生产者放在下面会让人先看到一堆
+        消费者 lag，而真因可能是某个域压根没在采（范围没就绪）。
+
+        ## 这一块回答三件原来读不出来的事
+        （见 `IngestSnapshot.producers` 的注释）
+
+        · **谁丢的** —— 原来 chat 与 doc 累加进同一对全局字段；
+        · **范围就绪了吗** —— `scopeNotReady` 原来完全不可见；
+        · **上一轮抽干了吗** —— 原来要从三个地方拼。
+      */}
+      {producers.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          {producers.map((producer) => (
+            <ProducerRow key={producer.id} producer={producer} />
+          ))}
+        </div>
+      )}
+
       {consumers.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {consumers.map((consumer) => (
@@ -127,6 +158,93 @@ export function DataPlaneTopologyPanel({
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * 一个生产者一行 —— **最该说的那一句**，而不是一堆数字。
+ *
+ * ## ★★★ 顺序即优先级，且刻意让"结构性问题"压过"丢了多少"
+ *
+ * 与 `ConsumerRow` 同一条判据：一个"这个渠道没有这个域"的生产者报
+ * "丢了 0 条"是误导（它压根不该采）。所以判据的顺序是：
+ *
+ * ① 渠道没这个能力 → 说"这个渠道没有…"（出路：去连另一个渠道）；
+ * ② 范围读不出来（坏 JSON）→ 说"重存一次范围"（用户自己能修）；
+ * ③ 范围让它一条都不采 → 说"还没选要学什么"（出路：去改勾选）；
+ * ④ 丢过东西 → 说丢了多少（★ 按域，这是 G16 的实质）；
+ * ⑤ 上一轮没抽干 → 说"还没翻完"；
+ * ⑥ 都正常 → 说它在干什么。
+ *
+ * ★ 每一档的**出路都不同** —— 那正是这一块存在的理由。合成一句
+ * "生产者异常"会让用户无从下手。
+ */
+function ProducerRow({ producer }: { producer: ProducerStatusView }) {
+  const { t } = useDynamicTranslation("settings")
+
+  const detail = !producer.supportedByChannel
+    ? /**
+       * ★★ 与"范围没就绪"必须分开：前者的出路是"去连另一个渠道"，
+       * 后者是"去改范围"。合成一个会让用户对着范围设置反复调，
+       * 而问题在别处（修 G17 的界面那一半）。
+       */
+      t("status.topology.producer.unsupported", {
+        defaultValue: "当前渠道没有这类数据",
+      })
+    : producer.scopeUnreadable
+      ? /**
+         * ★★★ 这一档用户**自己能修**（在设置页重存一次范围），
+         * 所以必须与"没配过"分开说 —— 而它们现在都表现为"不采"。
+         */
+        t("status.topology.producer.unreadable", {
+          defaultValue: "范围读不出来 —— 在设置里重存一次该数据源的范围即可恢复",
+        })
+      : !producer.scopeReady
+        ? t("status.topology.producer.notReady", {
+            defaultValue: "范围里一条都不许采 —— 去学习范围勾选要学的内容",
+          })
+        : producer.droppedOutOfScope > 0
+          ? /**
+             * ★★★ 这是 G16 的实质：**按域**的丢弃数。
+             *
+             * 原来 chat 与 doc 累加进同一对全局字段，于是
+             * 「文档挡掉 300 篇」与「聊天挡掉 300 条」是同一个数字 ——
+             * 而前者去改空间白名单、后者去改会话勾选。
+             *
+             * ★ `droppedUnknownTime` 单独说：「超出你选的日期」与
+             * 「这条数据渠道没给时间」是两个事实，出路也不同
+             * （后者要去看渠道解析）。
+             */
+            producer.droppedUnknownTime > 0
+            ? t("status.topology.producer.droppedWithUnknown", {
+                defaultValue: "范围外丢弃 {{dropped}}（其中 {{unknown}} 条渠道没给时间）",
+                dropped: producer.droppedOutOfScope.toLocaleString(),
+                unknown: producer.droppedUnknownTime.toLocaleString(),
+              })
+            : t("status.topology.producer.dropped", {
+                defaultValue: "范围外丢弃 {{dropped}}",
+                dropped: producer.droppedOutOfScope.toLocaleString(),
+              })
+          : producer.drained === false
+            ? /**
+               * ★ 只在**明确没抽干**时说（`false`）。`null` 表示这个调度
+               * 压根没有"抽干"概念（watermark / stream）—— 那时说
+               * "还没翻完"是一句对聊天永远成立的废话。
+               */
+              t("status.topology.producer.notDrained", {
+                defaultValue: "上一轮没翻完（条数是下界）",
+              })
+            : producer.purpose
+
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="typography-caption-400 text-[var(--text-base-secondary)]">
+        {producer.id}
+      </span>
+      <span className="typography-caption-400 truncate text-[var(--text-base-tertiary)]">
+        {detail}
+      </span>
     </div>
   )
 }

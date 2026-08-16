@@ -414,17 +414,122 @@ describe("★★ 覆盖面记账", () => {
  * 三条路都必须经过 `admitByScope`，且不许再出现"自己拼判据"的写法。
  */
 describe("接线：采集路共用同一个闸", () => {
-  it("★★★ 聊天与文档两条路都调 admitByScope", async () => {
+  it("★★★ `ProducerRunner` 真的被生产代码用了（修 G10）", async () => {
+    /**
+     * ## 这一条这一轮**换了方向**，理由如下
+     *
+     * 原来它数 `admitByScope<` 的出现次数（要求 ≥ 2）。那个判据在
+     * "各写一份判据"的年代是对的，但它有一个反向的坏处：
+     * **整段走 runner 之后调用点会变少**，于是它拦住了正确的修复。
+     *
+     * 而 G10 的真实形状是：`ProducerRunner` 有 32 条门禁而生产代码
+     * **零引用** —— 它只出现在一句注释里。所以现在锁的是那件事：
+     * 那一层必须真的在跑。
+     */
     const { readFileSync } = await import("node:fs")
     const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
+    // ★ 构造了一个实例（而不是只 import 了类型）
+    expect(src).toContain("new ProducerRunner({")
+    // ★★ 而且真的**跑**了它 —— 至少两条路（文档与听记）
+    const runs = src.match(/this\.producers\.run</g) ?? []
+    expect(runs.length).toBeGreaterThanOrEqual(2)
+  })
 
+  it("★★★ 聊天那条路仍然共用判据（它不整段走 runner，但闸只有一份）", async () => {
     /**
-     * 两处调用：`persist()`（聊天全局窗）与 `runDocuments()`（文档列举）。
+     * ## 为什么聊天**刻意**不整段走 runner
      *
-     * 反证：把任一处改回内联的 `filter(...)` ⇒ 这条转红。
+     * 它推进一个**不可回退的水位**（`commitProgress` / `confirmedEnd` /
+     * `splitIfTruncated` 那套不变式），而水位算错是这条链路上最贵的错误
+     * （永久漏采或永久重拉）。另两个域每轮从头列举，"这一轮白丢"的代价
+     * 只是一轮 CLI 调用 —— 风险完全不同。
+     *
+     * ★ 但**判据**必须只有一份：那两个隐私缺口（文档没有闸、聊天的时间闸
+     * 被会话闸挡住）的形状都是"判据有多份、其中一份漂了"。
+     * 所以聊天那条路调 `admitByScope`，与 runner 内部同一个函数。
      */
-    const calls = src.match(/admitByScope</g) ?? []
-    expect(calls.length).toBeGreaterThanOrEqual(2)
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
+    expect(src).toContain("admitByScope<")
+    /**
+     * ★ 而它**不许**自己实现一份 —— 那两个词同时出现在一个手写的
+     * filter 里就是那个缺陷的形状（下一条锁的是嵌套那一半）。
+     */
+    expect(src).not.toContain("isOccurredAtInScope(")
+  })
+
+  it("★★★ 三条路的丢弃计数进**同一个**按域计数器（G16 的前提）", async () => {
+    /**
+     * ## 为什么这一条必须锁住
+     *
+     * 聊天那条路不整段走 runner，所以它很容易"顺手"只加一份本地计数 ——
+     * 那时 `buildProducerStatuses` 里 chat 那一行永远是 0，
+     * 而它恰恰是量级最大的那个域（实测越界过 46,415 条）。
+     *
+     * 判据：那条路必须调 `noteDroppedFor`（runner 的公开记账入口）。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
+    expect(src).toContain('noteDroppedFor("chat"')
+    /**
+     * ★★ 而改范围时那份计数要清 —— 与两个旧字段同一条判据。
+     * 漏掉会让同一件事在界面上有两个互相矛盾的数字。
+     */
+    expect(src).toContain("this.producers.resetCounters()")
+  })
+
+  it("★★★ runner **不调用**任何水位方法（4c 的纪律）", async () => {
+    /**
+     * ## 这一条锁的是"没有动那段最难的代码"
+     *
+     * 聊天那条路整段搬进 runner 的风险是水位算错 —— 而那是这条链路上
+     * 最贵的错误（永久漏采或永久重拉）。所以 4c 只共用**判据与记账**。
+     *
+     * ## ★★ 断言必须区分「注释里提到」与「真的调用」
+     *
+     * 我第一版写的是 `not.toContain("commitProgress")` —— 而它当场转红，
+     * 因为 runner 的注释里**正在解释**"为什么不碰水位"就提到了那几个名字。
+     *
+     * 那个失败是对的：一个连注释都不许提的判据会逼人删掉解释。
+     * 所以判据改成**调用形状**（`.commitProgress(` 这种），
+     * 而注释里的反引号引用不受影响。
+     */
+    const { readFileSync } = await import("node:fs")
+    const runner = readFileSync("packages/ingest/src/producer.ts", "utf8")
+    for (const invariant of [
+      "commitProgress",
+      "confirmedEnd",
+      "splitIfTruncated",
+      "resetIncrementalWatermark",
+    ]) {
+      // ★ `.xxx(` = 真的在调它；注释里写的是 `` `xxx` ``（反引号），不匹配
+      expect(runner, `runner 不许调水位方法：${invariant}`).not.toContain(`.${invariant}(`)
+    }
+    /**
+     * ★ 而 runner **也不许** import scheduler（那是水位的家）——
+     * 没有那个 import，上面四条在结构上就不可能被违反。
+     */
+    expect(runner).not.toContain("scheduler.js")
+  })
+
+  it("★★★ `scopeNotReady` 只有 watermark 那个生产者声明要停（其余每轮重列）", async () => {
+    /**
+     * `scopeNotReady` 修的是一次真实事故：采集器比范围行先跑（实测差 1 秒），
+     * 那一轮拉到的 9 条全被丢，而**水位照常前移** —— 之后 since 之后
+     * 没有新消息就永远不再拉。用户看到"已采集 0"，日志里一个错都没有。
+     *
+     * ★ 关键在"水位照常前移"这一步。另两个域每轮从头列举，
+     * "这一轮白丢"的代价只是一轮 CLI 调用 —— 下一轮范围就绪了会再列一遍。
+     *
+     * 所以这个字段只有 chat 为 true，而它必须**由声明表达**
+     * （散在三个 tick 里的 if 让"为什么听记不需要它"只能靠读代码回答）。
+     */
+    const { PRODUCERS } = await import("@mycontext/ingest")
+    const halting = PRODUCERS.filter((p) => p.haltsOnScopeNotReady).map((p) => p.id)
+    expect(halting).toEqual(["chat-ingest"])
+    // ★ 而它恰好就是唯一那个 watermark 调度的（两个字段必须一致）
+    const watermark = PRODUCERS.filter((p) => p.schedule === "watermark").map((p) => p.id)
+    expect(watermark).toEqual(halting)
   })
 
   it("★★★ 不许再出现「时间闸包在 restricted 里」那个形状", async () => {

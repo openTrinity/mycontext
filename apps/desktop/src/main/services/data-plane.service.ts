@@ -34,7 +34,7 @@ import {
 } from "@mycontext/ipc-contract"
 import { AUTO_BUILD_MIN_INTERVAL_MS } from "@mycontext/knowledge-feed"
 import { GRAPH_BUILD_CONSUMER_ID, GRAPH_SYNC_CONSUMER_ID } from "@mycontext/knowledge-feed"
-import { buildDomainStatuses } from "@mycontext/ingest"
+import { buildDomainStatuses, buildProducerStatuses } from "@mycontext/ingest"
 import type { CycleRunnable } from "@mycontext/ingest"
 import { IngestService } from "./ingest.service.js"
 import { WORK_CONSUMER_ID } from "./distill.service.js"
@@ -702,6 +702,21 @@ export class DataPlaneService {
          * （注册过才算），而域是**设计**事实。前者未登录时未知，后者已知。
          */
         domains: buildDomainStatuses({ domainHeads: {} }).map((status) => ({ ...status })),
+        /**
+         * ★ 生产者的**声明**同样与登录无关，所以这里也给全量 + 零计数。
+         *
+         * ★★ 但**不传** `channelDomains`：未登录时 `capabilities` 拿不到
+         * （插件在，但那时按能力过滤会让整块生产者消失）—— 而用户看到一个
+         * 空白的生产者卡会以为坏了，看到"全部就绪、零丢弃"才是诚实的
+         * ："这些是我们会跑的生产者，现在还没开始"。
+         *
+         * 与 `consumers: []` 的区别与域那一条一样：消费者的"存在与否"是
+         * **运行时**事实（注册过才算），生产者是**设计**事实。
+         */
+        producers: buildProducerStatuses().map((status) => ({
+          ...status,
+          domains: [...status.domains],
+        })),
         /**
          * ★ 未登录时范围闸「没配、没丢过」。
          *

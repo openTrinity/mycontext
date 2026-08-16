@@ -686,16 +686,25 @@ export const chatCoverageDaySchema = z.object({
   /** 这一天**全部**在范围内的会话都抽干了吗（MIN 语义，不是 MAX） */
   drained: z.boolean(),
   /**
-   * 这一天还有几个**分区**没抽干。
+   * 这一天还有几个**分区**没抽干。`null` = 这个域**没有分区概念**。
    *
    * ★ 名字保留 `pendingConversations`（既有调用方在用），而它对文档域
    * 的含义是"还有几个**空间**没抽干" —— 分区语义按域不同
    * （聊天按会话、文档按空间），但"还有几个没齐"这个问题是同一个。
    *
-   * ★ 听记域恒 0：`minutes_coverage` 不按分区分（它是全量列举，
-   * 没有"某个分区抽干了"这件事）。报 0 而不是编一个数是诚实的。
+   * ## ★★★ 为什么听记域必须报 `null` 而不是 0（修 G15）
+   *
+   * 原来它对听记恒 **0**，注释写的是"报 0 而不是编一个数是诚实的"。
+   * 那句话只对了一半：0 不是编的，但它**读起来是"都齐了"** ——
+   * 而真相是"这个概念对听记不适用"（`minutes_coverage` 是每渠道一行，
+   * 它是全量列举，没有"某个分区抽干了"这件事）。
+   *
+   * 三行覆盖面并排时用户看到「文档还有 3 个空间没齐、听记还有 0 个没齐」，
+   * 于是他以为听记比文档更完整 —— 而那两个数字压根不是同一种东西。
+   *
+   * `null` 让界面能说「听记不按分区统计」，那是唯一诚实的表达。
    */
-  pendingConversations: z.number(),
+  pendingConversations: z.number().nullable(),
 })
 
 /**
@@ -712,7 +721,38 @@ export const chatCoverageViewSchema = z.object({
   localCount: z.number(),
   dayCount: z.number(),
   drainedDays: z.number(),
-  pendingConversations: z.number(),
+  /** 见 `chatCoverageDaySchema.pendingConversations`：`null` = 这个域没有分区概念。 */
+  pendingConversations: z.number().nullable(),
+  /**
+   * 这个域的覆盖面**怎么算出来的**。
+   *
+   * ## ★★★ 为什么要暴露它（修 G15）
+   *
+   * 三个域的覆盖面走**三条不同的路**，而它们的精度不同：
+   *
+   * | 域 | 来源 | `listedTotal`（渠道说有多少） |
+   * |---|---|---|
+   * | chat | `chat_coverage` 表，写入侧逐格记账 | ✅ 有 |
+   * | doc | `document_coverage` 表，写入侧逐格记账 | ✅ 有 |
+   * | minutes | **从 `minutes` 表现算** | ❌ 恒 null |
+   *
+   * 听记那条路的理由是成立的（真值已在实体表里、量级小三个数量级、
+   * 加一张 per-day 表要一次迁移 + 一条写入路径）。但由此产生的
+   * **表达不一致**是真实代价：那一档没有外部参照，所以"库里 12 场"
+   * 是不是全部只能靠**整渠道**的 `drained` 回答。
+   *
+   * 不说的话用户会以为三行是同一种精度的数字。
+   */
+  source: z.enum(["accounted", "derived"]),
+  /**
+   * 分区粒度的人话（i18n key 后缀）：`conversation` / `space` /
+   * `null` = 不按分区统计。
+   *
+   * ★ 与 `pendingConversations` 成对：那个给数字，这个给量词。
+   * 只给数字的话界面只能说"还有 3 个没齐" —— 而"3 个什么"对用户
+   * 恰恰是关键（3 个会话与 3 个知识库是完全不同的信息量）。
+   */
+  partitionKind: z.enum(["conversation", "space"]).nullable(),
 })
 
 /**
@@ -2422,6 +2462,80 @@ export const ingestSnapshotSchema = z.object({
       unwiredReason: z.string().nullable(),
       /** 最近一次错误；null = 没出错过 */
       lastError: z.string().nullable(),
+    }),
+  ),
+  /**
+   * ── **生产者**的声明 + 运行时（修 G16）─────────────────────────
+   *
+   * ## ★★★ 为什么必须有这一块（它补的是一个不对称）
+   *
+   * 消费者侧早就有完整的运行时视图（上面那个 `consumers`：lag / absent /
+   * waiting / stale / unwired）。而生产者侧只有下面那个**全局**
+   * `scope` 对象 —— chat 与 doc 两条路累加进**同一对**字段。
+   *
+   * 三件事因此读不出来，而它们的出路完全不同：
+   *
+   * · **谁丢的** —— 「文档挡掉 300 篇」与「聊天挡掉 300 条」是同一个数字。
+   *   前者去改文档的空间白名单，后者去改会话勾选；
+   * · **范围就绪了吗** —— `scopeNotReady` 完全不可见，而它是那次
+   *   "飞书一条都采不到"的根因（采集比范围行先跑、9 条全丢、水位照常前移）；
+   * · **上一轮抽干了吗** —— 原来要从三个地方拼：`minutesCoverage.drained`
+   *   在快照里、文档的截断只有一条 warn 日志、chat 靠 `backfill` 那三个数字。
+   *
+   * ★ 与 `consumers` 同形（声明 + 运行时合成一张表），判据在
+   * `buildProducerStatuses`（纯函数、不读库）。
+   */
+  producers: z.array(
+    z.object({
+      id: z.string(),
+      /** 一句话说明它产什么（来自 `ProducerSpec.purpose`） */
+      purpose: z.string(),
+      domains: z.array(z.enum(["chat", "doc", "minutes", "contact"])),
+      /** 受哪个范围约束：learning（什么进库）/ attention（什么投给分身） */
+      scope: z.enum(["learning", "attention"]),
+      /**
+       * 调度形状。界面据此解释"为什么这个域没有水位"：
+       * watermark（chat）/ drain-each-round（minutes）/
+       * tiered-listing（doc）/ stream（attention，不写 changelog）。
+       */
+      schedule: z.enum(["watermark", "drain-each-round", "tiered-listing", "stream"]),
+      /**
+       * 范围就绪了吗（可以开始采了）。
+       *
+       * ★ 判据是 `!collectsNothing`，**不含** `unset`：一个"没配过 +
+       * 缺省 collect-all"的域（听记/文档）是就绪的 —— 它按缺省方向采。
+       */
+      scopeReady: z.boolean(),
+      /** 用户还没配过这个域的范围（与"没就绪"分开：见上） */
+      scopeUnset: z.boolean(),
+      /**
+       * 范围**读不出来**（坏 JSON）。
+       *
+       * ★ 必须与 `scopeReady: false` 分开显示：前者用户自己能修
+       * （在设置页重存一次范围），后者要去改勾选。
+       */
+      scopeUnreadable: z.boolean(),
+      /** 本进程因**超出范围**丢弃的条数（★ 按域，不再是一个全局数字） */
+      droppedOutOfScope: z.number(),
+      /** 其中因**渠道没给业务时间**被丢的条数（出路不同：去看渠道解析） */
+      droppedUnknownTime: z.number(),
+      lastDroppedAt: z.number().nullable(),
+      /**
+       * 上一轮**抽干了吗**。`null` = 这个调度形状没有"抽干"这件事。
+       *
+       * ★ 三个值三种含义：true = 覆盖面完整；false = 撞了预算/截断
+       * （条数是下界）；null = watermark/stream 压根没有这个概念
+       * （报 false 会让界面说"还没采完"，而那对聊天是永远成立的废话）。
+       */
+      drained: z.boolean().nullable(),
+      /**
+       * 当前挂着的渠道里**有没有**能产这个域的。
+       *
+       * false = 这个 vault 的渠道都没有这个能力（比如只连飞书而这是听记）。
+       * ★ 与 `scopeReady: false` 分开：前者的出路是"去连另一个渠道"，
+       * 后者是"去改范围"。合成一个会让用户对着范围设置反复调。
+       */
+      supportedByChannel: z.boolean(),
     }),
   ),
   /**

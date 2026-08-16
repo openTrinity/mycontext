@@ -106,17 +106,48 @@ export interface DomainProducer<TItem> {
    */
   persist(items: readonly TItem[]): { changed: number; unchanged: number }
   /**
-   * 按 (分区, 天) 记覆盖面。`null` = 这个域这一轮不记
+   * 按 (分区, 天) 记覆盖面。不给 = 这个域这一轮不记
    * （听记没有 per-partition 覆盖面表）。
    */
   account?: ((input: CoverageAccounting) => void) | undefined
+  /**
+   * 记账的**语义**：这一格的数字是"新增了多少"还是"共有多少"。
+   *
+   * ## ★★★ 为什么这必须由域声明，而不是 runner 挑一个
+   *
+   * 两张覆盖面表回答的是**不同的问题**，而它们的写入语义因此相反：
+   *
+   * | 域 | 语义 | 为什么 |
+   * |---|---|---|
+   * | chat | `accumulate` | 一天的消息会跨多轮进来，覆盖会让计数在轮次之间跳回小值 |
+   * | doc | `snapshot` | "这个空间这天有多少篇"是**快照量** —— 一篇文档被改十次仍然是一篇 |
+   *
+   * 用错方向的后果都很具体、而且都不报错：
+   * · 文档用 accumulate → 改动频繁的空间篇数**虚高到几倍**；
+   * · 聊天用 snapshot → 每轮把总量覆盖成"这一轮新增的那几条"。
+   *
+   * ★ 缺省 `accumulate`（chat / minutes 的语义），因为它是 `bumpPartition`
+   * 的既有行为 —— 让新接进来的域**显式**要求 snapshot，而不是反过来。
+   */
+  readonly accounting?: "accumulate" | "snapshot"
 }
 
-/** 覆盖面记账的一次调用。★ 与 `CoverageRepositoryBase.bumpPartition` 同形。 */
+/**
+ * 覆盖面记账的一次调用。
+ *
+ * ★ 与 `CoverageRepositoryBase.bumpPartition` / `markDrained` 两者都同形 ——
+ * 用哪一个由 `DomainProducer.accounting` 决定（见那个字段）。
+ */
 export interface CoverageAccounting {
   partitionId: string
   dayBucket: string
-  /** 这一轮这个格子新增多少（累加语义） */
+  /**
+   * 这个格子的数字。
+   *
+   * · `accounting: "accumulate"` → **新增多少**（累加进 `local_count`）；
+   * · `accounting: "snapshot"` → **共有多少**（写 `listed_total`，
+   *   而 `local_count` 的真值由各自的 `rebuildFrom*` 从实体表数出来）。
+   */
   delta: number
   /** 渠道说这个格子共有多少；`null` = 这一轮不知道（保留旧值） */
   listedTotal?: number | null
@@ -248,7 +279,73 @@ export interface ProducerRunnerOptions {
  * → ④ 记覆盖面。
  */
 export class ProducerRunner {
+  /**
+   * **按域**累计的丢弃计数（本进程内）。
+   *
+   * ## ★★★ 为什么必须按域分（修 G16）
+   *
+   * 改动前 chat 与 doc 两条路累加进**同一对**快照字段
+   * （`IngestSnapshot.scope.droppedOutOfScope`）。于是
+   * 「文档被挡掉 300 篇」与「聊天被挡掉 300 条」在界面上是同一个数字 ——
+   * 而两者的出路完全不同：前者去改文档的空间白名单，后者去改会话勾选。
+   *
+   * ★ 在 runner 里而不是让调用方各记一份：那正是"判据有多份"的形状，
+   * 而这一层存在的全部理由就是消灭它。
+   *
+   * ★★ 进程内内存而不是落库：它回答的是"**本进程**挡掉了多少"，
+   * 跨重启累加没有意义（用户会把上次运行挡掉的量误读成现在仍在漏）。
+   * 与 `IngestService.droppedOutOfScope` 同一条判据。
+   */
+  private readonly counters = new Map<
+    ScopedDomain,
+    { dropped: number; unknownTime: number; lastAt: number | null }
+  >()
+
   constructor(private readonly options: ProducerRunnerOptions) {}
+
+  /**
+   * 某个域本进程累计丢了多少（给快照 / `buildProducerStatuses` 用）。
+   *
+   * ★ 没跑过的域返回全零而不是 `undefined`：调用方要的是"这个域挡了多少"，
+   * 而"还没跑过"与"跑了没挡"在那个问题上是同一个答案（0）。
+   * 让它返回 undefined 会逼每个调用点写一次 `?? 0`。
+   */
+  countersOf(domain: ScopedDomain): {
+    dropped: number
+    unknownTime: number
+    lastAt: number | null
+  } {
+    return this.counters.get(domain) ?? { dropped: 0, unknownTime: 0, lastAt: null }
+  }
+
+  /** 全部域的计数（快照那侧一次取完，避免逐域查）。 */
+  allCounters(): ReadonlyMap<
+    ScopedDomain,
+    { dropped: number; unknownTime: number; lastAt: number | null }
+  > {
+    return this.counters
+  }
+
+  /**
+   * 清零。
+   *
+   * ★ 用户改了范围时必须清：那个数字回答的是"**当前范围下**挡掉了多少"，
+   * 跨范围累加会让用户把改范围之前挡掉的量误读成新范围仍在漏
+   * （`IngestService.applyScopeChange` 里对那两个字段做的是同一件事）。
+   */
+  resetCounters(): void {
+    this.counters.clear()
+  }
+
+  /** 记一次丢弃进按域计数（`noteDropped` 里调，与日志同一处）。 */
+  private bumpCounters(domain: ScopedDomain, dropped: number, unknownTime: number): void {
+    const current = this.countersOf(domain)
+    this.counters.set(domain, {
+      dropped: current.dropped + dropped,
+      unknownTime: current.unknownTime + unknownTime,
+      lastAt: this.options.clock.now(),
+    })
+  }
 
   /**
    * 跑一批。
@@ -357,6 +454,19 @@ export class ProducerRunner {
             partitionId,
             dayBucket,
             delta,
+            /**
+             * ★★★ `snapshot` 语义要把这一格的数字也放进 `listedTotal`。
+             *
+             * 两张覆盖面表的写入语义相反（见 `DomainProducer.accounting`）：
+             * · accumulate（chat）→ `delta` 累加进 `local_count`；
+             * · snapshot（doc）→ 这一格"共有多少"，而 `local_count` 的真值
+             *   由 `rebuildFromDocuments` 从实体表数出来，这个数字进
+             *   `listed_total`（"渠道说有多少"）。
+             *
+             * 不给的话文档那条路会丢掉 `listedTotal` —— 而那是"这天齐没齐"
+             * 唯一的外部参照（`drained=false` 时 `local_count` 只是下界）。
+             */
+            ...(producer.accounting === "snapshot" ? { listedTotal: delta } : {}),
             ...(options.drained === undefined ? {} : { drained: options.drained }),
           })
         }
@@ -404,6 +514,31 @@ export class ProducerRunner {
   }
 
   /**
+   * 记一次丢弃 —— **给不整段走 runner 的那条路**（聊天）用的公开入口。
+   *
+   * ## ★★★ 为什么它必须存在
+   *
+   * 聊天那条路刻意不整段走 runner：它推进一个不可回退的水位
+   * （`commitProgress` / `confirmedEnd` / `splitIfTruncated` 那套不变式），
+   * 而水位算错是这条链路上最贵的错误。
+   *
+   * 但"丢了多少"这件事必须与另两条路进**同一个**按域计数器 ——
+   * 否则 `buildProducerStatuses` 里 chat 那一行永远是 0，而它恰恰是
+   * 量级最大的那个域（实测越界过 46,415 条）。
+   *
+   * ★ 也就是：runner 在那条路上只承担**记账**，不承担调度与落库。
+   * 那个边界写在 `PRODUCERS` 的 `schedule: "watermark"` 上。
+   */
+  noteDroppedFor(
+    domain: ScopedDomain,
+    dropped: number,
+    unknownTime: number,
+    scope: DomainScope,
+  ): void {
+    this.noteDropped(domain, dropped, unknownTime, scope)
+  }
+
+  /**
    * 记一次丢弃。
    *
    * ★ 日志**必须带渠道**：这条说的是「丢了 N 条数据」，而多渠道下不带渠道
@@ -417,6 +552,8 @@ export class ProducerRunner {
     unknownTime: number,
     scope: DomainScope,
   ): void {
+    // ★ 计数与日志在**同一处**：分开会出现"日志记了、计数没记"的漂移
+    this.bumpCounters(domain, dropped, unknownTime)
     this.options.logger?.info("producer dropped out-of-scope items", {
       channelId: this.options.channelId,
       domain,

@@ -187,6 +187,42 @@ export function ScopeCoverage({
               pending: pendingDays,
             })}
       </p>
+      {/*
+        ── ★★★ 三个域的精度不同，必须说出来（修 G15）───────────────
+
+        ## 那句话原来说不出来
+
+        听记那一档的 `pendingConversations` 恒 0，而 0 **读起来是"都齐了"**
+        —— 于是三行并排时用户看到「文档还有 3 个空间没齐、听记还有 0 个
+        没齐」，以为听记更完整。而那两个数字压根不是同一种东西：
+        听记没有分区概念，它的覆盖面是从 `minutes` 表**现算**的
+        （没有渠道给的 listedTotal 做外部参照）。
+
+        现在契约给了 `source` 与 `partitionKind`，界面据此说三句不同的话。
+      */}
+      {data.source === "derived" ? (
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("status.scope.coverage.derived", {
+            defaultValue: "（按整轮统计：这一类没有逐天的外部参照，齐没齐看整轮是否翻到底）",
+          })}
+        </p>
+      ) : data.pendingConversations !== null && data.pendingConversations > 0 ? (
+        /**
+         * ★ 量词按域给：3 个**会话**与 3 个**知识库**是完全不同的信息量。
+         * 只给数字的话用户不知道"3 个什么"，而那恰恰是他要的。
+         */
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {data.partitionKind === "space"
+            ? t("status.scope.coverage.pendingSpaces", {
+                defaultValue: "还有 {{count}} 个知识库没翻完。",
+                count: data.pendingConversations,
+              })
+            : t("status.scope.coverage.pendingConversations", {
+                defaultValue: "还有 {{count}} 个会话没翻完。",
+                count: data.pendingConversations,
+              })}
+        </p>
+      ) : null}
       {range.clamped ? (
         <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
           {t("status.scope.coverage.clamped", {
