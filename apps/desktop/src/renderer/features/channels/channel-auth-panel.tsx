@@ -119,20 +119,56 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
    */
   const appBinding = status.appBinding
   /**
+   * 本人身份（含 openIds）—— 头像要用它的 openDingTalkId。
+   *
+   * ★ 与下面 `usesPersonaIdentity` 那个 `selfIdentity` 分开：那个只在钉钉
+   * （persona 渠道）时取，而头像每个已授权渠道都要。`readSelf()` 目前返回主渠道
+   * 那一行（见 DataPlaneService.readSelfIdentity），钉钉正好是主渠道 —— 够用；
+   * 将来支持按渠道取时这里换成带 channelId 的版本即可。
+   */
+  const selfIdentityForAvatar = useSelfIdentity(authorized)
+  /**
    * 本人在**这个渠道**的头像。
    *
-   * ★ 复用 `useContactAvatars` 并把 `channelId` 传下去 —— 头像的取法与缓存
-   * 都按渠道分（钉钉走共同群、飞书走 `contact +get-user --as bot`）。
-   * 与仪表盘 greeting 用的是同一条路，不另造一个入口。
+   * ## ★★ 用 `selfIdentity.openIds` 的 openId，**不是** `status.userId`
    *
+   * `AuthStatus.userId` 来自 `dws auth status` 的 `user_id` —— 实测那是**数字
+   * userId**（如 `494542`），**不是** openDingTalkId（`D…` 开头）。而头像那条路
+   * （`chat group members list-by-ids --users` / `media.selfAvatar` 落缓存的键）
+   * 认的是 **openDingTalkId**。拿 userId 去查：要么服务端 `1001 Decode parameter
+   * error`，要么与 `selfAvatar` 写入缓存用的键对不上 → 永远命中不到。
+   *
+   * 这正是"设置里『从平台获取』能拿到、而授权卡拿不到"的原因：那个按钮走
+   * `media.selfAvatar()`，它读的是 `channel_self_identity.open_ids` 里的
+   * openDingTalkId；而这里之前读 `status.userId`（userId）—— 两个不同的 id。
+   * 现在两处都用 openId，与那个按钮同源。
+   *
+   * `openIds` 里按渠道挑：钉钉认 `openDingTalkId`、飞书认 `open_id`；
+   * 取不到就退到任意非空的那个（新渠道不必回来改）。
+   */
+  const selfOpenId = (() => {
+    if (!authorized) return null
+    const ids = selfIdentityForAvatar.data?.openIds ?? []
+    const preferred = channel.id === "feishu" ? "open_id" : "openDingTalkId"
+    return (
+      ids.find((e) => e.kind === preferred && e.value !== "")?.value ??
+      ids.find((e) => e.value !== "")?.value ??
+      null
+    )
+  })()
+  /**
    * ★ `groupExternalId` 传 `null`：本人不属于任何"共同群"，传一个会话 id
    * 会让查询必然空并落一条**终态** miss（那之后永久取不到）。
+   * ★ 花名(displayName)传下去：冷启动时本人头像也走 `search-common --nicks`
+   * 找共同群，缺花名会一次命令都不发（见 avatar.ts 的注释）。
    */
-  const selfExternalId = status.state === "authorized" ? status.userId : null
+  const selfExternalId = selfOpenId
+  // userName 只在 authorized 分支上有；selfOpenId 非空已蕴含 authorized。
+  const selfNick = status.state === "authorized" ? status.userName : null
   const selfAvatars = useContactAvatars(
     selfExternalId === null ? [] : [selfExternalId],
     null,
-    undefined,
+    selfExternalId === null || selfNick === null ? undefined : { [selfExternalId]: selfNick },
     channel.id,
   )
   const selfAvatarUrl =

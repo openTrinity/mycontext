@@ -47,6 +47,7 @@ import {
   useDashboardTrends,
   useKlGraphBuild,
   useOnboardingSteps,
+  useSelfIdentity,
   useContactAvatars,
 } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
@@ -213,10 +214,27 @@ export function DashboardModule({ activeChannelId = null }: DashboardModuleProps
    * 头像缺失本来就是正常状态之一（实测本机飞书返回的正是
    * `default-avatar_v3`），不该拿别人的脸去填。
    */
+  /**
+   * ★★ 本人头像的 externalId 用 **openId**，不是 `status.userId`。
+   *
+   * 实测 `dws auth status` 的 `user_id` 是**数字 userId**（如 `494542`），
+   * 而头像那条路（`list-by-ids --users` / `media.selfAvatar` 落缓存的键）认
+   * **openDingTalkId**（`D…`）。拿 userId 查恒对不上 → 头像永远命中不到、只能
+   * 回落首字母。openId 从本人身份行的 `openIds` 取（与设置里「从平台获取」同源）。
+   */
+  const selfIdentityForAvatar = useSelfIdentity(scope.channelId !== undefined)
+  const selfAuthorized =
+    scope.channelId !== undefined &&
+    scope.channels.find((c) => c.id === scope.channelId)?.status?.state === "authorized"
   const selfExternalId = (() => {
-    if (scope.channelId === undefined) return null
-    const status = scope.channels.find((c) => c.id === scope.channelId)?.status
-    return status?.state === "authorized" ? status.userId : null
+    if (!selfAuthorized) return null
+    const ids = selfIdentityForAvatar.data?.openIds ?? []
+    const preferred = scope.channelId === "feishu" ? "open_id" : "openDingTalkId"
+    return (
+      ids.find((e) => e.kind === preferred && e.value !== "")?.value ??
+      ids.find((e) => e.value !== "")?.value ??
+      null
+    )
   })()
   const selfAvatars = useContactAvatars(
     selfExternalId === null ? [] : [selfExternalId],
