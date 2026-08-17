@@ -200,6 +200,34 @@ export class ConversationRepository {
    * 采集前一次取全（一个很小的 Map —— 实测 123 个群里 1 个），
    * 逐个查会是几十次同步 SQL，而 better-sqlite3 是同步的。
    */
+  /**
+   * 服务端明确**拒绝读取**的会话数（按渠道）。
+   *
+   * ## ★★★ 为什么需要这个数（CLAUDE.md §5 的后半句）
+   *
+   * 「把它明确记成『不可读』而不是『0 条』。」在加这个方法之前，那一半
+   * 只做了一半：`unreadable_reason` 落库了、`cursors.ts` 的注释也写着
+   * "它该出现在「不可读」那个计数里"，但**那个计数不存在** ——
+   * 任何界面都读不到它。
+   *
+   * 实测本机库 **56 个会话**读不了，而用户看到的只是"这些会话没消息"。
+   * 数据缺失被表达成"本来就没有"，正是这条规则要防的形状。
+   *
+   * ★ 只数**会话**（`type` 不限）：群与单聊被拒的原因不同
+   * （保密 / 不在群里 / 缺对端标识），但对"我有多少读不到"这个问题
+   * 它们是同一类。原因的细分在 `unreadable_reason` 里，需要时再分组。
+   */
+  countUnreadable(channelId: string): number {
+    return (
+      this.db
+        .prepare<
+          [string],
+          { c: number }
+        >("SELECT count(*) AS c FROM conversations WHERE channel_id = ? AND unreadable_reason IS NOT NULL")
+        .get(channelId)?.c ?? 0
+    )
+  }
+
   unreadableByExternalId(channelId: string): Map<string, string> {
     const rows = this.db
       .prepare<[string], { external_id: string; unreadable_reason: string }>(

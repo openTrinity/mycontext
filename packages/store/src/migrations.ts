@@ -45,6 +45,7 @@ import { VAULT_0027_CHAT_COVERAGE } from "./migrations/vault/v27-chat-coverage.j
 import { VAULT_0028_ATTENTION_SCOPE } from "./migrations/vault/v28-attention-scope.js"
 import { VAULT_0029_DOCUMENT_COVERAGE } from "./migrations/vault/v29-document-coverage.js"
 import { VAULT_0030_ELIGIBILITY } from "./migrations/vault/v30-eligibility.js"
+import { VAULT_0031_REJUDGE_UNREADABLE } from "./migrations/vault/v31-rejudge-unreadable.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -383,6 +384,7 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
    * 完整理由见那个文件头。★ 只加列 + 索引；编号全局单调。
    */
   { version: 30, name: "eligibility", sql: VAULT_0030_ELIGIBILITY },
+  { version: 31, name: "rejudge-unreadable", sql: VAULT_0031_REJUDGE_UNREADABLE },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */

@@ -306,6 +306,141 @@ describe("错误归类：区分终态与可重试", () => {
     const error = classifyDwsError(output)
     expect(error?.code).toBe("RESOURCE_FORBIDDEN")
     expect(error?.message).toContain("保密会话")
+    // ★ 归因也要对：只有这一种才配 confidential（下面两条锁另外两种）
+    expect(error?.context?.["reason"]).toBe("confidential")
+  })
+
+  /**
+   * ── ★★★ 1001 的第三种：`peerUid is required` ──────────────────────
+   *
+   * ## 实测（2026-08-17，真身份 + 真 openDingTalkId）
+   *
+   * `chat message list --open-dingtalk-id <真实且格式正常的 id>` 稳定返回
+   * `1001` + `peerUid is required`。而代码原来把 `1001` 一律记成
+   * `confidential` —— 实测本机库里 **33 个单聊**被标成"保密会话"，
+   * 它们全都有对端 openId、格式正常、以前也读得到。
+   *
+   * 真因：这条命令要 `peerUid`（或 `--user <userId>`），而
+   * `openDingTalkId → peerUid` 在服务端解析为空。我们拿不到 userId ——
+   * 反查要走花名册类命令，按 CLAUDE.md §5 不进白名单。
+   *
+   * ★ 所以**结果**（跳过）是对的，**归因**是错的。而归因错的代价具体：
+   * 用户读到"对方设了保密"会去问对方，而问题在我们这边。
+   */
+  it("★★★ 1001 + peerUid is required → 不许归成保密会话", () => {
+    const output = JSON.stringify({
+      error: {
+        category: "api",
+        code: 1,
+        reason: "business_error",
+        server_error_code: "1001",
+        message:
+          "[UNCLASSIFIED] peerUid is required (operation: chat/list_individual_chat_message)",
+      },
+    })
+    const error = classifyDwsError(output)
+    // 仍然是终态（重试没用）
+    expect(error?.code).toBe("RESOURCE_FORBIDDEN")
+    expect(error?.retryable).toBe(false)
+    /**
+     * ★★★ 关键这一条：归因必须与"保密"分开。
+     *
+     * 反证：把 `SERVER_CODE_VARIANTS` 里 `peeruid is required` 那一格删掉
+     * → 落到整码表 → reason 变成 `confidential` → 这条转红。
+     */
+    expect(error?.context?.["reason"]).toBe("peer_id_unavailable")
+    expect(error?.message).not.toContain("保密")
+  })
+
+  /**
+   * ── ★★★ 两个**压根没分类过**的码（这次日志里的无限重试源头）────────
+   *
+   * 不在 `SERVER_ERROR_CODES` 里的码会落到兜底
+   * `PROCESS_FAILED{retryable:true}` → 采集每 2 分钟重撞一次、
+   * 永不落持久标记。那正是文件头记着的"刷屏事故"形状，而它又发生了一次。
+   */
+  it("★★★ 11056（listBaseConversationByIds null）是终态，不许可重试", () => {
+    /**
+     * ## 实测：稳定，不是偶发
+     *
+     * · 12 个群逐个试 → 8 个报 11056；
+     * · 同一个群连试 4 次（间隔 3s）→ ★ 4 次全报；
+     * · 带 / 不带 `--profile` → 一样报（不是组织不匹配）；
+     * · ★ 那 8 个群在全局窗里**一个都没有**（抽干 12 页）——
+     *   也就是归终态**不损失召回**，两条路本来都是 0 条。
+     *
+     * 反证：把这一行从表里删掉 → 归 `PROCESS_FAILED{retryable:true}`
+     * → 这条转红。而那正是修复前的状态。
+     */
+    const output = JSON.stringify({
+      error: {
+        category: "api",
+        code: 1,
+        reason: "business_error",
+        server_error_code: "11056",
+        message:
+          "[UNCLASSIFIED] listBaseConversationByIds null (operation: chat/list_conversation_message_v2)",
+      },
+    })
+    const error = classifyDwsError(output)
+    expect(error?.code).toBe("RESOURCE_FORBIDDEN")
+    expect(error?.retryable).toBe(false)
+    // ★ 与"保密"分开：这是服务端侧的问题，不是对方设了保密
+    expect(error?.context?.["reason"]).toBe("server_rejected")
+  })
+
+  it("★★★ 130003（本人不在会话里）是终态", () => {
+    /**
+     * 上游拼写是 `OpendId`（少一个 e），照抄。实测那 2 个群在库里都是
+     * **0 条消息** —— 与"从没进过"一致。
+     *
+     * ★ 没有补救动作：不在群里就是不在，授权与换客户端都无效。
+     */
+    const output = JSON.stringify({
+      error: {
+        category: "api",
+        code: 1,
+        reason: "business_error",
+        server_error_code: "130003",
+        message:
+          "[UNCLASSIFIED] OpendId is not in conversation (operation: chat/list_conversation_message_v2)",
+      },
+    })
+    const error = classifyDwsError(output)
+    expect(error?.code).toBe("RESOURCE_FORBIDDEN")
+    expect(error?.retryable).toBe(false)
+    expect(error?.context?.["reason"]).toBe("not_a_member")
+  })
+
+  it("★★ 每一个已分类的服务端码都必须给 `reason`（否则退回按码归因）", () => {
+    /**
+     * ## 为什么锁全表而不只锁新加的两个
+     *
+     * 调用方（`markUnreadable`）优先用 `context.reason`，缺了才退回
+     * 按错误码归因 —— 而按码归因就是"所有 RESOURCE_FORBIDDEN 都叫保密会话"，
+     * 也就是这次要修的那个 bug。
+     *
+     * 所以判据落在**每一条都有 reason** 上：将来加第四个码的人漏了它，
+     * 这条转红，而不是等到用户看到"这个群保密"才发现。
+     *
+     * ★ 类型上也要求了（`reason: string` 必填），这条是行为侧的第二道门。
+     */
+    const cases: readonly { code: string; message: string }[] = [
+      { code: "1001", message: "该群为保密群，无法获取消息记录" },
+      { code: "11056", message: "listBaseConversationByIds null" },
+      { code: "130003", message: "OpendId is not in conversation" },
+      { code: "CrossOrgPermissionDenied", message: "cross org" },
+      { code: "ENTERPRISE_NOT_AUTHORIZED", message: "not authorized" },
+    ]
+    for (const item of cases) {
+      const error = classifyDwsError(
+        JSON.stringify({
+          error: { category: "api", code: 1, server_error_code: item.code, message: item.message },
+        }),
+      )
+      expect(typeof error?.context?.["reason"], `${item.code} 缺 reason`).toBe("string")
+      expect(error?.retryable, `${item.code} 不该可重试`).toBe(false)
+    }
   })
 
   it.each([

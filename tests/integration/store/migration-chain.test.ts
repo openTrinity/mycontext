@@ -838,3 +838,80 @@ describe("迁移 checksum 的判据", () => {
     }
   })
 })
+
+/**
+ * ── ★★★ v31：重判被误记成「保密会话」的那些会话 ──────────────────────
+ *
+ * 归因错误的形状：`markUnreadable` 原来按**错误码**归因，所有
+ * `RESOURCE_FORBIDDEN` 都记成 `confidential`。而 `server_error_code=1001`
+ * 被上游复用于至少三件事，其中 `peerUid is required` 是"我们没有这个单聊
+ * 需要的标识" —— 实测本机库里 33 个单聊被标成"保密会话"。
+ *
+ * 迁移**不可能**知道当初各自是哪一种（库里只存了结论），所以做法是
+ * 清掉结论、让它重新判一次。
+ */
+describe("★★★ v31：清掉误判的 confidential 标记", () => {
+  it("★★★ confidential 被清掉（下一轮会重新判并落对的 reason）", () => {
+    const path = tempDbPath()
+    const before = openStore({ path, migrations: VAULT_MIGRATIONS.slice(0, 30) })
+    const now = 1_785_306_600_000
+    new ConversationRepository(before.db).upsert({
+      id: "c1",
+      channelId: "dingtalk",
+      externalId: "cidFAKE0001==",
+      type: "direct",
+      title: "单聊",
+      createdAt: now,
+    })
+    new ConversationRepository(before.db).markUnreadable(
+      "dingtalk",
+      "cidFAKE0001==",
+      "confidential",
+      now,
+    )
+    before.close()
+
+    const after = openStore({ path, migrations: VAULT_MIGRATIONS })
+    const reason = after.db
+      .prepare<
+        [],
+        { unreadable_reason: string | null }
+      >("SELECT unreadable_reason FROM conversations WHERE id = 'c1'")
+      .get()
+    expect(reason?.unreadable_reason).toBeNull()
+    after.close()
+  })
+
+  it("★★ 只清 confidential —— cross_org 不动（它的归因一直是对的）", () => {
+    /**
+     * `cross_org` 是 `PERMISSION_REQUIRED` 那条路径标的，语义一直准确
+     * （用户授权一次就能读）。清它只会白烧一次必失败的请求。
+     *
+     * 反证：把迁移的 WHERE 去掉（清全部）→ 这条转红。
+     */
+    const path = tempDbPath()
+    const before = openStore({ path, migrations: VAULT_MIGRATIONS.slice(0, 30) })
+    const now = 1_785_306_600_000
+    const repo = new ConversationRepository(before.db)
+    repo.upsert({
+      id: "c2",
+      channelId: "dingtalk",
+      externalId: "cidFAKE0002==",
+      type: "group",
+      title: "跨组织群",
+      createdAt: now,
+    })
+    repo.markUnreadable("dingtalk", "cidFAKE0002==", "cross_org", now)
+    before.close()
+
+    const after = openStore({ path, migrations: VAULT_MIGRATIONS })
+    const reason = after.db
+      .prepare<
+        [],
+        { unreadable_reason: string | null }
+      >("SELECT unreadable_reason FROM conversations WHERE id = 'c2'")
+      .get()
+    expect(reason?.unreadable_reason).toBe("cross_org")
+    after.close()
+  })
+})

@@ -657,6 +657,84 @@ export const REAL_ERR_ENTERPRISE_NOT_AUTHORIZED = `{
 }`
 
 /**
+ * ★★★ 逐会话读消息的**三种真实拒绝**（2026-08-17 实测，真身份 + 真 profile）。
+ *
+ * 这三个 fixture 对应一次真实日志里的刷屏：`11056` 与 `130003` 压根不在
+ * 分类表里 → 落到兜底 `PROCESS_FAILED{retryable:true}` → 采集每 2 分钟
+ * 重撞一次、永不落持久标记。
+ *
+ * ## 实测数据（12 个群逐个试）
+ *
+ * | server_error_code | 个数 | 含义 |
+ * |---|---|---|
+ * | `11056` | 8 | `listBaseConversationByIds null` —— 服务端内部查询返回空 |
+ * | `130003` | 2 | `OpendId is not in conversation` —— 本人不在这个会话里 |
+ * | `1001` | 1 | 真的保密群 |
+ * | （成功） | 1 | 正常返回 |
+ *
+ * ★ `11056` 同群连试 4 次（间隔 3s）全报，带/不带 `--profile` 一样 ——
+ * 稳定拒绝，不是偶发，所以归终态。而那 8 个群在全局窗里**一个都没有**
+ * （抽干 12 页 / 6 个会话 / 178 条），也就是归终态**不损失召回**。
+ *
+ * 值按 CLAUDE.md §1.2 脱敏：`trace_id` 换成假值，长度与字符集保持一致。
+ * 形状（字段顺序、转义、`[UNCLASSIFIED]` 前缀、上游的 `OpendId` 拼写）
+ * 逐字节照实测。
+ */
+export const REAL_ERR_CONV_LIST_BASE_NULL = `{
+  "error": {
+    "category": "api",
+    "code": 1,
+    "hint": "The API returned a business-level error. Check required parameters and values.",
+    "message": "[UNCLASSIFIED] listBaseConversationByIds null (operation: chat/list_conversation_message_v2)\\n  hint: Use --verbose for detailed error logs",
+    "operation": "tools/call",
+    "reason": "business_error",
+    "server_error_code": "11056",
+    "server_key": "chat",
+    "trace_id": "213FAKE00021786000000000000e0000"
+  }
+}`
+
+/** 本人不在这个会话里。★ 上游拼写是 `OpendId`（少一个 e），照抄。 */
+export const REAL_ERR_CONV_NOT_A_MEMBER = `{
+  "error": {
+    "category": "api",
+    "code": 1,
+    "hint": "The API returned a business-level error. Check required parameters and values.",
+    "message": "[UNCLASSIFIED] OpendId is not in conversation (operation: chat/list_conversation_message_v2)\\n  hint: Use --verbose for detailed error logs",
+    "operation": "tools/call",
+    "reason": "business_error",
+    "server_error_code": "130003",
+    "server_key": "chat",
+    "trace_id": "0bfFAKE0003178600000000000e00000"
+  }
+}`
+
+/**
+ * ★★★ 单聊：`peerUid is required`，而它复用了 `1001`。
+ *
+ * 这是那次**归因错误**的源头：代码把 `1001` 一律记成"保密会话"，
+ * 于是实测本机库里 33 个单聊被标成保密 —— 而它们全都有对端 openId、
+ * 格式正常、以前也读得到。
+ *
+ * 真因是这条命令要 `peerUid`（或 `--user <userId>`），而
+ * `openDingTalkId → peerUid` 在服务端解析为空。我们拿不到 userId：
+ * 反查要走花名册类命令，按 CLAUDE.md §5 不进白名单。
+ */
+export const REAL_ERR_DIRECT_PEER_UID_REQUIRED = `{
+  "error": {
+    "category": "api",
+    "code": 1,
+    "hint": "The API returned a business-level error. Check required parameters and values.",
+    "message": "[UNCLASSIFIED] peerUid is required (operation: chat/list_individual_chat_message)\\n  hint: Use --verbose for detailed error logs",
+    "operation": "tools/call",
+    "reason": "business_error",
+    "server_error_code": "1001",
+    "server_key": "chat",
+    "trace_id": "216FAKE00041786000000000000e0000"
+  }
+}`
+
+/**
  * ★★ `--profile` 钉住的身份在本机不存在 —— 三种真实形态，全是 exit 3。
  *
  * 复现（不碰真实登录态、不改全局 profile）：拿一个编造的 profile 值去跑

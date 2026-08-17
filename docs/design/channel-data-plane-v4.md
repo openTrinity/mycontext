@@ -828,7 +828,74 @@ typecheck / lint / 4881 条单测 —— 因为它们在类型与行为上都正
 ★★ 而第三条反过来支持了整个设计：范围放宽后重新打标是 80 ms 的事，
 所以"放宽立刻生效"不需要任何特殊机制。
 
-### 10.4 仍未实测的
+### 10.4 ★★★ 真机日志暴露的三个 bug（v4 之外，但同一条链上）
+
+用户跑起来之后贴了运行日志，逐条查下来有**三个真 bug** —— 都不是 v4
+引入的，而是 v4 让这条链被仔细看了一遍才发现。
+
+#### ① `11056` / `130003` 压根没分类 → 无限重试
+
+```
+WARN process non-zero exit … server_error_code: "11056"
+WARN ingest refreshConversation failed {"detail":"渠道命令失败（exit 1）"}   ← 没落标记
+```
+
+不在 `SERVER_ERROR_CODES` 里的码落到兜底 `PROCESS_FAILED{retryable:true}`
+→ 每 2 分钟重撞、永不落持久标记。**这与 `classifyDwsError` 注释里记着的
+两次事故（`not_authenticated`、`ENTERPRISE_NOT_AUTHORIZED`）是同一个形状**，
+也就是这个坑第三次发生了。
+
+实测（真身份 + 真 `--profile`，12 个群逐个试）：
+
+| code     | 个数 | 含义                                             |
+| -------- | ---- | ------------------------------------------------ |
+| `11056`  | 8    | `listBaseConversationByIds null`                 |
+| `130003` | 2    | `OpendId is not in conversation`（本人不在群里） |
+| `1001`   | 1    | 真的保密群                                       |
+| 成功     | 1    | —                                                |
+
+★ `11056` 同群连试 4 次全报、换时间窗一样、带不带 profile 一样 ⇒ 稳定拒绝
+⇒ 归终态。★★ 而那 8 个群**在全局窗里一个都没有**（抽干 12 页 / 6 个会话 /
+178 条）—— 所以归终态**不损失召回**，两条路本来都是 0 条。
+
+#### ② `1001` 被复用于三件事 → 归因错误
+
+```
+WARN … "peerUid is required" … server_error_code: "1001"
+WARN ingest conversation marked unreadable {"reason":"confidential"}   ← 错
+```
+
+上游把 `1001` 用于「真保密群」「`org not match`」「★ `peerUid is required`」
+三件事，而代码把它一律记成 `confidential`。实测本机库 **56 个单聊/会话**
+被标成"保密会话"，它们全都有对端 openId、格式正常、以前也读得到。
+
+真因：那条命令要 `peerUid`（或 `--user <userId>`），而
+`openDingTalkId → peerUid` 在服务端解析为空。我们**拿不到 userId** ——
+反查要走花名册类命令，按 CLAUDE.md §5 不进白名单。
+
+★ **结果**（跳过）是对的，**归因**是错的。而归因错的代价具体：用户读到
+"对方设了保密"会去问对方，而问题在我们这边。
+
+修法：`SERVER_CODE_VARIANTS` 按文案细分（`1001` 这个码本身没有区分度，
+`reason` 也都是 `business_error` —— 文案是唯一判据）；每条分类**必须**给
+`reason`（类型上必填），调用方优先用它。存量的 56 行由 v31 迁移**清掉结论
+让它重判**（不可能知道当初各自是哪种，而清掉正好也能自愈）。
+
+#### ③ ★★★ 「不可读」这个计数压根不存在（CLAUDE.md §5 只做了一半）
+
+规则原话：「把它明确记成『不可读』而不是『0 条』。」
+
+而实际状态：`unreadable_reason` 落库了、`cursors.ts` 的注释还写着
+**"它该出现在「不可读」那个计数里"** —— 而那个计数**任何界面都读不到**。
+
+于是 56 个读不了的会话，用户看到的只是"这些会话没消息"。
+**数据缺失被表达成"本来就没有"**，正是这条规则要防的形状。
+
+修法：`countUnreadable()` + 契约 `unreadablePartitions` + 覆盖面那一行文案。
+★ 文档/听记域给 `null` 而不是 0 —— 那两个域没在统计这件事，
+编一个 0 会被当成好消息（与听记 `pendingConversations` 恒 0 那次同一个教训）。
+
+### 10.5 仍未实测的
 
 - **§4.2 那个"几十毫秒"没有实测** —— 从 `persist` 返回到 `runPull` 末尾
   之间是对账 + 回填一步 + WAL checkpoint 判断。在回填那一轮上可能是**几秒**。

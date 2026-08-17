@@ -367,18 +367,97 @@ export const DWS_COMMAND_ALLOWLIST = {
 const SERVER_ERROR_CODES: Readonly<
   Record<
     string,
-    { code: "RESOURCE_FORBIDDEN" | "PERMISSION_REQUIRED"; message: string; messageKey: string }
+    {
+      code: "RESOURCE_FORBIDDEN" | "PERMISSION_REQUIRED"
+      message: string
+      messageKey: string
+      /**
+       * ★★★ 机器可读的归因，落进 `context.reason` → `unreadable_reason`。
+       *
+       * ## 为什么每一条都必须给
+       *
+       * 调用方（`markUnreadable`）原来按**错误码**归因，于是全部
+       * `RESOURCE_FORBIDDEN` 都记成 `confidential`（保密会话）。而这张表里
+       * 现在有三种完全不同的 `RESOURCE_FORBIDDEN`：真保密、服务端拒绝、
+       * 本人不在群里 —— 它们对用户的含义与出路都不同。
+       *
+       * ★ 不给的话就会退回按码归因，也就是又把它们混成"保密会话"。
+       * 所以这个字段**不是可选的**（类型上必填，漏了编译不过）。
+       */
+      reason: string
+    }
   >
 > = {
   "1001": {
     code: "RESOURCE_FORBIDDEN",
     message: "该会话被服务端标记为不可读取（保密会话）",
     messageKey: "errors:byCode.RESOURCE_FORBIDDEN",
+    /**
+     * ★ 走到这里的 `1001` 已经被 `SERVER_CODE_VARIANTS` 筛过一遍
+     * （`peerUid` / `org not match` 都在那张表里先命中），
+     * 所以剩下的确实是"该群为保密群"那一种。
+     */
+    reason: "confidential",
+  },
+  /**
+   * `11056` —— `listBaseConversationByIds null`。
+   *
+   * ## ★★★ 实测（2026-08-17，本机真身份 + 真 `--profile`）
+   *
+   * | 项 | 结果 |
+   * |---|---|
+   * | 12 个群逐个试 | **8 个报 11056**、2 个报 130003、1 个报 1001、1 个正常 |
+   * | 同一个群连试 4 次（间隔 3s） | ★ **4 次全报**，不是偶发 |
+   * | 带 / 不带 `--profile` | 一样报 —— **不是身份/组织不匹配** |
+   * | 那 8 个群在全局窗里 | ★ **一个都没有**（抽干 12 页 / 6 个会话 / 178 条） |
+   * | 其中 4 个群库里有历史 | 最新到 8-14，也就是**以前读得到、现在读不到** |
+   *
+   * ## 为什么归**终态**而不是可重试
+   *
+   * ★ 判据是"重试能不能好"：同群 4 次全失败、跨时间窗一样、换 profile
+   * 一样 —— 服务端的拒绝是稳定的。归可重试的代价已经量化过：
+   * 每 2 分钟一轮 × 每轮撞一次 × 永不落标记（那正是这次日志里看到的）。
+   *
+   * ★★ 而归终态**不损失召回**：这 8 个群在全局窗里也一个都拿不到 ——
+   * 也就是说现在两条路都是 0 条，标记它只是**停止白烧配额并把事实记下来**，
+   * 不是放弃本来能拿到的数据。这一条必须说清，否则读的人会以为
+   * 我们为了少打日志牺牲了数据。
+   *
+   * ## ★ 但它与"保密群"必须分开记
+   *
+   * 保密群是**对方设了保密**（`1001` 且文案明说）；这个是服务端在一个
+   * 内部查询上返回空。两者对用户的含义不同，所以 `reason` 分开
+   * （`server_rejected`），而不是都塞进 `confidential` ——
+   * 那会让界面把"服务端出问题"说成"这个群保密"。
+   */
+  "11056": {
+    code: "RESOURCE_FORBIDDEN",
+    message: "服务端拒绝读取这个会话的消息（内部会话查询返回空）",
+    messageKey: "errors:byCode.RESOURCE_FORBIDDEN",
+    // ★ 与"保密"分开：这是服务端侧的问题，不是对方设了保密
+    reason: "server_rejected",
+  },
+  /**
+   * `130003` —— `OpendId is not in conversation`（上游的拼写如此）。
+   *
+   * 语义明确：**本人不在这个会话里**（退群了 / 从没进过）。
+   * 实测那 2 个群在库里都是 **0 条消息** —— 与"没进过"一致。
+   *
+   * ★ 终态且**没有补救动作**：不在群里就是不在，授权与换客户端都无效。
+   * 归可重试的后果与 11056 同形（无限重撞）。
+   */
+  "130003": {
+    code: "RESOURCE_FORBIDDEN",
+    message: "本人不在这个会话里（已退出或从未加入）",
+    messageKey: "errors:byCode.RESOURCE_FORBIDDEN",
+    reason: "not_a_member",
   },
   CrossOrgPermissionDenied: {
     code: "PERMISSION_REQUIRED",
     message: "跨组织会话需要在来源应用中授权",
     messageKey: "errors:byCode.PERMISSION_REQUIRED",
+    // ★ 这一种**有**补救动作（用户授权一次就能读），所以必须与其余区分
+    reason: "cross_org",
   },
   /**
    * ★ 文案刻意**不提"重新授权/重新扫码"**：那对"客户端缺能力"无效。
@@ -388,7 +467,56 @@ const SERVER_ERROR_CODES: Readonly<
     code: "PERMISSION_REQUIRED",
     message: "当前渠道客户端对这个企业没有开通该能力，请在设置里换一份客户端",
     messageKey: "errors:byCode.CHANNEL_CLIENT_NOT_AUTHORIZED",
+    // ★ 出路是换客户端，不是授权 —— 与 cross_org 必须分开
+    reason: "client_not_authorized",
   },
+}
+
+/**
+ * ★★★ 同一个 `server_error_code` 下按**文案**细分的子情形。
+ *
+ * ## 为什么需要它（`1001` 一个码，三件事）
+ *
+ * | 文案子串 | 真正的含义 | 处置 |
+ * |---|---|---|
+ * | `该群为保密群` | 对方设了保密 | 跳过，无补救 |
+ * | `org not match` | 该资源属于另一个组织 | 跳过（换 profile 才可能读） |
+ * | ★ `peeruid is required` | **我们没有这个单聊需要的标识** | 跳过 —— 但这不是"保密" |
+ *
+ * ## ★★ 最后一行是一个真的归因错误（实测过）
+ *
+ * `chat message list --open-dingtalk-id <真实且格式正常的 openDingTalkId>`
+ * 稳定返回 `1001` + `peerUid is required`。而代码把 `1001` 一律记成
+ * `confidential` —— 实测本机库里**33 个单聊**被标成"保密会话"，
+ * 而它们全都有对端 openId、格式正常、以前也读得到。
+ *
+ * 真因是这条命令要的是 `peerUid`（或 `--user <userId>`），而
+ * `openDingTalkId` → `peerUid` 的解析在服务端返回空。我们**拿不到 userId**：
+ * 反查要走花名册类命令，按 CLAUDE.md §5 那类命令不进白名单。
+ *
+ * ★ 所以**结果**（跳过这个会话）是对的，**归因**是错的。而归因错的代价
+ * 很具体：界面若照这个 reason 说话，用户会以为"对方设了保密"
+ * （去问对方，问不出结果），而实际是我们的能力缺口。
+ *
+ * ★★ 判据只能是文案：三种情形的 `server_error_code` 与 `reason`
+ * （都是 `business_error`）完全一样。
+ */
+const SERVER_CODE_VARIANTS: Readonly<
+  Record<string, readonly { match: string; reason: string; message: string }[]>
+> = {
+  "1001": [
+    {
+      // ★ 小写比对（调用方已 `toLowerCase()`）—— 上游拼写是 `peerUid`
+      match: "peeruid is required",
+      reason: "peer_id_unavailable",
+      message: "这个单聊缺少服务端需要的对端标识（我们只有 openDingTalkId）",
+    },
+    {
+      match: "org not match",
+      reason: "org_not_match",
+      message: "该资源所属组织与当前登录组织不一致",
+    },
+  ],
 }
 
 /**
@@ -583,15 +711,26 @@ export function classifyDwsError(output: string): AppError | null {
     // ② 服务端业务码：保密群等「授权也解决不了」的终态。
     if (envelope.serverErrorCode !== null) {
       /**
-       * 开源版 v1.0.56 的 `list_group_member_by_ids` 也会复用 1001 表示
-       * `no permission: org not match`。它不是保密群，只是该群所属组织与
-       * 当前 profile 不匹配；仍归 RESOURCE_FORBIDDEN，但不能给用户错误文案。
+       * ★★★ `1001` 被上游**复用于至少三件不同的事**，必须按文案细分。
+       *
+       * 这里原来是一个针对 `org not match` 的 `if`。而实测发现第三种
+       * （`peerUid is required`）之后，那个形状就不够了 —— 一个 `if` 会
+       * 诱导下一个人再加一个 `if`，而每加一个都要记得放在 `SERVER_ERROR_CODES`
+       * 查表**之前**（放后面就永远走不到）。所以改成表。
+       *
+       * ★ 判据按**文案子串**匹配，而不是别的：`1001` 这个码本身在这三种
+       * 情形里完全相同，`reason` 也都是 `business_error`。文案是唯一
+       * 能区分的东西 —— 这与文件头"结构化字段优先"不冲突：
+       * 结构化字段在这里**没有区分度**。
        */
-      if (envelope.serverErrorCode === "1001" && output.toLowerCase().includes("org not match")) {
-        return new AppError("RESOURCE_FORBIDDEN", "该资源所属组织与当前登录组织不一致", {
+      const variant = SERVER_CODE_VARIANTS[envelope.serverErrorCode]?.find((entry) =>
+        output.toLowerCase().includes(entry.match),
+      )
+      if (variant !== undefined) {
+        return new AppError("RESOURCE_FORBIDDEN", variant.message, {
           retryable: false,
           messageKey: "errors:byCode.RESOURCE_FORBIDDEN",
-          context: { serverErrorCode: envelope.serverErrorCode, reason: "org_not_match" },
+          context: { serverErrorCode: envelope.serverErrorCode, reason: variant.reason },
         })
       }
       const mapped = SERVER_ERROR_CODES[envelope.serverErrorCode]
@@ -600,7 +739,8 @@ export function classifyDwsError(output: string): AppError | null {
           // 终态：重试永远好不了，只会反复骚扰用户或白烧配额。
           retryable: false,
           messageKey: mapped.messageKey,
-          context: { serverErrorCode: envelope.serverErrorCode },
+          // ★ `reason` 必须带上：调用方据它归因，缺了会退回"一律保密会话"
+          context: { serverErrorCode: envelope.serverErrorCode, reason: mapped.reason },
         })
       }
     }

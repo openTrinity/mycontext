@@ -24,6 +24,7 @@ import { createLogger } from "@mycontext/kernel"
 import type { ChannelPlugin } from "@mycontext/channels"
 import {
   ChatCoverageRepository,
+  ConversationRepository,
   DocumentCoverageRepository,
   MinutesCoverageRepository,
 } from "@mycontext/store"
@@ -367,5 +368,111 @@ describe("★★ 文档覆盖面的 pendingSpaces 映射到契约里那个共用
     expect(day?.pendingConversations).toBe(1)
     expect(day?.drained).toBe(false)
     vault.close()
+  })
+})
+
+/**
+ * ── ★★★ 「读不了几个会话」必须能被读出来（CLAUDE.md §5 的后半句）────────
+ *
+ * 「保密群 / 无权限的会话：识别到就跳过 …… 把它明确记成『不可读』
+ * 而不是『0 条』。」
+ *
+ * 加这一组之前，那一半**只做了一半**：`unreadable_reason` 落库了、
+ * `cursors.ts` 的注释还写着"它该出现在「不可读」那个计数里" ——
+ * 而那个计数**压根不存在**，没有任何出口能读到它。
+ *
+ * 实测本机库 **56 个会话**读不了，而用户看到的只是"这些会话没消息"：
+ * 数据缺失被表达成"本来就没有"。
+ */
+describe("★★★ 不可读会话数：读得出来（否则缺失被说成「没有」）", () => {
+  function markUnreadable(vault: TestVault, id: string, reason: string): void {
+    const repo = new ConversationRepository(vault.db)
+    repo.upsert({
+      id,
+      channelId: CH,
+      externalId: id,
+      type: "group",
+      title: "群",
+      createdAt: NOW,
+    })
+    repo.markUnreadable(CH, id, reason, NOW)
+  }
+
+  it("★★★ chat 覆盖面带出不可读数（各种 reason 都算）", () => {
+    /**
+     * 四种 reason 都要计入：它们的**出路**不同（保密无解、不在群里无解、
+     * 缺标识无解、跨组织授权一次就能读），但对"我有多少读不到"
+     * 这个问题它们是同一类。
+     *
+     * 反证：把 `countUnreadable` 的 WHERE 改成只数 `confidential`
+     * → 这条转红（4 变 1）。
+     */
+    const vault = openTestVault()
+    markUnreadable(vault, "cidFAKE0001==", "confidential")
+    markUnreadable(vault, "cidFAKE0002==", "server_rejected")
+    markUnreadable(vault, "cidFAKE0003==", "not_a_member")
+    markUnreadable(vault, "cidFAKE0004==", "peer_id_unavailable")
+
+    const view = makeService(vault).chatCoverage({
+      channelId: CH,
+      domain: "chat",
+      fromDay: D1,
+      toDay: D2,
+    })
+    expect(view.unreadablePartitions).toBe(4)
+    vault.close()
+  })
+
+  it("★★ 一个都没被拒时是 0（而不是 null）—— 0 与「不适用」必须分开", () => {
+    /**
+     * `0` = 有分区概念、一切正常；`null` = 这个域压根没有这个概念。
+     * 混成一个会让界面无法决定"要不要显示这一项"。
+     */
+    const vault = openTestVault()
+    const view = makeService(vault).chatCoverage({
+      channelId: CH,
+      domain: "chat",
+      fromDay: D1,
+      toDay: D2,
+    })
+    expect(view.unreadablePartitions).toBe(0)
+    vault.close()
+  })
+
+  it("★★ 听记与文档域是 null（那两个域没在统计这件事，不许编一个 0）", () => {
+    /**
+     * `unreadable_reason` 挂在 `conversations` 上 —— 那是会话的概念。
+     * 给文档域一个 0 等于说"一个知识库都没被拒"，而事实是我们没在统计。
+     *
+     * ★ 这与本文件开头那条教训同一个形状：听记的 `pendingConversations`
+     * 恒 0 曾让用户以为它比文档更完整。**编出来的 0 会被当成好消息。**
+     */
+    const vault = openTestVault()
+    // 就算库里有不可读会话，这两个域也不该报它
+    markUnreadable(vault, "cidFAKE0001==", "confidential")
+    const service = makeService(vault)
+
+    for (const domain of ["minutes", "doc"] as const) {
+      const view = service.chatCoverage({ channelId: CH, domain, fromDay: D1, toDay: D2 })
+      expect(view.unreadablePartitions, `${domain} 应为 null`).toBeNull()
+    }
+    vault.close()
+  })
+
+  it("★★★ 界面真的显示它（只落库不显示等于没做）", async () => {
+    /**
+     * 这一条是本组的关键：整个 bug 的形状就是"库里有、注释说该显示、
+     * 而没有任何地方读它"。所以判据必须落在**渲染层读了这个字段**上。
+     *
+     * 反证：把 `scope-coverage.tsx` 里那一段删掉 → 这条转红。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/renderer/features/shell/scope-coverage.tsx", "utf8")
+    expect(src).toContain("data.unreadablePartitions")
+    /**
+     * ★ 而措辞不许说"失败" —— 这些会话读不了多半不是故障
+     * （对方设了保密、我们不在群里），说成失败会让用户去反复重试。
+     */
+    expect(src).toContain("coverage.unreadable")
   })
 })

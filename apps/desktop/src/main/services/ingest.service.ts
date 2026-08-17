@@ -2217,12 +2217,36 @@ export class IngestService {
        * 固化成"用户需要去授权"。
        */
       if (isAppError(error) && !error.retryable) {
+        /**
+         * ★★★ 归因走**分类层给的 `reason`**，兜底才用错误码。
+         *
+         * ## 为什么不能只看错误码（一次真的归因错误）
+         *
+         * `RESOURCE_FORBIDDEN` 原来一律记成 `confidential`（保密会话）。
+         * 而上游把 `server_error_code=1001` 复用于至少三件事，其中一件是
+         * `peerUid is required` —— 那是**我们没有这个单聊需要的标识**
+         * （只有 openDingTalkId，而 userId 要走花名册、按 CLAUDE.md §5
+         * 不进白名单）。
+         *
+         * 实测本机库里**33 个单聊**被标成"保密会话"，而它们全都有对端
+         * openId、格式正常、以前也读得到。拿真实 openId 直接跑 CLI 复现过。
+         *
+         * ★ 结果（跳过）是对的，归因是错的。而归因错的代价很具体：
+         * 用户读到"对方设了保密"会去问对方，而问题在我们这边。
+         *
+         * ★★ 现在 `classifyDwsError` 会在 `context.reason` 里给出细分
+         * （`peer_id_unavailable` / `org_not_match` / `server_rejected` …），
+         * 这里优先用它 —— 判据只有一处定义，不在两层各写一遍。
+         */
+        const refined =
+          typeof error.context?.["reason"] === "string" ? (error.context["reason"] as string) : null
         const kind =
-          error.code === "RESOURCE_FORBIDDEN"
+          refined ??
+          (error.code === "RESOURCE_FORBIDDEN"
             ? "confidential"
             : error.code === "PERMISSION_REQUIRED"
               ? "cross_org"
-              : null
+              : null)
         if (kind !== null) {
           conversations.markUnreadable(
             this.options.plugin.meta.id,

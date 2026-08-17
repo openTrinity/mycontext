@@ -767,6 +767,9 @@ export class DistillSourceService {
         pendingConversations: input.domain === "minutes" ? null : 0,
         source: input.domain === "minutes" ? "derived" : "accounted",
         partitionKind: partitionKindOf(input.domain),
+        // ★ 库还没挂上 → 不知道有多少不可读。0 而不是 null：null 的语义是
+        //   "这个域没有分区概念"（只有听记），别拿它表达"暂时不知道"
+        unreadablePartitions: input.domain === "minutes" ? null : 0,
       }
     }
     if (input.domain === "doc") return this.documentCoverage(db, input)
@@ -822,6 +825,14 @@ export class DistillSourceService {
       dayCount: summary.days,
       drainedDays: summary.drainedDays,
       pendingConversations: summary.pendingConversations,
+      /**
+       * ★★★ 「读不了几个会话」—— CLAUDE.md §5 要求的那个数。
+       *
+       * 实测本机库 56 个会话读不了（保密 / 不在群里 / 缺对端标识），
+       * 而在这个字段之前用户看到的只是"这些会话没消息" ——
+       * 数据缺失被表达成"本来就没有"。
+       */
+      unreadablePartitions: new ConversationRepository(db).countUnreadable(input.channelId),
       // ★ chat 有专门的覆盖面表、写入侧逐格记账 → accounted
       source: "accounted",
       partitionKind: "conversation",
@@ -867,6 +878,18 @@ export class DistillSourceService {
       dayCount: summary.days,
       drainedDays: summary.drainedDays,
       pendingConversations: summary.pendingSpaces,
+      /**
+       * ★★ 文档域是 `null` 而不是 0。
+       *
+       * `unreadable_reason` 挂在 `conversations` 上 —— 那是**会话**的概念。
+       * 文档的分区是"知识库空间"，我们**没在统计**"哪个空间被拒了"
+       * （`document_coverage` 没有对应的列）。
+       *
+       * 给 0 会说谎："一个空间都没被拒"。而 `null` 的语义正是
+       * "这个问题在这个域上还没有答案" —— 界面据此不显示这一项，
+       * 而不是显示一个假的 0。
+       */
+      unreadablePartitions: null,
       // ★ doc 也有专门的覆盖面表（v29）、写入侧逐格记账 → accounted
       source: "accounted",
       // ★ 分区是**空间**（知识库/云盘目录），不是会话 —— 界面据此换量词
@@ -928,6 +951,8 @@ export class DistillSourceService {
       // ★ 整轮抽干 ⇒ 这些天都算齐；没抽干 ⇒ 一天都不算齐（见上面那段）
       drainedDays: drained ? rows.length : 0,
       pendingConversations: null,
+      // ★ 听记没有分区概念，"不可读分区"这个问题不适用 → null（不是 0）
+      unreadablePartitions: null,
       // ★ 从 `minutes` 表现算，没有渠道给的 listedTotal → derived
       source: "derived",
       // ★ 不按分区统计

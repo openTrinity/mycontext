@@ -242,10 +242,13 @@ describe("★★★ 覆盖面的三域表达（修 G15）", () => {
       dayCount: 0,
       drainedDays: 0,
       pendingConversations: null,
+      // ★ 听记没有分区概念 → 不可读分区数同样是 null（不是 0）
+      unreadablePartitions: null,
       source: "derived",
       partitionKind: null,
     })
     expect(parsed.pendingConversations).toBeNull()
+    expect(parsed.unreadablePartitions).toBeNull()
   })
 
   it("★★★ `source` 区分 accounted / derived（三行不是同一种精度）", async () => {
@@ -263,6 +266,7 @@ describe("★★★ 覆盖面的三域表达（修 G15）", () => {
           dayCount: 0,
           drainedDays: 0,
           pendingConversations: 0,
+          unreadablePartitions: 0,
           source,
           partitionKind: "conversation",
         }).source,
@@ -272,7 +276,14 @@ describe("★★★ 覆盖面的三域表达（修 G15）", () => {
 
   it("★★ `partitionKind` 给量词（3 个会话与 3 个知识库信息量不同）", async () => {
     const { chatCoverageViewSchema } = await import("@mycontext/ipc-contract")
-    const base = { days: [], localCount: 0, dayCount: 0, drainedDays: 0, pendingConversations: 3 }
+    const base = {
+      days: [],
+      localCount: 0,
+      dayCount: 0,
+      drainedDays: 0,
+      pendingConversations: 3,
+      unreadablePartitions: 0,
+    }
     expect(
       chatCoverageViewSchema.parse({ ...base, source: "accounted", partitionKind: "space" })
         .partitionKind,

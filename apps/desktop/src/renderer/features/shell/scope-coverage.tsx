@@ -223,6 +223,35 @@ export function ScopeCoverage({
               })}
         </p>
       ) : null}
+      {/*
+        ── ★★★ 「读不了几个会话」—— CLAUDE.md §5 的后半句 ────────────────
+
+        「保密群 / 无权限的会话：识别到就跳过 …… 把它明确记成『不可读』
+        而不是『0 条』。」
+
+        在这一块之前，那一半只做了一半：库里有 `unreadable_reason`、
+        `cursors.ts` 的注释也写着"它该出现在「不可读」那个计数里"，
+        而那个计数**压根不存在** —— 任何界面都读不到。
+
+        实测本机库 56 个会话读不了，而用户看到的只是"这些会话没消息"。
+        数据缺失被表达成"本来就没有"，那正是这条规则要防的。
+
+        ★ 措辞不说"失败"：这些会话读不了多半不是故障（对方设了保密、
+        我们不在群里、缺服务端要的标识），说成失败会让用户去反复重试。
+        说的是**事实 + 它对结论的影响**。
+
+        ★★ `> 0` 才显示：0 个不可读是常态，为它占一行只会稀释信息。
+        而 `null`（这个域没有这个概念）同样不显示 —— 见契约里那个字段。
+      */}
+      {data.unreadablePartitions !== null && data.unreadablePartitions > 0 ? (
+        <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+          {t("status.scope.coverage.unreadable", {
+            defaultValue:
+              "另有 {{count}} 个会话服务端不让读（保密、已退群或缺权限），不计入上面的条数。",
+            count: data.unreadablePartitions,
+          })}
+        </p>
+      ) : null}
       {range.clamped ? (
         <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
           {t("status.scope.coverage.clamped", {
