@@ -70,7 +70,6 @@ export interface ProducerStatus {
   id: string
   purpose: string
   domains: readonly DataDomain[]
-  scope: ProducerSpec["scope"]
   schedule: ProducerSpec["schedule"]
   /**
    * 范围就绪了吗（可以开始采了）。
@@ -167,7 +166,6 @@ export function buildProducerStatuses(input: ProducerViewInput = {}): readonly P
       id: spec.id,
       purpose: spec.purpose,
       domains: spec.domains,
-      scope: spec.scope,
       schedule: spec.schedule,
       scopeReady: !collectsNothing,
       scopeUnset: unset,

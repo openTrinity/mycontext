@@ -18,7 +18,7 @@
  * （实测 62 个连续页全是 `changed:0 / unchanged:51`）。
  *
  * 所以现在这个文件**直接调 `createPersonaInboxHandler`**（慢兜底的真
- * handler）与 `createPersonaFastPath`（快通道的真投递器），断言
+ * handler，v4 起是**唯一**的投递入口），断言
  * "范围外的消息没有进 Mailbox"。判据是：**删掉 `deliverMessage` 里的
  * 路由，这些用例必须转红**。
  */
@@ -34,11 +34,7 @@ import {
   toDayBucket,
   type ChangelogRow,
 } from "@mycontext/store"
-import {
-  PersonaSupervisor,
-  createPersonaFastPath,
-  createPersonaInboxHandler,
-} from "@mycontext/persona"
+import { PersonaSupervisor, createPersonaInboxHandler } from "@mycontext/persona"
 import { openTestVault } from "../../helpers/vault.js"
 
 const CH = "dingtalk"
@@ -257,7 +253,17 @@ describe("★★ 快通道与慢兜底的判据必须一致", () => {
    * ★ 这条用例是"路由必须放在 `deliverMessage` 里"这个设计决定的门禁：
    * 把路由挪回任何一条路的调用点外面，它就会转红。
    */
-  it("★★★ 同一条范围外消息：两条路都拒", () => {
+  it("★★★ 范围外消息：唯一那条投递路拒掉它（v4 §4）", () => {
+    /**
+     * ## 这一条这一轮**换了方向**
+     *
+     * 原来它断言"两条路都拒"（快通道 + 慢兜底）。快通道已删（v4 §4）——
+     * 投递只剩 changelog 那一条，于是"两条路会不会分叉"这个风险
+     * 从结构上消失了，而这条断言变成"唯一那条真的拦得住"。
+     *
+     * ★ 那个结构性保证由 `attention-scope.test.ts` 的
+     * 「`deliverMessage` 只有一个调用者」锁住；这里锁**行为**。
+     */
     const vault = openTestVault()
     watch(vault, [IN_SCOPE], NOW - 1000)
     seedMessage(vault, { messageId: "msgFAKE06", convExternalId: OUT_SCOPE, sentAt: NOW })
@@ -270,20 +276,23 @@ describe("★★ 快通道与慢兜底的判据必须一致", () => {
       logger,
       channelIds: [CH],
     }
-    const fastPath = createPersonaFastPath(deps)
-    const slowPath = createPersonaInboxHandler(deps)
-
-    expect(fastPath("msgFAKE06")).toBe(false)
-    expect(slowPath(batchOf(vault)).processed).toBe(0)
+    expect(createPersonaInboxHandler(deps)(batchOf(vault)).processed).toBe(0)
     expect(handled).toHaveLength(0)
     vault.close()
   })
 
-  it("★★ 同一条范围内消息：快通道放行，慢兜底按 message_id 去重（不重复入队）", () => {
+  it("★★★ `Mailbox` 的 message_id 去重**仍要留**（消费者重放要幂等）", () => {
     /**
-     * 两条路重叠是**安全**的（`Mailbox.push` 按 message_id 去重），
-     * 而这一点必须被锁住：去重坏掉的表现是同一条消息被处理两遍
-     * → **可能重复发送**（不可逆的社交后果）。
+     * ## 为什么删掉快通道之后这一条还有意义
+     *
+     * 去重原来防的是"两条路投同一条"。而它现在防的是**另一件事**：
+     * 消费者的租约被抢占后**从 `acked_seq` 重放**（`consumer.ts` 那套），
+     * 于是同一批消息会被再投一遍。
+     *
+     * 去重坏掉的表现是同一条消息被处理两遍 → **可能重复发送**
+     * （不可逆的社交后果，比重复花钱严重）。
+     *
+     * ★ 所以这条断言的形状是"跑两遍同一批，第二遍 processed 为 0"。
      */
     const vault = openTestVault()
     watch(vault, [IN_SCOPE], NOW - 1000)
@@ -297,9 +306,11 @@ describe("★★ 快通道与慢兜底的判据必须一致", () => {
       logger,
       channelIds: [CH],
     }
-    expect(createPersonaFastPath(deps)("msgFAKE07")).toBe(true)
-    // 慢兜底再看到同一条 → 去重挡住，不算 processed
-    expect(createPersonaInboxHandler(deps)(batchOf(vault)).processed).toBe(0)
+    const handler = createPersonaInboxHandler(deps)
+    // ★ 第一遍收下
+    expect(handler(batchOf(vault)).processed).toBe(1)
+    // ★★ 第二遍（模拟租约抢占后的重放）→ 去重挡住
+    expect(handler(batchOf(vault)).processed).toBe(0)
     vault.close()
   })
 })

@@ -106,12 +106,7 @@ export type {
   ResidentAgent,
 } from "./supervisor.js"
 
-export {
-  createPersonaInboxHandler,
-  createPersonaFastPath,
-  deliverMessage,
-  PERSONA_CONSUMER_ID,
-} from "./inbox-consumer.js"
+export { createPersonaInboxHandler, deliverMessage, PERSONA_CONSUMER_ID } from "./inbox-consumer.js"
 export type { PersonaHandlerOptions } from "./inbox-consumer.js"
 
 export {

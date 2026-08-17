@@ -20,7 +20,7 @@
  * 所以 `takeBatch` 有 `MAX_BATCH_SIZE`，**取最新的**并把丢下的条数报出来
  * （取最新而不是最早：数字人要回的是"现在在说什么"）。
  *
- * ## 快通道与慢兜底按 message_id 去重
+ * ## ★ 按 message_id 去重（防消费者重放导致重复处理）
  *
  * 进程内信号（快）与 Outbox 兜底扫描（慢）可能送来同一条消息。
  * 去重键是 `message_id` 而不是"哪条路来的" —— 后者要求两条路的
@@ -178,7 +178,17 @@ export const MAX_DIRECT_DRAFTABLE_AGE_MS = READ_REPLY_EXPIRY_MS
 export class Mailbox {
   /** conversationId → 待处理消息（内存队列，DB 是镜像） */
   private readonly pending = new Map<string, InboxEntry[]>()
-  /** 已见过的 message_id：快通道与慢兜底的去重 */
+  /**
+   * 已见过的 message_id。
+   *
+   * ★★ 去重原来防的是"两条投递路投同一条"（快通道 + changelog）。
+   * 快通道已删（v4 §4），而它现在防的是**另一件事**：消费者的租约被
+   * 抢占后**从 `acked_seq` 重放**（`consumer.ts` 那套），于是同一批消息
+   * 会被再投一遍。
+   *
+   * 坏掉的表现是同一条消息被处理两遍 → **可能重复发送**
+   * （不可逆的社交后果，比重复花钱严重）。
+   */
   private readonly seen = new Set<string>()
   /** conversationId → 连续失败次数（成功即清零） */
   private readonly failures = new Map<string, number>()

@@ -26,7 +26,6 @@ import type { ChannelConversationItem, ChannelPlugin } from "@mycontext/channels
 import { createDistillHandler, DISTILL_CONSUMER_ID } from "@mycontext/distill"
 import { type IngestSnapshot as ContractIngestSnapshot } from "@mycontext/ipc-contract"
 import {
-  createPersonaFastPath,
   createPersonaInboxHandler,
   PERSONA_CONSUMER_ID,
   type PersonaSupervisor,
@@ -81,6 +80,9 @@ import {
   type DomainScope,
   purgeOutOfScopeMessages,
   purgeOutOfScopeDocuments,
+  readCollectionRequest,
+  isWithinCollectionWindow,
+  type CollectionRequest,
   type CollectionScope,
   type PurgeReport,
   type MessageRow,
@@ -687,8 +689,6 @@ export class IngestService {
    * （这是不可逆的社交后果，比重复花钱严重）。
    */
   private readonly personaConsumer: OutboxConsumer | null
-  /** 快通道投递器：入库即把消息交给管控层（见构造里的注释） */
-  private readonly personaFastPath: ((messageId: string) => boolean) | null
   private probeTimer: NodeJS.Timeout | null = null
   private pullTimer: NodeJS.Timeout | null = null
   private minutesTimer: NodeJS.Timeout | null = null
@@ -1032,77 +1032,45 @@ export class IngestService {
           })
 
     /**
-     * ★ 快通道：入库即投递给管控层，不等它自己那 8 秒 tick。
+     * ★★★ 快通道**已删除**（v4 §4）—— 投递只剩 changelog 一条路。
      *
-     * ## 为什么两条路都要
+     * ## 它原来是什么
      *
-     * 管控层是消息流的**订阅者**（不是"监听某些会话的东西"）。订阅的
-     * 语义要求"入库就知道"，而 Outbox 消费者是被动的 —— 它要等
-     * `tickPull`（2 分钟）或探针那一轮才推进，于是"新消息到数字人"
-     * 最坏要等两分钟多。
+     * `persist()` 末尾 emit `inbound.message` → `createPersonaFastPath` →
+     * `deliverMessage` → `Mailbox.push` → `wake()`。触发条件三个：
+     * `changed > 0`、非 backfill、订阅方已挂上。
      *
-     * 但快通道**不能取代**慢兜底：进程内事件在崩溃、异常抛出、
-     * 或订阅方还没挂上时会丢，而 changelog 是持久的。
-     * 两条路按 `message_id` 去重（`Mailbox.push`），所以重叠是安全的 ——
-     * 这正是 `mailbox.ts` 文件头写的那个设计。
+     * ## 为什么删
      *
-     * ## 为什么 DWS 没有真正的 push
+     * `runSharedConsumersOnce()` 就在 `runPull` 的**末尾、同一个调用栈里**
+     * （见那个方法）。也就是所谓"慢兜底"只慢那一栈剩下的工作 ——
+     * 两条路**投同一批消息、走同一个函数（`deliverMessage`）、
+     * 结果被同一个去重表（`Mailbox` 按 message_id）吸收**。
+     *
+     * 快通道领先的是几十毫秒，而它的代价是一个**永久的**维护负担：
+     * 两条路的判据会不会分叉。而那不是假想 —— v2 修过一次真事故：
+     * 路由原来只挂快通道，慢兜底整条绕过监听范围。
+     *
+     * ★ 删掉之后 `deliverMessage` 只有一个调用者（`persona-inbox` 消费者），
+     * "忘了加某道闸"在结构上不可能。
+     *
+     * ## ★★ 秒级感知靠什么（不靠这条）
+     *
+     * event stream / 探针 → `refreshConversation()` → 落库 →
+     * **末尾驱动一次 `runSharedConsumersOnce()`**（那一行是这次删除的
+     * 前提，见 `refreshConversation` 里那段 ★★★）。全程仍在同一个调用栈里。
+     *
+     * ## ★ `wake()` 谁来调
+     *
+     * 消费者投递成功后调 `onPersonaDelivered` → `wake()` —— 那条本来就有。
+     * 所以叫醒的调用点从两处变成一处，而 `wake()` 自带防抖，行为不变。
+     *
+     * ## 为什么渠道侧没有真正的 push（保留这段事实）
      *
      * 查过全部 vendored reference：Webhook 只有**出向**
-     * （`message send-by-webhook` 发告警），没有任何 watch/subscribe/
-     * long-poll 命令。所以"感知新消息"对外仍是轮询（`PROBE_INTERVAL_MS`），
-     * 这里的"订阅"是**进程内**的那一段 —— 省掉的是我们自己引入的延迟。
+     * （发告警），没有任何 watch/subscribe/long-poll 命令。
+     * 所以"感知新消息"对外仍是轮询 + 事件叫醒，而不是服务端推正文。
      */
-    this.personaFastPath =
-      supervisor === undefined
-        ? null
-        : createPersonaFastPath({
-            db: options.db,
-            clock: options.clock,
-            supervisor,
-            logger: options.logger,
-            channelIds: [options.plugin.meta.id],
-          })
-    if (this.personaFastPath !== null) {
-      this.events.on("inbound.message", (message: MessageRow) => {
-        try {
-          /**
-           * ★ 只在**真的接纳了**才回调。
-           *
-           * `personaFastPath` 返回 false 的三种情况都不该叫醒调度：
-           * 路由判定范围外、准入闸拒掉（这个账号 86 个会话，多数消息被成本
-           * 闸拒）、或者慢兜底已经收下了同一条（按 message_id 去重）。
-           * 不区分的话每条入库消息都会排一次唤醒 —— 回溯时是几千次空跑。
-           *
-           * ## ★★★ 路由**不在这里**了（这是一次刻意的下沉）
-           *
-           * 这里原来有一整段路由：读 `attention_scope`、调 `routeToAttention`、
-           * 记 `attention_coverage`。但那样路由只在**快通道**上生效 ——
-           * 慢兜底（`persona-inbox` 消费者）整条绕过监听范围，而它恰恰是
-           * 真机上主要生效的那条（快通道要求 `changed.length > 0`，
-           * 而本机历史早已采完：实测 62 个连续页全是 `changed:0/unchanged:51`）。
-           *
-           * 现在路由在 `deliverMessage()` 里 —— 两条投递路唯一的交汇点。
-           * 判据、记账、"名单为空则放行"都只有一份，任何新增的第三条路径
-           * 也必然经过它，所以"忘了加路由"在结构上不可能。
-           */
-          const accepted = this.personaFastPath?.(message.id) ?? false
-          if (accepted) this.options.onPersonaDelivered?.()
-        } catch (error) {
-          /**
-           * 投递失败只记日志。
-           *
-           * 抛出去会打断 `persist()` 的循环 —— 后面那些消息连
-           * `batch.persisted` 都收不到（UI 就不刷新了）。而这条消息
-           * 仍在 changelog 里，慢兜底会补上。
-           */
-          this.options.logger.warn("persona fast path failed", {
-            messageId: message.id,
-            detail: error instanceof Error ? error.message : String(error),
-          })
-        }
-      })
-    }
   }
 
   /** 启动。幂等：重复调用不会起两套定时器。 */
@@ -2180,6 +2148,33 @@ export class IngestService {
         // 撞预算而一条没新增是异常的（正常情况下会先 break）—— 值得看见。
         this.options.logger.warn("ingest conversation drain hit page budget", { pages })
       }
+      /**
+       * ★★★ 定向补拉之后**驱动一次消费者循环**（v4 §4.3）。
+       *
+       * ## 为什么这一行是必须的，不是可选优化
+       *
+       * `runSharedConsumersOnce()` 原来只在 `runPull` 末尾
+       * （`tickPull`，2 分钟一轮）。而这条路是 **event stream / 探针**
+       * 触发的秒级补拉 —— 落库后就返回，投递要等下一轮 `tickPull`。
+       *
+       * 取消快通道（v4 §4）之后，投递只剩 changelog 那一条。不补这一行的话
+       * **event stream 带来的秒级优势会退化成 2 分钟** —— 而那正是快通道
+       * 当初存在的理由。
+       *
+       * ★ 只在**真有新消息**时跑：`changed === 0` 那一轮 changelog 里
+       * 没有新 seq，跑一轮 cycle 是纯开销（而这条路每次探针命中都会走）。
+       *
+       * ★★ `await` 而不是 fire-and-forget：调用方（探针 / event stream）
+       * 需要"这一趟做完了"这个信号才能算它的那一轮结束；而 `runCycle`
+       * 内部单个消费者抛错不打断整轮（那一层已有错误隔离）。
+       *
+       * ★ 非主渠道走 `afterPull`（它把主渠道那个唯一的消费者叫醒）——
+       * 与 `runPull` 末尾同一条判据，不复制那个 if。
+       */
+      if (changed > 0) {
+        if (this.options.registerSharedConsumers === false) await this.options.afterPull?.()
+        else await this.runSharedConsumersOnce()
+      }
       return changed
     } catch (error) {
       /**
@@ -3088,10 +3083,40 @@ export class IngestService {
    * 「不限」**，那要一直往回挖；undefined 是"没说"，此时不该启动回填。
    */
   private backfillSince(): number | null | undefined {
-    const scope = readCollectionScope(this.options.db)
-    // 源关掉 → 不回填（`readCollectionScope` 对关掉的源给 since: undefined）
-    if (!scope.enabled) return undefined
-    return scope.since
+    /**
+     * ★★★ 读**采集面**（学习范围 ∪ 监听范围）而不是学习范围（v4 §B）。
+     *
+     * 下界取更宽的那个（`min(学习 since, 最早的 enabledAt)`）——
+     * 监听范围里的会话要新消息，而它的 `enabledAt` 可能比学习的 `since`
+     * 更晚；取 min 之后学习那一侧仍然完整，而监听那一侧不会被漏。
+     *
+     * ★ 源关掉 → 不回填：`collectsNothing` 覆盖了那个情形
+     * （两个范围都空才算），而它比原来只看 `scope.enabled` 更准 ——
+     * "学习源关掉、但仍在监听 3 个群"那个组合下我们**仍要拉**。
+     */
+    const request = this.collectionRequest()
+    if (request.collectsNothing) return undefined
+    return request.since
+  }
+
+  /**
+   * 这一轮的**采集面**（去不去拉、拉哪些）。
+   *
+   * ## ★★★ 与 `collectionScope()` 的分层区别
+   *
+   * | | 回答什么 | 是什么 |
+   * |---|---|---|
+   * | `collectionRequest()` | **去不去拉** | ★ 隐私边界（不去拉 = 数据不存在） |
+   * | `collectionScope()` | 什么该进**学习语料** | 一个下游的口径 |
+   *
+   * 改动前采集面直接读后者 —— 于是一个下游（学习侧）替所有下游决定了
+   * "能不能拿到数据"，而另一个下游（分身）要的东西被挡了。
+   *
+   * ★ 每轮现读（不缓存）：用户改范围要立刻生效，理由与
+   * `readDomainScope` / `AttentionRouter` 同一条。
+   */
+  private collectionRequest(): CollectionRequest {
+    return readCollectionRequest(this.options.db, "chat", this.options.plugin.meta.id)
   }
 
   /**
@@ -3125,9 +3150,17 @@ export class IngestService {
    * 因为那时全局窗已经覆盖了全部会话。
    */
   private scopedConversationIds(): string[] {
-    const scope = this.collectionScope()
-    if (!scope.restricted) return []
-    return [...scope.allow]
+    /**
+     * ★★★ 走采集面（并集）而不是学习范围。
+     *
+     * 这一趟是"按勾选的会话逐个抽干"。只用学习白名单的话，
+     * **监听范围里、但没勾进学习范围的会话永远不会被逐个抽干** ——
+     * 而那些正是用户明确要分身盯的（它们只能靠全局窗顺带捞到，
+     * 而全局窗的时间下界比这一趟窄得多）。
+     */
+    const request = this.collectionRequest()
+    if (!request.restricted) return []
+    return [...request.allow]
   }
 
   /**
@@ -3437,8 +3470,14 @@ export class IngestService {
         pages += 1
         // stop 可能在 await 期间发生（logout 撞上正在跑的补采）。写库前返回。
         if (!this.running) return totals
-        // ★ `backfill: true` —— 补历史的消息不投给数字人（与回填同一个理由）。
-        const result = this.persist(page, { backfill: true })
+        /**
+         * ★★ 原来这里传 `{ backfill: true }`，让 `persist` 跳过 emit
+         * （补历史的消息不投给数字人）。那个参数已删（v4 §4）——
+         * 投递整个不在 `persist` 里了，而"回填不该被起草"现在由
+         * `routeToAttention` 的 `sentAt < enabled_at` 保证，
+         * 且那条判据对**任何**灌入路径都成立（更强）。
+         */
+        const result = this.persist(page)
         totals.changed += result.changed.length
         totals.unchanged += result.unchanged
 
@@ -3519,8 +3558,8 @@ export class IngestService {
         if (!this.running) return totals
 
         // 先落库再判切窗（顺序反了会「拉了就扔」，见增量那边的注释）。
-        // ★ `backfill: true` —— 补历史的消息不投给数字人，见 `persist`。
-        const result = this.persist(page, { backfill: true })
+        // ★ 同上：`backfill` 参数已删，回填不被起草由路由的 enabled_at 保证
+        const result = this.persist(page)
         totals.changed += result.changed.length
         totals.unchanged += result.unchanged
 
@@ -3686,16 +3725,13 @@ export class IngestService {
    * 逐条触发累计约 21 分钟主进程阻塞（实测单次 0.29ms@1万行 → 6.31ms@20万行）。
    * 而状态页要的只是"现在有多少条"，批级粒度完全够。
    */
-  private persist(
-    page: {
-      conversations: Parameters<typeof normalize>[0]["conversations"]
-      messages: Parameters<typeof normalize>[0]["messages"]
-      rawPayload: string
-      /** 服务端拒绝读取的会话（保密群等）。见 `ChannelPullPage`。 */
-      refusedConversations?: string[]
-    },
-    options: { backfill?: boolean } = {},
-  ) {
+  private persist(page: {
+    conversations: Parameters<typeof normalize>[0]["conversations"]
+    messages: Parameters<typeof normalize>[0]["messages"]
+    rawPayload: string
+    /** 服务端拒绝读取的会话（保密群等）。见 `ChannelPullPage`。 */
+    refusedConversations?: string[]
+  }) {
     /**
      * ★ 先记「不可读」，再落库。
      *
@@ -3774,14 +3810,66 @@ export class IngestService {
      * 是这条链路上最贵的错误。搬整段等于给那段最难的逻辑动手术；
      * 而共用**判据**已经拿到了全部收益（判据只有一份，漂不了）。
      */
-    const scope = readDomainScope(this.options.db, "chat")
-    const admitted = admitByScope<(typeof page.messages)[number]>(scope, page.messages, {
-      partitionOf: (message) => message.conversationExternalId,
-      occurredAtOf: (message) => message.sentAt,
-    })
-    const scopedPage = { ...page, messages: [...admitted.kept] }
-    if (admitted.dropped > 0) {
-      this.droppedOutOfScope += admitted.dropped
+    /**
+     * ★★★ 闸门走**采集面**（学习范围 ∪ 监听范围），不再是学习范围（v4 §B）。
+     *
+     * ## 这一改修的是三个洞（都在发生，且都静默）
+     *
+     * | 情形 | 改动前 |
+     * |---|---|
+     * | 用户选了历史区间（`until` 在过去） | 新消息被上界挡住 → 不入库 → 分身**收不到** |
+     * | 会话在监听范围、不在学习白名单 | 同上 |
+     * | 分身**自己发的回复** | 走 `refreshConversation` → 同一道闸 → 同样进不来 |
+     *
+     * ★ 第三条有放大器：`admit()` 判"该不该回"要读这个会话之前的往来。
+     * 分身回过的话不在库里 → 下一轮它看不见自己说过什么。
+     *
+     * ## ★★ 两道闸仍然**并列**（v2 G8 那个教训）
+     *
+     * · 分区闸：会话在采集面内吗（`allow`，`restricted` 为假时放行）；
+     * · 时间闸：`isWithinCollectionWindow` —— 它比 `isOccurredAtInScope`
+     *   多一条：**`attentionOnly` 里的会话不受 `until` 约束**
+     *   （用户要它们的新消息，而 `until` 是学习范围的上界）。
+     */
+    const request = this.collectionRequest()
+    const admitted = admitByScope<(typeof page.messages)[number]>(
+      {
+        // ★ 采集面的分区/时间信息投影成 `DomainScope` 的形状（闸门判据只有一份）
+        restricted: request.restricted,
+        allow: request.allow,
+        since: request.since,
+        /**
+         * ★★★ `until` 传 `undefined` —— 上界由下面那个 filter 按**会话**判。
+         *
+         * 传进来的话 `admitByScope` 会对**所有**会话卡上界，
+         * 而 `attentionOnly` 那些必须豁免。这是那第一个洞的修法所在。
+         */
+        until: undefined,
+        enabled: true,
+        unset: request.learningUnset,
+        unreadable: false,
+      },
+      page.messages,
+      {
+        partitionOf: (message) => message.conversationExternalId,
+        occurredAtOf: (message) => message.sentAt,
+      },
+    )
+    /**
+     * ★★ 上界：按**会话**判（`attentionOnly` 豁免）。
+     *
+     * 放在 `admitByScope` 之后而不是塞进它：那个函数的契约是
+     * "两道闸并列"，而"某些分区豁免上界"是这一层（采集面）特有的语义。
+     * 塞进去会让它多一个只有 chat 用得上的参数。
+     */
+    const withinWindow = admitted.kept.filter((message) =>
+      isWithinCollectionWindow(request, message.conversationExternalId, message.sentAt),
+    )
+    const droppedByWindow = admitted.kept.length - withinWindow.length
+    const scopedPage = { ...page, messages: [...withinWindow] }
+    const droppedTotal = admitted.dropped + droppedByWindow
+    if (droppedTotal > 0) {
+      this.droppedOutOfScope += droppedTotal
       this.lastDroppedAt = this.options.clock.now()
       /**
        * ★★★ 计数**也走 runner**（`noteDropped`），而不只是这里加一份。
@@ -3796,7 +3884,15 @@ export class IngestService {
        * 也就是：runner 在这条路上只承担**记账**，不承担调度与落库。
        * 那个边界写在 `PRODUCERS` 的 `schedule: "watermark"` 上。
        */
-      this.producers.noteDroppedFor("chat", admitted.dropped, admitted.droppedUnknownTime, scope)
+      this.producers.noteDroppedFor("chat", droppedTotal, admitted.droppedUnknownTime, {
+        restricted: request.restricted,
+        allow: request.allow,
+        since: request.since,
+        until: request.until,
+        enabled: true,
+        unset: request.learningUnset,
+        unreadable: false,
+      })
     }
 
     /**
@@ -3846,8 +3942,15 @@ export class IngestService {
      * ★ 只在**整页都被丢掉**时才这样：页内有留下来的消息说明范围是有效的，
      * 那时越界丢弃是正常工作（用户就是选了个子集），照常推水位。
      */
+    /**
+     * ★★★ 判据走**采集面**的 `collectsNothing` —— 它是"两个范围都空"。
+     *
+     * 只看学习范围（改动前）会让"学习范围一个都没勾、但监听了 3 个群"
+     * 这个组合报 `scopeNotReady`（不推水位、每轮重试）—— 而那时采集面
+     * **不是空的**（那 3 个群要拉），于是水位永远推不动而数据在进来。
+     */
     const scopeNotReady =
-      scopedPage.messages.length === 0 && page.messages.length > 0 && collectsNothing(scope)
+      scopedPage.messages.length === 0 && page.messages.length > 0 && request.collectsNothing
     if (scopedPage.messages.length === 0 && page.messages.length > 0) {
       return { changed: [] as MessageRow[], unchanged: 0, scopeNotReady }
     }
@@ -3971,42 +4074,43 @@ export class IngestService {
     }
 
     /**
-     * ★ 补历史的消息**不投给数字人**。
+     * ★★★ 「补历史的消息不投给数字人」这件事**不再由这里管**（v4 §4）。
      *
-     * 它们照常落库、照常进蒸馏（那正是回填的目的），但不该进待审队列：
-     * 一条 19 天前的消息，现在起草一条回复不是"帮上忙"，是社交事故。
-     * 而且回填一轮几千条，逐条走 agent 判定＋起草是几百次调用换 0 个
-     * 有用的草稿。
+     * ## 要求没变，判据换了个位置 —— 而新位置更强
      *
-     * 实测踩过：加了反向回填之后，7/13～7/22 的历史消息被当成新消息投给
-     * 数字人，起草时已过 10~19 天，而准入闸的年龄判据带一个
-     * `conversationRead` 前置条件（未读的群没有任何年龄上限），拦不住。
+     * 那个要求是真的：一条 19 天前的消息，现在起草一条回复不是"帮上忙"，
+     * 是社交事故（实测踩过：加了反向回填之后 7/13～7/22 的历史消息被当成
+     * 新消息投给数字人，起草时已过 10~19 天）。
      *
-     * 判据用「这一批是从哪条路径落库的」而不是「消息有多老」：后者要选一个
-     * 阈值，而那个阈值同时也是"增量采集允许多晚的消息进队列"——两件事
-     * 耦在一个数上，调其中一个必然误伤另一个。
+     * 改动前的实现是 `persist(page, {backfill: true})` → 跳过
+     * `emit("inbound.message")`。而投递整个不在 `persist` 里了，
+     * 所以那个参数已删。
      *
-     * ## 慢兜底靠准入闸的年龄上限兜，不靠这里记 id
+     * ★★ 现在由 `routeToAttention` 的第三条判据保证：
+     * `sentAt < enabled_at` → `before_enabled_at`。而回填的消息
+     * **按定义**比库里所有消息都早（窗口从已知最早那条往左走），
+     * 所以那条判据必然拦住它们。
      *
-     * Outbox 消费者会扫 changelog 补投，绕过这里。但**回填的消息按定义
-     * 就比库里所有消息都早**（窗口从已知最早那条往左走），所以准入闸里
-     * 那条无条件年龄上限（`MAX_GROUP_DRAFTABLE_AGE_MS`）必然拦住它们。
+     * ★★★ 而它比原来那个参数**更强**：它对**任何**灌入路径都成立
+     * （消费者重放、手动导入、将来的第三条路），而参数那一支只覆盖
+     * `persist` 的两个调用点 —— 漏一个就漏一条路。
      *
-     * 刻意**不**在内存里记一份"这些 id 是回填的"：那个集合会无界增长，
-     * 且进程重启后就丢了 —— 重启后消费者补投同一批消息时，那份记录
-     * 恰好已经不在。靠一个持久、且对任何灌入路径都成立的判据更可靠。
+     * 这与这段注释原本的结论其实是**同一条**：「刻意不在内存里记一份
+     * '这些 id 是回填的' …… 靠一个持久、且对任何灌入路径都成立的判据
+     * 更可靠」。v4 只是把那句话执行得更彻底 —— 连那个参数也不要了。
      */
-    if (options.backfill === true) {
-      if (result.changed.length > 0) {
-        this.events.emit("batch.persisted", { changed: result.changed.length })
-      }
-      return result
-    }
-
-    for (const message of result.changed) {
-      this.events.emit("inbound.message", message satisfies MessageRow)
-    }
-    // 批级信号：UI 推送用这个，不要订阅 inbound.message（见上文）。
+    /**
+     * ★★★ `inbound.message` 那条**逐条投递**已删（v4 §4）。
+     *
+     * 投递现在只走 changelog（`persona-inbox` 消费者），而它在
+     * `runPull` / `refreshConversation` 的末尾、同一个调用栈里被驱动。
+     * 见构造函数里那段 ★★★（为什么两条路合成一条）。
+     *
+     * ★ `batch.persisted` **留着** —— 它是**批级** UI 推送信号，
+     * 与投递无关（渲染层订阅它刷新计数）。回填那一支单独判是因为
+     * 回填也要刷 UI，只是不投递（而现在两支的行为一样了，
+     * 所以下面那个 if 覆盖两者）。
+     */
     if (result.changed.length > 0) {
       this.events.emit("batch.persisted", { changed: result.changed.length })
     }

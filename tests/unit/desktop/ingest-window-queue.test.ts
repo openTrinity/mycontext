@@ -670,7 +670,19 @@ describe("★ 回填的消息不进数字人待审队列", () => {
     }
   }
 
-  it("增量采到的消息会发 inbound.message（对照组）", async () => {
+  it("★★★ 增量采到的消息会发 `batch.persisted`（UI 刷新信号）", async () => {
+    /**
+     * ## 这一条这一轮**换了对象**
+     *
+     * 原来它断言 `inbound.message`（快通道的逐条投递事件）。那条路已删
+     * （v4 §4：投递只走 changelog），而**批级** UI 信号 `batch.persisted`
+     * 留着 —— 渲染层订阅它刷新计数。
+     *
+     * ★ 两者的区别值得记：`inbound.message` 是**投递**（要判路由与准入），
+     * `batch.persisted` 是**通知界面**（不判任何东西）。原来它们并存，
+     * 而前者的三个触发条件（changed>0 / 非 backfill / 订阅方挂上）
+     * 正是"为什么这条没投"有三个答案的来源。
+     */
     const clock = new ManualClock(START)
     const { plugin } = makePlugin((spec) =>
       spec.cursor === null
@@ -683,23 +695,39 @@ describe("★ 回填的消息不进数字人待审队列", () => {
         : emptyPage({ hasMore: false }),
     )
     const { vault, service } = makeService(plugin, clock)
-    const delivered: string[] = []
-    service.events.on("inbound.message", (m: { externalId: string }) =>
-      delivered.push(m.externalId),
-    )
+    const batches: number[] = []
+    service.events.on("batch.persisted", (e: { changed: number }) => batches.push(e.changed))
 
     await service.tickPull()
 
-    expect(delivered).toContain("msg-fresh")
+    expect(
+      batches.some((changed) => changed > 0),
+      "有新消息就该刷 UI",
+    ).toBe(true)
     vault.close()
   })
 
-  it("★ 回填窗拉回的消息不发 inbound.message，但仍然落库", async () => {
-    const clock = new ManualClock(START)
+  it("★★★ 回填的消息**仍然落库**（蒸馏要用），而不投给分身靠路由挡", async () => {
     /**
-     * 第一轮增量先把"库里最早那条"建立起来（回填的右端从它开始往左走），
-     * 之后回填窗才有东西可拉。两段用 sentAt 区分。
+     * ## 这一条的判据从"事件"移到了"路由"
+     *
+     * 原来它断言"回填不发 `inbound.message`" —— 那是靠 `persist()` 里
+     * `options.backfill === true` 那一支实现的。那条路已删。
+     *
+     * 而"回填的消息不该被起草"这个**要求没变**，它现在由
+     * `routeToAttention` 的第三条判据保证：`sentAt < enabled_at` →
+     * `before_enabled_at`。而回填的消息**按定义**比库里所有消息都早
+     * （窗口从已知最早那条往左走），所以那条判据必然拦住它们。
+     *
+     * ★★ 那个判据比事件那一支**更强**：它对**任何**灌入路径都成立
+     * （包括消费者重放、手动导入），而事件那一支只覆盖 `persist` 一条。
+     * `persist` 里那段注释写的正是这个理由（"靠一个持久、且对任何灌入
+     * 路径都成立的判据更可靠"）。
+     *
+     * ★ 所以这里只断言**落库**那一半 —— 不投递那一半由
+     * `attention-scope.test.ts` 的 `before_enabled_at` 那条锁住。
      */
+    const clock = new ManualClock(START)
     const backfilled = START - 19 * 24 * 60 * MS_PER_MINUTE
     const { plugin } = makePlugin((spec) => {
       // 回填窗的右端 <= 库里最早那条消息的时间，据此区分两条路径。
@@ -726,10 +754,6 @@ describe("★ 回填的消息不进数字人待审队列", () => {
     // 先跑一轮增量，让库里有"最早那条" + 让回填有起点。
     await service.tickPull()
 
-    const delivered: string[] = []
-    service.events.on("inbound.message", (m: { externalId: string }) =>
-      delivered.push(m.externalId),
-    )
     // 引导里选了 180 天 —— 回填据此往左走。
     new DistillSourceRepository(vault.db).upsert(
       "chat",
@@ -738,12 +762,10 @@ describe("★ 回填的消息不进数字人待审队列", () => {
     )
     await service.tickPull()
 
-    // ★ 落库了（回填的目的），但**没有**投给数字人。
     const stored = vault.db
       .prepare<[string], { c: number }>("SELECT count(*) AS c FROM messages WHERE external_id = ?")
       .get("msg-old")
     expect(stored?.c, "回填的消息必须落库（蒸馏要用）").toBe(1)
-    expect(delivered, "回填的消息不该进待审队列").not.toContain("msg-old")
     vault.close()
   })
 })

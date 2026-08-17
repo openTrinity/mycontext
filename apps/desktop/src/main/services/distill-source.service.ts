@@ -48,6 +48,7 @@ import type {
   ChannelConversationSourceView,
   ChannelConversationView,
   DistillScopeInput,
+  DistillSourceSaveResult,
   DistillSourceView,
   DocumentSpacesInput,
   DocumentSpacesView,
@@ -178,13 +179,71 @@ export interface DistillSourceServiceOptions {
  * 而本仓库已经吃过一次"两头都锁了、中间那根线是裸的"（删掉传值那一行，
  * 1023 条测试一条都不红）。
  */
-export function mergeScopeOnlyGrowing(
+/**
+ * 合并的结果 + **这次保存有没有收窄**。
+ *
+ * ## ★★★ 为什么必须把"收窄了"报出来（v4 §3.2）
+ *
+ * 「只增不减」有**一个刻意的例外**：`widen` 的第一格（`无 → 有`）允许
+ * "从不限收窄到具体列表"。那一格的理由是对的、不能删（否则非主渠道
+ * 那种"有 since、没有 conversationIds"的库**永远设不了白名单** ——
+ * 而那是超范围采集，比收窄糟得多）。
+ *
+ * 但它有一个后果：**图谱与画像里已经学过的那部分不会跟着收窄**。
+ * 因为下游（kl 图谱、forge 画像）是增量的，"输入变少"对它们不等于
+ * "把已有的删掉" —— 于是配置说"只学 2 个会话"，而图里有 92 个会话的知识。
+ *
+ * ★★ 这个不一致**不可能靠代码自动消除**（唯一的清空入口是手动重建，
+ * 而那要 50 min 且不可续传）。所以正确的处置是**让用户知情** ——
+ * 而不是静默地留一个矛盾。
+ *
+ * 这个字段就是那句话的载体：调用方据此告诉用户
+ * 「已经学过的知识不会自动移除，需要手动重建图谱」。
+ */
+export interface ScopeMergeResult {
+  scope: DistillScopeInput
+  /**
+   * 这次保存**缩小**了范围（走了 `widen` 的第一格）。
+   *
+   * ★ 只有"从不限收窄到具体列表"这一种。其余五格都是放宽或不变 ——
+   * 那时为 false，界面不该提示（一个每次保存都弹的确认等于没有确认）。
+   */
+  narrowed: boolean
+  /** 具体哪几个字段收窄了（给日志与文案：'会话' / '知识库空间' / '会话类型'） */
+  narrowedFields: readonly ("conversationIds" | "partitions" | "chatKinds")[]
+}
+
+/**
+ * 把新范围并进旧范围，**只许变宽**（唯一例外见 `ScopeMergeResult.narrowed`）。
+ *
+ * ★ 保留旧签名的薄封装 `mergeScopeOnlyGrowing`（下面那个）—— 既有调用方
+ * 与若干测试在用它，而它们不关心 `narrowed`。
+ */
+export function mergeScopeOnlyGrowingDetailed(
   before: DistillScopeInput | undefined,
   incoming: DistillScopeInput,
-): DistillScopeInput {
-  if (before === undefined) return incoming
+): ScopeMergeResult {
+  /**
+   * ★ 库里压根没有这一行 = 第一次配 —— 那不是"收窄"（以前什么都没配过，
+   * 没有"以前选的"可言）。这一格必须报 false，否则新装机第一次保存
+   * 就会看到一句"这会缩小范围"的确认，而那是错的归因。
+   */
+  if (before === undefined) return { scope: incoming, narrowed: false, narrowedFields: [] }
 
   const merged: DistillScopeInput = {}
+  const narrowedFields: ("conversationIds" | "partitions" | "chatKinds")[] = []
+  /** 走了 `widen` 第一格（`before` 无限制、`incoming` 有）→ 这个字段收窄了。 */
+  const notedNarrowing = (
+    field: "conversationIds" | "partitions" | "chatKinds",
+    beforeValue: unknown,
+    incomingValue: unknown,
+  ): void => {
+    if (beforeValue === undefined && incomingValue !== undefined) narrowedFields.push(field)
+  }
+
+  notedNarrowing("conversationIds", before.conversationIds, incoming.conversationIds)
+  notedNarrowing("partitions", before.partitions, incoming.partitions)
+  notedNarrowing("chatKinds", before.chatKinds, incoming.chatKinds)
 
   const ids = widen(before.conversationIds, incoming.conversationIds, unionOf)
   if (ids !== undefined) merged.conversationIds = ids
@@ -206,7 +265,23 @@ export function mergeScopeOnlyGrowing(
   const until = widen(numOrUndef(before.until), numOrUndef(incoming.until), Math.max)
   if (until !== undefined) merged.until = until
 
-  return merged
+  /**
+   * ★ 时间那两个字段**不算收窄** —— `since` 只能变早、`until` 只能变晚
+   * （`Math.min` / `Math.max`），所以它们在结构上不可能缩小。
+   * 把它们算进来会让每次改时间范围都弹一次确认。
+   */
+  return { scope: merged, narrowed: narrowedFields.length > 0, narrowedFields }
+}
+
+/**
+ * 旧签名（只要合并结果）。★ 保留是因为既有调用方与若干测试在用它 ——
+ * 改签名要同时改那几处，而它们不关心 `narrowed`。
+ */
+export function mergeScopeOnlyGrowing(
+  before: DistillScopeInput | undefined,
+  incoming: DistillScopeInput,
+): DistillScopeInput {
+  return mergeScopeOnlyGrowingDetailed(before, incoming).scope
 }
 
 /**
@@ -920,7 +995,7 @@ export class DistillSourceService {
     kind: DistillSourceKind
     enabled: boolean
     scope: DistillScopeInput
-  }): true {
+  }): DistillSourceSaveResult {
     /**
      * ★ 主库 = 主渠道自己的库；其余渠道各有一个。
      *
@@ -995,7 +1070,35 @@ export class DistillSourceService {
      * ★ `enabled` 不在此列：关掉一个源是"暂停采集"，不是"缩小范围" ——
      * 它不删任何已有数据，重新打开就继续。
      */
-    const merged = mergeScopeOnlyGrowing(before?.scope, input.scope)
+    /**
+     * ★★★ 走 `Detailed` 版本 —— 它多告诉我们一件事：**这次有没有收窄**。
+     *
+     * 那是 v4 §3.2 的落点：「只增不减」有一个刻意的例外（从不限收窄到
+     * 具体列表），而它的后果是**图谱与画像里已学的那部分不会跟着收窄**
+     * —— 下游是增量的，"输入变少"对它们不等于"把已有的删掉"。
+     *
+     * 这个不一致**不可能靠代码自动消除**（唯一的清空入口是手动重建，
+     * 50 min 且不可续传）。所以正确的处置是让用户知情，而不是留一个
+     * 静默的矛盾 —— 那正是本仓库最贵的那类问题（CLAUDE.md 第 4 节）。
+     */
+    const mergeResult = mergeScopeOnlyGrowingDetailed(before?.scope, input.scope)
+    const merged = mergeResult.scope
+    if (mergeResult.narrowed) {
+      /**
+       * ★ 记日志**并**通过返回值告诉界面。
+       *
+       * 只记日志不够：用户看不到日志，而这件事需要他做一个决定
+       * （要不要现在重建图谱）。只给界面不记日志也不够：排查
+       * "为什么图里还有那个群"时需要一条能对上的时间点。
+       */
+      this.options.logger.info("learning scope narrowed; downstream keeps what it learned", {
+        channelId: input.channelId,
+        kind: input.kind,
+        // ★ 只记字段名，不记真实 id（CLAUDE.md §1.1）
+        fields: [...mergeResult.narrowedFields],
+        hint: "已学的知识不会自动移除；要让它跟着收窄需手动重建图谱",
+      })
+    }
     if (input.kind === "chat") {
       const beforeCount = before?.scope.conversationIds?.length ?? 0
       const afterCount = merged.conversationIds?.length ?? 0
@@ -1051,7 +1154,18 @@ export class DistillSourceService {
     if (input.kind === "chat" && scopeChanged(before, { enabled: input.enabled, scope: merged })) {
       this.options.onScopeChanged?.(input.channelId)
     }
-    return true
+    /**
+     * ★ 返回**是否收窄**，让界面能提示「已学的知识不会自动移除」。
+     *
+     * 原来返回裸 `true`。改成对象是刻意的：那句提示只该在真的收窄时出现
+     * （每次保存都弹一次的确认等于没有确认），而"这次收窄了吗"这个事实
+     * 只有这一层知道（它是合并的产物，不是入参）。
+     */
+    return {
+      ok: true,
+      narrowed: mergeResult.narrowed,
+      narrowedFields: [...mergeResult.narrowedFields],
+    }
   }
 
   /**

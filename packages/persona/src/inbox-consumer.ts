@@ -51,7 +51,12 @@ interface DeliveryRepos {
   router: AttentionRouter
 }
 
-/** 造一份两条通路共用的仓储（statement 缓存因此有效，见 `createPersonaFastPath`）。 */
+/**
+ * 造一批共用的仓储实例。
+ *
+ * ★ 共用而不是每条 new：`prepare` 的语句缓存因此有效。逐条投递时
+ * 这不是微优化 —— 回溯 20 万条时每条都重建 statement 是分钟级的差别。
+ */
 function createRepos(options: PersonaHandlerOptions): DeliveryRepos {
   return {
     messages: new MessageRepository(options.db),
@@ -171,27 +176,27 @@ export function deliverMessage(
 }
 
 /**
- * 快通道投递器：给 `IngestService` 的 `inbound.message` 事件用。
- *
- * 与消费者共用 `deliverMessage`（**含路由**），也共用同一批仓储实例
- * —— `prepare` 的语句缓存因此有效。逐条投递时这一点不是微优化：
- * 回溯 20 万条时每条都重建 statement 会是分钟级的差别。
- */
-export function createPersonaFastPath(
-  options: PersonaHandlerOptions,
-): (messageId: string) => boolean {
-  const repos = createRepos(options)
-  return (messageId) => deliverMessage(options, repos, messageId)
-}
-
-/**
  * 把一批变更投给 supervisor。
  *
- * 返回的 `processed` 是**接纳数**而不是"看过的条数"：被路由或准入闸挡掉的
+ * ## ★★★ 这是**唯一**的投递入口（v4 §4）
+ *
+ * 改动前还有一条"快通道"（`createPersonaFastPath`，挂在 `IngestService`
+ * 的 `inbound.message` 事件上）。它已删 —— 理由：
+ *
+ * · 消费者循环就在 `runPull` / `refreshConversation` 的**末尾同栈**，
+ *   所以快通道领先的只是几十毫秒；
+ * · 而两条路的代价是一个**永久的**维护负担（判据会不会分叉）——
+ *   那不是假想：v2 修过一次真事故，路由原来只挂快通道，
+ *   慢兜底整条绕过监听范围。
+ *
+ * ★ 现在 `deliverMessage` 只有这一个调用者，"忘了加某道闸"
+ * 在结构上不可能。
+ *
+ * ## 返回值的语义
+ *
+ * `processed` 是**接纳数**而不是"看过的条数"：被路由或准入闸挡掉的
  * 算 skipped。这样状态页上的"处理了 N 条"就是"真的进队列的 N 条"，
  * 而不是一个虚高的数字。
- *
- * ★ 与快通道共用 `deliverMessage` —— 路由与准入的判据只有一份。
  */
 export function createPersonaInboxHandler(options: PersonaHandlerOptions) {
   const repos = createRepos(options)

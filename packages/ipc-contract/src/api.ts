@@ -45,6 +45,7 @@ import type {
   DocumentSpacesView,
   DistillSourceId,
   DistillScopeInput,
+  DistillSourceSaveResult,
   DistillSourceView,
   OnboardingStepId,
   OnboardingStepView,
@@ -230,12 +231,17 @@ export interface MyContextApi {
      * 白名单统一放 `scope.conversationIds`，里面就是**这个渠道自己的**
      * external_id。
      */
+    /**
+     * ★ 返回 `DistillSourceSaveResult` 而不是裸 `true` —— 它多带一件事：
+     * **这次有没有收窄**。见那个 schema 的注释（下游已学的部分不会跟着
+     * 收窄，而那需要用户知情 + 一次手动重建）。
+     */
     sourceSave(input: {
       channelId: string
       kind: DistillSourceId
       enabled: boolean
       scope: DistillScopeInput
-    }): Promise<Result<true>>
+    }): Promise<Result<DistillSourceSaveResult>>
     /** 清某个源的蒸馏水位 —— 下一轮从头再蒸（facet 幂等合并，不删已有结论） */
     sourceReset(input: { kind: DistillSourceId }): Promise<Result<true>>
     /**

@@ -90,17 +90,22 @@ describe("★★★ buildProducerStatuses：声明 + 运行时合成一张表", 
      * （水位那套是"只推已抽干的连续前缀"，它没有"整轮抽干"这个时刻）。
      */
     const statuses = buildProducerStatuses({
-      // ★ 故意给 watermark 与 stream 也传值 —— 声明是权威，它们必须报 null
+      /**
+       * ★ 故意给 `watermark` 也传值 —— 声明是权威，它必须报 null。
+       *
+       * ★★ `attention-stream` 已从 `PRODUCERS` 摘掉（v4 §6.3：它是消费者），
+       * 所以这里不再有 `stream` 那一档。而 `schedule: "stream"` 那个枚举值
+       * **留着** —— 将来真有一个"从外部流里产数据"的生产者时它就是对的。
+       */
       drained: new Map([
         ["chat-ingest", true],
         ["minutes-ingest", false],
         ["doc-ingest", true],
-        ["attention-stream", true],
       ]),
     })
     const by = new Map(statuses.map((s) => [s.id, s]))
+    // ★ watermark：水位那套没有"整轮抽干"这个时刻 → null
     expect(by.get("chat-ingest")?.drained).toBeNull()
-    expect(by.get("attention-stream")?.drained).toBeNull()
     expect(by.get("minutes-ingest")?.drained).toBe(false)
     expect(by.get("doc-ingest")?.drained).toBe(true)
   })
@@ -141,7 +146,6 @@ describe("★★★ buildProducerStatuses：声明 + 运行时合成一张表", 
         {
           id: "multi",
           domains: ["chat", "doc"],
-          scope: "learning",
           backfills: true,
           schedule: "tiered-listing",
           haltsOnScopeNotReady: false,

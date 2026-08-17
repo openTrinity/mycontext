@@ -9,7 +9,7 @@
  * ## 为什么是"声明 + 一个循环"，而不是重写那三个消费者
  *
  * 正确性相关的部分（租约抢占、从 `acked_seq` 重放、`required` 决定能不能裁
- * 历史、快通道/慢兜底按 `message_id` 去重）都是踩过坑才对的，重写等于
+ * 历史、投递按 `message_id` 去重防重放）都是踩过坑才对的，重写等于
  * 把它们重新犯一遍。缺的不是实现，而是**这套架构在代码里没有名字**：
  * 谁是生产者、谁消费谁、谁依赖谁，散在 `ingest.service.ts` 的构造函数与
  * `runOnce()` 调用顺序里 —— 只能靠读代码推断，不能被查询、不能被展示、
@@ -233,17 +233,17 @@ export interface ProducerSpec {
   /** 投哪些域 */
   domains: readonly DataDomain[]
   /**
-   * 这个生产者受哪个**范围**约束。
+   * ★★★ `scope` 字段**已删**（v4 §6.3）。
    *
-   * · `learning` —— 学习范围（`distill_sources.scope_json`，只增不减，可回溯）；
-   * · `attention` —— 监听范围（`attention_scope`，只记实时流，可关掉）。
+   * 它原来是 `"learning" | "attention"`，用来区分"这个生产者受哪个范围管"。
+   * 而 `attention-stream` 从这张表摘掉之后（它是**消费者** ——
+   * 输入是我们自己的表），所有生产者都受同一个**采集面**管
+   * （`readCollectionRequest` = 学习范围 ∪ 监听范围），
+   * 那个字段没有区分度了。
    *
-   * ★ 用户原话把这两个说成"两个生产者渠道"。它们其实是同一条采集链上的
-   * 两个**闸**：`learning` 决定什么进库（进而进 changelog），
-   * `attention` 决定什么投给分身。分开声明是为了让"哪个范围管哪件事"
-   * 不再需要读代码才知道。
+   * ★ 而它的存在正是自检判据① 需要 `filter(p => p.scope === "learning")`
+   * 这个特例的原因 —— **一张声明表需要跳过某几行才能自检，就是分类错了**。
    */
-  scope: "learning" | "attention"
   /** 是否会回溯历史。`attention` 恒 false —— 它只管实时流。 */
   backfills: boolean
   /** 一句话说明它产什么（状态页/文档直接用） */
@@ -292,7 +292,6 @@ export const PRODUCERS: readonly ProducerSpec[] = [
   {
     id: "chat-ingest",
     domains: ["chat"],
-    scope: "learning",
     backfills: true,
     schedule: "watermark",
     /** ★ 唯一为 true 的：只有它推进一个不可回退的水位（见上面那段 ★★★）。 */
@@ -302,7 +301,6 @@ export const PRODUCERS: readonly ProducerSpec[] = [
   {
     id: "minutes-ingest",
     domains: ["minutes"],
-    scope: "learning",
     backfills: true,
     schedule: "drain-each-round",
     haltsOnScopeNotReady: false,
@@ -322,39 +320,10 @@ export const PRODUCERS: readonly ProducerSpec[] = [
      */
     id: "doc-ingest",
     domains: ["doc"],
-    scope: "learning",
     backfills: true,
     schedule: "tiered-listing",
     haltsOnScopeNotReady: false,
     purpose: "拉知识库文档与云盘文件",
-  },
-  {
-    /**
-     * 分身的实时流生产者。
-     *
-     * ★ 它**不往 changelog 写**（消息已经由 `chat-ingest` 写过了）——
-     * 它产出的是"这条消息属于分身的关心范围"这个判断，落点是
-     * `attention_coverage` 的 routed/skipped 记账 + 投递给管控层。
-     * 声明它是为了让「监听范围」在拓扑里可见：用户配的那个范围
-     * 有一个明确的生产者在用它。
-     *
-     * ★★ 判据实现在 `AttentionRouter`（store 层），而**不是**在某个调用点
-     * —— 它被快通道与慢兜底两条投递路共用。改动前路由只在快通道上，
-     * 慢兜底整条绕过监听范围（见 `deliverMessage` 的注释）。
-     */
-    id: "attention-stream",
-    domains: ["chat"],
-    scope: "attention",
-    backfills: false,
-    schedule: "stream",
-    /**
-     * ★ false，而且理由与另两个域**不同**：它压根没有"进度"可推
-     * （既不推水位、也不翻页）。监听范围没配好时它的表现是
-     * `enforced: false`（放行但不记账），那由 `AttentionRouter` 表达 ——
-     * 见 `attention-router.ts` 的 mode 三态。
-     */
-    haltsOnScopeNotReady: false,
-    purpose: "按监听范围把新消息路由给数字分身管控层",
   },
 ]
 
@@ -647,11 +616,17 @@ export function checkTopologyConsistency(
   /**
    * ① 标 `active` 的域必须真的有生产者。
    *
-   * ★ 只数**写 changelog** 的生产者：`attention-stream` 不写
-   * （它产的是路由判断），把它算进来会让一个只有 attention 生产者的域
-   * 看起来"有人在产"，而 changelog 里其实永远是空的。
+   * ## ★★★ 这里原来有一个 `filter(p => p.scope === "learning")` 特例
+   *
+   * 那是因为 `attention-stream` 在这张表里，而它**不写 changelog**
+   * （它产的是路由判断）—— 把它算进来会让一个只有它的域看起来"有人在产"。
+   *
+   * 而那个特例本身就是**分类错了的信号**：一张声明表需要跳过某几行
+   * 才能自检，说明它混了两种东西。`attention-stream` 已经摘掉了
+   * （它是**消费者** —— 输入是我们自己的表，见 v4 §6.3），
+   * 于是这张表内部同质，filter 可以删。
    */
-  const written = new Set(producers.filter((p) => p.scope === "learning").flatMap((p) => p.domains))
+  const written = new Set(producers.flatMap((p) => p.domains))
   for (const domain of domains) {
     if (domain.producedBy === "active" && !written.has(domain.id)) {
       problems.push(`域 ${domain.id} 标了 active，但没有任何生产者往它投`)

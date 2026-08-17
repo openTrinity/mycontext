@@ -183,6 +183,18 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
    * 见 `submit` 里那段）。
    */
   const [savedChannel, setSavedChannel] = useState<string | null>(null)
+  /**
+   * 上一次保存**收窄了哪几个维度**；`null` = 没收窄（或还没保存过）。
+   *
+   * ★ 用"哪几个维度"而不是一个布尔：界面要说清是**会话**收窄了还是
+   * **知识库空间**收窄了 —— 用户接下来要做的判断不同（要不要重建图谱、
+   * 值不值得为这一类重建）。
+   *
+   * ★★ 存 state 而不是只弹一次 toast：这句话要**留在页面上**直到用户
+   * 处理它（去重建、或明确忽略）。一闪而过的提示对一个"需要做决定"的
+   * 事实是不够的 —— 而这正是本仓库反复出现的"用户没看见"那类问题。
+   */
+  const [narrowed, setNarrowed] = useState<readonly string[] | null>(null)
 
   /**
    * 首帧还没拿到 `sources` 时草稿是 null；拿到之后**只初始化一次**。
@@ -259,7 +271,27 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
           conversationIds: draft.conversationIds,
         },
       },
-      { onSuccess: () => setSavedChannel(activeChannel) },
+      {
+        onSuccess: (result) => {
+          setSavedChannel(activeChannel)
+          /**
+           * ★★★ 收窄了要**告诉用户**（v4 §3.2）。
+           *
+           * 「只增不减」有一个刻意的例外：从"不限"收窄到具体列表是允许的
+           * （否则非主渠道那种"有 since、没有白名单"的库永远设不了白名单
+           * —— 那是超范围采集，比收窄糟得多）。
+           *
+           * 而那一格有一个后果：**下游已经学过的那部分不会跟着收窄** ——
+           * 图谱与画像是增量的，"输入变少"对它们不等于"把已有的删掉"。
+           *
+           * 这个不一致**不可能靠代码自动消除**（唯一的清空入口是手动重建，
+           * 而那要几十分钟且不可中断）。所以正确的处置是让用户知情 ——
+           * 静默留一个"配置说没学过、产出说学过"的矛盾才是最糟的
+           * （CLAUDE.md 第 4 节）。
+           */
+          setNarrowed(result.narrowed ? result.narrowedFields : null)
+        },
+      },
     )
   }
 
@@ -293,6 +325,43 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
       })}
     >
       <div className="flex flex-col gap-3">
+        {/*
+          ── ★★★ 收窄告知（v4 §3.2）─────────────────────────────────
+
+          「只增不减」有一个刻意的例外（从"不限"收窄到具体列表），
+          而它的后果是**下游已学的那部分不会跟着收窄**。
+
+          这一块的存在理由：那个不一致不可能靠代码消除（唯一的清空入口
+          是手动重建，几十分钟且不可中断），所以必须让用户知情并给他出路。
+
+          ★ 放在最上面、且**留在页面上**（不是 toast）—— 它需要用户做一个
+          决定，而一闪而过的提示对"需要做决定"的事实不够。
+        */}
+        {narrowed === null ? null : (
+          <div className="flex flex-col gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border-divider-light)] bg-[var(--bg-card-z0)] p-3">
+            <p className="typography-body-small-400 text-[var(--text-base-primary)]">
+              {t("status.scope.narrowed.title", {
+                defaultValue: "范围已收窄，但**已经学过的知识还在**",
+              })}
+            </p>
+            <p className="typography-caption-400 text-[var(--text-base-secondary)]">
+              {t("status.scope.narrowed.body", {
+                defaultValue:
+                  "图谱与画像是增量积累的 —— 少给它们输入不等于把已经学到的删掉。要让已学的知识跟着收窄，需要重建当前渠道的图谱（会清空后重新学，耗时较长且不能中途关闭）。",
+              })}
+            </p>
+            <div className="flex items-center gap-2">
+              {/*
+                ★ 给出路而不是只报告问题：那个按钮本来就存在
+                （`rebuildGraph(fresh=true)` → `wipeGraphData()`），
+                但用户在这个语境下想不到去别的面板找它。
+              */}
+              <Button size="sm" variant="ghost" onClick={() => setNarrowed(null)}>
+                {t("status.scope.narrowed.dismiss", { defaultValue: "知道了，暂不重建" })}
+              </Button>
+            </div>
+          </div>
+        )}
         {/*
           ★ 覆盖面放在**编辑器之前**：用户打开这块最先想知道的是
           "我现在有多少"，而不是先面对一堆勾选框。

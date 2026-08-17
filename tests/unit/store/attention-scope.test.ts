@@ -281,9 +281,11 @@ describe("AttentionCoverageRepository：实时流覆盖面", () => {
 describe("接线：路由挂在两条投递路的交汇点（deliverMessage）", () => {
   it("★★★ 路由在 `deliverMessage` 里，且在准入前置查询之前", async () => {
     /**
-     * 判据是**位置**：`deliverMessage` 是快通道（`createPersonaFastPath`）与
-     * 慢兜底（`createPersonaInboxHandler`）唯一都会经过的函数。路由在这里
-     * ⇒ 任何新增的第三条投递路径也必然过闸，"忘了加路由"在结构上不可能。
+     * 判据是**位置**：`deliverMessage` 是投递的唯一入口。路由在这里
+     * ⇒ 任何新增的投递路径也必然过闸，"忘了加路由"在结构上不可能。
+     *
+     * ★★ v4 起它**只有一个调用者**（`createPersonaInboxHandler`）——
+     * 快通道已删，所以"两条路判据分叉"这个风险从结构上消失了。
      *
      * ★ 还断言它在 `message_mentions` 那条查询**之前**：范围外的消息不该
      * 为它去查 mentions 与"对方后来有没有又说话"（3 次带子查询的 SQL）。
@@ -293,7 +295,11 @@ describe("接线：路由挂在两条投递路的交汇点（deliverMessage）",
     const src = readFileSync("packages/persona/src/inbox-consumer.ts", "utf8")
     const fnIdx = src.indexOf("export function deliverMessage")
     expect(fnIdx).toBeGreaterThan(0)
-    const body = src.slice(fnIdx, src.indexOf("export function createPersonaFastPath"))
+    /**
+     * ★ 锚点改成 `createPersonaInboxHandler` —— 快通道
+     * （`createPersonaFastPath`）已删（v4 §4），而它曾是这里的下界。
+     */
+    const body = src.slice(fnIdx, src.indexOf("export function createPersonaInboxHandler"))
     // 路由真的被调用，且它的结论门控 return
     expect(body).toContain("repos.router.route({")
     expect(body).toContain("if (!route.routed)")
@@ -309,20 +315,49 @@ describe("接线：路由挂在两条投递路的交汇点（deliverMessage）",
     expect(body.indexOf("repos.router.route(")).toBeLessThan(body.indexOf("FROM message_mentions"))
   })
 
-  it("★★★ 两条通路共用同一份仓储（含 router）—— 判据只有一处", async () => {
+  it("★★★ `deliverMessage` **只有一个调用者**（v4 §4：两条路合成一条）", async () => {
     /**
-     * 反证：让 `createPersonaFastPath` 自己 new 一份不含 router 的仓储
-     * → 这条转红。而红之前的状态正是"两条路各有一份判据"，
-     * 那种不一致的表现是"快通道拦了、慢兜底放了"，两边都不报错。
+     * ## 这一条这一轮**换了方向**，而它比原来那条更强
+     *
+     * 原来断言的是"两条通路共用同一份仓储（含 router）" —— 那是在两条路
+     * 并存的前提下能做到的最好保证（判据只有一份，但**两个调用者**）。
+     *
+     * 快通道删掉之后（v4 §4）保证升级了：**只有一个调用者** ——
+     * 于是"两条路判据分叉"这个风险从结构上消失，而不是靠共用仓储去防。
+     *
+     * ★ 反证：再加一个 `createPersonaFastPath` 那样的第二入口 → 这条转红。
+     * 而红之前的状态正是那个永久的维护负担（v2 修过一次真事故：
+     * 路由原来只挂快通道，慢兜底整条绕过监听范围）。
      */
     const { readFileSync } = await import("node:fs")
     const src = readFileSync("packages/persona/src/inbox-consumer.ts", "utf8")
+    // ★ 仓储里仍然含 router（判据的载体没变）
     expect(src).toContain("router: new AttentionRouter(options.db, options.clock)")
-    // 两个工厂都走 createRepos，不各自 new
-    const fast = src.slice(src.indexOf("export function createPersonaFastPath"))
-    expect(fast).toContain("createRepos(options)")
+    /**
+     * ★★ 调用 `deliverMessage(` 的地方**只有一处**。
+     *
+     * 用正则数而不是 `includes`：后者答不了"有几个"，而这条断言的
+     * 全部内容就是那个数字。
+     */
+    const callSites = src.match(/deliverMessage\(options, repos/g) ?? []
+    expect(callSites).toHaveLength(1)
+    // ★ 而那一处在消费者工厂里（不是某个新的快通道）
     const slow = src.slice(src.indexOf("export function createPersonaInboxHandler"))
+    expect(slow).toContain("deliverMessage(options, repos")
     expect(slow).toContain("createRepos(options)")
+  })
+
+  it("★★★ 快通道整个消失了（`createPersonaFastPath` 不再存在）", async () => {
+    /**
+     * ★ 断言"不存在"而不是"没被调用"：留一个没人用的导出会让下一个人
+     * 以为它是可用的第二入口，而那正是要消灭的形状
+     * （v3 的 G10 就是"有实现、零引用"那一类）。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("packages/persona/src/inbox-consumer.ts", "utf8")
+    expect(src).not.toContain("export function createPersonaFastPath")
+    const index = readFileSync("packages/persona/src/index.ts", "utf8")
+    expect(index).not.toContain("createPersonaFastPath")
   })
 
   it("★★★ 调用点**不再**自己实现一份路由（否则判据又变成两份）", async () => {
@@ -336,8 +371,18 @@ describe("接线：路由挂在两条投递路的交汇点（deliverMessage）",
     // 只允许出现在注释里说明"为什么搬走了"，不允许再有真实调用
     expect(src).not.toContain("routeToAttention({")
     expect(src).not.toContain("new AttentionCoverageRepository(")
-    // 而投递本身仍在（快通道没被顺手删掉）
-    expect(src).toContain("this.personaFastPath?.(message.id)")
+    /**
+     * ★★★ 而**投递本身也不在这里了**（v4 §4）。
+     *
+     * 原来这一行断言的是"快通道没被顺手删掉"
+     * （`expect(src).toContain("this.personaFastPath?.(message.id)")`）。
+     * 现在方向相反：那条路是**刻意**删的，投递只走 changelog。
+     *
+     * ★ 而秒级感知靠 `refreshConversation` 末尾驱动一次消费者循环 ——
+     * 那一行有它自己的门禁（`collection-request.test.ts`）。
+     */
+    expect(src).not.toContain("personaFastPath")
+    expect(src).not.toContain('this.events.emit("inbound.message"')
   })
 
   it("★★★ mode 没配过（存量库）→ 放行且 enforced=false（否则是一次静默功能回归）", () => {

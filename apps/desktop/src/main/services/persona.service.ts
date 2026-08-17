@@ -146,8 +146,8 @@ function runtimeLimitsKeyFor(channelId: string | undefined): string {
  *
  * ★ 它是**兜底**，不再是主路径：主路径是投递后的 `wake()`
  * （见那个方法的注释）。留着它是因为唤醒可能漏 —— 异常路径、
- * 快通道没挂上、或者消息是被慢兜底的 Outbox 消费者捞回来的。
- * 与「快通道 + Outbox 兜底」同一个理由：两条路都不完美，合起来才可靠。
+ * 投递方没调 `wake()`（比如一次手动灌入），或者那一轮的叫醒被防抖吞掉。
+ * ★ 它是**兜底**：主路径是消费者投递后调 `wake()`（见那个方法）。
  */
 const TICK_MS = 8_000
 
@@ -583,7 +583,7 @@ export class PersonaService {
   }
 
   /**
-   * 暴露 supervisor 给 Outbox 消费者与快通道。
+   * 暴露 supervisor 给 Outbox 消费者（v4 起它是**唯一**的投递方）。
    *
    * ★ 入队很快（进程内事件，毫秒级），但**入队不等于被处理** ——
    * 取件的是 `TICK_MS` 那个定时器。所以调用方投递完之后应当调
@@ -598,7 +598,7 @@ export class PersonaService {
   /**
    * 投递之后叫醒调度 + 把「待处理」推给界面。
    *
-   * 这是投递方（快通道与 Outbox 消费者）**唯一**该调的那个方法 ——
+   * 这是投递方（`persona-inbox` 消费者）**唯一**该调的那个方法 ——
    * 两件事必须一起做：只唤醒不推快照，界面上那几秒里仍然什么都不动；
    * 只推快照不唤醒，数字还是要等 8 秒才开始变。
    */
@@ -612,7 +612,7 @@ export class PersonaService {
    *
    * ## ★ 为什么这个方法必须存在
    *
-   * 快通道（`inbound.message` → `createPersonaFastPath` → `onInbound`）
+   * 投递路（changelog → `persona-inbox` → `deliverMessage` → `onInbound`）
    * 把消息放进信箱之后**没有叫醒任何人**：唯一的取件人是 `TICK_MS = 8s`
    * 的那个定时器。于是"投递是订阅式的、处理仍是轮询式的" ——
    * 一条 @我 的消息平均要等 4 秒（0-8 秒随机）才开始处理。

@@ -614,6 +614,38 @@ export const distillSourceViewSchema = z.object({
 
 export type DistillSourceView = z.infer<typeof distillSourceViewSchema>
 
+/**
+ * 保存学习范围的结果。
+ *
+ * ## ★★★ 为什么不再是裸 `true`
+ *
+ * 「只增不减」有一个刻意的例外：**从"不限"收窄到具体列表**是允许的
+ * （否则非主渠道那种"有 since、没有 conversationIds"的库永远设不了
+ * 白名单 —— 而那是超范围采集，比收窄糟得多）。
+ *
+ * 而那一格有一个后果：**下游（图谱 / 画像）已经学过的那部分不会跟着
+ * 收窄** —— 它们是增量的，"输入变少"对它们不等于"把已有的删掉"。
+ *
+ * 这个不一致**不可能靠代码自动消除**（唯一的清空入口是手动重建图谱，
+ * 而那要几十分钟且不可中断）。所以正确的处置是**让用户知情** ——
+ * 而这个字段就是那句提示的开关。
+ *
+ * ★ 只在真的收窄时为 true：每次保存都弹一次的确认等于没有确认。
+ */
+export const distillSourceSaveResultSchema = z.object({
+  ok: z.literal(true),
+  /** 这次保存**缩小**了范围（走了那个刻意的例外）。 */
+  narrowed: z.boolean(),
+  /**
+   * 哪几个维度收窄了 —— 界面据此说清"哪一类"（会话 / 知识库 / 会话类型）。
+   *
+   * ★ 只有字段名，**不含真实 id**（CLAUDE.md §1.1：真实标识不出仓库、
+   * 也不该在 IPC 上被当成展示数据传来传去）。
+   */
+  narrowedFields: z.array(z.enum(["conversationIds", "partitions", "chatKinds"])),
+})
+export type DistillSourceSaveResult = z.infer<typeof distillSourceSaveResultSchema>
+
 export const distillSourceSaveInputSchema = z.object({
   /**
    * 存**哪个渠道**的范围。★★★ 必填。
@@ -2491,8 +2523,14 @@ export const ingestSnapshotSchema = z.object({
       /** 一句话说明它产什么（来自 `ProducerSpec.purpose`） */
       purpose: z.string(),
       domains: z.array(z.enum(["chat", "doc", "minutes", "contact"])),
-      /** 受哪个范围约束：learning（什么进库）/ attention（什么投给分身） */
-      scope: z.enum(["learning", "attention"]),
+      /**
+       * ★★★ `scope` **已删**（v4 §6.3）。
+       *
+       * 它原来区分"这个生产者受哪个范围管"。而 `attention-stream` 从
+       * `PRODUCERS` 摘掉之后（它是**消费者** —— 输入是我们自己的表），
+       * 所有生产者都受同一个**采集面**管（学习范围 ∪ 监听范围），
+       * 那个字段没有区分度了。
+       */
       /**
        * 调度形状。界面据此解释"为什么这个域没有水位"：
        * watermark（chat）/ drain-each-round（minutes）/

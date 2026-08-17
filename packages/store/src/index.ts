@@ -61,6 +61,15 @@ export {
 export type { DomainScope, DomainScopeDefault, ScopedDomain } from "./domain-scope.js"
 export { CORPUS_MESSAGE_PREDICATE, corpusMessagePredicate } from "./corpus-predicate.js"
 export type { CollectionScope } from "./collection-scope.js"
+/**
+ * 采集面（去不去拉）—— 学习范围 ∪ 监听范围。
+ *
+ * ★ 与 `readDomainScope`（那是"什么该进学习语料"）**分层不同**：
+ * 这一层是隐私边界（不去拉 = 数据不存在），那一层是下游口径。
+ * 见 `collection-request.ts` 文件头。
+ */
+export { readCollectionRequest, isWithinCollectionWindow } from "./collection-request.js"
+export type { CollectionRequest } from "./collection-request.js"
 export { purgeOutOfScopeMessages, purgeOutOfScopeDocuments } from "./purge-scope.js"
 export type { PurgeReport, DocumentPurgeReport } from "./purge-scope.js"
 

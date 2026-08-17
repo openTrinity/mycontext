@@ -16,6 +16,7 @@ import type {
   Credentials,
   DistillScopeInput,
   DistillSourceId,
+  DistillSourceSaveResult,
   KlGraphFactsInput,
   KlServerStatus,
   LanguagePreference,
@@ -491,7 +492,20 @@ export function useDisableAttentionScope() {
   })
 }
 
-function useDistillMutation<TInput>(perform: (input: TInput) => Promise<unknown>) {
+/**
+ * 蒸馏侧那几个 mutation 的共用外壳（成功后失效 `distillSources` 查询）。
+ *
+ * ★★ `TOutput` 默认 `unknown`（既有调用方都不看返回值），而
+ * `useSaveDistillSource` **要看** —— 它的返回里带 `narrowed`
+ * （这次保存有没有收窄），界面据此显示那句"已学的知识还在"。
+ *
+ * 不加这个泄型参数的话 `onSuccess(result)` 里的 `result` 是 `unknown`，
+ * 于是调用方只能 `as` —— 而那会盖住"契约改了但界面没跟上"这类真实差异
+ * （CLAUDE.md §6）。
+ */
+function useDistillMutation<TInput, TOutput = unknown>(
+  perform: (input: TInput) => Promise<TOutput>,
+) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: perform,
@@ -500,17 +514,20 @@ function useDistillMutation<TInput>(perform: (input: TInput) => Promise<unknown>
 }
 
 export function useSaveDistillSource() {
-  return useDistillMutation<{
-    /**
-     * 存哪个渠道的范围。★★★ 必填 —— 见
-     * `distillSourceSaveInputSchema.channelId`（旧形状造成过一次数据丢失：
-     * 在飞书那栏保存把钉钉的会话白名单清空了）。
-     */
-    channelId: string
-    kind: DistillSourceId
-    enabled: boolean
-    scope: DistillScopeInput
-  }>(async (input) => unwrap(await window.mycontext.distill.sourceSave(input)))
+  return useDistillMutation<
+    {
+      /**
+       * 存哪个渠道的范围。★★★ 必填 —— 见
+       * `distillSourceSaveInputSchema.channelId`（旧形状造成过一次数据丢失：
+       * 在飞书那栏保存把钉钉的会话白名单清空了）。
+       */
+      channelId: string
+      kind: DistillSourceId
+      enabled: boolean
+      scope: DistillScopeInput
+    },
+    DistillSourceSaveResult
+  >(async (input) => unwrap(await window.mycontext.distill.sourceSave(input)))
 }
 
 export function useResetDistillSource() {

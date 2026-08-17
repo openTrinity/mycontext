@@ -204,9 +204,15 @@ describe("接线：save 用 merged，派生链的判据也用 merged", () => {
   it("★★ repo.upsert 存的是 merged", async () => {
     const { readFileSync } = await import("node:fs")
     const src = readFileSync("apps/desktop/src/main/services/distill-source.service.ts", "utf8")
-    const idx = src.indexOf("const merged = mergeScopeOnlyGrowing(")
+    /**
+     * ★ v4 阶段 A 起走 `mergeScopeOnlyGrowingDetailed`（它多返回一个
+     * `narrowed` —— 那是"这次收窄了"的告知开关）。锚点跟着改，
+     * 而这条断言要锁的事实**没变**：存进库的必须是 `merged`。
+     */
+    const idx = src.indexOf("const mergeResult = mergeScopeOnlyGrowingDetailed(")
     expect(idx).toBeGreaterThan(0)
-    const after = src.slice(idx, idx + 1600)
+    // ★ 窗口放宽到 2600：那一段现在多了收窄告知的日志与注释
+    const after = src.slice(idx, idx + 2600)
     /**
      * 反证：把 `scope: merged` 改回 `scope: input.scope` → 红。
      * 而红之前的状态正是"并集算对了但没存"—— 用户取消勾选照旧生效。

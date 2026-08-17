@@ -242,27 +242,52 @@ describe("拓扑声明：id 必须与真实常量一致", () => {
   })
 })
 
-describe("生产者声明：两个范围各有归属", () => {
-  it("★★★ 学习范围与监听范围各自有生产者（用户要的「分开两个」）", () => {
-    const learning = PRODUCERS.filter((spec) => spec.scope === "learning").map((s) => s.id)
-    const attention = PRODUCERS.filter((spec) => spec.scope === "attention").map((s) => s.id)
-    expect(learning.length).toBeGreaterThan(0)
-    expect(attention).toEqual(["attention-stream"])
-  })
-
-  it("★★★ 监听范围的生产者**不回溯**（它只记实时流）", () => {
+describe("★★★ 生产者声明：只有「往 DWD 写的东西」（v4 §6.3）", () => {
+  it("★★★ `attention-stream` **不在** PRODUCERS 里 —— 它是消费者", () => {
     /**
-     * 用户原话：「不过他只需要记录实时流的内容」。
-     * 反证：把 `backfills` 改成 true → 这条转红，而那个改动的真实后果是
-     * 一次历史回填把几万条旧消息投给分身。
+     * ## 这一条这一轮**换了方向**，判据是"输入是什么"
+     *
+     * | | chat-ingest | attention-stream |
+     * |---|---|---|
+     * | 输入 | 渠道 CLI（**外部**） | ★ `messages` / changelog（**我们自己的表**） |
+     * | 输出 | `messages` + changelog | 一个判定 + 投递 |
+     *
+     * 输入是我们自己的表 = **消费者**。而它已经是消费者形状
+     * （`persona-inbox` 就是它 —— 有游标、有租约、有 `routed: true`），
+     * 所以 `PRODUCERS` 里那一行是**重复声明**。
+     *
+     * ★ 代价已经显形三处：自检判据① 要开 filter 特例、它的 `scopeReady`
+     * 读的是学习范围（v3 引入的 bug）、它的 dropped 恒 0 而真值在
+     * `attention_coverage.skipped_count` 里。
      */
-    const attention = PRODUCERS.find((spec) => spec.scope === "attention")
-    expect(attention?.backfills).toBe(false)
+    expect(PRODUCERS.map((spec) => spec.id)).not.toContain("attention-stream")
+    // ★ 而那件事本身仍在做 —— 由 persona-inbox 那个消费者（带路由闸）
+    expect(CONSUMERS.find((spec) => spec.id === PERSONA_CONSUMER_ID)?.routed).toBe(true)
   })
 
-  it("★ 学习范围的生产者会回溯（往回挖历史是它的本职）", () => {
-    const learning = PRODUCERS.filter((spec) => spec.scope === "learning")
-    expect(learning.every((spec) => spec.backfills)).toBe(true)
+  it("★★★ 所有生产者都**会回溯**（往回挖历史是采集的本职）", () => {
+    /**
+     * ★ 摘掉 `attention-stream` 之后这张表内部同质：全都是"从渠道拉、
+     * 往 DWD 写"的东西，而它们都要能回溯（`backfills: true`）。
+     *
+     * 反证：新加一个 `backfills: false` 的生产者 → 这条转红，
+     * 而那时该问的是"它到底是不是生产者"（不回溯的东西通常是消费者）。
+     */
+    expect(PRODUCERS.every((spec) => spec.backfills)).toBe(true)
+  })
+
+  it("★★★ `scope` 字段已删（所有生产者受同一个采集面管）", () => {
+    /**
+     * 它原来区分"受哪个范围管"。而采集面现在是**并集**
+     * （`readCollectionRequest` = 学习范围 ∪ 监听范围），
+     * 所以那个字段没有区分度了。
+     *
+     * ★ 而它的存在正是自检判据① 需要 filter 特例的原因 ——
+     * 一张声明表需要跳过某几行才能自检，就是分类错了。
+     */
+    for (const spec of PRODUCERS) {
+      expect((spec as { scope?: unknown }).scope).toBeUndefined()
+    }
   })
 })
 
@@ -555,28 +580,37 @@ describe("拓扑自检：声明与事实必须一致", () => {
     expect(problems.some((p) => p.includes("unwiredReason"))).toBe(true)
   })
 
-  it("★★ `attention-stream` 不算 changelog 生产者（它产的是路由判断）", () => {
+  it("★★★ 判据①**不再**需要 filter 特例（那个特例本身就是分类错了的信号）", () => {
     /**
-     * ★ 判据落在"只数 `scope: learning` 的生产者"。把 attention 算进来的话，
-     * 一个只有 attention 生产者的域会看起来"有人在产"，
-     * 而 changelog 里其实永远是空的 —— 那正是这套自检要防的形状。
+     * ## 这一条这一轮**换了方向**
+     *
+     * 原来判据① 是 `producers.filter(p => p.scope === "learning")` ——
+     * 那个 filter 存在的**唯一**理由是 `attention-stream` 在同一张表里
+     * 而它不写 changelog。
+     *
+     * 而一张声明表需要"跳过某几行"才能自检，**本身就是分类错了的信号**。
+     * `attention-stream` 已经摘掉了（它是消费者 —— 输入是我们自己的表），
+     * 于是这张表内部同质、filter 可以删。
+     *
+     * ★ 现在的判据是"标 active 的域必须有生产者投它"，不带任何例外。
+     * 反证：给一个 active 的域不配生产者 → 报一条（下面那两条已锁）。
      */
     const problems = checkTopologyConsistency({
       domains: [{ id: "chat", kind: "collectable", producedBy: "active", purpose: "聊天" }],
       producers: [
         {
-          id: "attention-stream",
+          id: "chat-ingest",
           domains: ["chat"],
-          scope: "attention",
-          backfills: false,
-          schedule: "stream",
-          haltsOnScopeNotReady: false,
-          purpose: "路由",
+          backfills: true,
+          schedule: "watermark",
+          haltsOnScopeNotReady: true,
+          purpose: "拉消息",
         },
       ],
       consumers: [],
     })
-    expect(problems).toHaveLength(1)
+    // ★ 有生产者投它 → 干净（不需要判它的 scope 是什么）
+    expect(problems).toHaveLength(0)
   })
 
   it("★ activeDomains() 只给真的有生产者的那三个", () => {
