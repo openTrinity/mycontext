@@ -20,13 +20,13 @@ import Database from "better-sqlite3"
 import {
   ConversationRepository,
   type Migration,
-  MessageRepository,
   openStore,
   PersonaRunRepository,
   rawChecksum,
   runMigrations,
   schemaChecksum,
   SelfIdentityRepository,
+  type SqliteDatabase,
   stripSqlComments,
   VAULT_MIGRATIONS,
 } from "@mycontext/store"
@@ -37,6 +37,55 @@ function tempDbPath(): string {
   const dir = mkdtempSync(join(tmpdir(), "mycontext-mig-"))
   tempDirs.push(dir)
   return join(dir, "core.sqlite")
+}
+
+/**
+ * 往**旧版本**的库里插消息 —— 不走 `MessageRepository`。
+ *
+ * ## ★★★ 为什么这里必须绕开 repository
+ *
+ * 这些用例故意把库停在某个中间版本（`VAULT_MIGRATIONS.slice(0, 14)`），
+ * 然后用**当前**的 repository 代码往里写 —— 而 repository 的 SQL 总是
+ * 按**最新** schema 写的。于是每加一列都会让这些用例红一次，
+ * 报的还是 `table messages has no column named …`（v30 加
+ * `learning_eligible` 时六条一起红）。
+ *
+ * ★ 那个红**不是**在报告一个真问题：这些用例测的是"迁移到 vN 时会不会
+ * 清掉该清的历史行"，与列的多少无关。所以正确的修法是让**种子数据**
+ * 只依赖那一版真的有的列，而不是每次去补 repository 的新字段。
+ *
+ * ★★ 反过来说：迁移本身的断言仍然走真 SQL（下面每个用例的 expect），
+ * 所以这个 helper 不会掩盖迁移写错。
+ */
+function seedMessage(
+  db: SqliteDatabase,
+  row: {
+    id: string
+    conversationId: string
+    externalId: string
+    contentText: string
+    sentAt: number
+    direction: "inbound" | "outbound"
+    isSelf?: boolean | null
+    origin?: string
+  },
+): void {
+  db.prepare(
+    `INSERT INTO messages
+       (id, channel_id, conversation_id, external_id, content_text, sent_at,
+        direction, is_self, origin, created_at)
+     VALUES (?, 'dingtalk', ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    row.id,
+    row.conversationId,
+    row.externalId,
+    row.contentText,
+    row.sentAt,
+    row.direction,
+    row.isSelf === null || row.isSelf === undefined ? null : row.isSelf ? 1 : 0,
+    row.origin ?? "human",
+    row.sentAt,
+  )
 }
 
 afterEach(() => {
@@ -180,30 +229,24 @@ describe("vault 迁移链", () => {
       memberCount: 2,
       createdAt: now,
     })
-    new MessageRepository(before.db).upsertMany([
-      {
-        id: "incoming",
-        channelId: "dingtalk",
-        conversationId: "conv-1",
-        externalId: "msg-in",
-        contentText: "在吗",
-        sentAt: now,
-        direction: "inbound",
-        isSelf: false,
-        createdAt: now,
-      },
-      {
-        id: "reply",
-        channelId: "dingtalk",
-        conversationId: "conv-1",
-        externalId: "msg-out",
-        contentText: "在",
-        sentAt: now + 1000,
-        direction: "outbound",
-        isSelf: true,
-        createdAt: now + 1000,
-      },
-    ])
+    seedMessage(before.db, {
+      id: "incoming",
+      conversationId: "conv-1",
+      externalId: "msg-in",
+      contentText: "在吗",
+      sentAt: now,
+      direction: "inbound",
+      isSelf: false,
+    })
+    seedMessage(before.db, {
+      id: "reply",
+      conversationId: "conv-1",
+      externalId: "msg-out",
+      contentText: "在",
+      sentAt: now + 1000,
+      direction: "outbound",
+      isSelf: true,
+    })
     new PersonaRunRepository(before.db).insertDraft(
       {
         id: "draft-1",
@@ -235,7 +278,6 @@ describe("vault 迁移链", () => {
     const before = openStore({ path, migrations: VAULT_MIGRATIONS.slice(0, 12) })
     const now = 1_785_306_600_000
     const conversations = new ConversationRepository(before.db)
-    const messages = new MessageRepository(before.db)
 
     conversations.upsert({
       id: "buildbot",
@@ -253,30 +295,24 @@ describe("vault 迁移链", () => {
       title: "小吴",
       createdAt: now,
     })
-    messages.upsertMany([
-      {
-        id: "bot-message",
-        channelId: "dingtalk",
-        conversationId: "buildbot",
-        externalId: "ext-bot",
-        contentText: "系统通知",
-        sentAt: now,
-        direction: "inbound",
-        isSelf: false,
-        createdAt: now,
-      },
-      {
-        id: "self-message",
-        channelId: "dingtalk",
-        conversationId: "self-chat",
-        externalId: "ext-self",
-        contentText: "备忘",
-        sentAt: now,
-        direction: "outbound",
-        isSelf: true,
-        createdAt: now,
-      },
-    ])
+    seedMessage(before.db, {
+      id: "bot-message",
+      conversationId: "buildbot",
+      externalId: "ext-bot",
+      contentText: "系统通知",
+      sentAt: now,
+      direction: "inbound",
+      isSelf: false,
+    })
+    seedMessage(before.db, {
+      id: "self-message",
+      conversationId: "self-chat",
+      externalId: "ext-self",
+      contentText: "备忘",
+      sentAt: now,
+      direction: "outbound",
+      isSelf: true,
+    })
     for (const [messageId, conversationId] of [
       ["bot-message", "buildbot"],
       ["self-message", "self-chat"],
@@ -323,7 +359,6 @@ describe("vault 迁移链", () => {
     const before = openStore({ path, migrations: VAULT_MIGRATIONS.slice(0, 13) })
     const now = 1_785_306_600_000
     const conversations = new ConversationRepository(before.db)
-    const messages = new MessageRepository(before.db)
     const identities = new SelfIdentityRepository(before.db)
     identities.upsert({
       channelId: "dingtalk",
@@ -347,19 +382,15 @@ describe("vault 迁移链", () => {
         title,
         createdAt: now,
       })
-      messages.upsertMany([
-        {
-          id: `message-${id}`,
-          channelId: "dingtalk",
-          conversationId: id,
-          externalId: `ext-${id}`,
-          contentText: "本人发出的消息",
-          sentAt: now,
-          direction: "outbound",
-          isSelf: true,
-          createdAt: now,
-        },
-      ])
+      seedMessage(before.db, {
+        id: `message-${id}`,
+        conversationId: id,
+        externalId: `ext-${id}`,
+        contentText: "本人发出的消息",
+        sentAt: now,
+        direction: "outbound",
+        isSelf: true,
+      })
     }
     expect(conversations.personaExclusionReason("self-chat")).toBe("self_conversation")
     expect(conversations.personaExclusionReason("partial-human-chat")).toBe("self_conversation")
@@ -384,19 +415,15 @@ describe("vault 迁移链", () => {
       title: "公益3小时",
       createdAt: now,
     })
-    new MessageRepository(before.db).upsertMany([
-      {
-        id: "public-service-message",
-        channelId: "dingtalk",
-        conversationId: "public-service",
-        externalId: "ext-public-service",
-        contentText: "公益提醒",
-        sentAt: now,
-        direction: "inbound",
-        isSelf: false,
-        createdAt: now,
-      },
-    ])
+    seedMessage(before.db, {
+      id: "public-service-message",
+      conversationId: "public-service",
+      externalId: "ext-public-service",
+      contentText: "公益提醒",
+      sentAt: now,
+      direction: "inbound",
+      isSelf: false,
+    })
     new PersonaRunRepository(before.db).insertDraft(
       {
         id: "public-service-draft",
@@ -431,19 +458,15 @@ describe("vault 迁移链", () => {
       title: "历史单聊",
       createdAt: old,
     })
-    new MessageRepository(before.db).upsertMany([
-      {
-        id: "stale-message",
-        channelId: "dingtalk",
-        conversationId: "stale-conversation",
-        externalId: "ext-stale",
-        contentText: "很久以前的消息",
-        sentAt: old,
-        direction: "inbound",
-        isSelf: false,
-        createdAt: old,
-      },
-    ])
+    seedMessage(before.db, {
+      id: "stale-message",
+      conversationId: "stale-conversation",
+      externalId: "ext-stale",
+      contentText: "很久以前的消息",
+      sentAt: old,
+      direction: "inbound",
+      isSelf: false,
+    })
     before.db
       .prepare(
         `INSERT INTO dh_inbox
@@ -510,19 +533,15 @@ describe("vault 迁移链", () => {
       title: "未读单聊",
       createdAt: old,
     })
-    new MessageRepository(before.db).upsertMany([
-      {
-        id: "unread-message",
-        channelId: "dingtalk",
-        conversationId: "unread-conversation",
-        externalId: "ext-unread",
-        contentText: "仍未读的历史消息",
-        sentAt: old,
-        direction: "inbound",
-        isSelf: false,
-        createdAt: old,
-      },
-    ])
+    seedMessage(before.db, {
+      id: "unread-message",
+      conversationId: "unread-conversation",
+      externalId: "ext-unread",
+      contentText: "仍未读的历史消息",
+      sentAt: old,
+      direction: "inbound",
+      isSelf: false,
+    })
     before.db
       .prepare(
         `INSERT INTO dh_inbox

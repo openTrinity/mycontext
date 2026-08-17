@@ -39,6 +39,11 @@ function message(overrides: Partial<MessageRow> = {}): MessageRow {
     hasMedia: false,
     rawRecordId: null,
     revision: 1,
+    /**
+     * ★ 打标之后的行（v30）。`null` = 打标之前入库的存量行 ——
+     * 学习侧对 null 视为**合格**（那些行当时通过了更严的旧闸）。
+     */
+    learningEligible: true,
     createdAt: NOW,
     ...overrides,
   }

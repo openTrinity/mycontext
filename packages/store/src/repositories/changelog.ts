@@ -24,6 +24,8 @@ interface ChangelogDbRow {
   emitted_at: number
   payload_ref: string | null
   digest: string
+  /** v30 资格位图；`NULL` = 打标之前写的（存量行）。见 `ELIGIBILITY_BITS`。 */
+  eligibility: number | null
 }
 
 function toChangelog(row: ChangelogDbRow): ChangelogRow {
@@ -38,6 +40,12 @@ function toChangelog(row: ChangelogDbRow): ChangelogRow {
     emittedAt: row.emitted_at,
     payloadRef: row.payload_ref,
     digest: row.digest,
+    /**
+     * ★ `NULL` 原样透出成 `undefined`（不折成 0）：那两者含义相反 ——
+     * `undefined` = "打标之前写的，按更严的旧闸判过"（learning 侧视为合格），
+     * `0` = "明确不在学习范围内"。折在一起会让存量库的图谱下一轮变空。
+     */
+    ...(row.eligibility === null ? {} : { eligibility: row.eligibility }),
   }
 }
 
@@ -55,8 +63,8 @@ export class ChangelogRepository {
     const statement = this.db.prepare(
       `INSERT INTO knowledge_changelog
          (op, entity_type, entity_id, channel_id, domain, occurred_at, emitted_at,
-          payload_ref, digest)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          payload_ref, digest, eligibility)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     const seqs: number[] = []
     for (const entry of entries) {
@@ -70,6 +78,16 @@ export class ChangelogRepository {
         entry.emittedAt,
         entry.payloadRef ?? null,
         entry.digest,
+        /**
+         * ★ 资格位图。`undefined` → NULL（"这一条没打标"）——
+         * 那只该出现在**存量行**上；新写入的都该带值。
+         *
+         * ★★ 不给默认 `ELIGIBILITY_BITS.learning`（"默认合格"）：
+         * 那会让一个忘了传 eligibility 的新生产者静默把越界数据
+         * 喂给学习侧，而它不报错。宁可 NULL（存量语义）—— 至少
+         * "为什么这一条没标"能问出来。
+         */
+        entry.eligibility ?? null,
       )
       seqs.push(Number(info.lastInsertRowid))
     }
@@ -118,22 +136,52 @@ export class ChangelogRepository {
   }
 
   /** 增量拉取：`since` 之后的条目，按 seq 升序。 */
-  changesSince(since: number, limit: number, domain?: string): ChangelogRow[] {
-    if (domain === undefined) {
-      return this.db
-        .prepare<
-          [number, number],
-          ChangelogDbRow
-        >("SELECT * FROM knowledge_changelog WHERE seq > ? ORDER BY seq LIMIT ?")
-        .all(since, limit)
-        .map(toChangelog)
+  changesSince(
+    since: number,
+    limit: number,
+    domain?: string,
+    /**
+     * 只要带这个**资格位**的变更（`ELIGIBILITY_BITS.learning` 之类）。
+     *
+     * ## ★★★ `NULL` 必须算**合格** —— 这是 v30 最容易写错的一处
+     *
+     * 判据是 `(eligibility & ? ) != 0 OR eligibility IS NULL`，
+     * 而**不是** `(eligibility & ?) != 0`。后者会把存量行（NULL）排除掉，
+     * 于是存量库的 fts / 图谱 / 画像下一轮**全部拿不到历史** ——
+     * 而它不报错，只是产出变空。
+     *
+     * 理由：存量行能进库，说明它当时通过了**更严**的旧闸
+     * （那道闸是"越界就丢"，所以库里的行必然合格）。
+     *
+     * ★ 不传 = 不按资格过滤（`persona-inbox` 走这条 —— 它的判据是
+     * `AttentionRouter` 每条现判，见 v30 迁移的文件头）。
+     */
+    requiresBit?: number,
+  ): ChangelogRow[] {
+    /**
+     * ★ 动态拼 WHERE 而不是四个写死的 SQL：那样"NULL 算合格"这条判据
+     * 会有四份拷贝，而它正是最容易漏的那一条。
+     *
+     * ★★ 只拼**结构**（哪几个条件在），值全走参数绑定 ——
+     * `domain` 与 `requiresBit` 都不进 SQL 文本。
+     */
+    const clauses = ["seq > ?"]
+    const params: (number | string)[] = [since]
+    if (domain !== undefined) {
+      clauses.push("domain = ?")
+      params.push(domain)
     }
+    if (requiresBit !== undefined) {
+      // 见上面那段 ★★★：NULL（存量行）算合格
+      clauses.push("((eligibility & ?) != 0 OR eligibility IS NULL)")
+      params.push(requiresBit)
+    }
+    params.push(limit)
     return this.db
-      .prepare<
-        [number, string, number],
-        ChangelogDbRow
-      >("SELECT * FROM knowledge_changelog WHERE seq > ? AND domain = ? ORDER BY seq LIMIT ?")
-      .all(since, domain, limit)
+      .prepare<(number | string)[], ChangelogDbRow>(
+        `SELECT * FROM knowledge_changelog WHERE ${clauses.join(" AND ")} ORDER BY seq LIMIT ?`,
+      )
+      .all(...params)
       .map(toChangelog)
   }
 

@@ -10,7 +10,7 @@ import {
   VAULT_MIGRATIONS,
   openStore,
   purgeOutOfScopeMessages,
-  readCollectionScope,
+  readCollectionRequest,
   type PurgeReport,
 } from "@mycontext/store"
 
@@ -34,7 +34,16 @@ export function runScopePurge(options: {
 }): ScopePurgeReport {
   const handle = openStore({ path: options.dbPath, migrations: VAULT_MIGRATIONS })
   try {
-    const scope = readCollectionScope(handle.db)
+    /**
+     * ★★★ 判据走**采集面**（`readCollectionRequest`），与产品运行时
+     * （`applyScopeChange`）**同一份**。
+     *
+     * 原来是 `readCollectionScope`（学习范围）。DWD 只打标不筛行之后，
+     * 「只因监听而入库的」那些行本来就不在学习白名单里 —— 拿学习范围清
+     * 会把分身要盯的会话删掉。而这个脚本是在**真库**上跑的，
+     * 删错就是不可逆的。
+     */
+    const scope = readCollectionRequest(handle.db, "chat", options.channelId)
     const totalBefore =
       handle.db.prepare<[], { c: number }>("SELECT count(*) AS c FROM messages").get()?.c ?? 0
     const report = purgeOutOfScopeMessages(handle.db, options.channelId, scope, {

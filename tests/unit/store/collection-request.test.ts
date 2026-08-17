@@ -18,7 +18,7 @@
  *
  * 五组断言：
  * ① 并集（监听里的会话必须在采集面内）；
- * ② ★ `until` 对 `attentionOnly` **豁免**（那第一个洞）；
+ * ② ★ `until` 对**监听范围里的会话**豁免（那第一个洞）；
  * ③ 下界取更宽；
  * ④ `collectsNothing` 是"两个范围都空"；
  * ⑤ ★ mode 三态在采集面上的含义与路由**不同**（`all` 不扩大采集面）。
@@ -76,7 +76,7 @@ describe("★★★ 并集：监听范围里的会话必须在采集面内", () 
       expect(request.restricted).toBe(true)
       expect([...request.allow].sort()).toEqual([A, B].sort())
       // ★ B 是"只因监听而在面内"的 —— 它不受 until 约束（见下一组）
-      expect([...request.attentionOnly]).toEqual([B])
+      expect([...request.attentionScoped]).toEqual([B])
     } finally {
       vault.close()
     }
@@ -106,16 +106,24 @@ describe("★★★ 并集：监听范围里的会话必须在采集面内", () 
       attention(vault, [B], "explicit")
       const request = readCollectionRequest(vault.db, "chat", CH)
       expect(request.restricted).toBe(false)
-      // ★ 不设限时那两个集合无意义 —— 不许在这里塞一个具体列表
+      // ★ 会话不设限时 `allow` 无意义 —— 不许在这里塞一个具体列表
       expect(request.allow.size).toBe(0)
-      expect(request.attentionOnly.size).toBe(0)
+      /**
+       * ★★★ 但 `attentionScoped` **仍要有内容** —— 它服务的是**上界**那一格，
+       * 与"会话设不设限"无关。
+       *
+       * 漏掉的形态：用户学全部会话但设了 `until`，同时让分身盯着 B
+       * → B 的新消息被上界挡住 → 分身对它失声。
+       * "不设限"说的是会话不设限，不是"时间上也不设限"。
+       */
+      expect([...request.attentionScoped]).toEqual([B])
     } finally {
       vault.close()
     }
   })
 })
 
-describe("★★★ `until` 对 attentionOnly 豁免（那第一个洞）", () => {
+describe("★★★ `until` 对监听范围里的会话豁免（那第一个洞）", () => {
   it("★★★ 用户选「学到 30 天前」，而 B 在监听 → B 的**新消息仍要拉**", () => {
     /**
      * ## 这是那三个洞里最实际的一个
@@ -141,21 +149,40 @@ describe("★★★ `until` 对 attentionOnly 豁免（那第一个洞）", () =
     }
   })
 
-  it("★★★ 反证：若 attentionOnly 也卡上界 → 监听会话的新消息全被挡", () => {
+  it("★★★ 「**既学也盯**」那一格同样豁免 —— 而这是默认形态", () => {
     /**
-     * 这一条把那个洞的形状显式化：`attentionOnly` 为空时（也就是
-     * "监听会话恰好都在学习白名单里"），上界对它照样生效 ——
-     * 那是对的。而它**不在**白名单里时必须豁免。
+     * ## 这一条这一轮**换了方向**，因为原来的判据是错的
+     *
+     * 它原来断言：B 同时在两个范围里时**受**上界约束（理由写的是
+     * "它在学习白名单里，用户说了学到那天为止"）。那个理由把两个问题
+     * 混成了一个：
+     *
+     * | 问题 | 由谁回答 |
+     * |---|---|
+     * | 这条要不要**拉** | 采集面（学习 ∪ 监听）—— 上界属于这里 |
+     * | 这条要不要**给学习侧** | ★ `learning_eligible` 打标 |
+     *
+     * "用户说了学到那天为止"说的是**第二个**问题。拿它去挡第一个问题的
+     * 后果：一个既勾进学习范围、又让分身盯着的群（**默认形态** ——
+     * 用户勾了群然后打开分身），一旦设了 `until` 就再也收不到新消息。
+     * 分身对它彻底失声，而没有任何一处报错。
+     *
+     * ★ 正确的分工：那些新消息**照样拉、照样入库**，只是
+     * `learning_eligible = 0`（超出学习上界）—— 于是学习侧看不到它们、
+     * 分身拿得到。两个选择都被完整执行。
+     *
+     * 反证：把 `attentionScoped` 改回 `监听名单 \ 学习白名单` → 这条转红。
      */
     const vault = openTestVault()
     try {
-      // B 同时在两个范围里 → 它不是 attentionOnly
       learning(vault, { conversationIds: [A, B], until: NOW - 30 * DAY })
       attention(vault, [B], "explicit")
       const request = readCollectionRequest(vault.db, "chat", CH)
-      expect(request.attentionOnly.size).toBe(0)
-      // ★ 那时 B 也受上界约束（它在学习白名单里，用户说了学到那天为止）
-      expect(isWithinCollectionWindow(request, B, NOW)).toBe(false)
+      // ★ B 在监听范围里 —— 它在不在学习白名单里与此无关
+      expect([...request.attentionScoped]).toEqual([B])
+      expect(isWithinCollectionWindow(request, B, NOW)).toBe(true)
+      // ★★ 而 A（只在学习范围里）仍受上界约束
+      expect(isWithinCollectionWindow(request, A, NOW)).toBe(false)
     } finally {
       vault.close()
     }
@@ -221,7 +248,12 @@ describe("★★★ mode 三态在采集面上的含义与路由**不同**", () 
       attention(vault, [B], "all")
       const request = readCollectionRequest(vault.db, "chat", CH)
       expect([...request.allow]).toEqual([A])
-      expect(request.attentionOnly.size).toBe(0)
+      /**
+       * ★ `all` 时 `attentionScoped` 也是空的：那个 mode 的语义是
+       * "盯**全部已学习的**会话"，而已学习的都在学习范围内 ——
+       * 上界对它们生效正是用户的意思（他没有单独指定要盯谁）。
+       */
+      expect(request.attentionScoped.size).toBe(0)
     } finally {
       vault.close()
     }
@@ -268,7 +300,8 @@ describe("★★★ 非 chat 域不读监听范围（那个耦合没有收益）
       attention(vault, [B], "explicit")
       const request = readCollectionRequest(vault.db, "doc", CH)
       expect([...request.allow]).toEqual(["wikiFAKE01"])
-      expect(request.attentionOnly.size).toBe(0)
+      // ★ 文档域压根不读监听范围（分身盯的是消息）
+      expect(request.attentionScoped.size).toBe(0)
     } finally {
       vault.close()
     }
@@ -281,7 +314,7 @@ describe("★★★ 接线：采集面真的被用了", () => {
     const src = readFileSync("apps/desktop/src/main/services/ingest.service.ts", "utf8")
     // ★ 闸门读采集面
     expect(src).toContain("this.collectionRequest()")
-    // ★★ 且上界按会话判（attentionOnly 豁免）
+    // ★★ 且上界按会话判（监听范围里的会话豁免）
     expect(src).toContain("isWithinCollectionWindow(request")
   })
 

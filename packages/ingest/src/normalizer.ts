@@ -26,6 +26,8 @@ import type {
   MessageInput,
   RawRecordInput,
 } from "@mycontext/store"
+/** ★ 资格位图的**唯一**一份算法（抄错会让消费者取错段）。 */
+import { eligibilityOf } from "@mycontext/store"
 
 /**
  * 时间有序的唯一 id。
@@ -65,6 +67,27 @@ export interface NormalizeInput {
   selfDisplayNames?: ReadonlySet<string>
   /** 身份是否已由用户确认。未确认时 is_self 一律留 null（未判定） */
   selfConfirmed: boolean
+  /**
+   * 这一批里哪些消息在**学习范围**内（按 `externalId`）。
+   *
+   * ## ★★★ 为什么要这个集合（DWD 只打标、不筛行）
+   *
+   * `messages` 是多个下游共用的明细层。改动前采集侧按**学习范围**把越界的
+   * 行**丢掉** —— 于是分身（要监听范围内的新消息）与界面（要完整对话）
+   * 永久拿不到那些数据。
+   *
+   * 现在越界的行**照样入库**，只是标 `learning_eligible = 0`，
+   * 学习侧那五个消费者按标签取不到它们。
+   *
+   * ★ `undefined` = 调用方没算（存量路径 / 单测）→ 标签留 `undefined`
+   * → 落库为 `NULL`（"没打过标"），而 learning 侧对 NULL 视为**合格**
+   * （那些行当时通过了更严的旧闸）。见 v30 迁移的文件头。
+   *
+   * ★★ 用 `externalId` 而不是数组下标：这个函数内部会因为"会话解析不出来"
+   * 而跳过某些消息，下标对不上；而 `(channel_id, external_id)` 是那张表的
+   * 唯一键，天然是这一批里的稳定标识。
+   */
+  learningEligibleIds?: ReadonlySet<string>
   fetchedAt: number
 }
 
@@ -150,6 +173,16 @@ export function normalize(input: NormalizeInput): NormalizedBatch {
       // 本人发的算 outbound，其余 inbound；未判定时按 inbound
       direction: isSelf === true ? "outbound" : "inbound",
       isSelf,
+      /**
+       * ★ 学习范围的资格标签（DWD 只打标、不筛行）。
+       *
+       * `undefined`（调用方没算）→ 落库为 NULL（"没打过标"），
+       * 而 learning 侧对 NULL 视为**合格** —— 见 `learningEligibleIds`
+       * 与 v30 迁移的文件头。
+       */
+      ...(input.learningEligibleIds === undefined
+        ? {}
+        : { learningEligible: input.learningEligibleIds.has(parsed.externalId) }),
       hasMedia: parsed.hasMedia,
       createdAt: input.fetchedAt,
       mentions,
@@ -206,7 +239,20 @@ function looksLikeBotChannel(conversation: ParsedConversationLike): boolean {
 
 /** 消息 → Outbox 条目。`digest` 用规范化内容 hash，消费者据此跳过无变化项。 */
 export function toChangelogEntry(
-  message: { id: string; channelId: string; sentAt: number; contentText: string | null },
+  message: {
+    id: string
+    channelId: string
+    sentAt: number
+    contentText: string | null
+    /**
+     * ★ 学习范围的资格标签 —— 它决定这一条的 `eligibility` 位图
+     * （也就是学习侧那五个消费者要不要看到它）。
+     *
+     * `undefined` / `null` = 没打过标（存量路径）→ `eligibility` 也留空，
+     * 而消费侧对空视为**合格**（那些行当时通过了更严的旧闸）。
+     */
+    learningEligible?: boolean | null
+  },
   emittedAt: number,
   rawRecordId?: string,
 ): ChangelogEntryInput {
@@ -216,6 +262,16 @@ export function toChangelogEntry(
     entityId: message.id,
     channelId: message.channelId,
     domain: "chat",
+    /**
+     * ★★★ 资格位图：让消费者按标签取自己那一段（v30）。
+     *
+     * ★ `undefined`（没打过标）时**不给这个键** —— 落库为 NULL，
+     * 而消费侧对 NULL 视为合格。给一个 `0` 会把存量行说成"不合格"，
+     * 于是学习侧下一轮拿不到历史。
+     */
+    ...(message.learningEligible === undefined || message.learningEligible === null
+      ? {}
+      : { eligibility: eligibilityOf({ learning: message.learningEligible }) }),
     occurredAt: message.sentAt,
     emittedAt,
     payloadRef: rawRecordId ?? null,

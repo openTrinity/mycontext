@@ -298,7 +298,7 @@ export class ProducerRunner {
    */
   private readonly counters = new Map<
     ScopedDomain,
-    { dropped: number; unknownTime: number; lastAt: number | null }
+    { dropped: number; unknownTime: number; tagged: number; lastAt: number | null }
   >()
 
   constructor(private readonly options: ProducerRunnerOptions) {}
@@ -313,17 +313,43 @@ export class ProducerRunner {
   countersOf(domain: ScopedDomain): {
     dropped: number
     unknownTime: number
+    tagged: number
     lastAt: number | null
   } {
-    return this.counters.get(domain) ?? { dropped: 0, unknownTime: 0, lastAt: null }
+    return this.counters.get(domain) ?? { dropped: 0, unknownTime: 0, tagged: 0, lastAt: null }
   }
 
   /** 全部域的计数（快照那侧一次取完，避免逐域查）。 */
   allCounters(): ReadonlyMap<
     ScopedDomain,
-    { dropped: number; unknownTime: number; lastAt: number | null }
+    { dropped: number; unknownTime: number; tagged: number; lastAt: number | null }
   > {
     return this.counters
+  }
+
+  /**
+   * 记「入库了但**不给学习侧**」的条数（`learning_eligible = 0`）。
+   *
+   * ## ★★★ 为什么是**新的一个数**，而不是并进 `dropped`
+   *
+   * v4 的设计表里写的是"把 dropped 改成打标为 0 的条数"。核对之后
+   * 那个说法会**合并两个出路不同的事实**：
+   *
+   * | 计数 | 事实 | 用户的出路 |
+   * |---|---|---|
+   * | `dropped` | ★ **压根没拉** / 拉了但不入库 | 改**采集面** —— 那是隐私边界 |
+   * | `tagged` | ★ **入库了**，只是学习侧看不到 | 改**学习范围** —— 数据在，随时能放宽后被学 |
+   *
+   * 合成一个的后果很具体：用户看到"挡了 300 条"，去查是不是漏采了 ——
+   * 而那 300 条**就在库里**、分身也在用它们。那是把一个正常状态报成事故。
+   *
+   * 反过来也一样：真的漏采（渠道没给时间、范围没就绪）会被这个正常值
+   * 淹掉 —— 而那才是要救的那一类。
+   */
+  noteTaggedIneligible(domain: ScopedDomain, count: number): void {
+    if (count <= 0) return
+    const current = this.countersOf(domain)
+    this.counters.set(domain, { ...current, tagged: current.tagged + count })
   }
 
   /**
@@ -341,6 +367,7 @@ export class ProducerRunner {
   private bumpCounters(domain: ScopedDomain, dropped: number, unknownTime: number): void {
     const current = this.countersOf(domain)
     this.counters.set(domain, {
+      ...current,
       dropped: current.dropped + dropped,
       unknownTime: current.unknownTime + unknownTime,
       lastAt: this.options.clock.now(),

@@ -68,8 +68,19 @@ describe("★★★ buildProducerStatuses：声明 + 运行时合成一张表", 
   it("★★★ 按域的丢弃计数（这是 G16 的实质）", () => {
     const statuses = buildProducerStatuses({
       counters: new Map([
-        ["chat-ingest", { droppedOutOfScope: 46_415, droppedUnknownTime: 0, lastDroppedAt: 1 }],
-        ["doc-ingest", { droppedOutOfScope: 300, droppedUnknownTime: 12, lastDroppedAt: 2 }],
+        [
+          "chat-ingest",
+          {
+            droppedOutOfScope: 46_415,
+            droppedUnknownTime: 0,
+            taggedIneligible: 0,
+            lastDroppedAt: 1,
+          },
+        ],
+        [
+          "doc-ingest",
+          { droppedOutOfScope: 300, droppedUnknownTime: 12, taggedIneligible: 0, lastDroppedAt: 2 },
+        ],
       ]),
     })
     const by = new Map(statuses.map((s) => [s.id, s]))
@@ -79,6 +90,53 @@ describe("★★★ buildProducerStatuses：声明 + 运行时合成一张表", 
     // ★★ 而"渠道没给时间"单独记（出路是去看渠道解析，不是改范围）
     expect(by.get("doc-ingest")?.droppedUnknownTime).toBe(12)
     expect(by.get("chat-ingest")?.droppedUnknownTime).toBe(0)
+  })
+
+  it("★★★ `taggedIneligible` 与 `droppedOutOfScope` 是**两个**数字（出路不同）", () => {
+    /**
+     * ## 为什么不能合成一个
+     *
+     * | 计数 | 事实 | 用户的出路 |
+     * |---|---|---|
+     * | `droppedOutOfScope` | 压根没拉 / 没入库 | 改**采集面**（隐私边界） |
+     * | `taggedIneligible` | ★ **入库了、分身在用** | 改**学习范围**（放宽后立刻能学） |
+     *
+     * v4 的设计表原来写的是"把 dropped 改成打标为 0 的条数"。合成一个的
+     * 后果很具体：一个**正常**状态（分身正在用那些消息）会被界面报成
+     * "漏采了 300 条" —— 用户会去重采一批**就在库里**的数据。
+     * 反过来，真的漏采（渠道没给时间 / 范围没就绪）会被这个正常值淹掉。
+     *
+     * 反证：把 `taggedIneligible` 并进 `droppedOutOfScope` → 这条转红。
+     */
+    const statuses = buildProducerStatuses({
+      counters: new Map([
+        [
+          "chat-ingest",
+          // ★ 没丢任何东西，但有 1200 条"入库了不给学习侧"
+          {
+            droppedOutOfScope: 0,
+            droppedUnknownTime: 0,
+            taggedIneligible: 1_200,
+            lastDroppedAt: null,
+          },
+        ],
+      ]),
+    })
+    const chat = statuses.find((s) => s.id === "chat-ingest")
+    expect(chat?.taggedIneligible).toBe(1_200)
+    // ★★ 而"丢弃"仍然是 0 —— 界面据此不说"漏采"
+    expect(chat?.droppedOutOfScope).toBe(0)
+  })
+
+  it("★ 没给计数的生产者 `taggedIneligible` 是 0（不是 undefined）", () => {
+    /**
+     * 与另外两个计数同一条理由：调用方要的是"这个域有多少"，
+     * 而"还没跑过"与"跑了没有"在那个问题上是同一个答案（0）。
+     * 返回 undefined 会逼每个调用点写一次 `?? 0`，而漏一处就是界面上
+     * 一个 `NaN`（`.toLocaleString()` 对 undefined 会抛）。
+     */
+    const chat = buildProducerStatuses().find((s) => s.id === "chat-ingest")
+    expect(chat?.taggedIneligible).toBe(0)
   })
 
   it("★★★ `drained` 只对会抽干的两种调度有值（watermark/stream 恒 null）", () => {

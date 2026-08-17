@@ -81,18 +81,32 @@ export interface CollectionRequest {
    */
   allow: ReadonlySet<string>
   /**
-   * 只受**监听范围**约束的那些会话（也就是"不在学习白名单里、但要盯"）。
+   * **在监听范围里**（active）的会话 —— 它们**不受 `until` 约束**。
    *
-   * ## ★★★ 为什么要单独一个集合
+   * ## ★★★ 判据是"在监听范围里"，**不是**"只在监听范围里"
    *
-   * 它们**不受 `until` 约束** —— 用户要它们的新消息，而 `until` 是
-   * 学习范围的上界（"学到某一天为止"）。拿 `until` 卡它们就是那第一个洞。
+   * 这里我第一版写错过，而错的方向是**功能静默消失**：原来这个集合是
+   * `监听名单 \ 学习白名单`（"只因监听而在面内"）。于是最常见的一格漏了：
    *
-   * ★ 而它们**仍然受 `since` 约束吗**？不受 —— 监听范围的语义是
+   * | 会话 | 学习白名单 | 监听 | 用户的意思 | ★ 旧判据 |
+   * |---|---|---|---|---|
+   * | A | ✓ | ✗ | 学它，不用盯 | 受 `until` 约束 ✅ |
+   * | B | ✗ | ✓ | 盯它，不学 | 豁免 ✅ |
+   * | ★ C | ✓ | ✓ | **既学也盯** | ❌ 受约束 → 新消息被挡 |
+   *
+   * 而 C 才是默认形态：用户勾一个群进学习范围，然后让分身也盯着它。
+   * 旧判据下他一旦设了 `until`（"学到某天为止"），那个群的新消息
+   * 就**再也进不来** —— 分身对它彻底失声，而没有任何一处报错。
+   *
+   * ★ 根因是把两个问题混成一个：「这条要不要**给学习侧**」（那才与
+   * "在不在学习白名单里"有关，由 `learning_eligible` 打标回答）
+   * 与「这条**要不要拉**」。上界属于前者，而这个集合属于后者。
+   *
+   * ★★ 而它们**仍然受 `since` 约束吗**？不受 —— 监听范围的语义是
    * "从 `enabledAt` 起的新消息"，那个下界比学习范围的 `since` 更晚，
    * 所以并集取更宽的那个（`min`）之后它自然被覆盖。
    */
-  attentionOnly: ReadonlySet<string>
+  attentionScoped: ReadonlySet<string>
   /**
    * 时间下界（unix ms）；`null` = 不限；`undefined` = 两个范围都没说。
    *
@@ -102,7 +116,7 @@ export interface CollectionRequest {
   /**
    * 时间上界（unix ms）；`undefined` = 不限。
    *
-   * ★★ **只来自学习范围**，且**只作用于 `attentionOnly` 之外的会话**
+   * ★★ **只来自学习范围**，且**只作用于 `attentionScoped` 之外的会话**
    * （见那个字段的注释）。
    */
   until: number | undefined
@@ -144,7 +158,7 @@ export function readCollectionRequest(
       collectsNothing: learning.restricted && learning.allow.size === 0,
       restricted: learning.restricted,
       allow: learning.allow,
-      attentionOnly: new Set(),
+      attentionScoped: new Set(),
       since: learning.since,
       until: learning.until,
       learningUnset: learning.unset,
@@ -188,7 +202,14 @@ export function readCollectionRequest(
       collectsNothing: false,
       restricted: false,
       allow: new Set(),
-      attentionOnly: new Set(),
+      /**
+       * ★ 学习范围不设限时**仍要**记下监听名单 —— 上界那一格要用它。
+       *
+       * 漏掉这里的形态：用户没设会话白名单（学全部）但设了 `until`，
+       * 同时让分身盯着某个群 → 那个群的新消息被上界挡住。
+       * "不设限"说的是**会话**不设限，与时间上界无关。
+       */
+      attentionScoped: new Set(attentionIds),
       since: widerSince(learning.since, earliestEnabledAt),
       until: learning.until,
       learningUnset: learning.unset,
@@ -196,12 +217,7 @@ export function readCollectionRequest(
   }
 
   const allow = new Set(learning.allow)
-  const attentionOnly = new Set<string>()
-  for (const id of attentionIds) {
-    // ★ 记下"只因监听而在面内"的那些 —— 它们不受 `until` 约束
-    if (!allow.has(id)) attentionOnly.add(id)
-    allow.add(id)
-  }
+  for (const id of attentionIds) allow.add(id)
 
   return {
     /**
@@ -213,7 +229,12 @@ export function readCollectionRequest(
     collectsNothing: allow.size === 0,
     restricted: true,
     allow,
-    attentionOnly,
+    /**
+     * ★★★ 全部 active 的监听会话（**不减去**学习白名单）——
+     * 见 `attentionScoped` 的注释里那张表：减去它会漏掉"既学也盯"那一格，
+     * 而那是默认形态。
+     */
+    attentionScoped: new Set(attentionIds),
     since: widerSince(learning.since, earliestEnabledAt),
     until: learning.until,
     learningUnset: learning.unset,
@@ -245,7 +266,7 @@ function widerSince(
  * 一条消息的**业务时间**在采集面的时间窗内吗。
  *
  * ★★★ 与 `isOccurredAtInScope`（学习范围那个）的区别只有一处，
- * 而那一处正是那第一个洞：**`attentionOnly` 里的会话不受 `until` 约束**。
+ * 而那一处正是那第一个洞：**`attentionScoped` 里的会话不受 `until` 约束**。
  *
  * @param partitionId 这条消息的会话 external_id
  */
@@ -261,7 +282,7 @@ export function isWithinCollectionWindow(
    * 用户选「学到 7 月 30 日」而仍在盯某个群 —— 那个群的新消息必须能拉，
    * 否则分身收不到（而他的两个选择都没要求这件事发生）。
    */
-  if (request.attentionOnly.has(partitionId)) return true
+  if (request.attentionScoped.has(partitionId)) return true
   if (request.until !== undefined && occurredAt > request.until) return false
   return true
 }

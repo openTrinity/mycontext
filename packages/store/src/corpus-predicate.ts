@@ -48,9 +48,12 @@
  * · 排除数字人自产（`origin = 'agent'`）—— 不排的话它自己发的话会被当
  *   本人语料再蒸一遍 → **自我强化漂移**（越来越像自己的输出而不是像本人）。
  *
- * ★ 不含 `channel_id` / 时间窗 / 会话白名单：那三样是**范围**
- * （`readCollectionScope`），由调用方按各自的查询形状拼。
- * 混进来会让这个常量变成"某个具体查询"，从而不再可共用。
+ * ★ 不含 `channel_id` / 时间窗 / 会话白名单：那三样是**查询形状**，
+ * 由调用方按各自的需要拼。混进来会让这个常量变成"某个具体查询"。
+ *
+ * ★★ 但**含** `learning_eligible`（v30）—— 那不是"某个查询的范围"，
+ * 而是"这条消息算不算学习语料"这个问题的一部分。见下面那段 ★★★：
+ * 这两个消费者的输入是**整张表**，changelog 上的标签过滤对它们无效。
  */
 /**
  * ★★★ `trim` 必须**显式给字符集**。
@@ -67,7 +70,38 @@
  */
 const BLANK_CHARS = "char(32)||char(9)||char(10)||char(13)"
 
-export const CORPUS_MESSAGE_PREDICATE = `content_text IS NOT NULL AND trim(content_text, ${BLANK_CHARS}) <> '' AND origin <> 'agent'`
+/**
+ * ★★★ 学习范围的资格闸（v30）—— **这一条是 v4 最容易漏的地方**。
+ *
+ * ## 为什么它必须在**这里**，而不是只在 changelog 上过滤
+ *
+ * `ConsumerSpec.requires` 让消费者按标签从 changelog 取那一段。但那只管
+ * "要不要唤醒它 / 给它这一条"。而这两个消费者的输入是**整张表**：
+ *
+ * · `graph-export` —— 重导全量 `records.jsonl` 四件套；
+ * · `forge pull` —— 按时间窗投影 `messages`。
+ *
+ * 那一趟**压根不看 changelog 的内容**（它只用一个 seq 判断"要不要重导"），
+ * 所以 changelog 上的过滤对它**完全无效**。
+ *
+ * 漏掉这一行的后果：`learning_eligible = 0` 的消息（用户明确不学的、
+ * 只因监听而入库的）被写进四件套 → 进图谱 → 进画像。
+ * **那是超范围，而且不报错。**
+ *
+ * ★ 这与 v2 的 G1（"文档采集完全不看时间下界"）是同一个形状：
+ * 一个下游的输入不是我们以为的那条路。
+ *
+ * ## ★★ `IS NOT 0` 而不是 `= 1` —— 差一个字，后果是存量图谱变空
+ *
+ * `NULL` = 打标之前入库的（存量行）。它们**当时通过了更严的旧闸**
+ * （那道闸是"越界就丢"，所以库里的行必然合格），所以视为合格。
+ *
+ * 写成 `= 1` 会把 NULL 全部排除 → 存量库下一轮重导得到一份**空**的
+ * 四件套 → 图谱与画像清空。而它不报错。
+ */
+const LEARNING_ELIGIBLE = "learning_eligible IS NOT 0"
+
+export const CORPUS_MESSAGE_PREDICATE = `content_text IS NOT NULL AND trim(content_text, ${BLANK_CHARS}) <> '' AND origin <> 'agent' AND ${LEARNING_ELIGIBLE}`
 
 /**
  * 带表别名的版本 —— 给有 JOIN 的查询用（如 `messages m`）。
@@ -80,6 +114,8 @@ export function corpusMessagePredicate(alias: string): string {
   return (
     `${prefix}content_text IS NOT NULL` +
     ` AND trim(${prefix}content_text, ${BLANK_CHARS}) <> ''` +
-    ` AND ${prefix}origin <> 'agent'`
+    ` AND ${prefix}origin <> 'agent'` +
+    // ★★★ 见 `LEARNING_ELIGIBLE` 那段：漏了它图谱会含越界数据且不报错
+    ` AND ${prefix}learning_eligible IS NOT 0`
   )
 }

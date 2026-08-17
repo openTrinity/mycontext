@@ -235,7 +235,24 @@ function ProducerRow({ producer }: { producer: ProducerStatusView }) {
               t("status.topology.producer.notDrained", {
                 defaultValue: "上一轮没翻完（条数是下界）",
               })
-            : producer.purpose
+            : producer.taggedIneligible > 0
+              ? /**
+                 * ★★★ 「入库了，但学习侧不看」—— **排在丢弃之后**，
+                 * 而措辞必须与丢弃明显不同。
+                 *
+                 * 它不是异常：那些消息是分身要盯的，用户的两个选择
+                 * （学习范围 + 监听范围）都被正确执行了。所以这句话说的是
+                 * **一个可以改的选择**（"想学它就把它加进学习范围"），
+                 * 而不是一个故障。
+                 *
+                 * ★ 用"未纳入学习"而不是"丢弃/挡掉"：后者会让用户以为
+                 * 数据没了，于是去重采一遍 —— 而它就在库里。
+                 */
+                t("status.topology.producer.taggedIneligible", {
+                  defaultValue: "已入库但未纳入学习 {{count}} 条（分身可用；想学它就加进学习范围）",
+                  count: producer.taggedIneligible.toLocaleString(),
+                })
+              : producer.purpose
 
   return (
     <div className="flex items-baseline justify-between gap-3">

@@ -2517,7 +2517,13 @@ export class KlServerService {
     const lockPath = join(this.dataDir, "graph.ladybug")
     if (!existsSync(lockPath)) return false
 
-    let pid: number | null = null
+    /**
+     * ★ 不给初值：下面 `try` 的每条路径要么赋值、要么 `return false`
+     * （catch 里直接返回），所以初值是死代码 —— 而 `no-useless-assignment`
+     * 报的正是这件事。给一个 `null` 初值还会让读者以为存在"没赋值就往下走"
+     * 的路径，从而去找一个不存在的分支。
+     */
+    let pid: number | null
     try {
       /**
        * `lsof -t` 只输出 pid。★ 用 `-t` 而不是解析完整输出：后者的列宽随
@@ -2539,7 +2545,8 @@ export class KlServerService {
     if (pid === null || Number.isNaN(pid) || pid === process.pid) return false
 
     // 存活性 + "是不是我们的 kl_server"
-    let looksLikeOurs = false
+    // ★ 同上：catch 直接 return，所以 `false` 初值永远读不到
+    let looksLikeOurs: boolean
     try {
       process.kill(pid, 0)
       const cmd = execFileSync("/bin/ps", ["-o", "command=", "-p", String(pid)], {

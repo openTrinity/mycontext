@@ -80,18 +80,78 @@ describe("语料谓词：两侧共用同一份定义", () => {
      * （纯空白会被选中，就是修复前 kl 侧的行为）。
      */
     const db = new Database(":memory:")
-    db.exec("CREATE TABLE messages (content_text TEXT, origin TEXT NOT NULL DEFAULT 'human')")
-    const insert = db.prepare("INSERT INTO messages (content_text, origin) VALUES (?, ?)")
-    insert.run(null, "human")
-    insert.run("", "human")
-    insert.run("   ", "human")
-    insert.run("\n\t ", "human")
-    insert.run("真内容", "human")
-    insert.run("数字人说的", "agent") // 要被排除
+    db.exec(
+      "CREATE TABLE messages (content_text TEXT, origin TEXT NOT NULL DEFAULT 'human'," +
+        " learning_eligible INTEGER)",
+    )
+    const insert = db.prepare(
+      "INSERT INTO messages (content_text, origin, learning_eligible) VALUES (?, ?, ?)",
+    )
+    insert.run(null, "human", 1)
+    insert.run("", "human", 1)
+    insert.run("   ", "human", 1)
+    insert.run("\n\t ", "human", 1)
+    insert.run("真内容", "human", 1)
+    insert.run("数字人说的", "agent", 1) // 要被排除
     const rows = db
       .prepare(`SELECT content_text FROM messages WHERE ${CORPUS_MESSAGE_PREDICATE}`)
       .all() as { content_text: string | null }[]
     expect(rows.map((row) => row.content_text)).toEqual(["真内容"])
+    db.close()
+  })
+
+  /**
+   * ── ★★★ v4 §5.4 的 B 位：**学习范围的资格闸就在这个谓词里** ────────
+   *
+   * DWD 只打标不筛行之后，越界的消息**照样在 `messages` 里**。而这两个
+   * 消费者（`graph-export` 的物化 / `forge pull`）的输入是**整张表** ——
+   * 它们那一趟压根不看 changelog 的内容，所以 changelog 上的
+   * `eligibility` 过滤对它们**完全无效**。
+   *
+   * 漏掉这里的后果：`learning_eligible = 0` 的行被写进四件套 → 进图谱
+   * → 进画像。**那是超范围，而且不报错。**
+   */
+  it("★★★ `learning_eligible = 0` 的消息被排除（越界内容不进图谱/画像）", () => {
+    const db = new Database(":memory:")
+    db.exec(
+      "CREATE TABLE messages (id TEXT, content_text TEXT," +
+        " origin TEXT NOT NULL DEFAULT 'human', learning_eligible INTEGER)",
+    )
+    const insert = db.prepare("INSERT INTO messages VALUES (?, ?, ?, ?)")
+    insert.run("in", "范围内", "human", 1)
+    insert.run("out", "只因监听而入库的", "human", 0)
+    const rows = db.prepare(`SELECT id FROM messages WHERE ${CORPUS_MESSAGE_PREDICATE}`).all() as {
+      id: string
+    }[]
+    expect(rows.map((row) => row.id)).toEqual(["in"])
+    db.close()
+  })
+
+  it("★★★ `NULL`（打标之前的存量行）算**合格** —— 写成 `= 1` 会让存量图谱变空", () => {
+    /**
+     * 这一条与上一条方向相反，而它才是最容易写错的那个：
+     *
+     * `learning_eligible = 1` 与 `learning_eligible IS NOT 0` 在 SQL 里
+     * 差几个字符，两者对 `1` / `0` 行为相同 —— **只在 NULL 上分岔**。
+     * 而存量库里**每一行都是 NULL**（v30 只加列、不回填）。
+     *
+     * 于是写成 `= 1` 的后果是：存量用户下一轮重导得到一份**空**的四件套
+     * → 图谱与画像清空。而它不报错、不抛异常，看起来只是"这次没数据"。
+     *
+     * 反证：把 `corpus-predicate.ts` 里的 `IS NOT 0` 改成 `= 1` → 这条转红。
+     */
+    const db = new Database(":memory:")
+    db.exec(
+      "CREATE TABLE messages (id TEXT, content_text TEXT," +
+        " origin TEXT NOT NULL DEFAULT 'human', learning_eligible INTEGER)",
+    )
+    const insert = db.prepare("INSERT INTO messages VALUES (?, ?, ?, ?)")
+    insert.run("legacy", "打标之前入库的", "human", null)
+    insert.run("tagged", "打标之后的", "human", 1)
+    const rows = db.prepare(`SELECT id FROM messages WHERE ${CORPUS_MESSAGE_PREDICATE}`).all() as {
+      id: string
+    }[]
+    expect(rows.map((row) => row.id)).toEqual(["legacy", "tagged"])
     db.close()
   })
 
@@ -105,12 +165,15 @@ describe("语料谓词：两侧共用同一份定义", () => {
      */
     const db = new Database(":memory:")
     db.exec(`
-      CREATE TABLE messages (id TEXT, content_text TEXT, origin TEXT NOT NULL DEFAULT 'human');
-      CREATE TABLE other (id TEXT, content_text TEXT, origin TEXT);
+      CREATE TABLE messages (id TEXT, content_text TEXT, origin TEXT NOT NULL DEFAULT 'human',
+        learning_eligible INTEGER);
+      -- ★ other 也有同名的 learning_eligible：这样"漏加前缀"会报
+      --   ambiguous column name，而不是碰巧还能跑
+      CREATE TABLE other (id TEXT, content_text TEXT, origin TEXT, learning_eligible INTEGER);
     `)
-    db.prepare("INSERT INTO messages VALUES (?, ?, ?)").run("m1", "真内容", "human")
-    db.prepare("INSERT INTO messages VALUES (?, ?, ?)").run("m2", "  ", "human")
-    db.prepare("INSERT INTO other VALUES (?, ?, ?)").run("m1", "x", "human")
+    db.prepare("INSERT INTO messages VALUES (?, ?, ?, ?)").run("m1", "真内容", "human", 1)
+    db.prepare("INSERT INTO messages VALUES (?, ?, ?, ?)").run("m2", "  ", "human", 1)
+    db.prepare("INSERT INTO other VALUES (?, ?, ?, ?)").run("m1", "x", "human", 0)
     const rows = db
       .prepare(
         `SELECT m.id FROM messages m JOIN other o ON o.id = m.id

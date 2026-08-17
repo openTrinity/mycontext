@@ -44,6 +44,7 @@ import { VAULT_0026_CLEAR_PLACEHOLDER_TITLES } from "./migrations/vault/v26-clea
 import { VAULT_0027_CHAT_COVERAGE } from "./migrations/vault/v27-chat-coverage.js"
 import { VAULT_0028_ATTENTION_SCOPE } from "./migrations/vault/v28-attention-scope.js"
 import { VAULT_0029_DOCUMENT_COVERAGE } from "./migrations/vault/v29-document-coverage.js"
+import { VAULT_0030_ELIGIBILITY } from "./migrations/vault/v30-eligibility.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -371,6 +372,17 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
    * 用户会以为文档那栏坏了。★ 只加表；编号全局单调（见 v25 那条注释）。
    */
   { version: 29, name: "document-coverage", sql: VAULT_0029_DOCUMENT_COVERAGE },
+  /**
+   * ★★★ 资格标签：DWD **只打标、不筛行**（v4 的分层修正）。
+   *
+   * `persist()` 那道闸原来在写入侧按**一个下游**（学习侧）的口径筛掉行，
+   * 于是另外两个下游（分身、界面）永久拿不到那些数据。
+   *
+   * ★ 三列都可空，`NULL` = "打标之前入库的"，而 learning 侧的判据必须是
+   * `IS NOT 0` 而不是 `= 1`（后者会把 NULL 排除 → 存量图谱下一轮变空）。
+   * 完整理由见那个文件头。★ 只加列 + 索引；编号全局单调。
+   */
+  { version: 30, name: "eligibility", sql: VAULT_0030_ELIGIBILITY },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */

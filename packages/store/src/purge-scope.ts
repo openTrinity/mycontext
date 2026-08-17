@@ -35,6 +35,28 @@
 import { withTransaction } from "./tx.js"
 import type { SqliteDatabase } from "./database.js"
 import { type CollectionScope } from "./collection-scope.js"
+import type { CollectionRequest } from "./collection-request.js"
+
+/**
+ * 清理的判据 —— ★★★ 是**采集面**（学习 ∪ 监听），不是学习范围。
+ *
+ * ## 为什么这一处必须换（v4 §3.3；漏了它是一个真的删数据的 bug）
+ *
+ * DWD 只打标不筛行之后，库里**故意**留着一类行：
+ * 「只因监听范围而入库的」（`learning_eligible = 0`）。它们是分身要盯的
+ * 新消息，而它们**本来就不在学习白名单里**。
+ *
+ * 而这个函数原来拿**学习范围**当判据 —— 于是它会把那些行判成"越界"
+ * 并**真删**（连带 FTS / 向量 / 媒体）。表现：用户监听的那个群，
+ * 每次保存一次范围就被清空一次，而分身随即失去上下文。**且不报错。**
+ *
+ * 判据换成采集面之后语义才自洽：**"我们本就不该去拉的"才叫越界**
+ * —— 那与 `readCollectionRequest` 是同一句话，也是唯一真正的隐私边界。
+ */
+export type PurgeCriterion = Pick<
+  CollectionRequest,
+  "restricted" | "allow" | "attentionScoped" | "since" | "until"
+>
 
 export interface PurgeReport {
   /** 删掉（或将要删掉）的消息条数 */
@@ -71,7 +93,7 @@ export interface PurgeReport {
 export function purgeOutOfScopeMessages(
   db: SqliteDatabase,
   channelId: string,
-  scope: CollectionScope,
+  scope: PurgeCriterion,
   options: { dryRun?: boolean } = {},
 ): PurgeReport {
   const dryRun = options.dryRun === true
@@ -104,24 +126,53 @@ export function purgeOutOfScopeMessages(
    *
    * `since === null`（显式不限）与 `undefined`（没配过）都不卡。
    */
-  const timeClauses: string[] = []
-  const timeParams: number[] = []
+  /**
+   * ★ 片段与它的参数**成对**推进同一个数组。
+   *
+   * 原来是 `timeClauses` / `timeParams` 两个数组、最后按顺序拼 ——
+   * 而上界那一格现在要多带一串 `NOT IN` 参数，两数组的写法就要求
+   * "记得把它插在正确的位置"。占位符错位在 SQLite 里**不报错**
+   * （类型是动态的），它只会静默地拿会话 id 去比 `sent_at`：
+   * 于是清理条件变成恒假或恒真 —— 后者会删掉全部消息。
+   */
+  const timeParts: { clause: string; params: unknown[] }[] = []
   if (typeof scope.since === "number") {
-    timeClauses.push("m.sent_at < ?")
-    timeParams.push(scope.since)
+    timeParts.push({ clause: "m.sent_at < ?", params: [scope.since] })
   }
   if (scope.until !== undefined) {
-    timeClauses.push("m.sent_at > ?")
-    timeParams.push(scope.until)
+    /**
+     * ★★★ 上界**只卡"不是只因监听而在面内"的那些会话**。
+     *
+     * ★ 判据是"**在**监听范围里"，不是"只在监听范围里" —— 一个既学也盯的
+     * 会话（默认形态）同样要豁免。见 `attentionScoped` 的注释。
+     *
+     * 与 `isWithinCollectionWindow` 完全同一条判据（那是前向闸，这是回溯清理，
+     * 两处必须同口径 —— 不同口径的方向是"闸放进来的行被清理删掉"，
+     * 于是采集与清理互相拆台，每轮都在删刚采的）。
+     *
+     * 具体形态：用户选「学到 7 月 30 日」，同时让分身盯着某个群。
+     * 那个群 8 月的新消息**该留**（用户的两个选择都没要求删它），
+     * 而不带这个例外的话它们全部命中 `sent_at > until` → 被删。
+     */
+    const watched = [...scope.attentionScoped]
+    timeParts.push(
+      watched.length === 0
+        ? { clause: "m.sent_at > ?", params: [scope.until] }
+        : {
+            clause:
+              `(m.sent_at > ? AND c.external_id NOT IN` + ` (${watched.map(() => "?").join(",")}))`,
+            params: [scope.until, ...watched],
+          },
+    )
   }
 
   /**
    * 三类越界取**并集**：会话不在白名单里、或时间早于下界、或晚于上界。
    * 用 OR 而不是分三趟删：一条消息可能同时命中两类，分趟会重复计数。
    */
-  const predicates = [outOfScopeClause, ...timeClauses]
+  const predicates = [outOfScopeClause, ...timeParts.map((part) => part.clause)]
   const where = predicates.length === 1 ? predicates[0] : predicates.join(" OR ")
-  const params: unknown[] = [channelId, ...allow, ...timeParams]
+  const params: unknown[] = [channelId, ...allow, ...timeParts.flatMap((part) => part.params)]
 
   const selectIds = `
     SELECT m.id AS id, m.conversation_id AS conversation_id

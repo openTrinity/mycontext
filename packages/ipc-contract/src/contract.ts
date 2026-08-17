@@ -2557,6 +2557,20 @@ export const ingestSnapshotSchema = z.object({
       droppedOutOfScope: z.number(),
       /** 其中因**渠道没给业务时间**被丢的条数（出路不同：去看渠道解析） */
       droppedUnknownTime: z.number(),
+      /**
+       * ★★★ 「**入库了**，但学习侧看不到」的条数（`learning_eligible = 0`）。
+       *
+       * 与 `droppedOutOfScope` 分开报，因为出路不同：
+       *
+       * | | 事实 | 出路 |
+       * |---|---|---|
+       * | `droppedOutOfScope` | 压根没拉 / 没入库 | 改**采集面**（隐私边界） |
+       * | `taggedIneligible` | ★ 入库了、分身在用 | 改**学习范围**（放宽后立刻能学） |
+       *
+       * 合成一个的后果：一个**正常**状态会被界面报成"漏采了 300 条"，
+       * 而真的漏采（渠道没给时间/范围没就绪）会被它淹掉。
+       */
+      taggedIneligible: z.number(),
       lastDroppedAt: z.number().nullable(),
       /**
        * 上一轮**抽干了吗**。`null` = 这个调度形状没有"抽干"这件事。

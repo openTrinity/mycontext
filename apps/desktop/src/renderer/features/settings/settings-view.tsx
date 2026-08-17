@@ -590,7 +590,10 @@ function StoragePanel() {
               <span className="text-[var(--text-base-primary)]">{formatBytes(c.bytes)}</span>
             </div>
           ))}
-        <div className="typography-body-small-500 mt-1 flex items-center justify-between border-t border-[var(--border-divider-light)] pt-1">
+        {/* ★ `typography-body-small-400 font-medium` 而不是 `-500`：表里没有
+            small-500 那一档（`check:typography` 会报），而"合计"这一行要的加粗
+            由 `font-medium` 给 —— 与状态面板/图谱面板里同类强调一致。 */}
+        <div className="typography-body-small-400 mt-1 flex items-center justify-between border-t border-[var(--border-divider-light)] pt-1 font-medium">
           <span className="text-[var(--text-base-secondary)]">{t("storage.total")}</span>
           <span className="text-[var(--text-base-primary)]">{formatBytes(data.totalBytes)}</span>
         </div>

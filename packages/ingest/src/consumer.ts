@@ -56,6 +56,19 @@ export interface OutboxConsumerOptions {
    * 不会互相干等（那会变成死锁）。
    */
   dependsOn?: readonly string[]
+  /**
+   * 只消费带这个**资格位**的变更（`ELIGIBILITY_BITS.learning` 之类）。
+   *
+   * ## ★★ 它是"要不要唤醒我"，不是唯一的闸
+   *
+   * 见 `ConsumerSpec.requires` 那段：输入是**整张表**的消费者
+   * （`graph-export` 重导四件套、`forge pull` 投影时间片）还要在自己的
+   * SQL 里筛 —— 那一趟压根不看 changelog 的内容。
+   *
+   * ★ 不传 = 不过滤（`persona-inbox` 走这条：它的判据是
+   * `AttentionRouter` 每条现判，而标签会往"更松"的方向漂）。
+   */
+  requiresBit?: number
   logger?: Logger
 }
 
@@ -158,7 +171,16 @@ export class OutboxConsumer {
     }
 
     const batch = this.changelog
-      .changesSince(cursor.ackedSeq, this.options.batchSize ?? 500)
+      .changesSince(
+        cursor.ackedSeq,
+        this.options.batchSize ?? 500,
+        /**
+         * ★ `domain` 仍不传（消费者按 `domains` 自己判 —— 那是既有行为，
+         * 而 `changesSince` 的 domain 参数只能收一个值，装不下多域消费者）。
+         */
+        undefined,
+        this.options.requiresBit,
+      )
       .filter((row) => upstreamLimit === null || row.seq <= upstreamLimit)
     if (batch.length === 0) {
       this.cursors.heartbeat(consumerId)

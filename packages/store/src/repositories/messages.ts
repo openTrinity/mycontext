@@ -42,6 +42,8 @@ interface MessageDbRow {
   direction: "inbound" | "outbound"
   is_self: number | null
   origin: "human" | "agent"
+  /** v30：`NULL` = 打标之前入库的（存量行）。见 `MessageInput.learningEligible`。 */
+  learning_eligible: number | null
   has_media: number
   raw_record_id: string | null
   revision: number
@@ -67,6 +69,13 @@ function toMessage(row: MessageDbRow): MessageRow {
     //   把未判定当"不是本人"会永久丢失人格语料，之后没有信号能纠回来。
     isSelf: row.is_self === null ? null : row.is_self === 1,
     origin: row.origin,
+    /**
+     * ★ `NULL` 原样透出（不折成 false）：那三态是有意义的 ——
+     * `null` = 打标之前入库的、`1` = 在学习范围内、`0` = 不在。
+     * 折成布尔会让"不知道"与"明确不在"同形，而 learning 侧对它们的
+     * 处置相反（前者视为合格、后者不合格）。
+     */
+    learningEligible: row.learning_eligible === null ? null : row.learning_eligible === 1,
     hasMedia: row.has_media === 1,
     rawRecordId: row.raw_record_id,
     revision: row.revision,
@@ -80,6 +89,46 @@ export interface MessageUpsertResult {
   /** 内容完全一致而被跳过的条数 */
   unchanged: number
 }
+
+/**
+ * ★★★ 资格标签的**合并规则** —— 唯一一处定义。
+ *
+ * 抽成常量而不是内联两遍：它要在 upsert 的 `SET` 与 `WHERE` 里**各出现一次**
+ * （前者算新值、后者判"值真的变了吗"）。写两遍必然漂，而漂的方向是
+ * 「SET 更新了标签、WHERE 判它没变 ⇒ 整个 UPDATE 不执行」——
+ * 那正好是一个完全静默的失效。
+ *
+ * ## 三条分支，每条都对应一个真实场景
+ *
+ * | 现有 | 传入 | 结果 | 场景 |
+ * |---|---|---|---|
+ * | 任意 | `NULL` | ★ **保持现有** | 这一批没算标签（存量路径 / 单测 / 另一条没打标的路） |
+ * | `NULL` | 0 或 1 | 传入的 | 存量行第一次被打标 |
+ * | 0/1 | 0/1 | `MAX` | ★ 只增不减（v4 §3 那条不变式） |
+ *
+ * ## ★★ 第一行为什么**不能**写成 `COALESCE(excluded.x, 0)`
+ *
+ * 那是我第一版写的，实测（SQLite）它会把存量行**收窄**：
+ *
+ * ```
+ * 存量行 le=NULL  →  内容被编辑 + 这一批没算标签（incoming NULL）
+ *   MAX(COALESCE(NULL,0), COALESCE(NULL,0)) = 0     ← ★ NULL 变成了 0
+ * ```
+ *
+ * 也就是 1 → 0 那个方向真的发生了（NULL 在读侧算合格、0 不算）：
+ * 存量库里被编辑过的消息会**逐条掉出**学习语料，而没有任何一处报错。
+ *
+ * ## ★★ 为什么不用 `MAX(...)` 处理 NULL
+ *
+ * SQLite 的多参 `MAX()` 遇到 NULL 返回 **NULL**（实测
+ * `MAX(NULL,1)` = `NULL`，不是 1）—— 与"取更大的那个"的直觉相反。
+ * 所以三条分支必须显式写出来。
+ */
+const LEARNING_ELIGIBLE_MERGE = `CASE
+           WHEN excluded.learning_eligible IS NULL THEN messages.learning_eligible
+           WHEN messages.learning_eligible IS NULL THEN excluded.learning_eligible
+           ELSE MAX(messages.learning_eligible, excluded.learning_eligible)
+         END`
 
 export class MessageRepository {
   constructor(private readonly db: SqliteDatabase) {}
@@ -96,8 +145,9 @@ export class MessageRepository {
       `INSERT INTO messages
          (id, channel_id, conversation_id, external_id, sender_actor_id, sender_external_id,
           sender_display_name, content_text, content_json, quoted_external_id, thread_id,
-          sent_at, direction, is_self, origin, has_media, raw_record_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sent_at, direction, is_self, origin, learning_eligible, has_media, raw_record_id,
+          created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(channel_id, external_id) DO UPDATE SET
          content_text        = excluded.content_text,
          content_json        = excluded.content_json,
@@ -109,13 +159,37 @@ export class MessageRepository {
          has_media           = MAX(messages.has_media, excluded.has_media),
          -- is_self 一旦判定过就不再被覆盖为 null（回填 job 走 markSelf）
          is_self             = COALESCE(messages.is_self, excluded.is_self),
+         -- ★★★ 只增不减 + NULL 三态 —— 规则见 LEARNING_ELIGIBLE_MERGE 那个常量
+         --   （SQL 注释里不能写反引号：它会提前终止这个模板字符串。
+         --    v30 迁移踩过同一个坑，报的是 TS1109 而不是"注释里有问题"）
+         --   ★ 同一个表达式在下面的 WHERE 里再出现一次，那是刻意的
+         learning_eligible   = ${LEARNING_ELIGIBLE_MERGE},
          -- 内容变了才 +1：revision 是"这条被编辑过几次"，不是"被采集过几次"
          revision            = messages.revision +
                                CASE WHEN COALESCE(messages.content_text, '')
                                        IS NOT COALESCE(excluded.content_text, '')
                                     THEN 1 ELSE 0 END
        WHERE COALESCE(messages.content_text, '') IS NOT COALESCE(excluded.content_text, '')
-          OR COALESCE(messages.content_json, '') IS NOT COALESCE(excluded.content_json, '')`,
+          OR COALESCE(messages.content_json, '') IS NOT COALESCE(excluded.content_json, '')
+          -- ★★★ 标签**变宽**也算"变了"（否则整个 UPDATE 不执行）。
+          --
+          -- ## 漏掉这一行的后果（我实测到的，不是设想）
+          --
+          -- 原来的 WHERE 只判**内容**。于是用户把一个群加进学习范围之后：
+          -- 那个群已经在库里的消息内容没变 ⇒ WHERE 为假 ⇒ UPDATE 整条不跑
+          -- ⇒ 标签**永远停在 0** ⇒ 学习侧永远看不到它们。
+          --
+          -- 表现是「我把这个群加进学习范围了，可它的历史消息一条都没学」，
+          -- 而唯一的出路会变成"删库重采" —— 那正是 v4 想消灭的东西
+          -- （放宽范围应当立刻生效，数据本来就在库里）。
+          --
+          -- ★ 用 IS NOT 而不是 <> ：后者对 NULL 返回 NULL（不为真），
+          -- 于是"存量行第一次被打标"这一格会被漏掉 —— 而那是最常见的一格。
+          --
+          -- ★★ 判据是"**结果值**与现有值不同"，不是"传入值与现有值不同"：
+          -- 后者会让"已是 1、传入 0"也算变化 ⇒ 每个重叠窗都重发一批 seq
+          -- ⇒ 下游把全部消息反复重算（文件头警告的正是这件事）。
+          OR (${LEARNING_ELIGIBLE_MERGE}) IS NOT messages.learning_eligible`,
     )
     const mentionInsert = this.db.prepare(
       `INSERT OR REPLACE INTO message_mentions (message_id, actor_external_id, is_self)
@@ -156,6 +230,16 @@ export class MessageRepository {
         input.direction,
         input.isSelf === null || input.isSelf === undefined ? null : input.isSelf ? 1 : 0,
         input.origin ?? "human",
+        /**
+         * ★ 三态原样存：`undefined`/`null` → NULL（"没打过标"），
+         * 而不是折成 0。折成 0 会让存量回填路径（不知道资格的那些）
+         * 把行标成"不合格" → 学习侧下一轮少掉它们。
+         */
+        input.learningEligible === null || input.learningEligible === undefined
+          ? null
+          : input.learningEligible
+            ? 1
+            : 0,
         (input.hasMedia ?? false) ? 1 : 0,
         input.rawRecordId ?? null,
         input.createdAt,

@@ -171,7 +171,12 @@ export {
 export { SyncCursorRepository, ProbeSnapshotRepository } from "./repositories/cursors.js"
 export type { ProbeSnapshot } from "./repositories/cursors.js"
 
-export { CHANGELOG_ENTITY_TYPES, CHANGELOG_DOMAINS } from "./repositories/types.js"
+export {
+  CHANGELOG_ENTITY_TYPES,
+  CHANGELOG_DOMAINS,
+  ELIGIBILITY_BITS,
+  eligibilityOf,
+} from "./repositories/types.js"
 export type {
   ChannelIdValue,
   RawRecordInput,

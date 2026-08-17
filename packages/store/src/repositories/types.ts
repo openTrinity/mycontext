@@ -201,6 +201,29 @@ export interface MessageInput {
   /** null = 未判定（不是 0）；身份确认后回填 */
   isSelf?: boolean | null
   origin?: "human" | "agent"
+  /**
+   * 这条消息在**学习范围**内吗（DWD 的资格标签，v30）。
+   *
+   * ## ★★★ 它为什么存在（DWD 只打标、不筛行）
+   *
+   * `messages` 是**多个下游共用**的明细层：学习侧（fts/graph/distill）、
+   * 数字分身、界面的消息历史。改动前 `persist()` 按**学习侧**的口径把
+   * 越界的行**丢掉** —— 于是另外两个下游永久拿不到那些数据
+   * （最实际的后果：分身收不到"超出学习 `until`"的新消息，
+   * 也看不见自己发过的回复）。
+   *
+   * ODPS 的惯例是「明细层只打标，筛选在消费侧」，这个字段就是那个标。
+   *
+   * ★ `undefined` / `null` = 打标之前入库的（存量行）。learning 侧的判据
+   * 必须是 `IS NOT 0` 而**不是** `= 1` —— 后者会把 NULL 排除掉，
+   * 而那会让存量库的图谱下一轮变空。见 v30 迁移的文件头。
+   *
+   * ★★ **没有** `attentionEligible` 的对应物：监听范围可以关掉、
+   * `enabled_at` 只能变早，所以一个落库那刻的快照会往"更松"的方向漂
+   * （"我关了它还在回消息"）。那一侧的判据必须是 `AttentionRouter`
+   * 每条现判。
+   */
+  learningEligible?: boolean | null
   hasMedia?: boolean
   rawRecordId?: string | null
   createdAt: number
@@ -225,6 +248,8 @@ export interface MessageRow {
   direction: "inbound" | "outbound"
   isSelf: boolean | null
   origin: "human" | "agent"
+  /** 见 `MessageInput.learningEligible`。`null` = 打标之前入库的（存量行）。 */
+  learningEligible: boolean | null
   hasMedia: boolean
   rawRecordId: string | null
   revision: number
@@ -257,6 +282,45 @@ export interface ChangelogEntryInput {
   payloadRef?: string | null
   /** 规范化内容 hash：消费者据此跳过无实质变化的项 */
   digest: string
+  /**
+   * **资格位图** —— 哪些消费者该看到这一条（v30）。
+   *
+   * ## ★★★ 它让"谁能看到什么"从五处 SQL 的 WHERE 变成一行声明
+   *
+   * 改动前 changelog 里每一条都是"所有消费者都看"，而筛选靠
+   * `persist()` 在**写入侧**丢掉行 —— 于是学习侧的口径替所有下游
+   * 做了决定（见 v30 迁移的文件头）。
+   *
+   * 现在消费者按 `ConsumerSpec.requires` 声明自己要哪个标签，
+   * `changesSince` 据此过滤。
+   *
+   * ★ `undefined` = 打标之前写的（存量行）。消费侧对它的处置与
+   * `messages.learning_eligible` 的 `NULL` 一致：**learning 侧视为合格**
+   * （`IS NOT 0`），因为那些行当时通过了更严的旧闸。
+   *
+   * 位定义见 `ELIGIBILITY_BITS`。
+   */
+  eligibility?: number | undefined
+}
+
+/**
+ * 资格位图的位定义。
+ *
+ * ★ 用位图而不是一个布尔列：将来加第二个维度（比如"只给某个新消费者"）
+ * 时不用再改一次表结构，而消费者那侧的判据形状不变。
+ *
+ * ★★ 而**监听范围刻意不在这里** —— 它可以关掉、`enabled_at` 只能变早，
+ * 所以一个落库那刻的快照会往"更松"的方向漂（"我关了它还在回消息"）。
+ * 那一侧的判据是 `AttentionRouter` 每条现判。见 v30 迁移的文件头。
+ */
+export const ELIGIBILITY_BITS = {
+  /** bit 0：在**学习范围**内（fts / graph-export / distill / distill-work 要它） */
+  learning: 1,
+} as const
+
+/** 从一个"在不在学习范围内"算出位图。★ 唯一一份实现（抄错会让消费者取错段）。 */
+export function eligibilityOf(input: { learning: boolean }): number {
+  return input.learning ? ELIGIBILITY_BITS.learning : 0
 }
 
 export interface ChangelogRow extends ChangelogEntryInput {

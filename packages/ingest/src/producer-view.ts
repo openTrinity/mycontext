@@ -45,6 +45,21 @@ export interface ProducerCounters {
    * 事实，出路也不同（前者去改范围、后者要去看渠道解析）。
    */
   droppedUnknownTime: number
+  /**
+   * ★★★ 「**入库了**，但不给学习侧」的条数（`learning_eligible = 0`）。
+   *
+   * ## 它与 `droppedOutOfScope` 是两个事实，出路不同
+   *
+   * | | 事实 | 出路 |
+   * |---|---|---|
+   * | `droppedOutOfScope` | 压根没拉 / 没入库 | 改**采集面**（隐私边界） |
+   * | `taggedIneligible` | ★ 入库了，只是学习侧看不到 | 改**学习范围**（放宽后立刻能学） |
+   *
+   * v4 的设计表原来写的是"把 dropped 改成打标为 0 的条数"。合成一个的
+   * 后果很具体：一个正常状态（分身在用那些消息）会被报成"漏采了 300 条"，
+   * 而真的漏采会被这个正常值淹掉。所以分成两个数。
+   */
+  taggedIneligible: number
   /** 最近一次丢弃的时刻；null = 本进程还没丢过 */
   lastDroppedAt: number | null
 }
@@ -91,6 +106,8 @@ export interface ProducerStatus {
   scopeUnreadable: boolean
   droppedOutOfScope: number
   droppedUnknownTime: number
+  /** ★ 入库了但学习侧看不到的条数 —— 见 `ProducerCounters.taggedIneligible` */
+  taggedIneligible: number
   lastDroppedAt: number | null
   /**
    * 上一轮**抽干了吗**。`null` = 这个调度形状没有"抽干"这件事。
@@ -134,6 +151,7 @@ export interface ProducerViewInput {
 const ZERO: ProducerCounters = {
   droppedOutOfScope: 0,
   droppedUnknownTime: 0,
+  taggedIneligible: 0,
   lastDroppedAt: null,
 }
 
@@ -172,6 +190,7 @@ export function buildProducerStatuses(input: ProducerViewInput = {}): readonly P
       scopeUnreadable: unreadable,
       droppedOutOfScope: counters.droppedOutOfScope,
       droppedUnknownTime: counters.droppedUnknownTime,
+      taggedIneligible: counters.taggedIneligible,
       lastDroppedAt: counters.lastDroppedAt,
       /**
        * ★ 只有会"抽干"的两种调度才可能有值。`watermark` 与 `stream`

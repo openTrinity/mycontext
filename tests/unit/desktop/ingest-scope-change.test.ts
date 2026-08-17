@@ -22,7 +22,8 @@ import {
   FtsIndexRepository,
   MessageRepository,
   purgeOutOfScopeMessages,
-  readCollectionScope,
+  readCollectionRequest,
+  AttentionScopeRepository,
 } from "@mycontext/store"
 import { IngestService } from "@main/services/ingest.service.js"
 import { DistillSourceService } from "@main/services/distill-source.service.js"
@@ -231,7 +232,11 @@ describe("★★ 取消勾选之后，那个会话的已有语料被清掉", () 
     seed(vault)
     // 有 chat 行但不带 conversationIds = 不限会话
     setScope(vault, undefined, START - 86_400_000)
-    const report = purgeOutOfScopeMessages(vault.db, CHANNEL, readCollectionScope(vault.db))
+    const report = purgeOutOfScopeMessages(
+      vault.db,
+      CHANNEL,
+      readCollectionRequest(vault.db, "chat", CHANNEL),
+    )
 
     expect(report.messages).toBe(0)
     expect(countMessages(vault, A)).toBe(2)
@@ -328,6 +333,106 @@ describe("★★ 保存范围时才通知（引导页一次点九个源，不能
     service.save({ kind: "chat", enabled: true, scope: { conversationIds: [A] } })
     service.save({ kind: "chat", enabled: false, scope: { conversationIds: [A] } })
     expect(calls()).toBe(2)
+    vault.close()
+  })
+})
+
+/**
+ * ── ★★★ 清理的判据是**采集面**，不是学习范围（v4 §3.3）────────────────
+ *
+ * DWD 只打标不筛行之后，库里**故意**留着一类行：「只因监听范围而入库的」。
+ * 它们是分身要盯的新消息，而它们**本来就不在学习白名单里**。
+ *
+ * 拿学习范围当清理判据会把它们判成越界并**真删**（连带 FTS / 向量 / 媒体）：
+ *
+ *   用户监听的那个群 → 每保存一次范围就被清空一次 → 分身随即失去上下文
+ *
+ * 而它不报错。这一组锁的就是"那些行必须活下来"。
+ */
+describe("★★★ 监听范围里的会话：不在学习白名单里，也不许被清掉", () => {
+  it("★★★ B 只在监听范围里 → 取消它的学习勾选后，它的消息**仍在**", () => {
+    /**
+     * 反证：把 `applyScopeChange` 里那个 `collectionRequest()` 改回
+     * `collectionScope()`（学习范围）→ 这条转红，B 的 2 条被删。
+     *
+     * ★ 这一条与本文件第一组（"取消勾选就该清掉"）**不矛盾**：
+     * 那一组里 B 两个范围都没有 —— 而"两个范围都不要"才叫越界。
+     */
+    const vault = openTestVault()
+    seed(vault)
+    // 学习范围只勾 A；而 B 在监听范围里（用户明确要分身盯着它）
+    setScope(vault, [A])
+    const attention = new AttentionScopeRepository(vault.db)
+    attention.setMode(CHANNEL, "explicit", START)
+    attention.add(CHANNEL, [{ conversationExternalId: B, enabledAt: START }], START)
+
+    makeService(vault).applyScopeChange()
+
+    expect(countMessages(vault, A)).toBe(2)
+    // ★★★ B 活着 —— 它在采集面内（学习 ∪ 监听）
+    expect(countMessages(vault, B)).toBe(2)
+    // FTS 也不该被动（4 行全在）
+    expect(ftsVirtualRows(vault)).toBe(4)
+    vault.close()
+  })
+
+  it("★★★ 监听会话**豁免上界** —— 学习范围只学到某天，它之后的新消息仍留着", () => {
+    /**
+     * ## 这是那第一个洞在清理侧的镜像
+     *
+     * 用户选「学到某一天为止」，同时让分身盯着某个群。那个群在 `until`
+     * 之后的新消息**该留**（他的两个选择都没要求删它）。
+     *
+     * 前向闸（`isWithinCollectionWindow`）已经对这一格豁免了。清理侧不豁免
+     * 的话两者互相拆台：闸放进来、清理删掉，每轮都在删刚采的 ——
+     * 而现象是"分身的上下文总是只有几分钟"。
+     *
+     * 反证：把 `purge-scope.ts` 里上界那一格的 `NOT IN (attentionScoped)`
+     * 删掉 → 这条转红。
+     */
+    const vault = openTestVault()
+    seed(vault)
+    // 学习范围：两个会话都勾，但上界卡在所有消息**之前**
+    new DistillSourceRepository(vault.db).upsert(
+      "chat",
+      { enabled: true, scope: { conversationIds: [A, B], until: START - 1 } },
+      START,
+    )
+    // B 在监听范围里
+    const attention = new AttentionScopeRepository(vault.db)
+    attention.setMode(CHANNEL, "explicit", START)
+    attention.add(CHANNEL, [{ conversationExternalId: B, enabledAt: START }], START)
+
+    makeService(vault).applyScopeChange()
+
+    // A 只受学习范围管 → 它的消息晚于 until → 被清
+    expect(countMessages(vault, A)).toBe(0)
+    // ★★★ B 受监听范围保护 → 豁免上界 → 留着
+    expect(countMessages(vault, B)).toBe(2)
+    vault.close()
+  })
+
+  it("★★ 监听会话被**关掉**之后就不再豁免（关掉 = 以后别管它）", () => {
+    /**
+     * `disable` 只置 `active = 0`（不删行，重开时 `enabled_at` 还在）。
+     * 而采集面只取 `active` 的行 —— 于是一个关掉的会话回到"只受学习范围管"。
+     *
+     * ★ 这一条锁的是"豁免不是永久的"：否则用户关掉监听之后，
+     * 那个会话仍然永远躲过清理，而配置上已经没有任何一处说要留它。
+     */
+    const vault = openTestVault()
+    seed(vault)
+    setScope(vault, [A])
+    const attention = new AttentionScopeRepository(vault.db)
+    attention.setMode(CHANNEL, "explicit", START)
+    attention.add(CHANNEL, [{ conversationExternalId: B, enabledAt: START }], START)
+    attention.disable(CHANNEL, B, START + 1)
+
+    makeService(vault).applyScopeChange()
+
+    expect(countMessages(vault, A)).toBe(2)
+    // 两个范围都不要它了 → 那才叫越界
+    expect(countMessages(vault, B)).toBe(0)
     vault.close()
   })
 })

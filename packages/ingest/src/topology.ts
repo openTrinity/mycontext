@@ -348,6 +348,36 @@ export interface ConsumerSpec {
   /** 消费哪些域（`null` = 全部；FTS 就是全部） */
   domains: readonly DataDomain[] | null
   /**
+   * 只消费带这个**资格标签**的变更。`null` = 全收（自己判）。
+   *
+   * ## ★★★ 为什么 learning 侧能用标签，而 persona **不能**
+   *
+   * 两个范围的性质根本不同：
+   *
+   * | | 学习范围 | 监听范围 |
+   * |---|---|---|
+   * | 能怎么变 | **只增不减** | ★ **可以关掉**；`enabled_at` 只能变早 |
+   * | 标签过期的方向 | 只往"更严"漂（放宽了但标签还是 0）→ **安全** | ★ **两个方向都漂** |
+   * | 漂错的现象 | 放宽了但暂时没学（下一轮补上） | ★ 「我关了它还在回消息」 |
+   *
+   * 所以 `persona-inbox` 是 `null` —— 它收全部 chat seq，判据是
+   * `AttentionRouter`（读 `attention_scope` 的**当前值**）每条现判。
+   *
+   * ★★ 而那不贵：路由（一次 `count(*)` 走部分索引 + 一次主键查）排在
+   * 三条带子查询的准入 SQL **之前**，范围外的消息在最便宜的那一步就走了。
+   *
+   * ## ★★★ 这个字段**不够** —— 输入是"表"的消费者还要自己筛
+   *
+   * 它只管"要不要唤醒这个消费者 / 给它这一条"。而 `graph-export` 与
+   * `forge pull` 的输入是**整张表**（重导四件套 / 投影时间片），
+   * 那一趟压根不看 changelog 的内容 —— 所以它们**还要**在自己的 SQL 里
+   * 加 `learning_eligible IS NOT 0`（落点：`corpus-predicate.ts`）。
+   *
+   * 漏掉那一处的后果：图谱含越界数据，而且不报错。
+   * 这与 v2 的 G1（"文档采集完全不看时间下界"）是同一个形状。
+   */
+  requires: "learning" | null
+  /**
    * 落后时能不能裁历史。
    *
    * `true` = 不能裁（丢了补不回来，如蒸馏语料）；
@@ -396,6 +426,7 @@ export interface ConsumerSpec {
 export const CONSUMERS: readonly ConsumerSpec[] = [
   {
     id: "local-index-fts",
+    requires: "learning",
     domains: null,
     required: true,
     dependsOn: [],
@@ -417,6 +448,7 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
      * 前者是产品决定，用户该做的事完全不同。
      */
     id: "local-index-vector",
+    requires: "learning",
     domains: null,
     /**
      * ★ `required: false` —— 一个没接线的消费者**绝不能**阻塞裁剪。
@@ -434,6 +466,7 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
   },
   {
     id: "graph-export",
+    requires: "learning",
     domains: ["chat", "minutes", "doc"],
     required: false,
     dependsOn: [],
@@ -460,6 +493,7 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
      * 被记成"图已经建好了" —— 一个静默的谎。
      */
     id: "graph-build",
+    requires: "learning",
     domains: ["chat", "minutes", "doc"],
     /** 落后不该阻止裁剪：图谱要历史时重新全量导出即可（与 graph-export 同理）。 */
     required: false,
@@ -476,6 +510,7 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
   },
   {
     id: "distill",
+    requires: "learning",
     domains: ["chat"],
     required: true,
     /**
@@ -517,6 +552,7 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
      * `maybeRefreshWorkLayer` 与手动 ack 那条路）。
      */
     id: "distill-work",
+    requires: "learning",
     domains: ["chat"],
     /**
      * `required: false` —— 它落后**不该**阻止裁剪历史。work 层抽的是长期
@@ -550,6 +586,15 @@ export const CONSUMERS: readonly ConsumerSpec[] = [
   },
   {
     id: "persona-inbox",
+    /**
+     * ★★★ `null` = 收全部 chat seq，判据是 `AttentionRouter` 每条**现判**。
+     *
+     * 不给它一个 `"attention"` 标签是刻意的：监听范围**可以关掉**、
+     * `enabled_at` 只能变早，所以一个落库那刻的快照会往"更松"的方向漂 ——
+     * 用户点了"不再盯这个群"，而标签还是 1 → 分身继续起草。
+     * 那是**用户看得见的错误行为**，而 learning 侧的漂移只是"暂时没学"。
+     */
+    requires: null,
     domains: ["chat"],
     required: false,
     dependsOn: [],

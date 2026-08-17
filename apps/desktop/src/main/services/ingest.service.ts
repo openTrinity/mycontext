@@ -81,6 +81,7 @@ import {
   purgeOutOfScopeMessages,
   purgeOutOfScopeDocuments,
   readCollectionRequest,
+  ELIGIBILITY_BITS,
   isWithinCollectionWindow,
   type CollectionRequest,
   type CollectionScope,
@@ -942,6 +943,16 @@ export class IngestService {
       db: options.db,
       clock: options.clock,
       consumerId: FTS_CONSUMER_ID,
+      /**
+       * ★★★ 只消费**学习范围内**的变更（v30 资格位图）。
+       *
+       * 与 `CONSUMERS` 里那一行的 `requires: "learning"` 必须一致 ——
+       * 声明与执行分叉的后果是"声明说它只看学习侧，而它其实全收"，
+       * 而那是超范围（越界消息进了 FTS / 蒸馏语料）。
+       *
+       * ★ `NULL`（存量行）算合格 —— 判据在 `changesSince` 里。
+       */
+      requiresBit: ELIGIBILITY_BITS.learning,
       owner: `main-${process.pid}`,
       handler: createFtsHandler(options.db, options.clock, options.logger),
       // FTS 是纯本地的，批量可以大
@@ -952,6 +963,16 @@ export class IngestService {
       db: options.db,
       clock: options.clock,
       consumerId: DISTILL_CONSUMER_ID,
+      /**
+       * ★★★ 只消费**学习范围内**的变更（v30 资格位图）。
+       *
+       * 与 `CONSUMERS` 里那一行的 `requires: "learning"` 必须一致 ——
+       * 声明与执行分叉的后果是"声明说它只看学习侧，而它其实全收"，
+       * 而那是超范围（越界消息进了 FTS / 蒸馏语料）。
+       *
+       * ★ `NULL`（存量行）算合格 —— 判据在 `changesSince` 里。
+       */
+      requiresBit: ELIGIBILITY_BITS.learning,
       owner: `main-${process.pid}`,
       handler: createDistillHandler({
         db: options.db,
@@ -3828,7 +3849,7 @@ export class IngestService {
      *
      * · 分区闸：会话在采集面内吗（`allow`，`restricted` 为假时放行）；
      * · 时间闸：`isWithinCollectionWindow` —— 它比 `isOccurredAtInScope`
-     *   多一条：**`attentionOnly` 里的会话不受 `until` 约束**
+     *   多一条：**`attentionScoped` 里的会话不受 `until` 约束**
      *   （用户要它们的新消息，而 `until` 是学习范围的上界）。
      */
     const request = this.collectionRequest()
@@ -3842,7 +3863,7 @@ export class IngestService {
          * ★★★ `until` 传 `undefined` —— 上界由下面那个 filter 按**会话**判。
          *
          * 传进来的话 `admitByScope` 会对**所有**会话卡上界，
-         * 而 `attentionOnly` 那些必须豁免。这是那第一个洞的修法所在。
+         * 而 `attentionScoped` 那些必须豁免。这是那第一个洞的修法所在。
          */
         until: undefined,
         enabled: true,
@@ -3856,7 +3877,7 @@ export class IngestService {
       },
     )
     /**
-     * ★★ 上界：按**会话**判（`attentionOnly` 豁免）。
+     * ★★ 上界：按**会话**判（`attentionScoped` 豁免）。
      *
      * 放在 `admitByScope` 之后而不是塞进它：那个函数的契约是
      * "两道闸并列"，而"某些分区豁免上界"是这一层（采集面）特有的语义。
@@ -3868,6 +3889,50 @@ export class IngestService {
     const droppedByWindow = admitted.kept.length - withinWindow.length
     const scopedPage = { ...page, messages: [...withinWindow] }
     const droppedTotal = admitted.dropped + droppedByWindow
+
+    /**
+     * ★★★ **DWD 打标**（v4 阶段 D）—— 这是那个分层修正的落点。
+     *
+     * ## 采集面 vs 学习范围：两个判据，两件事
+     *
+     * 上面那两道闸用的是**采集面**（学习 ∪ 监听）—— 它回答"该不该拉"，
+     * 是隐私边界。而这里算的是"这条**属于学习范围吗**" ——
+     * 那是一个**下游口径**，只决定学习侧那五个消费者要不要看到它。
+     *
+     * ## 于是"监听但不学"的消息**入库了**（这正是要修的）
+     *
+     * 改动前它们被 `persist` 丢掉 —— 而分身要它们（它盯着那个群）、
+     * 界面要它们（用户要看完整对话）。现在它们入库、标 `learning_eligible = 0`，
+     * 学习侧按标签取不到它们，而另两个下游拿得到。
+     *
+     * ★ 标签**落库时算一次**（不是查询时算）：`upsertMany` 的 SQL 用
+     * `MAX(...)` 保证它只 0 → 1（范围只增不减），所以物化一次是安全的，
+     * 而查询时算会让"范围一改、历史行的语义跟着变"。
+     */
+    const learning = readDomainScope(this.options.db, "chat")
+    const learningIds = new Set(
+      admitByScope<(typeof withinWindow)[number]>(learning, withinWindow, {
+        partitionOf: (message) => message.conversationExternalId,
+        occurredAtOf: (message) => message.sentAt,
+      }).kept.map((message) => message.externalId),
+    )
+    /**
+     * ★★★ 「入库了但学习侧看不到」也要**记数** —— 而且是**另一个**计数。
+     *
+     * ## 为什么不并进 `droppedOutOfScope`
+     *
+     * 那两个数字的出路不同（见 `noteTaggedIneligible` 的注释）：
+     *
+     * · `droppedOutOfScope` = 压根没入库 → 用户要去改**采集面**；
+     * · 这一个 = **入库了、分身正在用**，只是学习侧不看 → 改**学习范围**
+     *   就能立刻学（数据在库里，不用重新去渠道拉）。
+     *
+     * ★ 而这条改动前是**零可观测**的：那些消息以前被 `persist` 丢掉、
+     * 计入 dropped。现在它们入库了，若不记数就会从两个数字里同时消失
+     * —— 于是"监听但不学"这件事在界面上完全不存在，
+     * 而它恰恰是这一版新引入的、量级可能很大的一类。
+     */
+    this.producers.noteTaggedIneligible("chat", withinWindow.length - learningIds.size)
     if (droppedTotal > 0) {
       this.droppedOutOfScope += droppedTotal
       this.lastDroppedAt = this.options.clock.now()
@@ -3975,6 +4040,14 @@ export class IngestService {
         ),
         // 未确认身份时 is_self 一律留 null —— 猜错会永久丢失人格语料
         selfConfirmed: self?.confirmedAt !== null && self?.confirmedAt !== undefined,
+        /**
+         * ★★★ 学习范围的资格标签（v4 阶段 D：DWD 只打标、不筛行）。
+         *
+         * 采集面（学习 ∪ 监听）决定**入不入库**，这个集合决定
+         * **学习侧那五个消费者要不要看到它**。于是"监听但不学"的消息
+         * 入库了、标 0 —— 分身与界面拿得到，学习侧拿不到。
+         */
+        learningEligibleIds: learningIds,
         fetchedAt: this.options.clock.now(),
       }),
     )
@@ -4149,11 +4222,27 @@ export class IngestService {
    * @returns 清理报告。`messages: 0` = 新范围下没有越界数据（常见且正常）
    */
   applyScopeChange(options: { dryRun?: boolean } = {}): PurgeReport {
-    const scope = this.collectionScope()
+    /**
+     * ★★★ 判据是**采集面**（学习 ∪ 监听），不是学习范围（v4 §3.3）。
+     *
+     * 这一行原来是 `this.collectionScope()`（学习范围）。DWD 只打标不筛行
+     * 之后，库里**故意**留着「只因监听而入库的」那些行 —— 而它们本来就
+     * 不在学习白名单里。拿学习范围当判据会把它们判成越界并**真删**
+     * （连带 FTS / 向量 / 媒体文件），于是：
+     *
+     *   用户监听的那个群 → 每保存一次范围就被清空一次 → 分身失去上下文
+     *
+     * 而它不报错。换成采集面之后语义才自洽：**"我们本就不该去拉的"
+     * 才叫越界** —— 与 `readCollectionRequest` 同一句话。
+     *
+     * ★ 类型上也拦住了：`PurgeCriterion` 要求 `attentionScoped`，
+     * 而 `CollectionScope` 没有这个字段 —— 传错编译不过。
+     */
+    const request = this.collectionRequest()
     const report = purgeOutOfScopeMessages(
       this.options.db,
       this.options.plugin.meta.id,
-      scope,
+      request,
       options,
     )
     /**
@@ -4277,8 +4366,10 @@ export class IngestService {
     this.producers.resetCounters()
 
     this.options.logger.info("ingest scope change applied", {
-      restricted: scope.restricted,
-      allowed: scope.restricted ? scope.allow.size : null,
+      restricted: request.restricted,
+      allowed: request.restricted ? request.allow.size : null,
+      // ★ 在监听范围里的那些 —— 它们不受 until 约束，也不该被清
+      attentionScoped: request.attentionScoped.size,
       purgedMessages: report.messages,
       purgedConversations: report.conversations,
       purgedFtsRows: report.ftsRows,
@@ -4880,6 +4971,8 @@ export class IngestService {
               {
                 droppedOutOfScope: c.dropped,
                 droppedUnknownTime: c.unknownTime,
+                // ★ 入库了但学习侧看不到的 —— 与"丢弃"是两个事实（出路不同）
+                taggedIneligible: c.tagged,
                 lastDroppedAt: c.lastAt,
               },
             ]
