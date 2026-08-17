@@ -68,7 +68,12 @@ from kl_graph.config import DATA_DIR, GRAPH_DB_PATH, LADYBUG_OPTS, cfg
 SQLITE_PATH = DATA_DIR / "knowledge.db"
 QDRANT_PATH = str(DATA_DIR / "qdrant_data")
 QUERY_MAX_CONCURRENCY = int(cfg.pipelines.query.max_concurrency)
-CURRENT_USER = str(cfg.application.current_user or "")
+CURRENT_USER = str(cfg.application.current_user or "").strip()
+CURRENT_USER_ALIASES = tuple(
+    str(alias).strip()
+    for alias in cfg.application.current_user_aliases
+    if str(alias).strip()
+)
 COMMUNITIES_ENABLED = bool(cfg.pipelines.experimental.communities.enabled)
 ASK_SYNTHESIZE_DEFAULT = bool(cfg.pipelines.query.ask.synthesize)
 
@@ -3074,7 +3079,7 @@ def _todos_for_current_user_impl(req: RequestsRequest):
 def _directed_facts_for_current_user_impl(
     req: RequestsRequest, *, fact_type: FactType, result_key: str
 ):
-    """Return one directed fact type addressed to the exact current user."""
+    """Return one directed fact type addressed to the current user's identities."""
     if not state.ready:
         raise HTTPException(503, "Server not ready")
     if not CURRENT_USER:
@@ -3096,32 +3101,58 @@ def _directed_facts_for_current_user_impl(
     start_ms = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
 
-    current_user = state.sqlite_conn.execute(
-        """SELECT id, name, entity_type FROM entities
-           WHERE name = ? AND entity_type = ?
-           ORDER BY mention_count DESC LIMIT 1""",
-        (CURRENT_USER, "Person"),
-    ).fetchone()
-    if not current_user:
+    configured_names = []
+    seen_names = set()
+    for candidate in (CURRENT_USER, *CURRENT_USER_ALIASES):
+        name = str(candidate).strip()
+        if name and name not in seen_names:
+            configured_names.append(name)
+            seen_names.add(name)
+
+    name_placeholders = ", ".join("?" for _ in configured_names)
+    matched_rows = state.sqlite_conn.execute(
+        f"""SELECT id, name, entity_type FROM entities
+            WHERE entity_type = ? AND name IN ({name_placeholders})
+            ORDER BY mention_count DESC""",
+        ("Person", *configured_names),
+    ).fetchall()
+    matched_by_name = {row[1]: row for row in matched_rows}
+    matched_entities = [
+        matched_by_name[name] for name in configured_names if name in matched_by_name
+    ]
+    if not matched_entities:
+        suffix = ", ".join(configured_names)
         raise HTTPException(
-            404, f"Configured current-user Person entity not found: {CURRENT_USER}"
+            404, f"Configured current-user Person entities not found: {suffix}"
         )
 
+    current_user = matched_by_name.get(CURRENT_USER, matched_entities[0])
+    current_user_ids = [row[0] for row in matched_entities]
+    identity_placeholders = ", ".join("?" for _ in current_user_ids)
+
     rows = state.sqlite_conn.execute(
-        """SELECT f.id, f.text, f.fact_type, f.timestamp, f.confidence,
-                  f.subject_entity_id, requester.name, requester.entity_type,
-                  f.object_entity_id, recipient.name, recipient.entity_type,
-                  f.source_chunk_id, f.source_unit_id, f.extraction_item_id
-           FROM facts AS f
-           LEFT JOIN entities AS requester ON requester.id = f.subject_entity_id
-           LEFT JOIN entities AS recipient ON recipient.id = f.object_entity_id
-           WHERE f.fact_type = ? AND f.object_entity_id = ?
-             AND f.subject_entity_id IS NOT NULL
-             AND f.subject_entity_id <> f.object_entity_id
-             AND f.timestamp >= ? AND f.timestamp < ?
-           ORDER BY f.timestamp ASC, f.id ASC
-           LIMIT ?""",
-        (fact_type.value, current_user[0], start_ms, end_ms, req.limit),
+        f"""SELECT f.id, f.text, f.fact_type, f.timestamp, f.confidence,
+                   f.subject_entity_id, requester.name, requester.entity_type,
+                   f.object_entity_id, recipient.name, recipient.entity_type,
+                   f.source_chunk_id, f.source_unit_id, f.extraction_item_id
+            FROM facts AS f
+            LEFT JOIN entities AS requester ON requester.id = f.subject_entity_id
+            LEFT JOIN entities AS recipient ON recipient.id = f.object_entity_id
+            WHERE f.fact_type = ?
+              AND f.object_entity_id IN ({identity_placeholders})
+              AND f.subject_entity_id IS NOT NULL
+              AND f.subject_entity_id NOT IN ({identity_placeholders})
+              AND f.timestamp >= ? AND f.timestamp < ?
+            ORDER BY f.timestamp ASC, f.id ASC
+            LIMIT ?""",
+        (
+            fact_type.value,
+            *current_user_ids,
+            *current_user_ids,
+            start_ms,
+            end_ms,
+            req.limit,
+        ),
     ).fetchall()
 
     results = []
@@ -3157,6 +3188,9 @@ def _directed_facts_for_current_user_impl(
             "name": current_user[1],
             "type": current_user[2],
         },
+        "matched_entities": [
+            {"id": row[0], "name": row[1], "type": row[2]} for row in matched_entities
+        ],
         "date": req.date,
         "timezone": req.timezone,
         "start_timestamp": start_ms,

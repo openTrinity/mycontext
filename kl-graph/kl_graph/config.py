@@ -52,6 +52,7 @@ class _ConfigModel(BaseModel):
 class ApplicationConfig(_ConfigModel):
     debug: bool = False
     current_user: str
+    current_user_aliases: list[str]
     data_dir: str
     dws_export_dir: str
 

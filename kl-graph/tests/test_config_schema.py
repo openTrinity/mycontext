@@ -14,6 +14,7 @@ from kl_graph.config import PROJECT_ROOT, AppConfig, cfg, load_config
 EXPECTED_LEAVES = {
     "application.debug",
     "application.current_user",
+    "application.current_user_aliases",
     "application.data_dir",
     "application.dws_export_dir",
     "server.port",
@@ -157,6 +158,10 @@ def test_default_extraction_batch_size_is_five() -> None:
 
 def test_debug_integrity_checks_are_disabled_by_default() -> None:
     assert cfg.application.debug is False
+
+
+def test_current_user_aliases_are_empty_by_default() -> None:
+    assert list(cfg.application.current_user_aliases) == []
 
 
 def test_default_extraction_retries_are_step_scoped() -> None:

@@ -240,13 +240,21 @@ than 200, the server automatically limits results to the last 90 days and sets
 }
 ```
 
-Resolves `KL_CURRENT_USER` to an exact `Person` entity, then returns `REQUEST`
-facts whose `object_entity_id` is that entity and whose timestamp falls within
-the requested local day. Self-requests and facts without a resolved requester
-are excluded. Each result includes the requester, recipient, and source chunk,
-unit, and extraction-item IDs. The endpoint returns `503` when
-`KL_CURRENT_USER` is unset and `404` when its exact `Person` entity does not
-exist.
+Resolves `KL_CURRENT_USER` and the JSON list in `KL_CURRENT_USER_ALIASES` to
+exact `Person` entities, then returns `REQUEST` facts whose `object_entity_id`
+is any matched identity and whose timestamp falls within the requested local
+day. Configured aliases that do not exist in the graph are ignored. Requests
+between two matched identities and facts without a resolved requester are
+excluded. Each result includes the requester, recipient, and source chunk,
+unit, and extraction-item IDs; `matched_entities` reports which configured
+names participated in the query. The endpoint returns `503` when
+`KL_CURRENT_USER` is unset and `404` only when none of the configured names
+matches a `Person` entity.
+
+```bash
+export KL_CURRENT_USER="canonical-name"
+export KL_CURRENT_USER_ALIASES='["nickname","alternate-name"]'
+```
 
 Existing facts are not retroactively assigned participant roles when the
 SQLite schema is upgraded. Rebuild or re-ingest with the current extraction

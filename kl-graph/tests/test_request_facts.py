@@ -226,6 +226,7 @@ def test_requests_endpoint_filters_type_recipient_day_and_self(monkeypatch) -> N
     server_state.ready = True
     monkeypatch.setattr(kl_server, "state", server_state)
     monkeypatch.setattr(kl_server, "CURRENT_USER", "李华")
+    monkeypatch.setattr(kl_server, "CURRENT_USER_ALIASES", ())
 
     response = TestClient(kl_server.app).post(
         "/requests",
@@ -239,6 +240,7 @@ def test_requests_endpoint_filters_type_recipient_day_and_self(monkeypatch) -> N
         "name": "李华",
         "type": "Person",
     }
+    assert payload["matched_entities"] == [payload["current_user"]]
     assert payload["count"] == 1
     assert [item["id"] for item in payload["requests"]] == ["request-hit"]
     assert payload["requests"][0]["requester"]["id"] == "person-zhang"
@@ -262,6 +264,116 @@ def test_requests_endpoint_filters_type_recipient_day_and_self(monkeypatch) -> N
     store.close()
 
 
+def test_personal_endpoints_merge_aliases_and_exclude_cross_alias_self_requests(
+    monkeypatch,
+) -> None:
+    store = _memory_store()
+    current_user = Entity(id="person-me", name="李华", entity_type=EntityType.PERSON)
+    nickname = Entity(id="person-nickname", name="小李", entity_type=EntityType.PERSON)
+    requester = Entity(
+        id="person-requester", name="张三", entity_type=EntityType.PERSON
+    )
+    other = Entity(id="person-other", name="王五", entity_type=EntityType.PERSON)
+    store.upsert_entities([current_user, nickname, requester, other])
+    store.insert_chunks([Chunk(id="chunk-1", content="source")])
+
+    timezone = ZoneInfo("Asia/Shanghai")
+    in_day = int(datetime(2026, 7, 24, 9, tzinfo=timezone).timestamp() * 1000)
+    store.insert_facts(
+        [
+            Fact(
+                id="canonical-hit",
+                text="张三请求李华提交报告",
+                fact_type=FactType.REQUEST,
+                timestamp=in_day,
+                subject_entity_id=requester.id,
+                object_entity_id=current_user.id,
+                source_chunk_id="chunk-1",
+            ),
+            Fact(
+                id="nickname-hit",
+                text="张三请求小李修改代码",
+                fact_type=FactType.REQUEST,
+                timestamp=in_day,
+                subject_entity_id=requester.id,
+                object_entity_id=nickname.id,
+                source_chunk_id="chunk-1",
+            ),
+            Fact(
+                id="nickname-todo-hit",
+                text="张三要求小李修改代码并提交",
+                fact_type=FactType.ACTION_ITEM,
+                timestamp=in_day,
+                subject_entity_id=requester.id,
+                object_entity_id=nickname.id,
+                source_chunk_id="chunk-1",
+            ),
+            Fact(
+                id="canonical-to-nickname-self",
+                text="李华提醒小李提交报告",
+                fact_type=FactType.REQUEST,
+                timestamp=in_day,
+                subject_entity_id=current_user.id,
+                object_entity_id=nickname.id,
+                source_chunk_id="chunk-1",
+            ),
+            Fact(
+                id="nickname-to-canonical-self",
+                text="小李提醒李华提交报告",
+                fact_type=FactType.REQUEST,
+                timestamp=in_day,
+                subject_entity_id=nickname.id,
+                object_entity_id=current_user.id,
+                source_chunk_id="chunk-1",
+            ),
+            Fact(
+                id="other-recipient",
+                text="张三请求王五提交报告",
+                fact_type=FactType.REQUEST,
+                timestamp=in_day,
+                subject_entity_id=requester.id,
+                object_entity_id=other.id,
+                source_chunk_id="chunk-1",
+            ),
+        ]
+    )
+
+    server_state = kl_server.ServerState()
+    server_state.sqlite_conn = store.conn
+    server_state.ready = True
+    monkeypatch.setattr(kl_server, "state", server_state)
+    monkeypatch.setattr(kl_server, "CURRENT_USER", "李华")
+    monkeypatch.setattr(
+        kl_server,
+        "CURRENT_USER_ALIASES",
+        ("小李", "阿华", "李华", ""),
+    )
+    client = TestClient(kl_server.app)
+
+    response = client.post("/requests", json={"date": "2026-07-24"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_user"]["name"] == "李华"
+    assert [entity["name"] for entity in payload["matched_entities"]] == [
+        "李华",
+        "小李",
+    ]
+    assert payload["count"] == 2
+    assert [item["id"] for item in payload["requests"]] == [
+        "canonical-hit",
+        "nickname-hit",
+    ]
+
+    response = client.post("/todos", json={"date": "2026-07-24"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert [item["id"] for item in payload["todos"]] == ["nickname-todo-hit"]
+    store.close()
+
+
 def test_requests_endpoint_requires_configured_current_user(monkeypatch) -> None:
     store = _memory_store()
     server_state = kl_server.ServerState()
@@ -269,6 +381,7 @@ def test_requests_endpoint_requires_configured_current_user(monkeypatch) -> None
     server_state.ready = True
     monkeypatch.setattr(kl_server, "state", server_state)
     monkeypatch.setattr(kl_server, "CURRENT_USER", "")
+    monkeypatch.setattr(kl_server, "CURRENT_USER_ALIASES", ("小李",))
 
     response = TestClient(kl_server.app).post(
         "/requests", json={"date": "2026-08-14"}

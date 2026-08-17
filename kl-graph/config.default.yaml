@@ -10,6 +10,8 @@ application:
   debug: ${oc.env:KL_DEBUG,0}
   # Display name used to identify the owner in chat direction and personal queries.
   current_user: ${oc.env:KL_CURRENT_USER,""}
+  # Exact Person names that refer to the same owner for personal queries.
+  current_user_aliases: ${oc.decode:${oc.env:KL_CURRENT_USER_ALIASES,"[]"}}
   # Runtime-data directory; an empty value resolves to <project>/data.
   data_dir: ${oc.env:KL_DATA_DIR,""}
   # Root directory containing the DingTalk DWS export to ingest.

@@ -125,6 +125,8 @@ Example `.env`:
 # --- data + export locations ---
 export KL_DATA_DIR=./data                      # knowledge/cache DBs + qdrant
 export KL_DWS_EXPORT_DIR=/path/to/dws_export   # offline scripts.ingest default only
+export KL_CURRENT_USER="your-name"             # canonical Person name for personal queries
+export KL_CURRENT_USER_ALIASES='["nickname","flower-name"]' # exact aliases in the graph
 
 # --- embedding endpoint (OpenAI-compatible, routed via litellm) ---
 export KL_EMBED_BASE_URL=https://your-embed-endpoint/v1
