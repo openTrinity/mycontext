@@ -152,4 +152,39 @@ describe("★★★ 界面必须把这件事说出来（反证：静默是最糟
     // ★★ 而且把出路说出来了（"重建"这个词必须出现 —— 只报告问题不给出路没用）
     expect(panel).toContain("narrowed.body")
   })
+
+  it("★★★ 那个出路必须是**能点的按钮**，不只是一句话", async () => {
+    /**
+     * ## 这一条是补一个漏（而漏的形状值得记住）
+     *
+     * 上一条只断言"`narrowed.body` 这个 key 出现了" —— 也就是**文案里
+     * 提到了重建**。而实际代码里那一块只有一个「知道了，暂不重建」按钮，
+     * 旁边的注释却写着"给出路而不是只报告问题"。**注释说了谎，
+     * 而门禁只检查了文案。**
+     *
+     * ★ 危害不是"少一个按钮"：文案写"**暂不**重建"本身就暗示了另一个选项
+     * 存在，于是用户会去找它 —— 而它在另一个模块（图谱面板）里。
+     * 一句"需要重建"配一个只能关掉的按钮，比不提这件事更让人无从下手。
+     *
+     * ★★ 判据落在**调用**上（`rebuild.mutate` + `fresh: true`），
+     * 不是落在按钮文案上：文案可以改、可以国际化，而"真的会触发重建"
+     * 是那个出路存在的唯一证据。
+     *
+     * ★★★ `fresh: true` 必须一起锁：增量建图只会往图里加，
+     * 被移出范围的会话留在图里的实体与事实**不会消失** ——
+     * 那恰恰是这条提示要解决的问题。传 false 等于按钮点了没用。
+     */
+    const { readFileSync } = await import("node:fs")
+    const panel = readFileSync(
+      "apps/desktop/src/renderer/features/shell/collection-scope-panel.tsx",
+      "utf8",
+    )
+    expect(panel).toContain("useKlGraphBuild")
+    expect(panel).toMatch(/rebuild\.mutate\(\{\s*fresh:\s*true/)
+    /**
+     * ★ 必须带渠道：不带的话在飞书那栏点重建会把**钉钉**的图删了重烧
+     * （那次事故记在 `useKlGraphBuild` 与 `onScopeChanged` 的注释里）。
+     */
+    expect(panel).toMatch(/rebuild\.mutate\(\{[^}]*channelId/)
+  })
 })

@@ -25,7 +25,7 @@
 import { useMemo, useState } from "react"
 import { Button, Disclosure } from "@mycontext/design"
 import type { CoverageDomain, DistillScopeInput, DistillSourceId } from "@mycontext/ipc-contract"
-import { useDistillSources, useSaveDistillSource } from "../../lib/queries.js"
+import { useDistillSources, useKlGraphBuild, useSaveDistillSource } from "../../lib/queries.js"
 import { useDynamicTranslation } from "../../lib/use-dynamic-translation.js"
 import { useErrorText } from "../../lib/use-error-text.js"
 import { SourcesStep, type SourcesDraft } from "../onboarding/sources-step.js"
@@ -195,6 +195,23 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
    * 事实是不够的 —— 而这正是本仓库反复出现的"用户没看见"那类问题。
    */
   const [narrowed, setNarrowed] = useState<readonly string[] | null>(null)
+  /**
+   * ★★★ 收窄告知里那个「现在重建」按钮真的要能点。
+   *
+   * 这一处原来只有「知道了，暂不重建」一个按钮，而旁边的注释写着
+   * "给出路而不是只报告问题" —— 那句话当时不成立：出路没接。
+   *
+   * 而这个缺口的形状很典型：文案（"暂不重建"）**暗示**了另一个选项存在，
+   * 用户读完会去找那个按钮，找不到就只能自己猜要去哪个面板 ——
+   * 而那个面板在另一个模块里（图谱）。
+   *
+   * ★ `fresh: true` 是必须的：增量建图只会往图里加，删掉的会话留在图里的
+   * 实体与事实**不会消失** —— 而那恰恰是这条提示要解决的问题。
+   *
+   * ★★ 带 `channelId`：不带的话在飞书那栏点重建会把钉钉的图删了重烧
+   * （那个事故 `useKlGraphBuild` 的注释里记着）。
+   */
+  const rebuild = useKlGraphBuild()
 
   /**
    * 首帧还没拿到 `sources` 时草稿是 null；拿到之后**只初始化一次**。
@@ -320,8 +337,19 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
        * 后者是下面那块「分身监听范围」，两者必须在同一屏里能被区分开，
        * 否则用户改了这里却期待分身行为变化（或反过来）。
        */
+      /**
+       * ★★★ 文案里**不许**写 `**加粗**`。
+       *
+       * `hint` 与 `t()` 的返回都是**纯字符串**，`Disclosure` 直接把它渲染成
+       * 文本子节点（`disclosure.tsx:84`）—— 没有任何 markdown 处理。
+       * 于是那两个星号会**原样显示给用户**：「它\*\*学\*\*哪些历史」。
+       *
+       * ★ 这个坑在这个仓库里特别容易踩：注释与设计文档都用 `**` 强调，
+       * 写文案时手会顺着写下去。要强调就靠**词序**（把关键词放最前）
+       * 或拆成两句，而不是靠标记。
+       */
       hint={t("status.scope.description", {
-        defaultValue: "它**学**哪些历史：采多久、采哪些会话。范围只增不减。",
+        defaultValue: "学哪些历史：采多久、采哪些会话。范围只增不减。",
       })}
     >
       <div className="flex flex-col gap-3">
@@ -340,8 +368,9 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
         {narrowed === null ? null : (
           <div className="flex flex-col gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border-divider-light)] bg-[var(--bg-card-z0)] p-3">
             <p className="typography-body-small-400 text-[var(--text-base-primary)]">
+              {/* ★ 不写 `**` —— 见上面 hint 那段：这里也是纯文本渲染 */}
               {t("status.scope.narrowed.title", {
-                defaultValue: "范围已收窄，但**已经学过的知识还在**",
+                defaultValue: "范围已收窄，但已经学过的知识还在",
               })}
             </p>
             <p className="typography-caption-400 text-[var(--text-base-secondary)]">
@@ -352,10 +381,24 @@ export function CollectionScopePanel({ channelId }: CollectionScopePanelProps) {
             </p>
             <div className="flex items-center gap-2">
               {/*
-                ★ 给出路而不是只报告问题：那个按钮本来就存在
-                （`rebuildGraph(fresh=true)` → `wipeGraphData()`），
-                但用户在这个语境下想不到去别的面板找它。
+                ★★★ 给出路，而不是只报告问题。
+
+                这两个按钮是一对：文案说"暂不重建"就意味着"现在重建"必须
+                在旁边。只放前者的话用户得自己猜要去哪个面板找它
+                （而它在另一个模块里）。
               */}
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={rebuild.isPending}
+                onClick={() => {
+                  // fresh = true：增量建图删不掉图里已有的实体与事实
+                  rebuild.mutate({ fresh: true, channelId: activeChannel })
+                  setNarrowed(null)
+                }}
+              >
+                {t("status.scope.narrowed.rebuild", { defaultValue: "现在重建图谱" })}
+              </Button>
               <Button size="sm" variant="ghost" onClick={() => setNarrowed(null)}>
                 {t("status.scope.narrowed.dismiss", { defaultValue: "知道了，暂不重建" })}
               </Button>

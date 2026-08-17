@@ -78,7 +78,7 @@ export function AttentionScopePanel({
       <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
         {t("status.attention.note", {
           defaultValue:
-            "它**盯**哪些会话的新消息 —— 只看实时流、不回溯历史。与上面的学习范围是两件事：这里可以随时关掉（不会删任何数据），因为它不保存历史。",
+            "盯哪些会话的新消息 —— 只看实时流、不回溯历史。与上面的学习范围是两件事：这里可以随时关掉（不会删任何数据），因为它不保存历史。",
         })}
       </p>
 
@@ -101,7 +101,8 @@ export function AttentionScopePanel({
               })
             : activeCount === 0
               ? t("status.attention.mode.none", {
-                  defaultValue: "当前：**都不盯** —— 分身不会处理任何新消息。",
+                  // ★ 不写 `**`：这里是纯文本渲染，星号会原样显示给用户
+                  defaultValue: "当前：都不盯 —— 分身不会处理任何新消息。",
                 })
               : t("status.attention.mode.explicit", {
                   defaultValue: "当前：只盯下面这 {{count}} 个会话。",
