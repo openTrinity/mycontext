@@ -3274,10 +3274,18 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
       units_processed?: number
       chunks_created?: number
     }
+    /**
+     * ★ kl /status 的计数块字段名是 `knowledge`（entities/facts/edges）。
+     * 历史上有过一个叫 `sqlite` 的字段名 —— 两个名字都收，缺哪个用哪个，
+     * 都缺才是 0。**从前只读 `sqlite` 导致 counts 恒 0**：`awaitIngest`
+     * 报 `facts === 0` → 建图明明成功却被判成"缓存被污染"（实测 829 实体
+     * / 955 事实 / 4623 边全建好，UI 却报失败并让人去点重建）。
+     */
+    knowledge?: { entities?: number; facts?: number; edges?: number }
     sqlite?: { entities?: number; facts?: number; edges?: number }
   }
   const ingest = body.ingest ?? {}
-  const sqlite = body.sqlite ?? {}
+  const counts = body.knowledge ?? body.sqlite ?? {}
   const state = ingest.state
   return {
     state:
@@ -3288,9 +3296,9 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
     percent: ingest.percent ?? 0,
     error: ingest.error ?? "",
     counts: {
-      entities: sqlite.entities ?? 0,
-      facts: sqlite.facts ?? 0,
-      edges: sqlite.edges ?? 0,
+      entities: counts.entities ?? 0,
+      facts: counts.facts ?? 0,
+      edges: counts.edges ?? 0,
     },
     /**
      * ★ 上游是 snake_case（`units_discovered`），这里转成我们的 camelCase。
