@@ -20,23 +20,28 @@ const require = createRequire(import.meta.url)
 // 报 EINVAL；win32 必须 shell:true。POSIX 的 bin 是脚本/软链，维持原样。
 const SPAWN_SHELL = process.platform === "win32"
 
-const binary = (name) =>
-  resolve(root, "node_modules/.bin", process.platform === "win32" ? `${name}.cmd` : name)
+const binary = (name) => {
+  const path = resolve(root, "node_modules/.bin", process.platform === "win32" ? `${name}.cmd` : name)
+  // win32 + shell:true：路径含空格时必须整体加引号，否则 cmd 会把它拆开
+  return process.platform === "win32" ? `"${path}"` : path
+}
 
-const canLoadBetterSqlite3 = () =>
-  spawnSync(
-    binary("electron"),
-    [
-      "-e",
-      "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close()",
-    ],
-    {
-      cwd: root,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      stdio: "ignore",
-      shell: SPAWN_SHELL,
-    },
-  ).status === 0
+const canLoadBetterSqlite3 = () => {
+  const probe = "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close()"
+  return (
+    spawnSync(
+      binary("electron"),
+      // win32 + shell:true：含空格的 -e 代码必须加引号，否则被 cmd 拆成多个参数
+      ["-e", process.platform === "win32" ? `"${probe}"` : probe],
+      {
+        cwd: root,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        stdio: "ignore",
+        shell: SPAWN_SHELL,
+      },
+    ).status === 0
+  )
+}
 
 // pnpm 不把依赖平铺到 node_modules/<name>，必须按解析路径找 package.json。
 const electronPkgPath = require.resolve("electron/package.json")
