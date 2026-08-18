@@ -1286,11 +1286,8 @@ export function bootstrapApp(mainDir: string): AppContext {
         // ★ embedding 走 OpenAI 兼容：base 要带恰好一个 /v1（litellm 直接 POST
         // {base}/embeddings；用户配好带 /v1 的 URL 时不能再拼，否则 /v1/v1 → 404）。
         // 默认派生自主 LLM 网关；个别网关（如 StepFun）无 embedding 端点时，
-        // 可用 MYCONTEXT_EMBED_BASE_URL 单独指一个 OpenAI 兼容 embedding 服务。
-        embedBaseUrl:
-          (process.env["MYCONTEXT_EMBED_BASE_URL"] ?? "").trim() !== ""
-            ? (process.env["MYCONTEXT_EMBED_BASE_URL"] ?? "").trim()
-            : openAiEmbedBaseUrl(base),
+        // 用 MYCONTEXT_EMBED_BASE_URL（kernel 配置字段，走 defaults 层）单独指定。
+        embedBaseUrl: r.embedBaseUrl !== "" ? r.embedBaseUrl : openAiEmbedBaseUrl(base),
         embedModel: r.embedModel,
         apiKey: key,
         // ★ 网关（DashScope 兼容）的 text-embedding-v4 默认返回 1024 维，而 kl 默认

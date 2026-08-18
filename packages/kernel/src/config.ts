@@ -96,6 +96,13 @@ const DEFINITIONS = {
   modelProvider: { env: "MYCONTEXT_MODEL_PROVIDER", default: "openai", sensitive: false },
   embedModel: { env: "MYCONTEXT_EMBED_MODEL", default: "text-embedding-v4", sensitive: false },
   /**
+   * 嵌入（embedding）网关，独立于主 LLM 网关。
+   *
+   * ★ 默认派生自主 LLM 网关；个别网关（如 StepFun）没有 embedding 端点时，
+   * 用它单独指向一个 OpenAI 兼容的嵌入服务。值应带恰好一个 /v1。
+   */
+  embedBaseUrl: { env: "MYCONTEXT_EMBED_BASE_URL", default: "", sensitive: false },
+  /**
    * KL（知识图谱）建索引专用的网关。留空则回退主配置（见 RuntimeConfigService）。
    *
    * ★ 单独一路的理由：换主模型时不该顺带把 kl 的抽取也换坏（历史上只有部分模型能在
@@ -134,6 +141,8 @@ export const appConfigSchema = z.object({
   modelMain: z.string().min(1),
   modelProvider: z.enum(["openai", "anthropic"]),
   embedModel: z.string().min(1),
+  // 嵌入网关：可空（空 = 派生自主 LLM 网关）。
+  embedBaseUrl: z.string(),
   klLlmBaseUrl: z.string(),
   klLlmApiKey: z.string(),
   // KL 三项都可留空（回退主配置），所以模型这项**不**加 min(1)。
