@@ -26,6 +26,27 @@ EMBEDDING_DIM = int(cfg.services.embedding.dim)
 logger = logging.getLogger(__name__)
 
 
+class EmbeddingConfigurationError(RuntimeError):
+    """An embedding request rejected by the configured gateway."""
+
+
+_EMBEDDING_CONFIGURATION_HINTS = {
+    400: (
+        "向量请求配置无效（400）：请检查向量模型名称、维度配置，以及网关是否"
+        "支持 /v1/embeddings 的请求参数"
+    ),
+    401: "向量接口认证失败（401）：请检查 API Key 及网关认证配置",
+    403: (
+        "向量接口无权限（403）：请确认当前 API Key 有权调用 "
+        "/v1/embeddings 和所选向量模型"
+    ),
+    404: (
+        "向量接口或模型不存在（404）：请确认网关支持 "
+        "/v1/embeddings，且所选向量模型存在"
+    ),
+}
+
+
 class Embedder:
     """Synchronous embedding client over an OpenAI-compatible endpoint.
 
@@ -101,6 +122,16 @@ class Embedder:
         self._track_usage(resp)
         return [d["embedding"] for d in resp.data]
 
+    @staticmethod
+    def _raise_if_configuration_error(exc: Exception) -> None:
+        """Translate deterministic gateway rejections into actionable errors."""
+        status = getattr(exc, "status_code", None)
+        configuration_hint = _EMBEDDING_CONFIGURATION_HINTS.get(status)
+        if configuration_hint is not None:
+            raise EmbeddingConfigurationError(
+                f"{configuration_hint}；原始错误：{exc}"
+            ) from exc
+
     def _embed_with_retry(self, kwargs: dict):
         """Call ``litellm.embedding`` with bounded exponential backoff.
 
@@ -117,6 +148,7 @@ class Embedder:
             try:
                 return litellm.embedding(**kwargs)
             except Exception as exc:
+                self._raise_if_configuration_error(exc)
                 if not self._is_transient(exc) or attempt >= self.max_retries:
                     raise
                 delay = self._retry_after(exc)
@@ -186,6 +218,7 @@ class Embedder:
                 resp = await litellm.aembedding(**kwargs)
                 break
             except Exception as exc:  # noqa: BLE001 - inspect + selectively retry
+                self._raise_if_configuration_error(exc)
                 if not self._is_transient(exc) or attempt >= self.max_retries:
                     raise
                 delay = self._retry_after(exc)

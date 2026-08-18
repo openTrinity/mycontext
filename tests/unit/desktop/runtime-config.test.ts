@@ -79,6 +79,10 @@ function fakeFetch(
   return { impl, urls }
 }
 
+function embeddingBody(dimension = 2048): { data: Array<{ embedding: number[] }> } {
+  return { data: [{ embedding: Array<number>(dimension).fill(0) }] }
+}
+
 describe("三层解析", () => {
   it("无覆盖时走 kernel 默认层", () => {
     const ctx = makeService()
@@ -272,10 +276,16 @@ describe("adopt 旧高级面板配置", () => {
  */
 describe("网关探测", () => {
   it("成功 → 返回排序后的模型列表", async () => {
-    const { impl, urls } = fakeFetch(() => ({
-      status: 200,
-      body: { data: [{ id: "qwen3.7-plus" }, { id: "glm-5.2" }, { id: "claude-opus-4-8" }] },
-    }))
+    const { impl, urls } = fakeFetch((url) =>
+      url.endsWith("/embeddings")
+        ? { status: 200, body: embeddingBody() }
+        : {
+            status: 200,
+            body: {
+              data: [{ id: "qwen3.7-plus" }, { id: "glm-5.2" }, { id: "claude-opus-4-8" }],
+            },
+          },
+    )
     const ctx = makeService(loadConfig(), {}, impl)
     ctx.service.save({ llmBaseUrl: "https://gw.example", llmApiKey: "sk-ok-1234" }, NOW)
     const result = await ctx.service.probe({})
@@ -283,15 +293,24 @@ describe("网关探测", () => {
     // 排序过：列表要稳定，否则每次探测 chips 顺序都在跳
     expect(result.models).toEqual(["claude-opus-4-8", "glm-5.2", "qwen3.7-plus"])
     expect(urls[0]).toBe("https://gw.example/v1/models")
+    expect(urls[1]).toBe("https://gw.example/v1/embeddings")
     ctx.close()
   })
 
   it("base 带不带 /v1 都规范化到同一个 URL（不让用户去记）", async () => {
-    const { impl, urls } = fakeFetch(() => ({ status: 200, body: { data: [] } }))
+    const { impl, urls } = fakeFetch((url) => ({
+      status: 200,
+      body: url.endsWith("/embeddings") ? embeddingBody() : { data: [] },
+    }))
     const ctx = makeService(loadConfig(), {}, impl)
     await ctx.service.probe({ baseUrl: "https://gw.example/v1/", apiKey: "sk-x" })
     await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
-    expect(urls).toEqual(["https://gw.example/v1/models", "https://gw.example/v1/models"])
+    expect(urls).toEqual([
+      "https://gw.example/v1/models",
+      "https://gw.example/v1/embeddings",
+      "https://gw.example/v1/models",
+      "https://gw.example/v1/embeddings",
+    ])
     ctx.close()
   })
 
@@ -342,9 +361,12 @@ describe("网关探测", () => {
   /** 「不改 key、只测地址」要能表达 —— apiKey 省略时回退已存的那把。 */
   it("省略 apiKey 时用已存的 key", async () => {
     let seenAuth = ""
-    const { impl } = fakeFetch((_url, init) => {
+    const { impl } = fakeFetch((url, init) => {
       seenAuth = String((init?.headers as Record<string, string> | undefined)?.["Authorization"])
-      return { status: 200, body: { data: [{ id: "glm-5.2" }] } }
+      return {
+        status: 200,
+        body: url.endsWith("/embeddings") ? embeddingBody() : { data: [{ id: "glm-5.2" }] },
+      }
     })
     const ctx = makeService(loadConfig(), {}, impl)
     ctx.service.save({ llmApiKey: "sk-stored-9999" }, NOW)
@@ -354,10 +376,14 @@ describe("网关探测", () => {
   })
 
   it("OpenAI 形状 → provider openai", async () => {
-    const { impl } = fakeFetch(() => ({
-      status: 200,
-      body: { data: [{ id: "glm-5.2", object: "model", owned_by: "system" }] },
-    }))
+    const { impl } = fakeFetch((url) =>
+      url.endsWith("/embeddings")
+        ? { status: 200, body: embeddingBody() }
+        : {
+            status: 200,
+            body: { data: [{ id: "glm-5.2", object: "model", owned_by: "system" }] },
+          },
+    )
     const ctx = makeService(loadConfig(), {}, impl)
     const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
     expect(result.ok).toBe(true)
@@ -375,21 +401,29 @@ describe("网关探测", () => {
    * 并给出每模型的支持集，而不是只按信封形状猜一个。
    */
   it("★★ supported_endpoint_types 决定支持集（两个协议都要亮）", async () => {
-    const { impl } = fakeFetch(() => ({
-      status: 200,
-      body: {
-        data: [
-          {
-            id: "claude-opus-4-8",
-            object: "model",
-            supported_endpoint_types: ["anthropic", "openai"],
+    const { impl } = fakeFetch((url) =>
+      url.endsWith("/embeddings")
+        ? { status: 200, body: embeddingBody() }
+        : {
+            status: 200,
+            body: {
+              data: [
+                {
+                  id: "claude-opus-4-8",
+                  object: "model",
+                  supported_endpoint_types: ["anthropic", "openai"],
+                },
+                { id: "qwen-plus", object: "model", supported_endpoint_types: ["openai"] },
+                // 网关还可能标别的口（gemini/图像）——只保留我们认的两种
+                {
+                  id: "gemini-x",
+                  object: "model",
+                  supported_endpoint_types: ["gemini", "openai"],
+                },
+              ],
+            },
           },
-          { id: "qwen-plus", object: "model", supported_endpoint_types: ["openai"] },
-          // 网关还可能标别的口（gemini/图像）——只保留我们认的两种
-          { id: "gemini-x", object: "model", supported_endpoint_types: ["gemini", "openai"] },
-        ],
-      },
-    }))
+    )
     const ctx = makeService(loadConfig(), {}, impl)
     const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
     expect(result.ok).toBe(true)
@@ -414,9 +448,10 @@ describe("网关探测", () => {
    */
   it("Anthropic 网关：Bearer 404 → 换 x-api-key 重试 → provider anthropic", async () => {
     const seenHeaders: Array<Record<string, string> | undefined> = []
-    const { impl, urls } = fakeFetch((_url, init) => {
+    const { impl, urls } = fakeFetch((url, init) => {
       const headers = init?.headers as Record<string, string> | undefined
       seenHeaders.push(headers)
+      if (url.endsWith("/embeddings")) return { status: 200, body: embeddingBody() }
       // 第 1 次（Bearer）：这个口不认 → 404；第 2 次（x-api-key）：200
       if (headers?.["Authorization"] !== undefined) return { status: 404, body: "not found" }
       return {
@@ -432,10 +467,118 @@ describe("网关探测", () => {
     expect(result.ok).toBe(true)
     expect(result.provider).toBe("anthropic")
     expect(result.models).toEqual(["claude-opus-4-6"])
-    // 两次请求：先 openai 口、后 anthropic 口
-    expect(urls.length).toBe(2)
+    // 先以两种头探测 models，再用 OpenAI 兼容口探测 embedding
+    expect(urls.length).toBe(3)
     expect(seenHeaders[1]?.["x-api-key"]).toBe("sk-a")
     expect(seenHeaders[1]?.["anthropic-version"]).toBe("2023-06-01")
+    expect(seenHeaders[2]?.["Authorization"]).toBe("Bearer sk-a")
+    ctx.close()
+  })
+
+  it("向量探测使用草稿模型与建图参数", async () => {
+    let embeddingInit: RequestInit | undefined
+    const { impl } = fakeFetch((url, init) => {
+      if (url.endsWith("/embeddings")) {
+        embeddingInit = init
+        return { status: 200, body: embeddingBody() }
+      }
+      return { status: 200, body: { data: [{ id: "embed-draft" }] } }
+    })
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({
+      baseUrl: "https://gw.example",
+      apiKey: "sk-x",
+      embedModel: "embed-draft",
+    })
+    expect(result.ok).toBe(true)
+    expect(embeddingInit?.method).toBe("POST")
+    expect(embeddingInit?.headers).toEqual({
+      Authorization: "Bearer sk-x",
+      "Content-Type": "application/json",
+    })
+    expect(JSON.parse(String(embeddingInit?.body))).toEqual({
+      model: "embed-draft",
+      input: ["probe"],
+      encoding_format: "float",
+      dimensions: 2048,
+    })
+    ctx.close()
+  })
+
+  it("省略向量模型时使用已解析的配置", async () => {
+    let requestedModel = ""
+    const { impl } = fakeFetch((url, init) => {
+      if (url.endsWith("/embeddings")) {
+        requestedModel = (JSON.parse(String(init?.body)) as { model: string }).model
+        return { status: 200, body: embeddingBody() }
+      }
+      return { status: 200, body: { data: [] } }
+    })
+    const ctx = makeService(loadConfig(), {}, impl)
+    ctx.service.save({ embedModel: "embed-stored" }, NOW)
+    await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
+    expect(requestedModel).toBe("embed-stored")
+    ctx.close()
+  })
+
+  it("向量接口不可用时保留已发现的模型与协议", async () => {
+    const { impl } = fakeFetch((url) =>
+      url.endsWith("/embeddings")
+        ? { status: 404, body: { error: { message: "model not found" } } }
+        : {
+            status: 200,
+            body: {
+              data: [
+                {
+                  id: "glm-5.2",
+                  supported_endpoint_types: ["anthropic", "openai"],
+                },
+              ],
+            },
+          },
+    )
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe("embeddingUnavailable")
+    expect(result.models).toEqual(["glm-5.2"])
+    expect(result.providers).toEqual(["anthropic", "openai"])
+    expect(result.modelProviders).toEqual({ "glm-5.2": ["anthropic", "openai"] })
+    expect(result.detail).toContain("model not found")
+    ctx.close()
+  })
+
+  it.each([401, 403] as const)("向量接口 %i → embeddingUnauthorized", async (status) => {
+    const { impl } = fakeFetch((url) => ({
+      status: url.endsWith("/embeddings") ? status : 200,
+      body: url.endsWith("/embeddings") ? { error: "forbidden" } : { data: [] },
+    }))
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
+    expect(result.reason).toBe("embeddingUnauthorized")
+    ctx.close()
+  })
+
+  it("向量响应形状不对 → embeddingBadResponse", async () => {
+    const { impl } = fakeFetch((url) => ({
+      status: 200,
+      body: url.endsWith("/embeddings") ? { data: [{ vector: [0] }] } : { data: [] },
+    }))
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
+    expect(result.reason).toBe("embeddingBadResponse")
+    ctx.close()
+  })
+
+  it("向量维度不是 2048 → embeddingDimensionMismatch", async () => {
+    const { impl } = fakeFetch((url) => ({
+      status: 200,
+      body: url.endsWith("/embeddings") ? embeddingBody(1024) : { data: [] },
+    }))
+    const ctx = makeService(loadConfig(), {}, impl)
+    const result = await ctx.service.probe({ baseUrl: "https://gw.example", apiKey: "sk-x" })
+    expect(result.reason).toBe("embeddingDimensionMismatch")
+    expect(result.detail).toBe("Expected 2048 dimensions, received 1024")
     ctx.close()
   })
 
