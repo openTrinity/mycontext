@@ -440,8 +440,13 @@
         "unauthorized": "密钥不对，换一把再试",
         "unreachable": "连不上这个地址，检查一下",
         "badResponse": "这个地址不是模型服务，检查一下",
-        "noKey": "先填 API Key"
+        "noKey": "先填 API Key",
+        "embeddingUnavailable": "向量接口或模型不可用——确认网关支持 /v1/embeddings，并检查向量模型名",
+        "embeddingUnauthorized": "向量模型无权限——换用有该模型权限的密钥",
+        "embeddingBadResponse": "向量返回格式不对——确认网关兼容 OpenAI embeddings 接口",
+        "embeddingDimensionMismatch": "向量维度不是 2048——换用支持 2048 维的模型"
       },
+      "noEmbeddingModels": "模型列表中没有向量模型候选，请填写网关实际支持的模型名",
       "modelNotListed": "网关不认识这个模型名 —— 从上面挑一个，否则蒸馏/建图会报 model_not_found"
     },
     "workLayer": {

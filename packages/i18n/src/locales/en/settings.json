@@ -440,8 +440,13 @@
         "unauthorized": "Key rejected — try another one",
         "unreachable": "Can't reach this endpoint — check it",
         "badResponse": "Not a model service — check the endpoint",
-        "noKey": "Enter an API key first"
+        "noKey": "Enter an API key first",
+        "embeddingUnavailable": "Embedding endpoint or model unavailable — verify /v1/embeddings and the embedding model name",
+        "embeddingUnauthorized": "Embedding model access denied — use a key with access to this model",
+        "embeddingBadResponse": "Invalid embedding response — verify the gateway's OpenAI-compatible embeddings output",
+        "embeddingDimensionMismatch": "Embedding dimension isn't 2048 — choose a model that supports 2048 dimensions"
       },
+      "noEmbeddingModels": "No embedding candidates appear in the model list. Enter a model supported by the gateway",
       "modelNotListed": "This model isn't in the gateway's list — pick one above, or extraction/graph tasks will fail with model_not_found"
     },
     "workLayer": {

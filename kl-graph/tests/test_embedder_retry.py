@@ -10,12 +10,15 @@ Run: ``.venv/bin/python -m pytest tests/test_embedder_retry.py -q``
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kl_graph.ingest.embedder import Embedder
+from kl_graph.ingest.embedder import Embedder, EmbeddingConfigurationError
 
 
 class _Exc(Exception):
@@ -136,3 +139,64 @@ def test_embed_with_retry_does_not_retry_hard_stop(monkeypatch) -> None:
     except _Exc:
         pass
     assert calls["n"] == 1  # no retries on a hard stop
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_hint"),
+    [
+        (400, "向量模型名称、维度配置"),
+        (401, "API Key 及网关认证配置"),
+        (403, "/v1/embeddings 和所选向量模型"),
+        (404, "网关支持 /v1/embeddings"),
+    ],
+)
+def test_deterministic_4xx_has_actionable_embedding_error(
+    monkeypatch, status_code: int, expected_hint: str
+) -> None:
+    import kl_graph.ingest.embedder as emod
+
+    calls = {"n": 0}
+    original_detail = f"provider rejected embedding request ({status_code})"
+
+    def reject(**kwargs):
+        calls["n"] += 1
+        raise _Exc(original_detail, status_code=status_code)
+
+    monkeypatch.setattr(emod.litellm, "embedding", reject)
+
+    embedder = Embedder.__new__(Embedder)
+    embedder.max_retries = 5
+    with pytest.raises(EmbeddingConfigurationError) as caught:
+        embedder._embed_with_retry({"model": "x", "input": ["t"]})
+
+    assert expected_hint in str(caught.value)
+    assert original_detail in str(caught.value)
+    assert isinstance(caught.value.__cause__, _Exc)
+    assert calls["n"] == 1
+
+
+def test_async_embedding_uses_the_same_configuration_error(monkeypatch) -> None:
+    import kl_graph.ingest.embedder as emod
+
+    calls = {"n": 0}
+
+    async def reject(**kwargs):
+        calls["n"] += 1
+        raise _Exc("async embedding model not found", status_code=404)
+
+    monkeypatch.setattr(emod.litellm, "aembedding", reject)
+
+    embedder = Embedder.__new__(Embedder)
+    embedder.model = "openai/x"
+    embedder.base_url = "https://gateway.example/v1"
+    embedder.api_key = "test-key"
+    embedder.timeout = 1.0
+    embedder.dimensions = 2048
+    embedder.max_retries = 5
+
+    with pytest.raises(EmbeddingConfigurationError) as caught:
+        asyncio.run(embedder._aembed(["t"]))
+
+    assert "向量接口或模型不存在（404）" in str(caught.value)
+    assert isinstance(caught.value.__cause__, _Exc)
+    assert calls["n"] == 1

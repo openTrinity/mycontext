@@ -4097,8 +4097,8 @@ export type RuntimeConfigApply = z.infer<typeof runtimeConfigApplySchema>
  * （日志里一行，界面上什么都没有）。一次探测把「几小时后静默失败」
  * 变成「现在当场告诉你」。
  *
- * 而同一次请求顺带解决第二件事：`/v1/models` 的返回**就是**可选模型列表，
- * 于是模型名可以从"猜着填的输入框"变成"从列表里挑"。
+ * `/v1/models` 提供可选模型列表；列表解析成功后，再以建图实际参数
+ * 请求 `/v1/embeddings`，避免把「主模型可读」误判为「整套建图配置可用」。
  *
  * 探测用**草稿值**（用户正在输入还没保存的），不是已存的配置 ——
  * 否则「先存错的再测」这个顺序就没法用了。
@@ -4108,11 +4108,14 @@ export const probeRuntimeConfigInputSchema = z.object({
   baseUrl: z.string().max(2000).optional(),
   /** 留空则用已存的 key（UI 不回显，所以"不改 key 只测连通"要能表达） */
   apiKey: z.string().max(500).optional(),
+  /** 留空则用当前已解析的向量模型 */
+  embedModel: z.string().max(200).optional(),
 })
 
 export type ProbeRuntimeConfigInput = z.infer<typeof probeRuntimeConfigInputSchema>
 
 export const runtimeConfigProbeSchema = z.object({
+  /** models 与 embedding 两步都通过时为 true */
   ok: z.boolean(),
   /**
    * 失败原因分类。UI 据此给可照做的下一步，而不是抛一段英文报文：
@@ -4120,17 +4123,34 @@ export const runtimeConfigProbeSchema = z.object({
    * · `unreachable` —— 地址连不上（DNS/超时/拒连）
    * · `badResponse` —— 连上了但不是 OpenAI 兼容的 /v1/models（多半 URL 填到了别处）
    * · `noKey` —— 还没填 key
+   * · `embeddingUnavailable` —— 向量接口或模型不可用
+   * · `embeddingUnauthorized` —— 向量接口拒绝当前 key
+   * · `embeddingBadResponse` —— 向量接口响应不符合 OpenAI 格式
+   * · `embeddingDimensionMismatch` —— 返回向量不是建图所需的 2048 维
    */
-  reason: z.enum(["unauthorized", "unreachable", "badResponse", "noKey"]).nullable(),
+  reason: z
+    .enum([
+      "unauthorized",
+      "unreachable",
+      "badResponse",
+      "noKey",
+      "embeddingUnavailable",
+      "embeddingUnauthorized",
+      "embeddingBadResponse",
+      "embeddingDimensionMismatch",
+    ])
+    .nullable(),
   /**
-   * **推荐/主**协议（成功时非 null）。UI 据此把协议 chip 自动选好。
+   * **推荐/主**协议（models 解析成功时非 null）。UI 据此把协议 chip 自动选好。
+   * 后续 embedding 失败时仍保留。
    *
    * ★ 这是"建议默认选哪个"，**不是**"只支持这一个" —— 具体支持哪些看 `providers`。
    * 取值优先 anthropic（若网关支持）：claude 类模型走原生 Anthropic 协议信息更全。
    */
   provider: modelProviderSchema.nullable(),
   /**
-   * 网关**实际支持**的协议集合（成功时非空）。
+   * 网关**实际支持**的协议集合（models 解析成功时非空）。
+   * 后续 embedding 失败时仍保留。
    *
    * ★ 这条修的是"明明两种协议都支持却被报成 openai 单一"那个 bug：许多网关的
    * `/v1/models` 会给每个模型标 `supported_endpoint_types`（如
@@ -4149,7 +4169,7 @@ export const runtimeConfigProbeSchema = z.object({
   modelProviders: z.record(z.string(), z.array(modelProviderSchema)),
   /** 网关原文（截断）。放在折叠区里给会看的人，不直接怼到界面上 */
   detail: z.string().nullable(),
-  /** 探到的模型 id 列表（成功时非空）。UI 用它做模型选择器 */
+  /** 探到的模型 id 列表。后续 embedding 失败时仍保留 */
   models: z.array(z.string()),
 })
 

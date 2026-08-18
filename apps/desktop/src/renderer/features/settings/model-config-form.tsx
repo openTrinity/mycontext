@@ -7,21 +7,22 @@
  * 会在某天分叉：一处加了 KL 折叠区、另一处没有，而用户在两处看到的
  * 「同一个设置」长得不一样。共用组件从源头上避免这件事。
  *
- * ## ★★ 核心：一次「测试连接」同时解决三件事
+ * ## ★★ 核心：一次「测试连接」同时验证生成与向量配置
  *
  * 首版这里是三个裸输入框 + 五六行说明小字，而它有一个**不说明就看不见**
  * 的问题：填错了不会当场报错 —— 模型名写错在几小时后的蒸馏/建图里表现为
  * `model_not_found`，密钥写错表现为 401，两者在界面上都**完全无声**。
  * 那正是本项目最怕的失效形态。
  *
- * `GET /v1/models` 一次请求同时给出：
- * ① 地址通不通、② 密钥对不对、③ **有哪些模型可选**。
+ * `GET /v1/models` 给出地址、密钥与可选模型；随后用当前向量模型
+ * 请求 `POST /v1/embeddings`，按建图真实参数验证接口、权限、响应格式和 2048 维。
  * 于是：
  * · 「配置正确吗」从"等几小时看有没有结论"变成"现在就有绿灯"；
  * · 模型名从**猜着填的输入框**变成**从列表里挑**（对齐本项目已有的
  *   `PersonaRuntimePanel` —— 那里的注释写着"给档位就是给建议"）。
  *
- * 探测前有内置推荐档位兜底，所以"还没测"时也不是空白。
+ * 探测前显示内置推荐档位。一旦拿到网关列表，主模型改用真实列表；
+ * 没有向量候选时进入手动输入，不再重新显示推荐向量模型。
  *
  * ## 用交互承载信息，而不是堆说明文字
  *
@@ -72,7 +73,7 @@ export interface ModelConfigFormProps {
  * "给档位就是给建议"）。这几个是本机网关实测能用的：`glm-5.2` 是默认
  * （openai + anthropic 双协议都支持，主 LLM 与知识库抽取可以共用一个）。
  *
- * 探测成功后**用真实列表替换**它 —— 兜底值的作用只是"别让第一眼是空的"。
+ * 拿到非空网关列表后**用真实列表替换**它；网关列表为空时仍显示建议。
  */
 const SUGGESTED_MODELS = ["glm-5.2", "claude-sonnet-4-6", "qwen3.7-plus"] as const
 const SUGGESTED_EMBED = ["text-embedding-v4"] as const
@@ -97,17 +98,20 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const [klProvider, setKlProvider] = useState<ModelProvider | null>(null)
   /** 模型名手输模式（探测列表里没有想要的那个时） */
   const [customModel, setCustomModel] = useState(false)
+  const [customEmbedModel, setCustomEmbedModel] = useState(false)
   /**
-   * 探测是**针对哪组凭据**跑的。
+   * 探测是**针对哪组输入**跑的。
    *
-   * ★ 防假反馈：探测成功给了绿灯后，用户又改了地址/密钥 —— 那条绿灯就
+   * ★ 防假反馈：探测成功给了绿灯后，用户又改了地址/密钥/向量模型 —— 那条绿灯就
    * **不再代表当前输入**了（它测的是改之前那组）。而 `probe.data` 会一直留着。
-   * 记下"探测时用的地址 + 有没有带 key"，当前草稿与之不一致时就不显示旧结果。
+   * 记下探测时的地址、key 状态和向量模型，当前草稿与之不一致时就不显示旧结果。
    * 这与本组件反对的"保存按钮假反馈"是同一条原则：结论必须对应当前状态。
    */
-  const [probedAgainst, setProbedAgainst] = useState<{ baseUrl: string; withKey: boolean } | null>(
-    null,
-  )
+  const [probedAgainst, setProbedAgainst] = useState<{
+    baseUrl: string
+    withKey: boolean
+    embedModel: string
+  } | null>(null)
 
   const current: RuntimeConfigView | undefined = config.data
   if (current === undefined) return null
@@ -164,34 +168,38 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
 
   /** 探测用**草稿值**：先测通再存才是自然顺序。 */
   const runProbe = (): void => {
-    setProbedAgainst({ baseUrl: baseUrlValue, withKey: apiKey !== "" })
+    setProbedAgainst({ baseUrl: baseUrlValue, withKey: apiKey !== "", embedModel: embedValue })
     probe.mutate({
       ...(baseUrlValue.trim() === "" ? {} : { baseUrl: baseUrlValue }),
       ...(apiKey === "" ? {} : { apiKey }),
+      embedModel: embedValue,
     })
   }
 
   /**
    * 探测结果是否**仍对应当前输入**。
    *
-   * 探完之后改了地址、或加/去了 key，旧结果就过期了 —— 这时不展示它，
-   * 也不拿它的模型列表去覆盖推荐档位（否则会拿"上一次网关"的列表给"这一次地址"挑）。
+   * 探完之后改了地址、key 状态或向量模型，旧结果就过期了 —— 这时不展示它，
+   * 也不拿它的模型列表去覆盖推荐档位。
    */
   const probeFresh =
     probedAgainst !== null &&
     probedAgainst.baseUrl === baseUrlValue &&
-    probedAgainst.withKey === (apiKey !== "")
+    probedAgainst.withKey === (apiKey !== "") &&
+    probedAgainst.embedModel === embedValue
 
   const result: RuntimeConfigProbe | undefined = probeFresh ? probe.data : undefined
+  /** `/v1/models` 已成功解析的结果；embedding 后续失败时仍然有值。 */
+  const discovery = result !== undefined && result.provider !== null ? result : undefined
   /** 探到的列表优先；没探过用推荐档位。 */
   const modelOptions =
-    result?.ok === true && result.models.length > 0
-      ? result.models
+    discovery !== undefined && discovery.models.length > 0
+      ? discovery.models
       : (SUGGESTED_MODELS as readonly string[])
   const embedOptions =
-    result?.ok === true && result.models.length > 0
-      ? result.models.filter((id) => /embed/i.test(id))
-      : (SUGGESTED_EMBED as readonly string[])
+    discovery === undefined
+      ? (SUGGESTED_EMBED as readonly string[])
+      : discovery.models.filter((id) => /embed/i.test(id))
 
   /**
    * 某个**具体模型**支持哪些协议（读探测到的 `modelProviders`）。
@@ -201,10 +209,10 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
    * anthropic chip 能标灰，而不是拿网关整体的支持集去糊每个模型。
    */
   const providersForModel = (model: string): readonly ModelProvider[] => {
-    const per = result?.ok === true ? result.modelProviders[model] : undefined
+    const per = discovery?.modelProviders[model]
     if (per !== undefined && per.length > 0) return per
-    return result?.ok === true && result.providers.length > 0
-      ? result.providers
+    return discovery !== undefined && discovery.providers.length > 0
+      ? discovery.providers
       : (["openai", "anthropic"] as const)
   }
 
@@ -226,7 +234,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const klModelValue = klModel ?? current.klModelMain.value
   const effectiveKlProvider: ModelProvider =
     klProvider ??
-    (result?.ok === true && klModelValue.trim() !== ""
+    (discovery !== undefined && klModelValue.trim() !== ""
       ? preferredProviderFor(klModelValue)
       : null) ??
     current.klEffective.provider
@@ -236,7 +244,9 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
    */
   const effectiveMainProvider: ModelProvider =
     mainProvider ??
-    (result?.ok === true && modelValue.trim() !== "" ? preferredProviderFor(modelValue) : null) ??
+    (discovery !== undefined && modelValue.trim() !== ""
+      ? preferredProviderFor(modelValue)
+      : null) ??
     current.mainProvider.value
 
   /**
@@ -244,7 +254,9 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
    * 协议信息）时两个都摆出来 —— 让用户仍能手选，只是没有"这个网关支持哪些"的确证。
    */
   const supportedProviders: readonly ModelProvider[] =
-    result?.ok === true && result.providers.length > 0 ? result.providers : ["openai", "anthropic"]
+    discovery !== undefined && discovery.providers.length > 0
+      ? discovery.providers
+      : ["openai", "anthropic"]
 
   return (
     <div className="flex flex-col gap-[var(--gap-section-lg)]">
@@ -297,16 +309,16 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
             <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
               {t("model.provider.modelMain")}
             </span>
-            {result?.ok === true && result.models.length > 0 && (
+            {discovery !== undefined && discovery.models.length > 0 && (
               <Tag size="sm" status="accent">
-                {t("model.probe.fromGateway", { count: result.models.length })}
+                {t("model.probe.fromGateway", { count: discovery.models.length })}
               </Tag>
             )}
             {/* 探测识别到的网关**支持的协议集** —— 让用户看见这网关到底支持哪些 */}
-            {result?.ok === true && result.providers.length > 0 && (
+            {discovery !== undefined && discovery.providers.length > 0 && (
               <Tag size="sm" status="default">
                 {t("model.probe.detectedProtocol", {
-                  provider: result.providers.map((p) => t(`model.provider.${p}`)).join(" / "),
+                  provider: discovery.providers.map((p) => t(`model.provider.${p}`)).join(" / "),
                 })}
               </Tag>
             )}
@@ -338,12 +350,12 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
             这正是本组件要防的那个静默失效：模型名对不上，几小时后的蒸馏/建图
             才以 `model_not_found` 报错，界面当下无声。既然刚探到了真实列表，
             就能当场指出"这个名字网关不认识"，把无声变成可见。
-            只在 result.ok（真拿到列表）时判 —— 没探过不知道网关有什么，不妄断。
+            只在真拿到列表时判 —— 没探过不知道网关有什么，不妄断。
           */}
-          {result?.ok === true &&
-            result.models.length > 0 &&
+          {discovery !== undefined &&
+            discovery.models.length > 0 &&
             modelValue.trim() !== "" &&
-            !result.models.includes(modelValue) && (
+            !discovery.models.includes(modelValue) && (
               <span className="typography-caption-400 text-[var(--status-warning)]">
                 {t("model.probe.modelNotListed")}
               </span>
@@ -373,12 +385,29 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
             {t("model.provider.embedModel")}
           </span>
           <ChipPicker
-            options={
-              embedOptions.length > 0 ? embedOptions : (SUGGESTED_EMBED as readonly string[])
-            }
+            options={embedOptions}
             value={embedValue}
-            onPick={(next) => setEmbedModel(next)}
+            onPick={(next) => {
+              setEmbedModel(next)
+              setCustomEmbedModel(false)
+            }}
+            otherLabel={t("model.other")}
+            custom={customEmbedModel || !embedOptions.includes(embedValue)}
+            onCustom={() => setCustomEmbedModel(true)}
           />
+          {(customEmbedModel || !embedOptions.includes(embedValue)) && (
+            <Input
+              aria-label={t("model.provider.embedModel")}
+              value={embedValue}
+              onChange={(event) => setEmbedModel(event.target.value)}
+              placeholder="text-embedding-v4"
+            />
+          )}
+          {discovery !== undefined && embedOptions.length === 0 && (
+            <span className="typography-caption-400 text-[var(--status-warning)]">
+              {t("model.probe.noEmbeddingModels")}
+            </span>
+          )}
         </div>
       </section>
 

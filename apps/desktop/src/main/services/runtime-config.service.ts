@@ -101,6 +101,19 @@ const LEGACY_ADVANCED_API_KEY_SECRET = "advanced_ai_api_key"
 
 type FieldSource = RuntimeConfigView["llmBaseUrl"]["source"]
 
+interface DiscoveredModels {
+  provider: ModelProvider
+  providers: ModelProvider[]
+  modelProviders: Record<string, ModelProvider[]>
+  models: string[]
+}
+
+type EmbeddingProbeFailureReason =
+  | "embeddingUnavailable"
+  | "embeddingUnauthorized"
+  | "embeddingBadResponse"
+  | "embeddingDimensionMismatch"
+
 export class RuntimeConfigService {
   private readonly listeners = new Set<(resolved: ResolvedRuntimeConfig) => void>()
 
@@ -265,27 +278,7 @@ export class RuntimeConfigService {
   }
 
   /**
-   * 探测网关：`GET {base}/v1/models`。
-   *
-   * ## ★ 为什么要有这个动作
-   *
-   * 模型名/密钥填错**不会当场报错** —— 它在几小时后的蒸馏或建图里表现为
-   * `model_not_found` / 401，而那些错是静默的（日志一行，界面无声）。
-   * 这正是本项目最怕的失效形态。一次探测把它变成「现在当场告诉你」。
-   *
-   * 同一次请求顺带给出**可选模型列表** —— 于是模型名可以从"猜着填"
-   * 变成"从列表里挑"。
-   *
-   * ## 用草稿值而不是已存配置
-   *
-   * 用户是在"还没保存"的状态下点测试的（先测通再存才是自然顺序）。
-   * `apiKey` 省略时回退到已存的那把 —— 「不改 key、只测地址」要能表达。
-   *
-   * 失败一律**归类**（见 contract 的 reason 枚举）而不是把原文怼给用户：
-   * 401 与 DNS 失败要给出的下一步动作完全不同。
-   */
-  /**
-   * 探测网关并**识别协议**：先试 OpenAI 兼容口，传输不对再试 Anthropic 口。
+   * 探测网关、**识别协议**并验证 embedding。
    *
    * ## ★ 为什么要有这个动作
    *
@@ -296,6 +289,8 @@ export class RuntimeConfigService {
    * 同一次请求顺带给出**可选模型列表** + **识别到的协议** —— 于是模型名可以从
    * "猜着填"变成"从列表里挑"，协议也不用用户去猜（同事踩过的坑：给了
    * OpenAI 兼容 URL 却被当 Anthropic 发 → 404）。
+   * models 解析成功后，用建图的真实参数请求 `/v1/embeddings`，验证 Phase A
+   * 实际依赖的向量模型与 2048 维输出。
    *
    * ## 为什么先 openai 后 anthropic
    *
@@ -308,18 +303,21 @@ export class RuntimeConfigService {
    * ## 用草稿值而不是已存配置
    *
    * 用户是在"还没保存"的状态下点测试的（先测通再存才是自然顺序）。
-   * `apiKey` 省略时回退到已存的那把 —— 「不改 key、只测地址」要能表达。
+   * `apiKey` 或 `embedModel` 省略时使用当前已解析的值。
    *
    * 失败一律**归类**（见 contract 的 reason 枚举）而不是把原文怼给用户：
-   * 401 与 DNS 失败要给出的下一步动作完全不同。
+   * models 阶段失败返回空列表；embedding 阶段失败保留已发现的模型与协议。
    */
   async probe(input: {
     baseUrl?: string | undefined
     apiKey?: string | undefined
+    embedModel?: string | undefined
   }): Promise<RuntimeConfigProbe> {
     const resolved = this.resolved()
     const base = (input.baseUrl ?? "").trim() !== "" ? input.baseUrl!.trim() : resolved.llmBaseUrl
     const key = (input.apiKey ?? "").trim() !== "" ? input.apiKey!.trim() : resolved.llmApiKey
+    const embedModel =
+      (input.embedModel ?? "").trim() !== "" ? input.embedModel!.trim() : resolved.embedModel
 
     if (base.trim() === "") {
       return this.probeFail("unreachable", null)
@@ -330,11 +328,11 @@ export class RuntimeConfigService {
 
     // base 可能带或不带 /v1（两种都有人填）—— 规范化，不让用户去记。
     const root = base.replace(/\/+$/, "").replace(/\/v1$/, "")
-    const url = `${root}/v1/models`
+    const modelsUrl = `${root}/v1/models`
 
     try {
       // ── 第 1 试：OpenAI 兼容口 ──
-      const openai = await this.fetchImpl(url, {
+      const openai = await this.fetchImpl(modelsUrl, {
         headers: { Authorization: `Bearer ${key}` },
         // 8 秒：探测是用户**在等**的动作，不能像后台请求那样给 90 秒
         signal: AbortSignal.timeout(8_000),
@@ -343,12 +341,7 @@ export class RuntimeConfigService {
       if (openai.ok) {
         const parsed = await this.parseModels(openai, "openai")
         if (parsed !== null) {
-          this.options.logger.info("gateway probe ok", {
-            providers: parsed.providers,
-            provider: parsed.provider,
-            models: parsed.models.length,
-          })
-          return { ok: true, reason: null, ...parsed, detail: null }
+          return this.probeEmbedding(root, key, embedModel, parsed)
         }
         // 200 但形状不对：多半 URL 填到了控制台首页（返回 HTML）。
         return this.probeFail("badResponse", null)
@@ -365,7 +358,7 @@ export class RuntimeConfigService {
       }
 
       // ── 第 2 试：Anthropic 口（仅在 OpenAI 口报「传输不对」信号时）──
-      const anthropic = await this.fetchImpl(url, {
+      const anthropic = await this.fetchImpl(modelsUrl, {
         headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
         signal: AbortSignal.timeout(8_000),
       })
@@ -373,12 +366,7 @@ export class RuntimeConfigService {
       if (anthropic.ok) {
         const parsed = await this.parseModels(anthropic, "anthropic")
         if (parsed !== null) {
-          this.options.logger.info("gateway probe ok", {
-            providers: parsed.providers,
-            provider: parsed.provider,
-            models: parsed.models.length,
-          })
-          return { ok: true, reason: null, ...parsed, detail: null }
+          return this.probeEmbedding(root, key, embedModel, parsed)
         }
         return this.probeFail("badResponse", null)
       }
@@ -399,6 +387,104 @@ export class RuntimeConfigService {
       this.options.logger.info("gateway probe unreachable", { detail })
       return this.probeFail("unreachable", detail)
     }
+  }
+
+  /** 用建图的真实参数验证 OpenAI 兼容向量接口。 */
+  private async probeEmbedding(
+    root: string,
+    key: string,
+    embedModel: string,
+    discovered: DiscoveredModels,
+  ): Promise<RuntimeConfigProbe> {
+    const url = `${root}/v1/embeddings`
+
+    let response: Response
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: embedModel,
+          input: ["probe"],
+          encoding_format: "float",
+          dimensions: 2048,
+        }),
+        signal: AbortSignal.timeout(8_000),
+      })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message.slice(0, 300) : null
+      this.options.logger.info("embedding probe failed", {
+        reason: "embeddingUnavailable",
+        detail,
+      })
+      return this.embeddingProbeFail("embeddingUnavailable", detail, discovered)
+    }
+
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => "")).slice(0, 300)
+      const reason =
+        response.status === 401 || response.status === 403
+          ? "embeddingUnauthorized"
+          : "embeddingUnavailable"
+      this.options.logger.info("embedding probe failed", { status: response.status, reason })
+      return this.embeddingProbeFail(reason, detail === "" ? null : detail, discovered)
+    }
+
+    const dimension = await this.parseEmbeddingDimension(response)
+    if (dimension === null) {
+      this.options.logger.info("embedding probe failed", { reason: "embeddingBadResponse" })
+      return this.embeddingProbeFail("embeddingBadResponse", null, discovered)
+    }
+    if (dimension !== 2048) {
+      this.options.logger.info("embedding probe failed", {
+        reason: "embeddingDimensionMismatch",
+        expectedDimension: 2048,
+        actualDimension: dimension,
+      })
+      return this.embeddingProbeFail(
+        "embeddingDimensionMismatch",
+        `Expected 2048 dimensions, received ${dimension}`,
+        discovered,
+      )
+    }
+
+    this.options.logger.info("gateway probe ok", {
+      providers: discovered.providers,
+      provider: discovered.provider,
+      models: discovered.models.length,
+      embedModel,
+      embeddingDimension: dimension,
+    })
+    return { ok: true, reason: null, ...discovered, detail: null }
+  }
+
+  /** 读取 OpenAI embedding 响应中第一条有限数值向量的维度。 */
+  private async parseEmbeddingDimension(response: Response): Promise<number | null> {
+    const body = (await response.json().catch(() => null)) as unknown
+    if (typeof body !== "object" || body === null) return null
+
+    const data = (body as { data?: unknown }).data
+    if (!Array.isArray(data) || data.length === 0) return null
+    const first = data[0]
+    if (typeof first !== "object" || first === null) return null
+
+    const embedding = (first as { embedding?: unknown }).embedding
+    if (!Array.isArray(embedding)) return null
+    if (!embedding.every((value) => typeof value === "number" && Number.isFinite(value)))
+      return null
+    return embedding.length
+  }
+
+  /** embedding 探测失败仍保留已解析的模型与协议信息。 */
+  private embeddingProbeFail(
+    reason: EmbeddingProbeFailureReason,
+    detail: string | null,
+    discovered: DiscoveredModels,
+  ): RuntimeConfigProbe {
+    return { ok: false, reason, ...discovered, detail }
   }
 
   /** 探测失败的统一形状（各字段空着）。 */
@@ -439,12 +525,7 @@ export class RuntimeConfigService {
   private async parseModels(
     response: Response,
     viaHeader: ModelProvider,
-  ): Promise<{
-    provider: ModelProvider
-    providers: ModelProvider[]
-    modelProviders: Record<string, ModelProvider[]>
-    models: string[]
-  } | null> {
+  ): Promise<DiscoveredModels | null> {
     const body = (await response.json().catch(() => null)) as { data?: unknown } | null
     if (body === null || !Array.isArray(body.data)) return null
 
