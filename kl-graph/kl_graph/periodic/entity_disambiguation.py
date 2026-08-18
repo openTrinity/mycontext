@@ -596,6 +596,8 @@ async def _judge_batch(
                 temperature=0.1,
                 max_tokens=1024,
                 timeout=60.0,
+                # ★ StepFun 推理模型：低思考档，避免小预算被思考烧空导致 content 为空。
+                extra_body={"reasoning_effort": "low"},
             )
         content = resp.choices[0].message.content
 

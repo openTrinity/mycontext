@@ -805,6 +805,8 @@ async def summarize_entity_descriptions(
                 temperature=0.1,
                 max_tokens=1024,
                 timeout=LLM_TIMEOUT,
+                # ★ StepFun 推理模型：低思考档，避免小预算被思考烧空导致 content 为空。
+                extra_body={"reasoning_effort": "low"},
             ),
             timeout=LLM_TIMEOUT + _WAIT_FOR_GRACE,
         )
@@ -1304,6 +1306,11 @@ class LLMExtractor:
                     temperature=0.1,
                     max_tokens=8192,
                     timeout=240,  # per-request timeout (seconds)
+                    # ★ StepFun 推理模型：官方把信息抽取列为 low 档场景。high/默认档
+                    # 的思考会把 max_tokens 烧在 reasoning_content 上 → content 空 +
+                    # finish_reason=length（实测大 chunk 在 8192 下截断）。low 档内容
+                    # 质量实测无损（少边缘信息）、token -46%、耗时减半。
+                    extra_body={"reasoning_effort": "low"},
                     # Retrying is owned by this extractor so failed slots and
                     # attempt counts remain visible to ingestion status.
                     num_retries=0,
@@ -1476,6 +1483,8 @@ class LLMExtractor:
                     temperature=0.1,
                     max_tokens=16384,
                     timeout=LLM_BATCH_TIMEOUT,  # per-request timeout (seconds)
+                    # ★ StepFun 推理模型：官方把信息抽取列为 low 档场景（同单条抽取）。
+                    extra_body={"reasoning_effort": "low"},
                     # Avoid nested/opaque SDK retries; _process_batch retries
                     # only the slots that failed this attempt.
                     num_retries=0,
