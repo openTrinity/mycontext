@@ -16,6 +16,10 @@ import { dirname, join, resolve } from "node:path"
 const root = resolve(import.meta.dirname, "..")
 const require = createRequire(import.meta.url)
 
+// Node ≥20.12.2 在 Windows 上禁止无 shell 直接 spawn .cmd/.bat（CVE-2024-27980），
+// 报 EINVAL；win32 必须 shell:true。POSIX 的 bin 是脚本/软链，维持原样。
+const SPAWN_SHELL = process.platform === "win32"
+
 const binary = (name) =>
   resolve(root, "node_modules/.bin", process.platform === "win32" ? `${name}.cmd` : name)
 
@@ -30,6 +34,7 @@ const canLoadBetterSqlite3 = () =>
       cwd: root,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: "ignore",
+      shell: SPAWN_SHELL,
     },
   ).status === 0
 
@@ -44,7 +49,11 @@ const electronVersion = JSON.parse(readFileSync(electronPkgPath, "utf8")).versio
 // 一次重建 node_modules 就会清掉 dist/ 而 stamp 仍在。
 if (!existsSync(join(dirname(electronPkgPath), "path.txt"))) {
   console.log(`下载 Electron ${electronVersion} 二进制…`)
-  const download = spawnSync(binary("install-electron"), { cwd: root, stdio: "inherit" })
+  const download = spawnSync(binary("install-electron"), {
+    cwd: root,
+    stdio: "inherit",
+    shell: SPAWN_SHELL,
+  })
   if (download.error) throw download.error
   if (download.status !== 0) process.exit(download.status ?? 1)
 }
@@ -70,6 +79,7 @@ const result = spawnSync(
     cwd: root,
     env: { ...process.env, HOME: electronHome, USERPROFILE: electronHome },
     stdio: "inherit",
+    shell: SPAWN_SHELL,
   },
 )
 if (result.error) throw result.error
