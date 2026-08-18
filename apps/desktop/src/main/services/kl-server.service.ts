@@ -346,8 +346,16 @@ export interface KlGatewayConfig {
   llmProvider?: "openai" | "anthropic"
   embedBaseUrl?: string
   embedModel?: string
-  /** 出网密钥（embedding + LLM 共用网关时同一个）。 */
+  /**
+   * 出网密钥（embedding + LLM 共用网关时同一个）。
+   *
+   * ★ embedding 网关（embedBaseUrl）独立时，embedding 的 key 必须用
+   * `embedApiKey`（否则 embedding 请求会带着 LLM 网关的 key 打到
+   * embedding 网关 → 401 Token is invalid）。空 = 共用 apiKey（原行为）。
+   */
   apiKey?: string
+  /** 独立 embedding 网关（embedBaseUrl 非空）时 embedding 专用的 key。 */
+  embedApiKey?: string
   /**
    * embedding 维度。**必须与网关实际返回的维度一致** —— kl 的 Qdrant 集合按
    * 这个数建，向量维度对不上会在 upsert 时崩（实测网关 text-embedding-v4 默认
@@ -2713,7 +2721,9 @@ export class KlServerService {
        * 出网 key**塞到对应的名下 —— embedding 那把与 LLM 那把是同一个网关的同一把。
        */
       if (gw.apiKey !== undefined && gw.apiKey !== "") {
-        env["KL_EMBED_API_KEY"] = gw.apiKey
+        // embedding 独立网关时用它的专属 key，否则与 LLM 共用同一把。
+        env["KL_EMBED_API_KEY"] =
+          gw.embedApiKey !== undefined && gw.embedApiKey !== "" ? gw.embedApiKey : gw.apiKey
         if (gw.llmProvider === "anthropic") env["ANTHROPIC_AUTH_TOKEN"] = gw.apiKey
         else env["OPENAI_API_KEY"] = gw.apiKey
       }

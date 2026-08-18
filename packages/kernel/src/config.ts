@@ -103,6 +103,11 @@ const DEFINITIONS = {
    */
   embedBaseUrl: { env: "MYCONTEXT_EMBED_BASE_URL", default: "", sensitive: false },
   /**
+   * 嵌入网关的 key。独立 embedding 网关（MYCONTEXT_EMBED_BASE_URL）时必填；
+   * 空 = 与 LLM 网关共用一把 key（原行为）。
+   */
+  embedApiKey: { env: "MYCONTEXT_EMBED_API_KEY", default: "", sensitive: true },
+  /**
    * KL（知识图谱）建索引专用的网关。留空则回退主配置（见 RuntimeConfigService）。
    *
    * ★ 单独一路的理由：换主模型时不该顺带把 kl 的抽取也换坏（历史上只有部分模型能在
@@ -143,6 +148,8 @@ export const appConfigSchema = z.object({
   embedModel: z.string().min(1),
   // 嵌入网关：可空（空 = 派生自主 LLM 网关）。
   embedBaseUrl: z.string(),
+  // 嵌入网关 key：可空（空 = 与 LLM 网关共用）。
+  embedApiKey: z.string(),
   klLlmBaseUrl: z.string(),
   klLlmApiKey: z.string(),
   // KL 三项都可留空（回退主配置），所以模型这项**不**加 min(1)。

@@ -58,6 +58,8 @@ export interface ResolvedRuntimeConfig {
    * 默认层 env（MYCONTEXT_EMBED_BASE_URL），无存储覆盖入口。
    */
   embedBaseUrl: string
+  /** 嵌入网关 key（独立 embedding 网关时必填；空 = 与 LLM 网关共用）。 */
+  embedApiKey: string
   /** KL 三项已解析回退后的**实际生效**值 */
   klBaseUrl: string
   klApiKey: string
@@ -152,6 +154,7 @@ export class RuntimeConfigService {
       mainProvider,
       embedModel,
       embedBaseUrl: d.embedBaseUrl.trim(),
+      embedApiKey: d.embedApiKey.trim(),
       klBaseUrl: klBaseRaw.trim() !== "" ? klBaseRaw : llmBaseUrl,
       klApiKey: klApiRaw.trim() !== "" ? klApiRaw : llmApiKey,
       klModel: klModelRaw.trim() !== "" ? klModelRaw : modelMain,
