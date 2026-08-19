@@ -102,6 +102,109 @@ describe("★★ 没有够格的结论时不产出文件", () => {
   })
 })
 
+/**
+ * ★★ 未决矛盾不物化为定论（issue #13）。
+ *
+ * merger 的矛盾分支刻意「保留双结论并降置信，交用户裁决」：行上的 value
+ * 只是 candidate 单方的值，另一方的结论躺在 `conflict_json` 里。而降置信
+ * 公式（min - 0.15，下限 0.2）在两侧都高时只降到 0.75 —— 高于
+ * MIN_CONFIDENCE，所以这里若照常渲染，candidate 的值会以普通结论的口吻
+ * 进产物，读的人无从知道它正被质疑。物化层必须与 merger 的意图对齐：
+ * 矛盾未决，就不出结论。
+ */
+describe("★★ 未决矛盾不物化为定论（issue #13）", () => {
+  /**
+   * merger 矛盾分支落在真实行上的形状：0.9/0.9 的冲突 → 置信 0.75、
+   * value 是 candidate 单方的值、双方结论在 conflict_json 里。全假值。
+   */
+  const conflicted = facet({
+    facet: "role",
+    key: "systems",
+    confidence: 0.75,
+    valueJson: JSON.stringify("负责订单中台"),
+    conflictJson: JSON.stringify({ existing: "负责用户中台", candidate: "负责订单中台" }),
+  })
+
+  it("★★ 矛盾行不作为结论渲染 —— 置信 0.75 本可过关，挡它的是未决矛盾", () => {
+    const result = renderWorkLayer(
+      [conflicted, facet({ facet: "role", key: "stack", valueJson: '"只写后端"' })],
+      context,
+    )
+    const body = result.content ?? ""
+    // candidate 单方的值不许以结论口吻出现 —— 那正是 issue #13 的病灶
+    expect(body).not.toContain("负责订单中台")
+    // existing 一方同样不许（两边都在等裁决，展开任何一方都是替人拍板）
+    expect(body).not.toContain("负责用户中台")
+    // 普通结论不受影响
+    expect(body).toContain("只写后端")
+    expect(result.included).toBe(1)
+    expect(result.droppedConflicted).toBe(1)
+    // ★ 0.75 > 0.5：它不是被置信度挡掉的 —— 两种"挡"必须能分开数
+    expect(result.droppedLowConfidence).toBe(0)
+  })
+
+  it("★★ 被挡掉的矛盾不静默消失 —— 产物里披露条数（同 truncated 的约定）", () => {
+    const result = renderWorkLayer(
+      [conflicted, facet({ facet: "role", key: "stack", valueJson: '"只写后端"' })],
+      context,
+    )
+    expect(result.content).toMatch(/另有 1 条相互矛盾的结论未列出，待人工裁决/)
+  })
+
+  it("★ tasks 节同样不物化矛盾（过滤发生在进 renderTaskGroups 之前）", () => {
+    const result = renderWorkLayer(
+      [
+        facet({
+          facet: "tasks",
+          key: "frontend",
+          confidence: 0.75,
+          valueJson: JSON.stringify({ task: "排查假前端问题", askKind: "help_request" }),
+          conflictJson: JSON.stringify({
+            existing: { task: "只排查假后端问题" },
+            candidate: { task: "排查假前端问题" },
+          }),
+        }),
+        facet({
+          facet: "tasks",
+          key: "triage",
+          valueJson: JSON.stringify({ task: "分诊假环境告警", askKind: "help_request" }),
+        }),
+      ],
+      context,
+    )
+    const body = result.content ?? ""
+    expect(body).not.toContain("排查假前端问题")
+    expect(body).not.toContain("只排查假后端问题")
+    expect(body).toContain("分诊假环境告警")
+    expect(result.droppedConflicted).toBe(1)
+    expect(body).toMatch(/另有 1 条相互矛盾的结论未列出/)
+  })
+
+  it("★ 低置信度的矛盾行计入 droppedConflicted —— 它的状态是「等裁决」不是「证据不够」", () => {
+    const result = renderWorkLayer(
+      [
+        facet({
+          facet: "role",
+          key: "low",
+          confidence: 0.3,
+          valueJson: '"矛盾且薄"',
+          conflictJson: JSON.stringify({ existing: "甲方案", candidate: "乙方案" }),
+        }),
+        facet({ facet: "role", key: "solid", valueJson: '"普通结论"' }),
+      ],
+      context,
+    )
+    expect(result.droppedConflicted).toBe(1)
+    expect(result.droppedLowConfidence).toBe(0)
+  })
+
+  it("★ 全是矛盾行 → 沿用「没有够格结论就不写文件」的约定（计数仍带回，供日志与裁决）", () => {
+    const result = renderWorkLayer([conflicted], context)
+    expect(result.content).toBeNull()
+    expect(result.droppedConflicted).toBe(1)
+  })
+})
+
 describe("★★ facet 值是不可信输入", () => {
   it("★★ 伪造标题层级被中性化", () => {
     const result = renderWorkLayer(

@@ -121,6 +121,14 @@ export interface WorkLayerResult {
   included: number
   /** 因置信度不够被挡掉的条数 */
   droppedLowConfidence: number
+  /**
+   * 因**未决矛盾**（merger 的 conflict 分支留下的 `conflict_json`）被挡掉的条数。
+   *
+   * 与 `droppedLowConfidence` 分开计数：一个是"证据不够"，一个是"等人在
+   * 两个都有证据的结论里拍板"—— 挡掉的原因不同，日志里混在一起就无从区分
+   * 「这轮抽得差」与「画像里有矛盾等裁决」。
+   */
+  droppedConflicted: number
 }
 
 /**
@@ -193,9 +201,30 @@ export function renderWorkLayer(
 ): WorkLayerResult {
   const byFacet = new Map<string, ProfileFacetRow[]>()
   let droppedLowConfidence = 0
+  let droppedConflicted = 0
 
   for (const row of facets) {
     if (!WORK_SECTIONS.some((section) => section.facet === row.facet)) continue
+    /**
+     * ★★ 未决矛盾不进产物（issue #13）。
+     *
+     * merger 的矛盾分支（`merger.ts`）刻意「保留双结论并降置信，交用户裁决」：
+     * 行上的 `value` 只是 candidate 单方的值，`conflict_json` 里才躺着另一方。
+     * 而降置信的公式（min-0.15，下限 0.2）在两侧都够高时只降到 0.75 ——
+     * 高于 `MIN_CONFIDENCE`，于是这条**单方**的值会以普通结论的口吻写进
+     * `work.md`，读的人无从知道它正被质疑。那等于把 merger 刻意留给人
+     * 裁决的事，在物化这一层替人拍板了 —— 物化层必须与 merger 的
+     * 设计意图对齐：矛盾未决，就不出结论。
+     *
+     * 判断放在置信度之前：一条矛盾行的定义性状态是「等裁决」，那与分数
+     * 高低无关（低分的矛盾行也该计入「待裁决」而不是「证据不够」）。
+     * tasks 节也一样 —— 过滤发生在分节之前，`renderTaskGroups`
+     * 拿到的就已是干净的行。
+     */
+    if (row.conflictJson !== null && row.conflictJson !== "") {
+      droppedConflicted += 1
+      continue
+    }
     if (row.confidence < MIN_CONFIDENCE) {
       droppedLowConfidence += 1
       continue
@@ -215,7 +244,7 @@ export function renderWorkLayer(
   const included =
     [...byFacet.values()].reduce((sum, rows) => sum + rows.length, 0) + playbooks.length
   if (included === 0) {
-    return { content: null, included: 0, droppedLowConfidence }
+    return { content: null, included: 0, droppedLowConfidence, droppedConflicted }
   }
 
   const name = neutralizeMarkdown(context.displayName || "本人")
@@ -279,6 +308,18 @@ export function renderWorkLayer(
   }
 
   /**
+   * ★★ 被挡掉的矛盾结论**必须说出来**（issue #13）。
+   *
+   * 与上面 truncated 同一条约定（「未测到 ≠ 测到 0」的同一形状）：
+   * 静默不渲染会让产物读成「这里没有结论」，而真相是「有 N 条，但它们
+   * 互相矛盾、等人裁决」。矛盾双方都躺在 `conflict_json` 里（审阅页可见），
+   * 这里只报条数、不展开内容 —— 展开任何一方的值都又是替人拍板。
+   */
+  if (droppedConflicted > 0) {
+    lines.push("", `（另有 ${String(droppedConflicted)} 条相互矛盾的结论未列出，待人工裁决。）`)
+  }
+
+  /**
    * ★ 工作套路放**最后**。
    *
    * 前面五节是"他是谁 / 别人找他干什么 / 怎么做 / 交付什么 / 红线"——
@@ -289,7 +330,7 @@ export function renderWorkLayer(
     lines.push(...renderPlaybooks(playbooks, context.playbookSection?.coverage))
   }
 
-  return { content: lines.join("\n"), included, droppedLowConfidence }
+  return { content: lines.join("\n"), included, droppedLowConfidence, droppedConflicted }
 }
 
 /**
