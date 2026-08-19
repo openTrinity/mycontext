@@ -243,11 +243,38 @@ export function renderWorkLayer(
    */
   const included =
     [...byFacet.values()].reduce((sum, rows) => sum + rows.length, 0) + playbooks.length
+  const name = neutralizeMarkdown(context.displayName || "本人")
   if (included === 0) {
+    /**
+     * ★★ 全被挡掉但其中有未决矛盾 → 留一份**最小披露**，而不是不写文件（issue #13）。
+     *
+     * 「没有文件」会被读成「还没蒸出来」，而真相是「有 N 条结论、只是互相
+     * 矛盾、等人裁决」—— 两个截然不同的状态。纯矛盾时写一份只含披露的产物
+     * （不含任何一方的值，不替人拍板），让读的人知道这里有事在等裁决；
+     * 只有低置信度 / 根本没抽出够格结论时才沿用「无文件 = 没蒸出来」。
+     */
+    if (droppedConflicted > 0) {
+      const lines: string[] = [
+        `# ${name} 的工作方式`,
+        "",
+        `<!-- generated from profile_facets (work) @ ${String(context.nowMs)} — 请勿手改 -->`,
+        "",
+        "> 这里写的是**他会做什么、怎么做**，用于替他起草内容时对齐做法。",
+        "> **这不是回复授权**：某件事是不是该由你替他答，只看 `decisions.md`",
+        "> 与 `rules.json`（答复率、风险类、never_settle）。这个文件里出现过的",
+        "> 系统或话题，不代表它可以被自动回复。",
+        "",
+        "> 这一轮抽出了结论，但它们**互相矛盾、等人裁决** —— 裁决之前，",
+        "> 本文件不写出其中任何一条，免得把未决的事替人拍板成定论。",
+        "> 矛盾的双方都躺在审阅页的 `conflict_json` 里，可对照查看。",
+        "",
+        `（另有 ${String(droppedConflicted)} 条相互矛盾的结论未列出，待人工裁决。）`,
+        "",
+      ]
+      return { content: lines.join("\n"), included: 0, droppedLowConfidence, droppedConflicted }
+    }
     return { content: null, included: 0, droppedLowConfidence, droppedConflicted }
   }
-
-  const name = neutralizeMarkdown(context.displayName || "本人")
   const lines: string[] = [
     `# ${name} 的工作方式`,
     "",

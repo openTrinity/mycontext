@@ -198,9 +198,17 @@ describe("★★ 未决矛盾不物化为定论（issue #13）", () => {
     expect(result.droppedLowConfidence).toBe(0)
   })
 
-  it("★ 全是矛盾行 → 沿用「没有够格结论就不写文件」的约定（计数仍带回，供日志与裁决）", () => {
+  it("★ 全是矛盾行 → 写**最小披露**产物，而不是不写（issue #13）", () => {
     const result = renderWorkLayer([conflicted], context)
-    expect(result.content).toBeNull()
+    // 不再是 content:null —— 否则「有结论但互相矛盾」会被读成「还没蒸出来」
+    expect(result.content).not.toBeNull()
+    const body = result.content ?? ""
+    // 披露条数在产物里可见
+    expect(body).toMatch(/另有 1 条相互矛盾的结论未列出，待人工裁决/)
+    // 但任何一方的值都不许以结论口吻出现（不替人拍板）
+    expect(body).not.toContain("负责订单中台")
+    expect(body).not.toContain("负责用户中台")
+    expect(result.included).toBe(0)
     expect(result.droppedConflicted).toBe(1)
   })
 })
