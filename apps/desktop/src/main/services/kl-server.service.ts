@@ -139,6 +139,12 @@ export interface KlIngestSnapshot {
   phase: string
   percent: number
   error: string
+  /**
+   * 服务端的状态说明。★ 其中有一个**跨语言契约**：任务被取消（`_quiesce` →
+   * `task.cancel()`）时 kl_server 写 `state="error" + detail="cancelled"`，
+   * 桌面端据此把它当「取消」而不是「失败」（见 awaitIngest 里 error 分支）。
+   */
+  detail: string
   /** 图库当前的**绝对**规模（不是这一轮的增量，见 `KlBuildVolume`） */
   counts: { entities: number; facts: number; edges: number }
   /**
@@ -1735,6 +1741,18 @@ export class KlServerService {
         }
         if (snapshot.state === "error") {
           this.buildProgress = null
+          /**
+           * ★★ 服务端任务被取消（`_quiesce` → `task.cancel()`）时，kl_server
+           * 写 `state="error" + detail="cancelled"` 作终态。这对我们意味着
+           * 「建图被掐断」而非「建图失败」—— 与墙钟兜底 / `stopping` 同款，
+           * 必须走 cancelled 而不是 error：error 会进上层 `consecutiveFailures`
+           * → 30 分钟自动建图退避（见本文件 `cancelled` 契约的注释）。
+           * detail 是服务端取消分支的固定标记（见 kl_server 那两个 job 的
+           * `except asyncio.CancelledError`），不是自由文本。
+           */
+          if (snapshot.detail === "cancelled") {
+            return { error: null, cancelled: true, ...counts, volume }
+          }
           return {
             error: snapshot.error === "" ? "未知错误" : snapshot.error,
             cancelled: false,
@@ -3306,6 +3324,7 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
       phase?: string
       percent?: number
       error?: string
+      detail?: string
       units_discovered?: number
       units_skipped?: number
       units_processed?: number
@@ -3324,6 +3343,7 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
     phase: ingest.phase ?? "",
     percent: ingest.percent ?? 0,
     error: ingest.error ?? "",
+    detail: ingest.detail ?? "",
     counts: {
       entities: sqlite.entities ?? 0,
       facts: sqlite.facts ?? 0,

@@ -615,6 +615,7 @@ function snap(over: Partial<KlIngestSnapshot> = {}): KlIngestSnapshot {
     phase: "",
     percent: 1,
     error: "",
+    detail: "",
     counts: { entities: 15, facts: 23, edges: 125 },
     ...over,
   }
@@ -946,6 +947,63 @@ describe("KlServerService · 建图（rebuildGraph 走 server 的 /ingest）", (
     expect(svc.status().buildProgress).toBeNull()
     // 超时记 WARN（不是 error —— error 会进上层的失败计数触发退避）
     expect(warns.some((w) => w.includes("wall-clock"))).toBe(true)
+  })
+
+  /**
+   * ★★ 服务端任务被取消（`_quiesce` → `task.cancel()`）落的是
+   * `state="error" + detail="cancelled"` 终态 —— 桌面端必须把它当「取消」
+   * 而不是「失败」。
+   *
+   * ## 为什么这条不能少
+   *
+   * 服务端只有 idle/running/done/error 四种 state，取消只能落在 error 上；
+   * 而 error 被 `awaitIngest` 读成失败 → `rebuildGraph` 走失败分支 → 上层
+   * 计入 `consecutiveFailures` → 30 分钟自动建图退避 —— 恰恰是该 PR 反复
+   * 强调的「取消不是失败」要避免的事。区分只能靠 detail 那个固定标记。
+   */
+  it("★★ /status 报 error+detail=cancelled → 按 cancelled 收场（不进退避）", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const svc = makeService({
+      runner: fakeRunner(),
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      exportDir: "/tmp/exports/dws",
+      postIngest: async () => 200,
+      readStatus: async () => snap({ state: "error", error: "ingest cancelled", detail: "cancelled" }),
+    })
+
+    const r = await svc.rebuildGraph()
+
+    // 与 stop()/墙钟打断同款：不是失败、没有失败原因
+    expect(r.ok).toBe(false)
+    expect(r.cancelled).toBe(true)
+    expect(r.reason).toBeNull()
+    // building 复位，否则建图入口永久禁用
+    expect(svc.status().building).toBe(false)
+  })
+
+  /**
+   * ★ 反证：**普通** error（detail 不是 "cancelled"）仍然是失败 ——
+   * 否则服务端任何报错都会被吞成取消，自动建图就永远不会退避了。
+   */
+  it("★ /status 报 error 但 detail≠cancelled → 仍是失败", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    const svc = makeService({
+      runner: fakeRunner(),
+      probeHealth: async () => true,
+      clock: new ManualClock(1_000),
+      exportDir: "/tmp/exports/dws",
+      postIngest: async () => 200,
+      readStatus: async () => snap({ state: "error", error: "提取阶段崩了", detail: "" }),
+    })
+
+    const r = await svc.rebuildGraph()
+
+    expect(r.ok).toBe(false)
+    // 失败路径的返回不含 cancelled 键（= 不是「取消」，上层按失败计入退避）
+    expect(r.cancelled).not.toBe(true)
+    expect(r.reason).toContain("提取阶段崩了")
+    expect(svc.status().building).toBe(false)
   })
 
   /**
