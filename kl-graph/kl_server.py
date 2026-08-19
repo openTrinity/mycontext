@@ -696,6 +696,15 @@ async def _run_single_ingest_job(req: IngestRequest):
             detail = f"ingest complete with warning: {result.warning}"
         _set_progress("done", "", 1.0, detail)
         logger.info("Background ingest complete.")
+    except asyncio.CancelledError:
+        # 任务被取消（清场路径会对整个 ingest 任务 task.cancel()）。
+        # CancelledError 继承自 BaseException，不会被下面的 except Exception
+        # 接住 —— 若不在这一支落终态，/status 将永远停在 running，轮询方
+        # 再也等不到 done/error，桌面端的建图标志就此卡死（只能重启恢复）。
+        # 写完终态必须 re-raise：吞掉取消会让任务以正常状态结束，
+        # 等待方无从知道它其实是被掐断的。
+        _set_progress("error", "", 0.0, "cancelled", "ingest cancelled")
+        raise
     except Exception as e:
         logger.exception("Background ingest failed")
         _set_progress("error", "", 0.0, "", str(e))
@@ -724,6 +733,12 @@ async def _run_single_improve_job(req: ImproveRequest) -> None:
         )
         _set_progress("done", "", 1.0, "full improvement complete")
         logger.info("Background full improvement complete.")
+    except asyncio.CancelledError:
+        # 与 ingest job 同一个坑：CancelledError 不走 except Exception，
+        # 不在这里落终态的话 /status 会恒报 running，轮询方永远等不到终态。
+        # 写完终态再 re-raise，理由见上面那个 job 里的注释。
+        _set_progress("error", "", 0.0, "cancelled", "improvement cancelled")
+        raise
     except Exception as e:
         logger.exception("Background full improvement failed")
         _set_progress("error", "", 0.0, "", str(e))
@@ -753,6 +768,14 @@ async def _run_ingest_queue(first: tuple[str, object]) -> None:
             pending = state.ingest_queue.pop(0) if state.ingest_queue else None
     finally:
         state.ingest_task = None
+        # 兜底终态：正常路径每个 job 自己会写 done/error，但取消等异常路径
+        # 可能从任意 await 点逃出 while 而没落到终态。progress 仍停在
+        # running 的话，/status 会永远报 running —— 轮询方的建图标志随之
+        # 卡死。宁可补一个 error 终态让轮询方能收敛；文案刻意写「没到终态」，
+        # 与 job 自己落库的报错区分开。
+        progress = state.ingest_progress or {}
+        if progress.get("state") == "running":
+            _set_progress("error", "", 0.0, "", "ingest queue ended without terminal state")
 
 
 @asynccontextmanager
