@@ -53,6 +53,13 @@ export interface ResolvedRuntimeConfig {
   /** 主模型协议（默认层 ?? 用户覆盖）。opencode 子进程与直连 LlmClient 都按它切传输。 */
   mainProvider: ModelProvider
   embedModel: string
+  /**
+   * 嵌入网关（独立于主 LLM 网关；空 = 派生自主网关）。
+   * 默认层 env（MYCONTEXT_EMBED_BASE_URL），无存储覆盖入口。
+   */
+  embedBaseUrl: string
+  /** 嵌入网关 key（独立 embedding 网关时必填；空 = 与 LLM 网关共用）。 */
+  embedApiKey: string
   /** KL 三项已解析回退后的**实际生效**值 */
   klBaseUrl: string
   klApiKey: string
@@ -146,6 +153,8 @@ export class RuntimeConfigService {
       modelMain,
       mainProvider,
       embedModel,
+      embedBaseUrl: d.embedBaseUrl.trim(),
+      embedApiKey: d.embedApiKey.trim(),
       klBaseUrl: klBaseRaw.trim() !== "" ? klBaseRaw : llmBaseUrl,
       klApiKey: klApiRaw.trim() !== "" ? klApiRaw : llmApiKey,
       klModel: klModelRaw.trim() !== "" ? klModelRaw : modelMain,
