@@ -114,6 +114,25 @@ const INGEST_PROBE_FAILURE_LIMIT = 5
 /** 建图进度轮询间隔。分钟级任务,3s 足够且不会刷屏 UI。 */
 const INGEST_POLL_INTERVAL_MS = 3_000
 
+/**
+ * 建图轮询的**墙钟上限**(3 小时)—— 挂死保险丝,不是性能判据。
+ *
+ * ★★ 为什么在"刻意不设时间上限"之后又要加一个、而且加这么大:
+ *
+ * 正常建图最坏实测约 129 分钟,3 小时留了一倍以上的裕量 —— 正常建图
+ * 永远碰不到它。它兜的是另一类故障:server 侧任务被取消却没落终态
+ * (CancelledError 不走 except Exception),`/status` 恒报 running,轮询方
+ * 就永远等不到 done/error —— `building` 卡 true、自动建图入口永久禁用,
+ * 只能重启应用。那种挂死没有任何**进度**判据能识别(Phase A 整块提交,
+ * 中途无增量可看),只能靠墙钟。
+ *
+ * ★ 触发后按 cancelled 收场(WARN + 复位),绝不报 error:error 会进上层
+ * 的 `consecutiveFailures` → 触发 30 分钟退避 → 后续自动建图被推迟
+ * —— 45min 超时当年正是因此被删掉的(见 `awaitIngest` 里的注释)。
+ * "放弃观察"与"建图失败"是两件事。
+ */
+const INGEST_WALL_CLOCK_LIMIT_MS = 10_800_000
+
 /** `/status` 里 ingest 那一段（我们只取用得上的字段）。 */
 export interface KlIngestSnapshot {
   state: "idle" | "running" | "done" | "error"
@@ -1610,7 +1629,7 @@ export class KlServerService {
     let consecutiveProbeFailures = 0
 
     /**
-     * ★★ 这里**没有时间上限**，是刻意的。
+     * ★★ 这里没有"太慢就算失败"的上限 —— 但有一条 3 小时的墙钟兜底。
      *
      * ## 原来有一个 45min 的 `INGEST_TIMEOUT_MS`，它是个假失败源
      *
@@ -1639,12 +1658,14 @@ export class KlServerService {
      *
      * ## 那靠什么结束
      *
-     * 只靠**明确的终态**：`state` 变成 `done` / `error`。加一条兜底：
-     * 连续多次连不上 `/status`（进程真没了），那时 `handle.alive` 也会是 false。
-     * 这两个都是"事实"而不是"推测"。
-     *
-     * 真出现挂死时的表现是"建图一直显示在跑" —— 而那与事实一致（进程确实在、
-     * 只是不出结果），用户仍可停服务或重启应用。比谎报一个失败诚实。
+     * 只靠**事实**而不是推测：
+     * · `state` 变成 `done` / `error`（server 自己报的终态）；
+     * · 连续多次连不上 `/status` 且子进程句柄已死（进程真没了）；
+     * · 墙钟超过 `INGEST_WALL_CLOCK_LIMIT_MS`（3 小时）—— 兜的是 server 侧
+     *   任务被取消却没落终态、`/status` 恒报 running 的那种挂死（见常量
+     *   的注释）。到点按 cancelled 收场（WARN + 复位），绝不报 error：
+     *   error 会进 `consecutiveFailures` 触发退避 —— 45min 超时当年正是
+     *   因此被删的。3 小时远超正常建图最坏的 129 分钟，正常建图碰不到它。
      */
     for (;;) {
       /**
@@ -1660,6 +1681,22 @@ export class KlServerService {
       if (this.stopping) {
         this.buildProgress = null
         this.options.logger.info("graph build cancelled by shutdown", {})
+        return { error: null, cancelled: true, ...counts, volume }
+      }
+
+      /**
+       * ★★ 墙钟兜底 —— 见循环外注释的最后一节。
+       *
+       * 放在探测**之前**：等满 3 小时还没终态，多探一次也不会改变结论。
+       * 返回形状与 stopping 同款（cancelled、无失败原因），但记 WARN ——
+       * 这不是预期路径，值得留一条痕去查 server 侧为什么 3 小时不出终态。
+       * `buildProgress` 必须一并复位，否则 UI 上永远挂着停在半路的百分比。
+       */
+      if (this.options.clock.now() - startedAt >= INGEST_WALL_CLOCK_LIMIT_MS) {
+        this.buildProgress = null
+        this.options.logger.warn("graph build wall-clock limit reached; giving up waiting", {
+          elapsedMs: this.options.clock.now() - startedAt,
+        })
         return { error: null, cancelled: true, ...counts, volume }
       }
 

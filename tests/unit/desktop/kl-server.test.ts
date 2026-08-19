@@ -886,6 +886,69 @@ describe("KlServerService · 建图（rebuildGraph 走 server 的 /ingest）", (
   })
 
   /**
+   * ★★ 墙钟兜底：/status 恒 running（server 侧任务被取消却没落终态的形状）
+   * → 超过 3 小时后放弃观察，按 cancelled 收场且 building 复位。
+   *
+   * ## 这条守的是「building 卡 true」的死锁
+   *
+   * server 侧任务被取消时若没落终态，/status 会永远报 running；而
+   * `awaitIngest` 又只认终态 —— 两个"各自正确"的行为合起来就是死锁：
+   * building 恒 true → 自动建图入口永久禁用，只能重启应用。
+   *
+   * ## 为什么断言 cancelled 而不是 error
+   *
+   * error 会被上层记进 `consecutiveFailures` → 触发 30 分钟退避 → 后续
+   * 自动建图被推迟 —— 45min 超时当年正是因此被删掉的。墙钟兜底只是
+   * "放弃观察"，不是"建图失败"，必须走 cancelled 那条路。
+   */
+  it("★★ /status 恒 running 超过墙钟上限 → cancelled 收场且 building 复位", async () => {
+    process.env[KL_PYTHON] = "/fake/python"
+    // 记下 WARN：超时不是预期路径，必须留痕才能从日志查到"为什么放弃了"
+    const warns: string[] = []
+    const recorder = {
+      debug: () => {},
+      info: () => {},
+      warn: (message: string) => {
+        warns.push(message)
+      },
+      error: () => {},
+      child: () => recorder,
+    } as unknown as ConstructorParameters<typeof KlServerService>[0]["logger"]
+    const clock = new ManualClock(1_000)
+    let polls = 0
+    const svc = makeService({
+      runner: fakeRunner(),
+      probeHealth: async () => true,
+      clock,
+      logger: recorder,
+      exportDir: "/tmp/exports/dws",
+      postIngest: async () => 200,
+      readStatus: async () => {
+        polls += 1
+        // 第 3 轮把时钟快进 3 小时+ —— 等价于"server 挂死、/status 恒
+        // running"跑满墙钟上限（真实耗时仍是毫秒级）。之后永远 running。
+        if (polls === 3) clock.advance(3 * 60 * 60 * 1000 + 1)
+        return snap({ state: "running", phase: "phase_a", percent: 0.4 })
+      },
+    })
+
+    const r = await svc.rebuildGraph()
+
+    // 确实走了轮询循环（不是 POST/前置闸的早退）
+    expect(polls).toBeGreaterThanOrEqual(3)
+    // 与 stop() 打断同款：不是失败、没有失败原因
+    expect(r.ok).toBe(false)
+    expect(r.cancelled).toBe(true)
+    expect(r.reason).toBeNull()
+    // ★ 核心：building 复位，否则建图入口永久禁用（正是这个 bug 的形态）
+    expect(svc.status().building).toBe(false)
+    // 进度也要清掉，否则 UI 上永远挂着停在半路的百分比
+    expect(svc.status().buildProgress).toBeNull()
+    // 超时记 WARN（不是 error —— error 会进上层的失败计数触发退避）
+    expect(warns.some((w) => w.includes("wall-clock"))).toBe(true)
+  })
+
+  /**
    * ★ 那靠什么结束 —— **进程真没了**才算失败。
    *
    * 两个条件都要：连续多次探测不到 `/status`（`INGEST_PROBE_FAILURE_LIMIT`）
