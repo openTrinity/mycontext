@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { ConversationRepository, MessageRepository, PersonaRunRepository } from "@mycontext/store"
 import { openTestVault } from "../../helpers/vault.js"
 
@@ -225,6 +225,45 @@ describe("待审草稿：每会话数量上限", () => {
       .prepare<[], { state: string }>("SELECT state FROM dh_drafts WHERE id = 'b1'")
       .get()?.state
     expect(b1).toBe("pending")
+    vault.close()
+  })
+})
+
+describe("待审草稿：预计算排除集合仍保持 SQL 有界", () => {
+  it("大量排除草稿不会让缓存路径一次加载全部 pending", () => {
+    const { vault, runs } = setup()
+    new ConversationRepository(vault.db).upsert({
+      id: "excluded",
+      channelId: "dingtalk",
+      externalId: "cid-excluded",
+      type: "group",
+      title: "排除会话",
+      memberCount: 3,
+      createdAt: NOW,
+    })
+    seedDrafts(
+      runs,
+      "excluded",
+      Array.from({ length: 80 }, (_, index) => `excluded-${String(index)}`),
+      NOW + 100,
+    )
+    seedDrafts(
+      runs,
+      "conv-1",
+      Array.from({ length: 55 }, (_, index) => `kept-${String(index)}`),
+      NOW + 1000,
+    )
+    const prepare = vi.spyOn(vault.db, "prepare")
+
+    const result = runs.pendingDrafts(50, new Set(["excluded"]))
+
+    expect(result).toHaveLength(50)
+    expect(result.every((draft) => draft.conversationId === "conv-1")).toBe(true)
+    const boundedQueries = prepare.mock.calls
+      .map(([sql]) => String(sql))
+      .filter((sql) => sql.includes("FROM dh_drafts") && sql.includes("LIMIT"))
+    expect(boundedQueries.length).toBeGreaterThan(0)
+    prepare.mockRestore()
     vault.close()
   })
 })

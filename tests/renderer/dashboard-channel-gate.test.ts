@@ -55,6 +55,9 @@ function code(source: string): string {
 
 const queries = code(read("apps/desktop/src/renderer/lib/queries.ts"))
 const dashboard = code(read("apps/desktop/src/renderer/features/dashboard/dashboard-module.tsx"))
+const dashboardScope = code(
+  read("apps/desktop/src/renderer/features/dashboard/use-dashboard-scope.ts"),
+)
 
 describe("★★★ 渠道未定时不显示别的渠道的图谱", () => {
   /**
@@ -66,7 +69,7 @@ describe("★★★ 渠道未定时不显示别的渠道的图谱", () => {
   it("★★★ useKlGraphEgo 在渠道未定时不发请求", () => {
     const ego = queries.slice(queries.indexOf("export function useKlGraphEgo"))
     const body = ego.slice(0, ego.indexOf("\n}"))
-    expect(body).toContain("enabled: channelId !== undefined")
+    expect(body).toContain("enabled: enabled && channelId !== undefined")
   })
 
   /**
@@ -77,13 +80,24 @@ describe("★★★ 渠道未定时不显示别的渠道的图谱", () => {
    *
    * 这条断言方向是**反的**（断言"没有"），因为要防的是"顺手统一加上"。
    */
-  it("★★ useKlGraphOverview 不加 enabled（引导第 4 步靠不带渠道 = 全部合并）", () => {
+  it("★★ useKlGraphOverview 默认启用，不能按 channelId 自动关闭 onboarding", () => {
     const overview = queries.slice(queries.indexOf("export function useKlGraphOverview"))
     const body = overview.slice(0, overview.indexOf("\n}"))
-    expect(
-      body,
-      "引导流程第 4 步调 useKlGraphOverview(building) 不带渠道 —— 加了 enabled 会把它关掉",
-    ).not.toContain("enabled: channelId !== undefined")
+    expect(body).toContain("enabled = true")
+    expect(body).toContain("enabled,")
+    expect(body).not.toContain("enabled: channelId !== undefined")
+  })
+
+  it("★★ 建图期间仪表盘暂停 ego 与 overview 的同步数据库读取", () => {
+    expect(dashboardScope).toContain("useKlGraphEgo(building, channelId, !building)")
+    expect(dashboardScope).toContain("useKlGraphOverview(building, channelId, !building)")
+  })
+
+  it("★★ 建图完成后同时刷新 overview 与 ego 缓存", () => {
+    const build = queries.slice(queries.indexOf("export function useKlGraphBuild"))
+    const body = build.slice(0, build.indexOf("\n}"))
+    expect(body).toContain('queryKey: ["kl", "graph-overview"]')
+    expect(body).toContain('queryKey: ["kl", "graph-ego"]')
   })
 
   /**

@@ -76,7 +76,7 @@ export interface DataPlaneOptions {
    * 与 `getPersonaSupervisor` 成对：给了 supervisor 却不给这个，
    * 消息会进队列但要等 8 秒才被处理（见 `PersonaService.wake`）。
    */
-  onPersonaDelivered?: () => void
+  onPersonaDelivered?: (conversationIds: readonly string[], refreshAllExclusions: boolean) => void
   /**
    * 采集轮询周期（可配置，来自设置页）。透传给 `IngestService.intervals`。
    * 不给时用内置默认（探针 10s）。

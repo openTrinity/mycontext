@@ -535,7 +535,7 @@ export interface IngestServiceOptions {
    * 只在**真的接纳了**至少一条时调 —— 准入闸拒掉的那些不该叫醒任何人
    * （86 个会话的账号里绝大多数消息是被成本闸拒掉的，那时唤醒就是白跑）。
    */
-  onPersonaDelivered?: () => void
+  onPersonaDelivered?: (conversationIds: readonly string[], refreshAllExclusions: boolean) => void
   /**
    * **外部驱动**的那三个消费者（`graph-export` / `graph-build` /
    * `distill-work`）的 runnable。
@@ -1040,7 +1040,9 @@ export class IngestService {
             handler: (batch) => {
               const result = createdPersonaHandler(batch)
               // 兜底路径也要叫醒 —— 它捞回来的消息同样在等取件人
-              if (result.processed > 0) options.onPersonaDelivered?.()
+              if (result.conversationIds.length > 0 || result.refreshAllExclusions) {
+                options.onPersonaDelivered?.(result.conversationIds, result.refreshAllExclusions)
+              }
               return result
             },
             batchSize: 500,

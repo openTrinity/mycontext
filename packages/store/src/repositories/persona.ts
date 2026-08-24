@@ -252,7 +252,7 @@ export class PersonaConfigRepository {
    * 从 conversations 左连而不是从 configs 查：后者只有配过的那几行，
    * 而 UI 要展示"我可以给哪些会话开监听"。
    */
-  listWithConversations(): {
+  listWithConversations(excludedConversationIds?: ReadonlySet<string>): {
     conversationId: string
     /**
      * 该会话所属渠道（`'dingtalk'` | `'feishu'` …）。
@@ -384,14 +384,19 @@ export class PersonaConfigRepository {
            LEFT JOIN probe_snapshots p
                   ON p.channel_id = c.channel_id
                  AND p.conversation_external_id = c.external_id
-          WHERE NOT EXISTS (
+          ${
+            excludedConversationIds === undefined
+              ? `WHERE NOT EXISTS (
             SELECT 1
               FROM persona_conversation_exclusions e
              WHERE e.conversation_id = c.id
-          )
+          )`
+              : ""
+          }
           ORDER BY c.last_message_at DESC NULLS LAST`,
       )
       .all()
+      .filter((raw) => excludedConversationIds?.has(raw.id) !== true)
       .map((raw) => ({
         conversationId: raw.id,
         channelId: raw.channel_id,
@@ -655,49 +660,73 @@ export class PersonaRunRepository {
   }
 
   /** 待审阅的草稿。UI 的草稿箱读它。 */
-  pendingDrafts(limit = 50): DhDraftRow[] {
-    return this.db
-      .prepare<
-        [number],
-        {
-          id: string
-          run_id: string | null
-          conversation_id: string
-          reply_to_external_id: string | null
-          text: string
-          edited_text: string | null
-          state: string
-          citations_json: string | null
-          not_sent_reason: string | null
-          expired_reason: string | null
-          created_at: number
-          resolved_at: number | null
-        }
-      >(
-        `SELECT * FROM dh_drafts
-          WHERE state = 'pending'
-            AND NOT EXISTS (
-              SELECT 1
-                FROM persona_conversation_exclusions e
-               WHERE e.conversation_id = dh_drafts.conversation_id
-            )
-          ORDER BY created_at DESC LIMIT ?`,
-      )
-      .all(limit)
-      .map((raw) => ({
-        id: raw.id,
-        runId: raw.run_id,
-        conversationId: raw.conversation_id,
-        replyToExternalId: raw.reply_to_external_id,
-        text: raw.text,
-        editedText: raw.edited_text,
-        state: raw.state as DhDraftRow["state"],
-        citations: parseKeywords(raw.citations_json),
-        notSentReason: raw.not_sent_reason,
-        expiredReason: raw.expired_reason,
-        createdAt: raw.created_at,
-        resolvedAt: raw.resolved_at,
-      }))
+  pendingDrafts(limit = 50, excludedConversationIds?: ReadonlySet<string>): DhDraftRow[] {
+    type RawDraft = {
+      id: string
+      run_id: string | null
+      conversation_id: string
+      reply_to_external_id: string | null
+      text: string
+      edited_text: string | null
+      state: string
+      citations_json: string | null
+      not_sent_reason: string | null
+      expired_reason: string | null
+      created_at: number
+      resolved_at: number | null
+    }
+    const toDraftRow = (raw: RawDraft): DhDraftRow => ({
+      id: raw.id,
+      runId: raw.run_id,
+      conversationId: raw.conversation_id,
+      replyToExternalId: raw.reply_to_external_id,
+      text: raw.text,
+      editedText: raw.edited_text,
+      state: raw.state as DhDraftRow["state"],
+      citations: parseKeywords(raw.citations_json),
+      notSentReason: raw.not_sent_reason,
+      expiredReason: raw.expired_reason,
+      createdAt: raw.created_at,
+      resolvedAt: raw.resolved_at,
+    })
+    if (excludedConversationIds === undefined) {
+      return this.db
+        .prepare<[number], RawDraft>(
+          `SELECT * FROM dh_drafts
+           WHERE state='pending' AND NOT EXISTS (
+             SELECT 1 FROM persona_conversation_exclusions e
+             WHERE e.conversation_id=dh_drafts.conversation_id
+           )
+           ORDER BY created_at DESC,id DESC LIMIT ?`,
+        )
+        .all(limit)
+        .map(toDraftRow)
+    }
+
+    const pageSize = Math.max(limit * 2, 50)
+    const result: RawDraft[] = []
+    let beforeCreatedAt: number | null = null
+    let beforeId: string | null = null
+    while (result.length < limit) {
+      const page = this.db
+        .prepare<[number | null, number | null, number | null, string | null, number], RawDraft>(
+          `SELECT * FROM dh_drafts
+           WHERE state='pending'
+             AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+           ORDER BY created_at DESC,id DESC LIMIT ?`,
+        )
+        .all(beforeCreatedAt, beforeCreatedAt, beforeCreatedAt, beforeId, pageSize)
+      if (page.length === 0) break
+      for (const row of page) {
+        if (!excludedConversationIds.has(row.conversation_id)) result.push(row)
+        if (result.length >= limit) break
+      }
+      const tail = page.at(-1)
+      if (tail === undefined || page.length < pageSize) break
+      beforeCreatedAt = tail.created_at
+      beforeId = tail.id
+    }
+    return result.slice(0, limit).map(toDraftRow)
   }
 
   /**

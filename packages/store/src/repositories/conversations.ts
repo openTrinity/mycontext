@@ -277,6 +277,19 @@ export class ConversationRepository {
       .run(isBotChannel ? 1 : 0, id)
   }
 
+  /** 一次性读取动态排除结果；UI 热路径在 attach 时缓存，避免重复展开全量视图。 */
+  listPersonaExclusions(): {
+    conversationId: string
+    reason: PersonaConversationExclusionReason
+  }[] {
+    return this.db
+      .prepare<[], { conversation_id: string; reason: PersonaConversationExclusionReason }>(
+        "SELECT conversation_id, reason FROM persona_conversation_exclusions",
+      )
+      .all()
+      .map((row) => ({ conversationId: row.conversation_id, reason: row.reason }))
+  }
+
   /** Persona 不应处理或展示的会话；分类规则由 v12 的数据库视图统一定义。 */
   personaExclusionReason(id: string): PersonaConversationExclusionReason | null {
     const row = this.db
@@ -294,7 +307,30 @@ export class ConversationRepository {
    * 分类会随着消息与 actor 补全而变化，所以不能只依赖一次性迁移。
    * attach 前调用可保证 mailbox.restore() 不会把这些消息重新捞回内存。
    */
-  cleanupPersonaExclusions(at: number): { inbox: number; drafts: number } {
+  cleanupPersonaExclusions(
+    at: number,
+    known?: ReadonlyMap<string, PersonaConversationExclusionReason>,
+  ): { inbox: number; drafts: number } {
+    if (known !== undefined) {
+      const transaction = this.db.transaction(() => {
+        let inbox = 0
+        let drafts = 0
+        const dropInbox = this.db.prepare(
+          `UPDATE dh_inbox SET state='dropped',drop_reason=?,processed_at=COALESCE(processed_at,?)
+           WHERE state='pending' AND conversation_id=?`,
+        )
+        const expireDrafts = this.db.prepare(
+          `UPDATE dh_drafts SET state='expired',resolved_at=COALESCE(resolved_at,?)
+           WHERE state='pending' AND conversation_id=?`,
+        )
+        for (const [conversationId, reason] of known) {
+          inbox += dropInbox.run(reason, at, conversationId).changes
+          drafts += expireDrafts.run(at, conversationId).changes
+        }
+        return { inbox, drafts }
+      })
+      return transaction()
+    }
     const transaction = this.db.transaction(() => {
       const inbox = this.db
         .prepare(

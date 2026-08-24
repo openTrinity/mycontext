@@ -46,6 +46,7 @@ import { VAULT_0028_ATTENTION_SCOPE } from "./migrations/vault/v28-attention-sco
 import { VAULT_0029_DOCUMENT_COVERAGE } from "./migrations/vault/v29-document-coverage.js"
 import { VAULT_0030_ELIGIBILITY } from "./migrations/vault/v30-eligibility.js"
 import { VAULT_0031_REJUDGE_UNREADABLE } from "./migrations/vault/v31-rejudge-unreadable.js"
+import { VAULT_0032_PERSONA_MESSAGE_LOOKUP } from "./migrations/vault/v32-persona-message-lookup.js"
 import { VAULT_0019_DRAFT_KEEP_AND_TRACE } from "./migrations/vault/v19-draft-keep-and-trace.js"
 import {
   VAULT_0002_LEGACY_CHECKSUMS,
@@ -385,6 +386,7 @@ export const VAULT_MIGRATIONS: readonly Migration[] = [
    */
   { version: 30, name: "eligibility", sql: VAULT_0030_ELIGIBILITY },
   { version: 31, name: "rejudge-unreadable", sql: VAULT_0031_REJUDGE_UNREADABLE },
+  { version: 32, name: "persona-message-lookup", sql: VAULT_0032_PERSONA_MESSAGE_LOOKUP },
 ]
 
 /** 默认清单指 control：openStore 不传 migrations 时开的就是控制库。 */

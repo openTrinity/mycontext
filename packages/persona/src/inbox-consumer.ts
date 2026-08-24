@@ -198,18 +198,51 @@ export function deliverMessage(
  * 算 skipped。这样状态页上的"处理了 N 条"就是"真的进队列的 N 条"，
  * 而不是一个虚高的数字。
  */
+export interface PersonaBatchResult {
+  processed: number
+  skipped: number
+  conversationIds: readonly string[]
+  refreshAllExclusions: boolean
+}
+
 export function createPersonaInboxHandler(options: PersonaHandlerOptions) {
   const repos = createRepos(options)
 
-  return (batch: readonly ChangelogRow[]): { processed: number; skipped: number } => {
+  return (batch: readonly ChangelogRow[]): PersonaBatchResult => {
     let processed = 0
     let skipped = 0
+    const conversationIds = new Set<string>()
+    let refreshAllExclusions = false
 
     for (const entry of batch) {
-      if (entry.entityType !== "message" || entry.op === "delete") {
+      if (entry.entityType === "message" && entry.op === "delete") {
+        refreshAllExclusions = true
         skipped += 1
         continue
       }
+      if (entry.entityType === "conversation") {
+        conversationIds.add(entry.entityId)
+        skipped += 1
+        continue
+      }
+      if (entry.entityType === "actor") {
+        for (const row of options.db
+          .prepare<
+            [string],
+            { conversation_id: string }
+          >("SELECT DISTINCT conversation_id FROM messages WHERE sender_actor_id = ?")
+          .all(entry.entityId)) {
+          conversationIds.add(row.conversation_id)
+        }
+        skipped += 1
+        continue
+      }
+      if (entry.entityType !== "message") {
+        skipped += 1
+        continue
+      }
+      const message = repos.messages.findById(entry.entityId)
+      if (message !== null) conversationIds.add(message.conversationId)
       if (deliverMessage(options, repos, entry.entityId)) processed += 1
       else skipped += 1
     }
@@ -217,6 +250,11 @@ export function createPersonaInboxHandler(options: PersonaHandlerOptions) {
     if (processed > 0) {
       options.logger?.info("persona inbox enqueued", { processed, skipped })
     }
-    return { processed, skipped }
+    return {
+      processed,
+      skipped,
+      conversationIds: [...conversationIds],
+      refreshAllExclusions,
+    }
   }
 }

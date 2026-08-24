@@ -186,8 +186,8 @@ export function useDashboardScope(pickedChannelId: string | null): DashboardScop
   const feed = useFeedInfo(true, channelId)
   const persona = usePersonaSnapshot(true)
   const distill = useDistillProgress(true)
-  const ego = useKlGraphEgo(building, channelId)
-  const overview = useKlGraphOverview(building, channelId)
+  const ego = useKlGraphEgo(building, channelId, !building)
+  const overview = useKlGraphOverview(building, channelId, !building)
 
   /**
    * ★ 判据是**能力**（`sendAs`）而不是渠道 id —— 见 `canRunPersona`。

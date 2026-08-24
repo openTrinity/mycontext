@@ -12,6 +12,8 @@
   },
   "scripts": {
     "dev": "pnpm run verify:toolchain && pnpm run prepare:bin && pnpm run native:electron && pnpm --filter @mycontext/desktop dev",
+    "benchmark:persona-reads": "node scripts/benchmark-persona-reads.mjs",
+    "check:persona-performance-ui": "node scripts/run-isolated-persona-performance.mjs",
     "build": "pnpm run typecheck && pnpm run prepare:bin && pnpm --filter @mycontext/desktop build",
     "build:app": "node scripts/rebuild-electron.mjs && pnpm run prepare:bin && node scripts/build-python-bundle.mjs && pnpm --filter @mycontext/desktop exec electron-vite build",
     "dist:mac": "pnpm run build:app && electron-builder --mac --dir --config apps/desktop/electron-builder.yml",

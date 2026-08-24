@@ -21,6 +21,7 @@
 import { describe, expect, it } from "vitest"
 import { ManualClock, createLogger } from "@mycontext/kernel"
 import {
+  ActorRepository,
   ChangelogRepository,
   ConversationRepository,
   DistillTaskRepository,
@@ -267,6 +268,56 @@ describe("★ persona 消费者：只投递，不处理", () => {
     return { supervisor, handled }
   }
 
+  it("消息删除要求全量刷新动态排除缓存", () => {
+    const vault = seed({ messages: [{ id: "m1", sentAt: NOW, isSelf: false }] })
+    const { supervisor } = makeSupervisor(vault)
+    const handler = createPersonaInboxHandler({
+      db: vault.db,
+      clock: new ManualClock(NOW),
+      supervisor,
+      logger,
+    })
+    const row = batchOf(vault)[0]
+    if (row === undefined) throw new Error("fixture missing")
+
+    expect(handler([{ ...row, op: "delete" }])).toMatchObject({
+      processed: 0,
+      skipped: 1,
+      refreshAllExclusions: true,
+    })
+    vault.close()
+  })
+
+  it("conversation 与 actor 变更会上报受影响会话供排除缓存刷新", () => {
+    const vault = seed({ messages: [{ id: "m1", sentAt: NOW, isSelf: false }] })
+    new ActorRepository(vault.db).upsert({
+      id: "actor-1",
+      channelId: "dingtalk",
+      externalId: "actor-external-1",
+      kind: "bot",
+      displayName: "机器人",
+      seenAt: NOW,
+    })
+    vault.db.prepare("UPDATE messages SET sender_actor_id='actor-1' WHERE id='m1'").run()
+    const { supervisor } = makeSupervisor(vault)
+    const handler = createPersonaInboxHandler({
+      db: vault.db,
+      clock: new ManualClock(NOW),
+      supervisor,
+      logger,
+    })
+    const base = batchOf(vault)[0]
+    if (base === undefined) throw new Error("fixture missing")
+
+    expect(
+      handler([
+        { ...base, entityType: "conversation", entityId: "conv-1" },
+        { ...base, entityType: "actor", entityId: "actor-1" },
+      ]),
+    ).toMatchObject({ processed: 0, skipped: 2, conversationIds: ["conv-1"] })
+    vault.close()
+  })
+
   it("未监听 → 全部被准入闸拒（默认安全）", () => {
     const vault = seed({ messages: [{ id: "m1", sentAt: NOW, isSelf: false }] })
     const { supervisor, handled } = makeSupervisor(vault)
@@ -343,7 +394,7 @@ describe("★ persona 消费者：只投递，不处理", () => {
       channelIds: ["dingtalk"],
     })
 
-    expect(handler(batchOf(vault))).toEqual({ processed: 0, skipped: 1 })
+    expect(handler(batchOf(vault))).toMatchObject({ processed: 0, skipped: 1 })
     vault.close()
   })
 

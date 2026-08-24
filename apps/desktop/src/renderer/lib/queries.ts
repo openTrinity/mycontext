@@ -1921,14 +1921,14 @@ export function useKlGraphBuild() {
       return unwrap(await window.mycontext.kl.graphBuild(opts.fresh ?? false, opts.channelId))
     },
     /**
-     * 建完立刻重取概览。
+     * 建完同时重取概览与关系图。
      *
-     * 不失效的话页面上仍是建图**之前**的那份数字（多半是 0）——
-     * 用户等了几分钟、按钮回到"重新建图"，而下面的数字一动不动，
-     * 看起来就是"跑完了但什么都没建出来"。
+     * building 期间两条 query 都暂停并保留旧缓存；完成时必须一起失效，
+     * 否则数字更新了而关系图仍停在建图前。
      */
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["kl", "graph-overview"] })
+      void queryClient.invalidateQueries({ queryKey: ["kl", "graph-ego"] })
     },
   })
 }
@@ -1936,21 +1936,19 @@ export function useKlGraphBuild() {
 /**
  * 图谱概览（可视化版块）。
  *
- * ## ★ 建图期间要**轮询**，其它时候不必
+ * ## ★ 建图期间暂停读取
  *
- * 建图是分钟级的，而 entities/facts/edges 是一路涨上去的 —— 那个"在长"的
- * 过程本身就是最好的进度指示（比一个百分比可信：百分比是我们算的，
- * 行数是真数据）。所以 `building` 时每 5s 拉一次，否则只在打开页面时拉。
- *
- * 5s 而不是 1s：这几个 COUNT 走的是只读连接，但建图时 SQLite 正在被写，
- * 拉太勤会跟写者抢锁。
+ * kl 建图进程会持续写 SQLite/Qdrant，并可占满一个 CPU 核心。此时从 Electron
+ * 主线程每 5 秒同步 COUNT 同一批文件，会让窗口事件也排在数据库 I/O 后面。
+ * 仪表盘因此在 building 时保留上一次缓存，完成后 `enabled` 恢复并重取。
+ * onboarding 不传第三个参数，默认 `enabled=true`，行为保持不变。
  */
 /**
  * @param channelId 看哪个渠道的图谱规模。与 `useKlGraphEgo` 同一个取值范围
  *   —— 仪表盘那六个数与下面那张图必须说同一个渠道，否则读者会把两边对不上
  *   的数字当成 bug。★ 进 queryKey，否则切渠道命中同一份缓存（点了没反应）。
  */
-export function useKlGraphOverview(building: boolean, channelId?: string) {
+export function useKlGraphOverview(building: boolean, channelId?: string, enabled = true) {
   return useQuery({
     queryKey: ["kl", "graph-overview", channelId ?? "primary"],
     queryFn: async () =>
@@ -1959,8 +1957,9 @@ export function useKlGraphOverview(building: boolean, channelId?: string) {
           channelId === undefined ? undefined : { channelId },
         ),
       ),
-    refetchInterval: building ? 5_000 : false,
+    refetchInterval: enabled && building ? 5_000 : false,
     staleTime: 3_000,
+    enabled,
   })
 }
 
@@ -1970,7 +1969,8 @@ export function useKlGraphOverview(building: boolean, channelId?: string) {
  * `staleTime` 给 30s：它读的是只读 SQLite（实测拼图 2ms + 几百行查询），
  * 但图谱**只在建图后才变** —— 秒级重取是白花主进程的同步查询。
  *
- * 建图中每 5s 重取一次：那时用户正等着看图长出来。
+ * 建图期间仪表盘保留上一次缓存，不再让 Electron 主线程读取正在被 Python
+ * 写入的图库；完成后 query 自动恢复并刷新。
  */
 /**
  * @param channelId 看**哪个渠道**的关系图。
@@ -1982,7 +1982,7 @@ export function useKlGraphOverview(building: boolean, channelId?: string) {
  * ★ `channelId` 进 queryKey：不进的话切换渠道命中同一份缓存，
  * 界面上表现为"点了没反应"。
  */
-export function useKlGraphEgo(building: boolean, channelId?: string) {
+export function useKlGraphEgo(building: boolean, channelId?: string, enabled = true) {
   return useQuery({
     /**
      * ★ `channelId` 进 key —— 少了它切渠道会命中同一份缓存，于是飞书那栏
@@ -2024,8 +2024,8 @@ export function useKlGraphEgo(building: boolean, channelId?: string) {
       return view
     },
     /**
-     * ★ 建图中 5s 轮询（用户正等着看图长出来）；平时不轮询 ——
-     * 图只在建图后才变，秒级重取是白花主进程的查询。
+     * ★ 仪表盘在建图期间通过 `enabled=false` 暂停同步图库读取；完成后恢复。
+     * 其它调用方默认 enabled=true，仍保留既有查询行为。
      */
     /**
      * ★★★ 渠道还没定下来时**别发请求**。
@@ -2051,8 +2051,8 @@ export function useKlGraphEgo(building: boolean, channelId?: string) {
      * ★ `channelId === undefined` 只在**渠道列表还没加载**时出现（选过就有值、
      * 有已授权渠道就有值），所以这个门不会让图谱在正常状态下不显示。
      */
-    enabled: channelId !== undefined,
-    refetchInterval: building ? 5_000 : false,
+    enabled: enabled && channelId !== undefined,
+    refetchInterval: enabled && building ? 5_000 : false,
     /**
      * ★★ 但**失败要重试**：上面把"服务没起来"抛成了错误，
      * 而 kl 的 warmup 实测约 10s，所以退避几次一定能等到。

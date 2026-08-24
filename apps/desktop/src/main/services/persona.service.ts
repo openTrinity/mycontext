@@ -520,6 +520,8 @@ export class PersonaService {
   /** 快照节流：上次推送时刻 + 待推的定时器（见 emitSnapshotThrottled） */
   private lastSnapshotAt = 0
   private snapshotTimer: ReturnType<typeof setTimeout> | null = null
+  /** 动态 bot/self 分类：attach 时全量建立，之后按 changelog 涉及会话增量刷新。 */
+  private readonly exclusionReasons = new Map<string, "bot_channel" | "self_conversation">()
 
   private readonly memory: PersonaMemory
 
@@ -602,7 +604,9 @@ export class PersonaService {
    * 两件事必须一起做：只唤醒不推快照，界面上那几秒里仍然什么都不动；
    * 只推快照不唤醒，数字还是要等 8 秒才开始变。
    */
-  onDelivered(): void {
+  onDelivered(conversationIds: readonly string[] = [], refreshAllExclusions = false): void {
+    if (refreshAllExclusions) this.reloadExclusions()
+    else this.refreshExclusions(conversationIds)
     this.wake()
     this.emitSnapshotThrottled()
   }
@@ -716,8 +720,11 @@ export class PersonaService {
      */
     this.forgeSkillRoot = forgeSkillRoot ?? this.options.forgeSkillRoot ?? null
     const configs = new PersonaConfigRepository(db)
-    const excluded = new ConversationRepository(db).cleanupPersonaExclusions(
+    const conversations = new ConversationRepository(db)
+    this.reloadExclusions()
+    const excluded = conversations.cleanupPersonaExclusions(
       this.options.clock.now(),
+      this.exclusionReasons,
     )
     if (excluded.inbox > 0 || excluded.drafts > 0) {
       this.options.logger.info("persona excluded conversations cleaned", excluded)
@@ -785,6 +792,7 @@ export class PersonaService {
     await this.supervisor?.stop()
     this.supervisor = null
     this.db = null
+    this.exclusionReasons.clear()
     // ★ 目录也要清：留着的话切身份后一次漏接的 attach 会静默写进上一个身份的目录
     this.dirs = null
     this.reviewFeedback.clear()
@@ -891,7 +899,6 @@ export class PersonaService {
       }
     }
     const configs = new PersonaConfigRepository(db)
-    new ConversationRepository(db).cleanupPersonaExclusions(this.options.clock.now())
     const runs = new PersonaRunRepository(db)
     // 本人已回的作废 + 每会话按上限裁（取代按时效过期，见 pruneDrafts）。
     this.pruneDrafts(runs, configs)
@@ -914,10 +921,7 @@ export class PersonaService {
        * `replyMode === "auto"` 就是唯一判据（其余是运行时闸：工作时间/
        * 场景/频率/授权）。
        */
-      autoReplyCount: configs
-        .listWithConversations()
-        .filter((row) => row.config?.replyMode === "auto" || row.config?.replyMode === "yolo")
-        .length,
+      autoReplyCount: this.autoReplyCount(db),
       pendingInbox,
       pendingDrafts,
       residents: this.supervisor.residentConversations().map((agent) => agent.conversationId),
@@ -971,7 +975,7 @@ export class PersonaService {
     const db = this.db
     if (db === null) return []
     const configs = new PersonaConfigRepository(db)
-    return configs.listWithConversations().map((row) => ({
+    return configs.listWithConversations(new Set(this.exclusionReasons.keys())).map((row) => ({
       conversationId: row.conversationId,
       channelId: row.channelId,
       externalId: row.externalId,
@@ -1401,10 +1405,9 @@ export class PersonaService {
     if (db === null) return []
     const runs = new PersonaRunRepository(db)
     const configs = new PersonaConfigRepository(db)
-    new ConversationRepository(db).cleanupPersonaExclusions(this.options.clock.now())
     // 本人已回的作废 + 每会话按上限裁（取代按时效过期，见 pruneDrafts）。
     this.pruneDrafts(runs, configs)
-    return runs.pendingDrafts().map((row) => ({
+    return runs.pendingDrafts(50, new Set(this.exclusionReasons.keys())).map((row) => ({
       id: row.id,
       // ★ 回看生成过程的入口。以前这里被丢掉了（库里有值、界面拿不到）。
       runId: row.runId,
@@ -2909,6 +2912,55 @@ export class PersonaService {
   private requireDb(): SqliteDatabase {
     if (this.db === null) throw new AppError("DB_UNAVAILABLE", "尚未登录")
     return this.db
+  }
+
+  /** 自动回复会话数；沿用动态排除语义，但不加载完整会话列表。 */
+  private autoReplyCount(db: SqliteDatabase): number {
+    const excluded = [...this.exclusionReasons.keys()]
+    const whereExcluded =
+      excluded.length === 0
+        ? ""
+        : ` AND conversation_id NOT IN (${excluded.map(() => "?").join(",")})`
+    return (
+      db
+        .prepare<string[], { c: number }>(
+          `SELECT count(*) AS c FROM dh_conversation_configs
+           WHERE reply_mode IN ('auto','yolo')${whereExcluded}`,
+        )
+        .get(...excluded)?.c ?? 0
+    )
+  }
+
+  /** 删除消息后无法从已删行恢复 conversation_id，只在该稀有路径全量重建。 */
+  private reloadExclusions(): void {
+    const db = this.db
+    if (db === null) return
+    this.exclusionReasons.clear()
+    for (const item of new ConversationRepository(db).listPersonaExclusions()) {
+      this.exclusionReasons.set(item.conversationId, item.reason)
+    }
+  }
+
+  /**
+   * 只重算本批触及会话的动态分类。按 conversation_id 查询视图会先走
+   * conversations 主键与 idx_msg_conv_time，不会像全量 UI 读取那样扫描全部消息。
+   */
+  private refreshExclusions(conversationIds: readonly string[]): void {
+    const db = this.db
+    if (db === null || conversationIds.length === 0) return
+    const conversations = new ConversationRepository(db)
+    const newlyExcluded = new Map<string, "bot_channel" | "self_conversation">()
+    for (const conversationId of new Set(conversationIds)) {
+      const reason = conversations.personaExclusionReason(conversationId)
+      if (reason === null) this.exclusionReasons.delete(conversationId)
+      else {
+        this.exclusionReasons.set(conversationId, reason)
+        newlyExcluded.set(conversationId, reason)
+      }
+    }
+    if (newlyExcluded.size > 0) {
+      conversations.cleanupPersonaExclusions(this.options.clock.now(), newlyExcluded)
+    }
   }
 
   /** 推快照给渲染层（新消息提醒与草稿数都靠它）。 */

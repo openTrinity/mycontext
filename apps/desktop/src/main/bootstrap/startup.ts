@@ -1826,7 +1826,8 @@ export function bootstrapApp(mainDir: string): AppContext {
      * 不接这一条的话消息只是"进了队列"：要等 `TICK_MS`（8 秒）才被处理，
      * 而那几秒里界面上「待处理」一动不动 —— 与没收到无法区分。
      */
-    onPersonaDelivered: () => persona.onDelivered(),
+    onPersonaDelivered: (conversationIds, refreshAllExclusions) =>
+      persona.onDelivered(conversationIds, refreshAllExclusions),
     /**
      * ★★★ work 层（`distill-work` 消费者）的驱动入口。
      *
