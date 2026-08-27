@@ -99,6 +99,9 @@ export {
 } from "./plugins/feishu/index.js"
 export type { FeishuPluginOptions } from "./plugins/feishu/index.js"
 
+export { createCodexLocalPlugin } from "./plugins/codex-local/index.js"
+export type { CodexLocalPluginOptions } from "./plugins/codex-local/index.js"
+
 export {
   parseLocalTime,
   formatLocalTime,

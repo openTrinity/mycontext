@@ -59,7 +59,7 @@ export interface PostAuthDeps {
      */
     clearBlocked(): void
   }
-  media: {
+  media?: {
     selfAvatar(options?: { force?: boolean | undefined }): Promise<{
       path: string | null
       reason: string | null
@@ -270,7 +270,7 @@ export async function applyPostAuthIdentity(
   deps.dataPlane.clearBlocked()
 
   await confirmIdentity(deps, channelId)
-  await refreshAccountProfile(deps, status)
+  if (deps.media !== undefined) await refreshAccountProfile(deps, status)
 }
 
 /**
@@ -431,6 +431,7 @@ async function refreshAccountProfile(
   deps: PostAuthDeps,
   status: Extract<AuthStatus, { state: "authorized" }>,
 ): Promise<void> {
+  if (deps.media === undefined) return
   const { media, auth, logger, toFileUrl } = deps
   try {
     /**
@@ -495,5 +496,7 @@ export function scopedChannelIdFor(
   channelId: string,
   binOverride: string | null | undefined,
 ): string {
+  /** Codex 记录与 DWS 二进制来源无关，不能继承 DWS 的来源后缀。 */
+  if (channelId === "codex") return channelId
   return scopedChannelId(channelId, sourceKeyOf(binOverride ?? undefined))
 }

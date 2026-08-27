@@ -11,7 +11,10 @@
     "authInProgress": "该渠道正在授权中",
     "authFailed": "授权失败：{{detail}}",
     "authNotDetected": "授权流程结束但未检测到有效登录态，请重试",
-    "authLegacyTokenSlot": "本机已有一份旧格式的登录态，渠道 CLI 拒绝覆盖它（怕误删你终端里在用的登录）。请在终端执行一次带身份的登录完成迁移：dws auth login --profile <你的组织 corpId>"
+    "authLegacyTokenSlot": "本机已有一份旧格式的登录态，渠道 CLI 拒绝覆盖它（怕误删你终端里在用的登录）。请在终端执行一次带身份的登录完成迁移：dws auth login --profile <你的组织 corpId>",
+    "localRecordsUnavailable": "找不到可读的本地 Codex 记录目录。请确认 Codex 已在本机使用过，或正确设置 CODEX_HOME。",
+    "localRecordsNeedLogin": "请先登录 MyContext，再为当前账号开启本地 Codex 记录。",
+    "localRecordsReadFailed": "读取本地 Codex 记录失败，请检查目录权限后重试。"
   },
   "process": {
     "spawnFailed": "无法启动所需的程序",
@@ -68,6 +71,7 @@
     "INTERNAL": "出现了未预期的问题",
     "CHANNEL_CLIENT_NOT_AUTHORIZED": "当前渠道客户端对这个企业没有开通所需能力（不是登录问题，重新扫码无效）。请到设置里换一份客户端：内置那份与自备那份开通的能力不同。",
     "CHANNEL_NOT_READY": "渠道尚未就绪，请先登录后重试",
+    "CHANNEL_LOCAL_RECORDS_UNAVAILABLE": "本地 Codex 记录目录不存在或不可读",
     "CHANNEL_PIPELINE_NO_PORT": "本机没有可用端口来启动图谱服务"
   }
 }

@@ -18,6 +18,14 @@
       "backToApp": "Return to the app; Lark content will enter the local database and knowledge graph"
     }
   },
+  "codex": {
+    "label": "Local Codex",
+    "description": "Read-only access to text you entered in local Codex tasks for the graph and search.",
+    "steps": {
+      "review": "Confirm that only text you submitted is collected; reasoning, tool output and system prompts are excluded",
+      "enable": "Click Authorize to enable local read-only collection for this MyContext account"
+    }
+  },
   "state": {
     "authorized": "Connected",
     "expired": "Expired",
@@ -93,14 +101,16 @@
     "machineSessionHint": "This computer already has a DingTalk session (sessions are shared across logins on the same machine). Authorize once for the current account so we know who you are — otherwise learning would use the wrong identity.",
     "accountTitle": "Connected account",
     "scopeTitle": "What you're authorizing",
-    "machineSessionHintFeishu": "Lark is authorized in this app. Confirm the identity once for this account so learning attributes messages to you."
+    "machineSessionHintFeishu": "Lark is authorized in this app. Confirm the identity once for this account so learning attributes messages to you.",
+    "machineSessionHintCodex": "Local Codex records are enabled for this account."
   },
   "settings": {
     "expiredHint": "Authorization expired — you'll need to scan again",
     "expiryWarning": "This authorization expires in {{days}} days. Re-authorizing now is a good idea.",
     "identityMismatch": "Identity misconfigured: this data is bound to \"{{boundCorp}}\", but the channel config directory currently resolves to \"{{channelCorp}}\". These should always match (each identity keeps its own data and config) — re-authorize to \"{{boundCorp}}\" to restore it, or switch to \"{{channelCorp}}\" and its own data.",
     "sharedCredentialNote": "The official DingTalk CLI stores credentials in your system keychain, shared with the CLI in your terminal. To clear them completely, run <1>{{command}}</1> in a terminal.",
-    "feishuCredentialNote": "Lark credentials are isolated inside this app's user directory and do not reuse your terminal CLI session. To clear them, run <1>{{command}}</1> in the app's isolated environment."
+    "feishuCredentialNote": "Lark credentials are isolated inside this app's user directory and do not reuse your terminal CLI session. To clear them, run <1>{{command}}</1> in the app's isolated environment.",
+    "codexCredentialNote": "Read-only access is isolated per MyContext account. Signing out stops collection without changing or deleting any Codex records."
   },
   "progress": {
     "browserOpened": "{{channel}} sign-in opened — scan the code to continue",
@@ -115,6 +125,14 @@
     "noSpeakDescription": "Lark data never enters the auto-reply or send path, and no write scopes are requested.",
     "credentialsTitle": "Isolated authorization directory",
     "credentialsDescription": "The official Lark CLI handles authorization; credentials stay inside this app's isolated user directory."
+  },
+  "codexScope": {
+    "readTitle": "Reads only your input",
+    "readDescription": "Reads only text you submitted in local Codex tasks and honors the selected time and task scope.",
+    "noSpeakTitle": "Generated and execution records stay out",
+    "noSpeakDescription": "Model answers, reasoning, system prompts, tool calls, command output and attachments are excluded.",
+    "credentialsTitle": "Explicitly enabled per account",
+    "credentialsDescription": "Message bodies are not scanned before authorization; consent stays in this account's vault."
   },
   "avatarMiss": {
     "notPermitted": "This channel client lacks contacts permission, so avatars cannot be fetched — switch to a client that has it under \"custom client\" below.",

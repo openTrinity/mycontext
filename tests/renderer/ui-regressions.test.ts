@@ -128,13 +128,15 @@ describe("② 设置导航扁平 + 全局渠道切换", () => {
   })
 })
 
-describe("③ 钉钉也有刷新头像按钮", () => {
-  it("★★★ 刷新头像按钮不被 isolatedCredentials 挡住", () => {
+describe("③ 有头像能力的已连接渠道才显示刷新头像按钮", () => {
+  it("★★★ 刷新头像按钮由连接状态与 avatars 能力共同控制", () => {
     /**
      * 用户原话：「钉钉渠道那边得要有个刷新头像的按钮吧」。
      *
      * 它原来挂在只有飞书成立的 `isolatedCredentials` 分支里，所以钉钉看不到。
-     * 判据：按钮的显示条件是 `accountConnected`（两个渠道都成立）。
+     * 判据：按钮的显示条件包含 `accountConnected`，并且只对明确声明
+     * `avatars` 能力的渠道开放。这样钉钉/飞书仍可见，本地只读渠道不会出现
+     * 一个永远无法工作的按钮。
      *
      * 反证：把条件改回 `isolatedCredentials` → 转红。
      */
@@ -146,8 +148,8 @@ describe("③ 钉钉也有刷新头像按钮", () => {
      * `accountConnected`（失败态判据、按钮文案三元），随便一个都能命中。
      * 剥注释也不够，因为它们是真代码而不是注释。
      *
-     * 所以改成：从按钮往前找**最近的** `? (` 分支开头，断言它就是
-     * `{accountConnected ? (`。
+     * 所以改成：从按钮往前找**最近的** `? (` 分支开头，断言它就是连接态
+     * 与能力的联合门控。
      *
      * 反证：把那一行换成 `{isolatedCredentials ? (` → 转红（已实测）。
      */
@@ -160,7 +162,7 @@ describe("③ 钉钉也有刷新头像按钮", () => {
     const gateAt = before.lastIndexOf("? (")
     const gateLineStart = before.lastIndexOf("{", gateAt)
     const gate = before.slice(gateLineStart, gateAt + 3).replace(/\s+/g, " ")
-    expect(gate).toBe("{accountConnected ? (")
+    expect(gate).toBe("{accountConnected && channel.capabilities?.avatars === true ? (")
   })
 })
 

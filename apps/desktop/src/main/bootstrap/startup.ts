@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import Database from "better-sqlite3"
 import { app, powerMonitor, shell, type BrowserWindow } from "electron"
@@ -29,6 +30,7 @@ import {
 } from "@mycontext/store"
 import {
   ChannelHost,
+  createCodexLocalPlugin,
   createDingTalkPlugin,
   createFeishuPlugin,
   createRegistry,
@@ -436,7 +438,14 @@ export function bootstrapApp(mainDir: string): AppContext {
         : `lark-cli-${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`,
     ),
   })
-  const registry = createRegistry([dingtalk, feishu])
+  const codex = createCodexLocalPlugin({
+    recordsRoot: () => {
+      const configured = process.env["CODEX_HOME"]?.trim()
+      return configured === undefined || configured === "" ? join(homedir(), ".codex") : configured
+    },
+    consentRoot: () => vaultPaths?.codexAuthRoot ?? "",
+  })
+  const registry = createRegistry([dingtalk, feishu, codex])
 
   let window: BrowserWindow | null = null
   /**
@@ -2873,8 +2882,15 @@ export function bootstrapApp(mainDir: string): AppContext {
           void mounted.klServer.ensureReady().catch(() => undefined)
         }
       }
+      const plugin = registry.get(channelId)
       await applyPostAuthIdentity(
-        { dataPlane, media, auth, logger, toFileUrl: toLocalFileUrl },
+        {
+          dataPlane,
+          auth,
+          logger,
+          toFileUrl: toLocalFileUrl,
+          ...(plugin.avatars === undefined ? {} : { media }),
+        },
         status,
         /**
          * ★ 把渠道传下去 —— 不传的话身份会写到**主渠道**那张表上，

@@ -68,6 +68,7 @@ export class ChannelService {
         descriptionKey: plugin.meta.descriptionKey,
         available: plugin.meta.available,
         stepKeys: plugin.auth.describeStepKeys(),
+        authModes: plugin.auth.supportedModes?.() ?? ["loopback", "device"],
         status,
         loginInProgress: this.options.host.isLoginInProgress(plugin.meta.id),
         /**
@@ -83,6 +84,7 @@ export class ChannelService {
           sendAs: [...plugin.capabilities.sendAs],
           domains: [...plugin.capabilities.domains],
           isolatedCredentials: plugin.capabilities.isolatedCredentials,
+          avatars: plugin.avatars !== undefined,
         },
       })
     }
