@@ -1,13 +1,15 @@
 /**
  * dws 二进制解析（脚本侧；运行时侧的路径解析在 packages/runtime-env/src/binaries.ts）。
  *
- * ## 两个来源，优先级不同
+ * ## 来源与优先级（与运行时 `resolve("dws")` 对齐）
  *
  * 1. **`MYCONTEXT_DWS_SOURCE`** —— 显式指定一个可执行文件或其所在目录。
  *    这是**闭源版**的唯一入口：内部同学自己装好闭源 dws，把路径给进来。
  *    最高优先级，因为"我明确指了一个"必须盖过默认。
- * 2. **npm 依赖 `dingtalk-workspace-cli`（开源版，Apache-2.0）** ——
- *    默认来源。版本由 lockfile 钉住，`pnpm install` 后必然命中。
+ * 2. **PATH 上的 `dws`** —— 全局安装（`npm install -g dingtalk-workspace-cli`）等。
+ *    准备脚本侧：能命中就不强迫拷进 `resources/bin`。
+ * 3. **npm 依赖 `dingtalk-workspace-cli`（开源版，Apache-2.0）** ——
+ *    可解包则**可选**拷进 `resources/bin` 作打包兜底；解不出时运行时仍可走包内启动器。
  *
  * ## ★ 为什么开源版走 npm 而不是入 git
  *
@@ -43,7 +45,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { spawnSync } from "node:child_process"
-import { dirname, join } from "node:path"
+import { delimiter, dirname, join } from "node:path"
 
 const require = createRequire(import.meta.url)
 
@@ -77,6 +79,27 @@ function packageRoot() {
   }
 }
 
+/** workspace / 本机是否装了 `dingtalk-workspace-cli`（不论归档是否已解出）。 */
+export function isDwsNpmPackagePresent() {
+  return packageRoot() !== null
+}
+
+/**
+ * PATH 上找 `dws` / `dws.exe`（与运行时 `findOnPath` 同语义）。
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string | null}
+ */
+export function resolveDwsOnPath(env = process.env) {
+  const exe = process.platform === "win32" ? "dws.exe" : "dws"
+  for (const dir of (env["PATH"] ?? "").split(delimiter)) {
+    if (dir === "") continue
+    const candidate = join(dir, exe)
+    if (isFile(candidate)) return candidate
+  }
+  return null
+}
+
 /**
  * 从 npm 包里解出当前平台的 dws，落到 `cacheDir`。
  *
@@ -85,11 +108,16 @@ function packageRoot() {
  *
  * @returns {{ path: string, version: string } | null} null = 包没装 / 平台不支持
  */
-export function resolveDwsFromNpm(cacheDir, binaryFileName) {
+/**
+ * @param {string} [platformKey] 如 `win32-x64`；缺省为当前进程平台。
+ *   交叉准备（在 mac 上为 Windows 打包）时必须显式传入，否则永远解出本机那份。
+ */
+export function resolveDwsFromNpm(cacheDir, binaryFileName, platformKey) {
   const root = packageRoot()
   if (root === null) return null
 
-  const archiveName = PLATFORM_ARCHIVES[`${process.platform}-${process.arch}`]
+  const key = platformKey ?? `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`
+  const archiveName = PLATFORM_ARCHIVES[key]
   if (archiveName === undefined) return null
 
   const archive = join(root, "assets", archiveName)

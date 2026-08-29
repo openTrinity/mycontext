@@ -80,6 +80,7 @@ import {
   type DomainScope,
   purgeOutOfScopeMessages,
   purgeOutOfScopeDocuments,
+  retagLearningEligible,
   readCollectionRequest,
   ELIGIBILITY_BITS,
   isWithinCollectionWindow,
@@ -4313,6 +4314,29 @@ export class IngestService {
     }
 
     /**
+     * ★★★ 放宽后立刻 bulk 重打标（v4 Critical #1）。
+     *
+     * 监听先入库、`learning_eligible = 0` 的历史，在用户加进学习范围后
+     * **不能**等下一轮渠道重采才变 1 —— 下面 `onScopeChanged` 会立刻
+     * `export`（± rebuild），那时语料谓词仍排除它们 ⇒ 用户看到重建完成
+     * 而图谱缺新范围。`retagLearningEligible` 实测全库 ~80 ms。
+     *
+     * ★ dryRun 已在上面 return：预演不改标签、不写 changelog。
+     */
+    const retag = retagLearningEligible(this.options.db, this.options.plugin.meta.id, {
+      now: this.options.clock.now(),
+    })
+    if (retag.promoted > 0) {
+      this.options.logger.info("scope change promoted learning_eligible", {
+        channelId: this.options.plugin.meta.id,
+        promoted: retag.promoted,
+        changelogEntries: retag.changelogEntries,
+      })
+      // 标签变了 = 语料面变了，推一次快照（与下面 purge 那条同一理由）
+      this.events.emit("batch.persisted", { changed: retag.promoted })
+    }
+
+    /**
      * ★ 重置回填下界，让放宽后的范围真的会被往回补。
      *
      * `commitFloor` 的 upsert 用的是 `MIN(现有, 新值)`（水位只能往更早走），
@@ -4402,6 +4426,8 @@ export class IngestService {
       purgedDocuments: docReport.documents,
       purgedDocumentSpaces: docReport.spaces,
       purgedDocumentCoverageRows: docReport.coverageRows,
+      // ★ 放宽后立刻晋升的条数 —— 0 也报，方便对上"为什么语料没变"
+      promotedEligible: retag.promoted,
       // ★ 两个游标都重置了要说出来 —— 下一轮会做一次全回溯，那不是异常
       cursorsReset: true,
     })

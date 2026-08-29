@@ -3,10 +3,9 @@
  *
  * ## 为什么退出需要一个专门的模块（而不是一串 await）
  *
- * `dispose()` 里每一步都在等外部世界：ACP 的 `session/dispose`（走 JSON-RPC
- * 到 opencode 子进程）、DWS 子进程收尾（实测约 0.6s）、kl 子进程的
- * SIGTERM→SIGKILL。这些都可能**永远不返回** —— 而首版是一串裸 `await`、
- * 外面没有任何超时。
+ * `dispose()` 里每一步都在等外部世界：Cursor / ACP 会话收尾、DWS 子进程
+ * 收尾（实测约 0.6s）、本地 embed / kl 子进程的 SIGTERM→SIGKILL。这些都可能
+ * **永远不返回** —— 而首版是一串裸 `await`、外面没有任何超时。
  *
  * 后果不是"退出慢"，而是**退不出去**：`before-quit` 已经
  * `preventDefault()` 了，窗口关了、进程还在、Dock 图标赖着不走，
@@ -38,8 +37,9 @@ import type { Clock, Logger } from "@mycontext/kernel"
  * 各步的超时预算（毫秒）。
  *
  * 取值依据是"这一步正常要多久"，不是随手给的：
- * · `search` —— 逐 session 走 ACP dispose，实测单次约 0.2-1.3s，
- *   会话数可能几十个，给 3s（超了就不管了，opencode 自己会随进程退出而死）；
+ * · `embedServer` —— 关本地向量 HTTP（stdin→SIGTERM→SIGKILL），给 3s；
+ * · `search` —— 逐 session 收 Cursor/ACP，实测单次约 0.2-1.3s，
+ *   会话数可能几十个，给 3s（超了就不管了，子进程随主进程退出）；
  * · `klServer` —— **4s**。`DuplexHandle.close()` 的兜底链是
  *   「关 stdin → 0.5s 后 SIGTERM → 3s 后 SIGKILL」（见 process.ts），
  *   也就是最坏 3.5s。原来给 2s 的后果是**每次退出都超时**（实测
@@ -51,11 +51,12 @@ import type { Clock, Logger } from "@mycontext/kernel"
  *   给 2s；
  * · `db` —— 关库是同步的（better-sqlite3），给 1s 只是防病态情况。
  *
- * 合计约 14s，而硬超时（见 `HARD_EXIT_MS`）是 8s —— 刻意小于合计值：
+ * 合计约 17s，而硬超时（见 `HARD_EXIT_MS`）是 8s —— 刻意小于合计值：
  * 正常退出远快于各步预算之和（它们不会同时踩上限），
  * 而真出现"每步都拖满"的情况时，用户等 8s 已经够久了。
  */
 export const SHUTDOWN_STEP_TIMEOUTS = {
+  embedServer: 3_000,
   search: 3_000,
   klServer: 4_000,
   persona: 2_000,

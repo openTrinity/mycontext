@@ -226,7 +226,7 @@ export KL_EMBEDDING_DIM=1024
 export KL_EMBED_SEND_DIMENSIONS=0
 
 # extraction/synthesis LLM: qwen3.6-flash (Anthropic-compatible base;
-# do NOT append /v1 — litellm adds /v1/messages itself).
+# do NOT append /v1 — HTTP client adds /v1/messages itself).
 export KL_LLM_BASE_URL=https://example.com/apps/anthropic
 export KL_LLM_MODEL=qwen3.6-flash
 export ANTHROPIC_AUTH_TOKEN=<api-key>   # real value lives only in .env

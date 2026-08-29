@@ -1641,7 +1641,7 @@ export function useSearchSessionMutations() {
  *
  * `degradedReason` 跟**实际走的路**走（后端 M2.9 随每条 stream 带下来）：
  * 走了 agent turn → null；落回本地召回 → 非空文案。这比静态的
- * `agentAvailable`（只表示"装没装 opencode"）准确 —— 装了但本轮起不来时，
+ * `agentAvailable`（密钥/网关是否任一可用）准确 —— 配了但本轮起不来时，
  * 用户仍要看到降级横幅。切换会话时清空（reason 是上一会话的，不该串）。
  *
  * 收到 `done` 时刷新该会话详情（一期流式是"整批落库后通知"）。

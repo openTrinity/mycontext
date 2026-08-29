@@ -388,6 +388,11 @@ export function KlPanel({ channelId }: { channelId: string | null }) {
             {t("status.kl.egress")}：{t("status.kl.egressYes")}
           </p>
         )}
+        {status?.embeddingStatus !== undefined && status.embeddingStatus !== "" && (
+          <p className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("status.kl.embedding")}：{status.embeddingStatus}
+          </p>
+        )}
 
         {/*
           ★★ `perChannel` 缺失时回落成**主渠道**那张卡 —— 渠道 id 写死

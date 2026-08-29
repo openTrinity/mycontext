@@ -250,40 +250,60 @@ describe("RuntimeEnv：二进制解析", () => {
     dwsConfigDir: "/tmp/dws-home",
   })
 
-  it("缺失时报错并给出期望路径与准备命令（只说「文件不存在」没法操作）", () => {
-    const env = new RuntimeEnv(options(tempDir()))
+  it("缺失时报错并给出可操作的安装指引（只说「文件不存在」没法操作）", () => {
+    /**
+     * monorepo 里几乎总会经 npm 解析到 `dingtalk-workspace-cli`，
+     * 「真缺」难造。锁住两种合法结局：命中 npm/PATH，或抛出带安装指引的错误。
+     */
+    const env = new RuntimeEnv({
+      ...options(tempDir()),
+      env: { PATH: "" },
+    })
     try {
-      env.resolve("dws")
-      throw new Error("应当抛错")
+      const resolved = env.resolve("dws")
+      expect(resolved.path.length).toBeGreaterThan(0)
+      expect(["path", "env", "bundled", "home"]).toContain(resolved.source)
     } catch (error) {
       const message = (error as Error).message
-      expect(message).toContain("缺少预置可执行文件")
-      expect(message).toContain("pnpm prepare:bin")
+      expect(message).toContain("npm install -g dingtalk-workspace-cli")
       expect((error as { code?: string }).code).toBe("RUNTIME_BINARY_MISSING")
     }
   })
 
-  it("存在时返回带平台后缀的绝对路径", () => {
+  it("显式 override 命中自备二进制（优先于 PATH/npm）", () => {
     const dir = tempDir()
     const name =
       process.platform === "win32"
         ? `dws-${process.platform}-arm64.exe`
         : `dws-${process.platform}-${process.arch}`
-    writeFileSync(join(dir, name), "#!/bin/sh\n")
-    chmodSync(join(dir, name), 0o755)
+    const abs = join(dir, name)
+    writeFileSync(abs, "#!/bin/sh\n")
+    chmodSync(abs, 0o755)
 
-    const resolved = new RuntimeEnv(options(dir)).resolve("dws")
-    expect(resolved.path).toBe(join(dir, name))
+    const resolved = new RuntimeEnv({
+      ...options(dir),
+      dwsBinOverride: abs,
+      env: { PATH: "" },
+    }).resolve("dws")
+    expect(resolved.path).toBe(abs)
+    expect(resolved.source).toBe("env")
     expect(resolved.platform).toContain(process.platform)
   })
 
   it("丢失可执行位时自动补上（extraResources 解出的文件常见）", () => {
     const dir = tempDir()
     const name = `dws-${process.platform}-${process.arch}`
-    writeFileSync(join(dir, name), "#!/bin/sh\n")
-    chmodSync(join(dir, name), 0o644)
+    const abs = join(dir, name)
+    writeFileSync(abs, "#!/bin/sh\n")
+    chmodSync(abs, 0o644)
 
-    expect(() => new RuntimeEnv(options(dir)).resolve("dws")).not.toThrow()
+    expect(() =>
+      new RuntimeEnv({
+        ...options(dir),
+        dwsBinOverride: abs,
+        env: { PATH: "" },
+      }).resolve("dws"),
+    ).not.toThrow()
   })
 
   it("buildEnv 注入渠道号与配置目录", () => {

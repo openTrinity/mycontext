@@ -187,24 +187,27 @@ export function explainDecisionReason(reason: string | null): ReasonExplained | 
  *
  * 上面那些是**单条草稿**为什么没自动发（用户可以逐条看）；这里是
  * **整个模块**的能力少了一块，影响每一次生成。两者的读者动作不同：
- * 前者是"这条我手动发一下"，后者是"我得去装个东西 / 配个东西"。
+ * 前者是"这条我手动发一下"，后者是"我得去配个东西"。
  *
  * ## ★ 为什么必须按原因分文案
  *
- * 原来只有一句"未配置模型 —— 去设置里配好 LLM"。而实测同事的状态是
- * `opencode_version_unreadable`：他的模型**配好了**
- * （日志 `llm holder reconfigured, model: gpt-5.6-sol`），横幅却让他去配模型。
- * 让用户去改一个改不了的东西比不告诉他更糟 —— 这条与
- * `DECISION_REASON_INFO` 文件头写的是同一个道理。
+ * 只有布尔值时横幅只能说一句"去配模型"。实测过：模型已配好、缺的是
+ * Agent 编排凭据，那句却把人推向改主模型 —— 比不告诉他更糟。
  *
- * `opencode_too_old` 带着版本号（`opencode_too_old:1.1.0<1.2.23`），
- * 所以用前缀匹配而不是全等。
+ * 现行码：`llm_not_configured` / `cursor_api_key_missing`。
+ * 仍兼容历史库里的 `opencode_*`（映射到 Agent 密钥类文案，不再提二进制）。
  */
 export function explainDegradedReason(reason: string, t: (key: string) => string): string {
   if (reason === "llm_not_configured") return t("degradedReasons.llmNotConfigured")
-  if (reason === "opencode_missing") return t("degradedReasons.agentMissing")
-  if (reason === "opencode_version_unreadable") return t("degradedReasons.agentUnreadable")
-  if (reason.startsWith("opencode_too_old")) return t("degradedReasons.agentTooOld")
+  if (reason === "cursor_api_key_missing") return t("degradedReasons.agentKeyMissing")
+  // 历史码：旧会话/快照可能还带着；一律按「Agent 不可用」呈现，勿再提 prepare:bin。
+  if (
+    reason === "opencode_missing" ||
+    reason === "opencode_version_unreadable" ||
+    reason.startsWith("opencode_too_old")
+  ) {
+    return t("degradedReasons.agentKeyMissing")
+  }
   /**
    * 未登记 → 原样显示那个串。
    *

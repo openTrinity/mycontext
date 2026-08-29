@@ -86,7 +86,7 @@ export class AdvancedAiService {
       raw === null
         ? {
             modelRoles: { "embedding.local": resolved.embedModel },
-            harness: { search: "opencode-acp", persona: "opencode-acp" },
+            harness: { search: "cursor-agent", persona: "cursor-agent" },
             rawConfigJson: null,
           }
         : (() => {
@@ -120,14 +120,8 @@ export class AdvancedAiService {
         })
       }
 
-      // ★ 剥掉权限键后再落盘。
-      //
-      // 逃生阀整份注入 OPENCODE_CONFIG_CONTENT，而 opencode 的
-      // `agent.<name>.permission` 会**覆盖**我们注入的 deny-all
-      // （实测 merge = rulesets.flat() + findLast，agent 段追加在 user 段之后）。
-      // 于是 `{"agent":{"build":{"permission":{"webfetch":"allow"}}}}` 就能把
-      // webfetch 从 deny 翻回 allow —— 而 webfetch 无域名白名单，
-      // 正是「读画像 → 外传」这条外泄通道。
+      // 逃生阀整份注入时曾用于外部 agent 配置；仍剥权限键，防止提权配置落盘。
+      // （Agent 主路已改 Cursor SDK；逃生阀只影响极客覆盖项，不改发送门禁。）
       //
       // 在**存**的时候就剥（而不是只在读的时候）：库里不留一份"看起来被接受了"
       // 的提权配置，避免将来某条新的读路径漏掉清洗。

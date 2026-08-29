@@ -72,6 +72,12 @@ export { readCollectionRequest, isWithinCollectionWindow } from "./collection-re
 export type { CollectionRequest } from "./collection-request.js"
 export { purgeOutOfScopeMessages, purgeOutOfScopeDocuments } from "./purge-scope.js"
 export type { PurgeReport, DocumentPurgeReport } from "./purge-scope.js"
+/**
+ * 范围放宽后 bulk 重打标（0 → 1）+ 写 changelog。
+ * 见 `eligibility-retag.ts` 文件头 —— 漏挂会让 export/rebuild 静默缺语料。
+ */
+export { retagLearningEligible } from "./eligibility-retag.js"
+export type { RetagReport } from "./eligibility-retag.js"
 
 /**
  * 把一个 vault 清回「刚登录完、还没采过」的状态。

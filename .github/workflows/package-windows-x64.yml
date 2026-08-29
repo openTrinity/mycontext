@@ -1,0 +1,55 @@
+name: package-windows-x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preserve Forge integrity bytes
+        shell: pwsh
+        run: |
+          git config core.autocrlf false
+          git config core.eol lf
+          git checkout -- vendor/forge
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # kl 需要 Windows 原生 Python + 依赖；脚本会下载、校验并准备 venv。
+      - name: Prepare Windows Python runtime
+        run: pnpm setup:python
+
+      - name: Build Windows x64 packages
+        run: pnpm dist:win
+
+      - name: Upload Windows x64 packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyContext-windows-x64
+          path: apps/desktop/release/**
+          if-no-files-found: error
+          retention-days: 14

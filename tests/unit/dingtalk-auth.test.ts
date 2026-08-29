@@ -24,7 +24,7 @@ import type { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
 
 const NOW = new Date("2026-07-28T11:20:00.000Z")
 
-/** 实测输出：已授权 */
+/** 实测输出：已授权（相对 `NOW` 仍有效） */
 const AUTHORIZED = JSON.stringify({
   success: true,
   authenticated: true,
@@ -38,6 +38,30 @@ const AUTHORIZED = JSON.stringify({
   user_id: "100001",
   user_name: "高鹏",
 })
+
+/**
+ * ★ 给 `login()` 收尾复查用的「此刻仍有效」凭据。
+ *
+ * `queryStatus` → `parseAuthStatus(stdout)` 用的是**真** `Date.now()`，
+ * 上面那份相对 `NOW=2026-07-28` 的 fixture 在真实日历翻过 refresh 到期日之后
+ * 会变成 `expired` —— 于是 login 测例在某一天突然红，而解析单测仍绿。
+ * 这份按调用时的 now 往后推，不跟日历较劲。
+ */
+function authorizedAt(now: Date = new Date()): string {
+  return JSON.stringify({
+    success: true,
+    authenticated: true,
+    refreshed: true,
+    token_valid: true,
+    refresh_token_valid: true,
+    expires_at: new Date(now.getTime() + 10 * 60 * 60 * 1000).toISOString(),
+    refresh_expires_at: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    corp_id: "dingexampleorgid0001",
+    corp_name: "（公司）",
+    user_id: "100001",
+    user_name: "高鹏",
+  })
+}
 
 describe("parseAuthStatus：已授权", () => {
   it("解析出组织、用户与两个到期时间", () => {
@@ -269,7 +293,7 @@ describe("DingTalkAuth：OAuth 后继续完成 PAT 范围授权", () => {
       },
       exec: async () => ({
         exitCode: 0,
-        stdout: AUTHORIZED,
+        stdout: authorizedAt(),
         stderr: "",
         timedOut: false,
       }),

@@ -120,27 +120,23 @@ export interface DistillSourceServiceOptions {
    */
   primaryChannelId: string
   /**
-   * 用户改了采集范围之后的回调（清越界语料 + 重建图谱，装配处注入）。
+   * 用户改了采集范围之后的回调（清越界语料 + 视情况重建图谱，装配处注入）。
    *
    * ★ 为什么是回调而不是在这里做：清语料要碰 `DataPlaneService`、
    * 删媒体字节要碰文件系统、重建图谱要碰 `KlServerService` —— 这一层
    * 只管 `distill_sources` 那张表。把那三件事塞进来等于让一个配置读写
    * 服务持有半个应用。
    *
-   * ## ★★★ 必须带 `channelId`
+   * ## ★★★ 必须带 `channelId` + `narrowed`
    *
-   * 它原来是无参的，而接线那侧（`startup.ts` 的 `onScopeChanged`）只能对
-   * **主渠道**动手：`dataPlane.applyScopeChange()` / `feed.export()` /
-   * `klServer.rebuildGraph(true)` 三个都不带渠道，且那个 `klServer` 是主渠道
-   * 的裸实例。于是"保存飞书的范围"会删掉并重建**钉钉**的图。
-   *
-   * 实测日志：`[Main:KlServer] graph build started` +
-   * `kl graph data wiped for fresh rebuild {dataDir: …/kl}` ——
-   * 而飞书的图在 `…/kl/feishu`。
+   * · `channelId`：不带的话接线只能对主渠道动手，保存飞书会重建钉钉的图。
+   * · `narrowed`：v4 §3.2 选 B（知情可选重建），否决 C（保存即自动 fresh）。
+   *   接线侧收窄时**不许**自动 `rebuildGraph(true)` —— UI「暂不重建」必须真。
+   *   放宽走增量重建（retag 之后语料已齐）。
    *
    * 不给 = 只存范围、不做后续清理（单测与未接线路径）。
    */
-  onScopeChanged?: (channelId: string) => void
+  onScopeChanged?: (channelId: string, detail: { narrowed: boolean }) => void
 }
 
 /**
@@ -1177,7 +1173,7 @@ export class DistillSourceService {
      * 不是可以删掉的理由（显式的「清空渠道数据」仍走同一条路）。
      */
     if (input.kind === "chat" && scopeChanged(before, { enabled: input.enabled, scope: merged })) {
-      this.options.onScopeChanged?.(input.channelId)
+      this.options.onScopeChanged?.(input.channelId, { narrowed: mergeResult.narrowed })
     }
     /**
      * ★ 返回**是否收窄**，让界面能提示「已学的知识不会自动移除」。

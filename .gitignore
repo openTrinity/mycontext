@@ -134,3 +134,14 @@ acp-stream-dump.json
 .claude/
 .agents/
 .hitg_attachments/
+
+.lark-cache/
+.opencode-cache/
+
+# 旁路 embedding 权重（README 可跟踪）
+vendor/models/**
+!vendor/models/README.md
+!vendor/models/.gitkeep
+
+# 误解压的 asar 工作目录
+extracted/

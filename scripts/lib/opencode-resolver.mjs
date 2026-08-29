@@ -54,16 +54,18 @@ function isExecutableFile(path) {
 }
 
 /**
- * 当前平台对应的**平台包名候选**，按优先级排列。
+ * 平台包名候选，按优先级排列。
  *
- * 与 opencode 的 `postinstall.mjs::packageNames()` 同一套判据 ——
- * 保持一致才不会在老 CPU（无 AVX2）上挑到会崩的普通版。
+ * @param {string} [platformKey] 如 `win32-x64`；缺省为当前进程平台。
+ *   交叉准备时必须显式传入（本机 CPU 特征不能用来挑 Windows 包）。
  */
-function platformPackageNames() {
+export function platformPackageNames(platformKey) {
   const platformMap = { darwin: "darwin", linux: "linux", win32: "windows" }
   const archMap = { x64: "x64", arm64: "arm64", arm: "arm" }
-  const platform = platformMap[process.platform] ?? process.platform
-  const arch = archMap[process.arch] ?? process.arch
+  const key = platformKey ?? `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`
+  const [nodePlat, nodeArch] = key.split("-")
+  const platform = platformMap[nodePlat] ?? nodePlat
+  const arch = archMap[nodeArch] ?? nodeArch
   const base = `opencode-${platform}-${arch}`
 
   if (arch !== "x64") {
@@ -72,11 +74,14 @@ function platformPackageNames() {
     return [base]
   }
 
-  // x64：baseline = 无 AVX2 的保守版。挑不准时**优先 baseline**
-  // （在支持 AVX2 的机器上跑 baseline 只是慢一点，反过来会 SIGILL）。
-  const baseline = !supportsAvx2()
+  // ★ 交叉准备（target ≠ host）：本机有没有 AVX2 与目标机无关。
+  // 保守走 baseline 优先 —— 在 AVX2 机器上只是慢一点，反过来会 SIGILL。
+  const cross =
+    platformKey !== undefined &&
+    platformKey !== `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`
+  const baseline = cross || !supportsAvx2()
   if (platform === "linux") {
-    if (isMusl()) {
+    if (!cross && isMusl()) {
       return baseline
         ? [`${base}-baseline-musl`, `${base}-musl`, `${base}-baseline`, base]
         : [`${base}-musl`, `${base}-baseline-musl`, base, `${base}-baseline`]
@@ -136,8 +141,12 @@ function isMusl() {
  *
  * @returns {string | null} 真二进制的绝对路径
  */
-export function resolveOpencodeNpmBinary() {
-  const sourceBinary = process.platform === "win32" ? "opencode.exe" : "opencode"
+/**
+ * @param {string} [platformKey] 如 `win32-x64`；缺省为当前进程平台。
+ */
+export function resolveOpencodeNpmBinary(platformKey) {
+  const key = platformKey ?? `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`
+  const sourceBinary = key.startsWith("win32") ? "opencode.exe" : "opencode"
   let fromLauncher
   try {
     // 平台包挂在 opencode-ai 名下，所以要从它的上下文解析。
@@ -145,7 +154,7 @@ export function resolveOpencodeNpmBinary() {
   } catch {
     return null
   }
-  for (const name of platformPackageNames()) {
+  for (const name of platformPackageNames(platformKey)) {
     try {
       const pkgJson = fromLauncher.resolve(`${name}/package.json`)
       const bin = join(dirname(pkgJson), "bin", sourceBinary)

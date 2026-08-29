@@ -284,7 +284,8 @@ export class GraphQueryService {
     if (mine.size === 0) return []
 
     const links: FactEntityLink[] = []
-    // ★ 中心自己的边（见上面注释：不给的话中心节点是孤立的）
+    // ★ 中心自己那一份也要放进结果：`buildEgoGraph` 靠 `self.id` 那些边
+    // 认出中心节点，只给邻居的话中心是孤立的。
     for (const factId of mine) links.push({ factId, entityId: selfId })
 
     const limit = this.options.egoCandidateLimit ?? EGO_CANDIDATE_LIMIT
@@ -304,6 +305,33 @@ export class GraphQueryService {
           if (mine.has(factId)) links.push({ factId, entityId: row.id })
         }
       })
+    }
+    return links
+  }
+
+  /**
+   * fact 交集为空时，用 kl `/entity` 的直连边兜底。
+   *
+   * 常见形状：本人有大量 `AUTHORED_BY` / `MENTIONS`，但没有以我为 ABOUT
+   * 主语的事实 → `factsOfEntity(me)` 空，ego 会误说「没抽到关联」。
+   * 合成 `{factId, entityId}` 形状，让 `buildEgoGraph` 不用改。
+   */
+  private async linksViaNeighbors(selfId: string): Promise<FactEntityLink[]> {
+    const neighborsOf = this.options.neighborsOfEntity
+    if (neighborsOf === undefined) return []
+    let neighbors: readonly { id: string; type: string; label: string }[]
+    try {
+      neighbors = await neighborsOf(selfId)
+    } catch {
+      return []
+    }
+    const links: FactEntityLink[] = []
+    for (const neighbor of neighbors) {
+      if (neighbor.id === "" || neighbor.id === selfId) continue
+      // 合成 fact id：每条直连边当成一次「共现」，weight=1
+      const factId = `neighbor:${selfId}:${neighbor.id}`
+      links.push({ factId, entityId: selfId })
+      links.push({ factId, entityId: neighbor.id })
     }
     return links
   }
@@ -363,28 +391,34 @@ export class GraphQueryService {
        *
        * `factLinksAround` 读的 `edges` 表在默认后端（ladybug）下恒空 ——
        * 完整推理见 `factsOfEntity` 的注释。所以这里的顺序是刻意的：
-       * ① 有 `factsOfEntity` → 走交集（真实关系）；
-       * ② 没有（未注入 / kl 没起来）→ 退回 SQLite，它**可能**是空的，
+       * ① 有 `factsOfEntity` → 走 fact 交集（真实共现）；
+       * ② 交集空且接了 `neighborsOfEntity` → 直连边兜底（发言/提及有边但
+       *    没有 ABOUT 事实时，否则会误说「没抽到关联」）；
+       * ③ 没有（未注入 / kl 没起来）→ 退回 SQLite，它**可能**是空的，
        *    那时下面的文案要说清"读不到"而不是"没有"。
        */
-      const links =
+      let links =
         this.options.factsOfEntity === undefined
           ? db.factLinksAround(self.id)
           : await this.linksViaKl(db, self.id)
+
+      if (links.length === 0 && this.options.factsOfEntity !== undefined) {
+        links = await this.linksViaNeighbors(self.id)
+      }
 
       if (links.length === 0) {
         /**
          * ★★ 两种"空"要说不同的话。
          *
-         * · 走过 kl 还是空 → 真的没抽到关联，指向「优化图谱」是对的；
+         * · 走过 kl（fact + 直连）还是空 → 真的几乎没有与本人相关的图结构；
          * · 没走 kl（读的是那张恒空表）→ 说"没抽到"就是**假话**。
-         *   那时要说清是我们读不到，且指出 kl 没起来这个真实原因 ——
-         *   否则用户会去点优化图谱，而那不会有任何帮助。
+         *
+         * 「优化图谱」按钮已从界面拿掉（ingest 自带 improve）；文案不再催那一步。
          */
         return empty(
           this.options.factsOfEntity === undefined
             ? "关系数据要图谱服务在运行才能读到 —— 稍等它起来，或在设置里看它的状态"
-            : "还没抽到你和别人的关联（图刚建好时可能要再跑一次「优化图谱」）",
+            : "图里能认出你，但还没有和别人的关联边（可确认本人身份是否与图中人名一致，或扩大采集后再建图）",
         )
       }
 

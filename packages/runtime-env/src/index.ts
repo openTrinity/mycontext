@@ -22,3 +22,28 @@ export type { PythonVersionProbe, ResolvedPython } from "./python.js"
 export { ProcessRunner } from "./process.js"
 export { maskArgValues } from "./process.js"
 export type { ExecSpec, ExecResult, SpawnSpec, DuplexSpec, DuplexHandle } from "./process.js"
+
+export {
+  EMBED_MODEL_NAME,
+  LOCAL_EMBED_DIM,
+  LOCAL_EMBED_PORT_DEFAULT,
+  looksLikeModelDir,
+  embedModelCandidates,
+  probeEmbedAccelerator,
+  probeEmbedModel,
+  localEmbedBaseUrl,
+  isLocalEmbedUsable,
+  resolveEmbedGateway,
+  formatEmbedStatusText,
+  formatEmbedGatewayStatus,
+} from "./embed-model.js"
+export type {
+  EmbedAccelerator,
+  EmbedProbeReason,
+  EmbedModelProbeResult,
+  EmbedModelProbeOptions,
+  EmbedGatewayMode,
+  EmbedGatewayConfigSlice,
+  ResolveEmbedGatewayInput,
+  ResolvedEmbedGateway,
+} from "./embed-model.js"

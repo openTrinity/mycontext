@@ -24,7 +24,7 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
-import litellm
+from kl_graph.utils.litellm_config import litellm
 import pytest
 from fastapi.testclient import TestClient
 

@@ -259,6 +259,27 @@ class ZvecVectorStore(VectorStore):
             collection = self._zvec.open(str(path))
             vector_schema = collection.schema.vector(_VECTOR_FIELD)
             if vector_schema is None or vector_schema.dimension != self.embedding_dim:
+                # Empty collection left by a prior misconfigured dim (e.g. 2048
+                # against a fixed-4096 local embedder): drop and recreate so
+                # the next ingest can proceed without a manual wipe.
+                try:
+                    n = int(collection.stats.doc_count)
+                except Exception:  # noqa: BLE001
+                    n = -1
+                if n == 0:
+                    logger.warning(
+                        "Recreating empty Zvec collection %r "
+                        "(stored dim incompatible with embedding_dim=%d)",
+                        name,
+                        self.embedding_dim,
+                    )
+                    # Zvec Collection 无显式 close；释引用后 rmtree。
+                    del collection
+                    gc.collect()
+                    import shutil
+
+                    shutil.rmtree(path, ignore_errors=True)
+                    return self._zvec.create_and_open(str(path), self._schema(name))
                 raise ValueError(
                     f"Zvec collection {name!r} has an incompatible embedding dimension"
                 )

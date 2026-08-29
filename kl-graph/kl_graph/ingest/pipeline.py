@@ -1004,11 +1004,28 @@ class IngestionPipeline:
             )
         if self.embedder is None:
             emb_cfg = cfg.pipelines.ingestion.embedding
+            concurrency = int(emb_cfg.concurrency)
+            batch_size = int(emb_cfg.batch_size)
+            timeout = float(emb_cfg.timeout)
+            # 本机单卡 embedding（llama.cpp 等）：
+            # · 默认 10 路并发 → 503 / 互相拖死
+            # · 默认 60s / batch=10 → 长文本批次经常 ReadTimeout（UI「timed out」）
+            from kl_graph.config import _is_loopback_url
+
+            if _is_loopback_url(str(cfg.services.embedding.base_url or "")):
+                concurrency = min(concurrency, 1)
+                # 远端/本机 llama 常见 -c 8192（n_ctx≈8704）；按 8192 主动切窗。
+                batch_size = min(batch_size, 1)
+                timeout = max(timeout, 300.0)
+                max_input_tokens = 8192
+            else:
+                max_input_tokens = None
             self.embedder = Embedder(
-                batch_size=emb_cfg.batch_size,
-                concurrency=emb_cfg.concurrency,
+                batch_size=batch_size,
+                concurrency=concurrency,
                 max_retries=emb_cfg.max_retries,
-                timeout=emb_cfg.timeout,
+                timeout=timeout,
+                max_input_tokens=max_input_tokens,
             )
         # The extractor is initialized lazily by run_extraction on its event-loop
         # thread. Store initialization also runs in worker threads, so creating or

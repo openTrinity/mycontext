@@ -188,3 +188,43 @@ describe("★★★ 界面必须把这件事说出来（反证：静默是最糟
     expect(panel).toMatch(/rebuild\.mutate\(\{[^}]*channelId/)
   })
 })
+
+describe("★★★ 收窄时不许自动 rebuildGraph(true)（v4 §3.2 B，Critical #2）", () => {
+  it("★★★ onScopeChanged 必须带上 narrowed，接线侧才能分叉", async () => {
+    /**
+     * 反证：回调仍是 `(channelId) => void`、save 不传 narrowed
+     * → 接线侧无法区分「知情可选重建」与「放宽增量」，只能永远 fresh。
+     */
+    const { readFileSync } = await import("node:fs")
+    const src = readFileSync("apps/desktop/src/main/services/distill-source.service.ts", "utf8")
+    expect(src).toMatch(
+      /onScopeChanged\?:\s*\(channelId:\s*string,\s*detail:\s*\{\s*narrowed:\s*boolean\s*\}\)\s*=>\s*void/,
+    )
+    expect(src).toMatch(
+      /onScopeChanged\?\.\(input\.channelId,\s*\{\s*narrowed:\s*mergeResult\.narrowed\s*\}\)/,
+    )
+  })
+
+  it("★★★ 收窄路径：startup 不调 rebuildGraph(true)；放宽才增量 rebuild", async () => {
+    /**
+     * 设计选 B（知情 + 可选重建），否决 C（保存即自动重建）。
+     * UI「知道了，暂不重建」必须真能不做重建 —— 否则文案说谎。
+     *
+     * 反证：把 `if (detail.narrowed) return` 删掉、或改回无条件
+     * `rebuildGraph(true)` → 这条转红。
+     */
+    const { readFileSync } = await import("node:fs")
+    const startup = readFileSync("apps/desktop/src/main/bootstrap/startup.ts", "utf8")
+    const at = startup.indexOf("onScopeChanged:")
+    expect(at).toBeGreaterThan(0)
+    // 取回调体（到下一个同级字段前），避免误匹配文件别处的 rebuildGraph
+    const body = startup.slice(at, at + 4500)
+    expect(body).toMatch(/detail\.narrowed/)
+    // ★ 收窄：明确跳过自动重建
+    expect(body).toMatch(/if\s*\(\s*detail\.narrowed\s*\)/)
+    // ★ 放宽：增量（false），不是 fresh wipe
+    expect(body).toMatch(/rebuildGraph\(\s*false\s*\)/)
+    // ★★ 回调体内不许再调 fresh —— 匹配**调用**而非注释里的文字
+    expect(body).not.toMatch(/\.rebuildGraph\(\s*true\s*\)/)
+  })
+})

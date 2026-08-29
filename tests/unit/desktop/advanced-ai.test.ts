@@ -66,7 +66,7 @@ describe("读写", () => {
     const context = makeService()
     const config = context.service.read()
     expect(config.baseUrl).toBe("https://default/v1")
-    expect(config.harness["search"]).toBe("opencode-acp")
+    expect(config.harness["search"]).toBe("cursor-agent")
     expect(config.apiKeyTail).toBeNull()
     context.close()
   })
@@ -78,7 +78,7 @@ describe("读写", () => {
         baseUrl: "https://custom/v1",
         apiKey: null,
         modelRoles: { "harness.search": "my-model" },
-        harness: { search: "builtin-llm", persona: "opencode-acp" },
+        harness: { search: "builtin-llm", persona: "cursor-agent" },
         rawConfigJson: null,
       },
       NOW,

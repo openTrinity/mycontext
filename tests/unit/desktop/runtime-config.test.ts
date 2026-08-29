@@ -3,7 +3,7 @@
  *
  * 锁住的性质：
  * 1. 三层解析：用户存的覆盖 > kernel loadConfig 默认层；
- * 2. KL 三项留空回退主配置（`klEffective` 给出实际生效值）；
+ * 2. KL / 向量三项留空回退主配置（`klEffective` / `embedEffective` 给出实际生效值）；
  * 3. 脱敏：apiKey 只给 configured + 后 4 位，明文不出现在视图里；
  * 4. save 后 process.env 被 seed（含 ANTHROPIC_* 别名）；
  * 5. apiKey 三态：undefined 不改、null/"" 清空、字符串写入；
@@ -141,6 +141,53 @@ describe("KL 三项回退主配置", () => {
     const v = ctx.service.view()
     expect(v.klEffective.model).toBe("claude-sonnet-4-6")
     expect(v.klEffective.apiKeyConfigured).toBe(true)
+    ctx.close()
+  })
+})
+
+describe("向量配置回退主配置", () => {
+  it("向量全空时 embedEffective 用主配置", () => {
+    const ctx = makeService()
+    ctx.service.save(
+      { llmBaseUrl: "https://main", modelMain: "glm-5.2", llmApiKey: "sk-main1234" },
+      NOW,
+    )
+    const r = ctx.service.resolved()
+    expect(r.embedBaseUrl).toBe("https://main")
+    expect(r.embedApiKey).toBe("sk-main1234")
+    expect(r.embedModel).toBe("text-embedding-v4")
+    expect(r.embeddingDim).toBe(2048)
+    expect(r.embedSendDimensions).toBe(true)
+    const v = ctx.service.view()
+    expect(v.embedEffective.baseUrl).toBe("https://main")
+    expect(v.embedEffective.apiKeyConfigured).toBe(true)
+    ctx.close()
+  })
+
+  it("向量单独指定时不回退", () => {
+    const ctx = makeService()
+    ctx.service.save(
+      {
+        llmBaseUrl: "https://main",
+        modelMain: "glm-5.2",
+        embedLlmBaseUrl: "https://embed",
+        embedLlmApiKey: "sk-embed9999",
+        embedModel: "text-embedding-3-small",
+        embeddingDim: 1536,
+        embedSendDimensions: false,
+      },
+      NOW,
+    )
+    const r = ctx.service.resolved()
+    expect(r.embedBaseUrl).toBe("https://embed")
+    expect(r.embedApiKey).toBe("sk-embed9999")
+    expect(r.embedModel).toBe("text-embedding-3-small")
+    expect(r.embeddingDim).toBe(1536)
+    expect(r.embedSendDimensions).toBe(false)
+    const v = ctx.service.view()
+    expect(v.embedEffective.model).toBe("text-embedding-3-small")
+    expect(v.embedEffective.embeddingDim).toBe(1536)
+    expect(v.embedEffective.sendDimensions).toBe(false)
     ctx.close()
   })
 })
@@ -536,6 +583,88 @@ describe("主模型协议", () => {
     // 只改主模型，知识库仍是默认 openai
     expect(ctx.service.resolved().mainProvider).toBe("anthropic")
     expect(ctx.service.resolved().klProvider).toBe("openai")
+    ctx.close()
+  })
+})
+
+/**
+ * Agent 运行时凭据（`cursorApiKey`）与落点（`cursorRuntime`）。
+ *
+ * 锁住：secret 脱敏、三态、CURSOR_API_KEY 双读、seed 双写、默认 local。
+ */
+describe("Agent 运行时配置", () => {
+  it("默认 cursorRuntime=local，apiKey 未配置", () => {
+    const ctx = makeService()
+    expect(ctx.service.resolved().cursorRuntime).toBe("local")
+    expect(ctx.service.resolved().cursorApiKey).toBe("")
+    const v = ctx.service.view()
+    expect(v.cursorRuntime.value).toBe("local")
+    expect(v.cursorRuntime.source).toBe("default")
+    expect(v.cursorApiKey.configured).toBe(false)
+    ctx.close()
+  })
+
+  it("save 覆盖 runtime 为 cloud + 脱敏 key", () => {
+    const ctx = makeService()
+    ctx.service.save({ cursorRuntime: "cloud", cursorApiKey: "sk-cursor-4242" }, NOW)
+    expect(ctx.service.resolved().cursorRuntime).toBe("cloud")
+    expect(ctx.service.resolved().cursorApiKey).toBe("sk-cursor-4242")
+    const v = ctx.service.view()
+    expect(v.cursorRuntime.value).toBe("cloud")
+    expect(v.cursorRuntime.source).toBe("user")
+    expect(v.cursorApiKey.configured).toBe(true)
+    expect(v.cursorApiKey.tail).toBe("4242")
+    expect(JSON.stringify(v)).not.toContain("sk-cursor")
+    ctx.close()
+  })
+
+  it("apiKey 三态：undefined 不改，null 清空", () => {
+    const ctx = makeService()
+    ctx.service.save({ cursorApiKey: "sk-keep-1111" }, NOW)
+    ctx.service.save({ cursorRuntime: "cloud" }, NOW)
+    expect(ctx.service.view().cursorApiKey.tail).toBe("1111")
+    ctx.service.save({ cursorApiKey: null }, NOW)
+    expect(ctx.service.view().cursorApiKey.configured).toBe(false)
+    ctx.close()
+  })
+
+  it("★ seed 双写 CURSOR_API_KEY + MYCONTEXT_CURSOR_API_KEY，并写 RUNTIME", () => {
+    const env: NodeJS.ProcessEnv = {}
+    const ctx = makeService(loadConfig(), env)
+    ctx.service.save({ cursorApiKey: "sk-seed-9999", cursorRuntime: "cloud" }, NOW)
+    expect(env["CURSOR_API_KEY"]).toBe("sk-seed-9999")
+    expect(env["MYCONTEXT_CURSOR_API_KEY"]).toBe("sk-seed-9999")
+    expect(env["MYCONTEXT_CURSOR_RUNTIME"]).toBe("cloud")
+    ctx.close()
+  })
+
+  it("★ 清空 key 后 seed 会 delete 双名（不留空串透传）", () => {
+    const env: NodeJS.ProcessEnv = {
+      CURSOR_API_KEY: "stale",
+      MYCONTEXT_CURSOR_API_KEY: "stale",
+    }
+    const ctx = makeService(loadConfig(), env)
+    ctx.service.save({ cursorApiKey: "sk-tmp-0000" }, NOW)
+    ctx.service.save({ cursorApiKey: null }, NOW)
+    expect(env["CURSOR_API_KEY"]).toBeUndefined()
+    expect(env["MYCONTEXT_CURSOR_API_KEY"]).toBeUndefined()
+    ctx.close()
+  })
+
+  it("★ 双读：loadConfig 认 CURSOR_API_KEY（与 MYCONTEXT_* 同义）", () => {
+    const defaults = loadConfig({ env: { CURSOR_API_KEY: "sk-from-alt-7777" } })
+    const ctx = makeService(defaults)
+    expect(ctx.service.resolved().cursorApiKey).toBe("sk-from-alt-7777")
+    expect(ctx.service.view().cursorApiKey.configured).toBe(true)
+    expect(ctx.service.view().cursorApiKey.source).toBe("env")
+    ctx.close()
+  })
+
+  it("env 层可覆盖 runtime（MYCONTEXT_CURSOR_RUNTIME）", () => {
+    const defaults = loadConfig({ env: { MYCONTEXT_CURSOR_RUNTIME: "cloud" } })
+    const ctx = makeService(defaults)
+    expect(ctx.service.resolved().cursorRuntime).toBe("cloud")
+    expect(ctx.service.view().cursorRuntime.source).toBe("env")
     ctx.close()
   })
 })

@@ -1025,12 +1025,36 @@ def _is_transient_llm_error(exc: Exception) -> bool:
     if any(phrase in msg for phrase in (
         "context_length_exceeded", "max_tokens", "maximum context length",
         "token limit", "content_filter", "invalid_api_key", "authentication",
+        "exceed_context_size", "exceeds the available context",
     )):
         return False
     return (
         "rate limit" in msg or "timeout" in msg or " 429" in msg
         or "5xx" in msg or "overloaded" in msg or "cloudflare" in msg
         or "connection error" in msg
+    )
+
+
+def _is_context_window_error(exc: Exception) -> bool:
+    """True when the provider rejected the prompt as too long for n_ctx.
+
+    llama.cpp 对超长既可能回 400 ``exceed_context_size_error``，也可能回 500
+    ``Context size has been exceeded``（typed 成 InternalServerError）。后者若
+    当 transient 原样重试，永远不会拆批。
+    """
+    if isinstance(exc, litellm.ContextWindowExceededError):
+        return True
+    msg = str(exc).lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "exceed_context_size",
+            "exceeds the available context",
+            "context_length_exceeded",
+            "maximum context length",
+            "context size has been exceeded",
+            "context size",
+        )
     )
 
 
@@ -1311,6 +1335,13 @@ class LLMExtractor:
             except _HardStopResponseError:
                 raise
             except Exception as e:  # noqa: BLE001 - classify then re-raise or mark
+                if _is_context_window_error(e):
+                    self.stats["llm_errors"] += 1
+                    logger.error(
+                        "single-msg context overflow on chunk %s; soft-fail: %s: %s",
+                        msg.id[:20], type(e).__name__, str(e)[:300],
+                    )
+                    return _failure_result(str(e), transient=False)
                 if not _is_transient_llm_error(e):
                     self.stats["llm_errors"] += 1
                     logger.error(
@@ -1491,6 +1522,27 @@ class LLMExtractor:
                 return self._batch_failure(messages, "timeout", transient=True)
             except Exception as e:  # noqa: BLE001 - classify then re-raise or mark
                 self.stats["llm_errors"] += 1
+                # 本机/小上下文（如 llama -c 8192）：批次超限时拆批，而不是整轮 HARD-STOP。
+                if _is_context_window_error(e):
+                    if len(messages) > 1:
+                        mid = max(1, len(messages) // 2)
+                        logger.warning(
+                            "batch context overflow (%d msgs, first=%s); "
+                            "splitting into %d+%d",
+                            len(messages),
+                            first_id,
+                            mid,
+                            len(messages) - mid,
+                        )
+                        left = await self._call_llm_batch(messages[:mid])
+                        right = await self._call_llm_batch(messages[mid:])
+                        return left + right
+                    logger.error(
+                        "single-msg context overflow (first=%s); soft-fail slot: %s",
+                        first_id,
+                        str(e)[:300],
+                    )
+                    return self._batch_failure(messages, str(e), transient=False)
                 if not _is_transient_llm_error(e):
                     logger.error(
                         "HARD-STOP batch LLM error (%d msgs, first=%s): %s: %s",
@@ -1606,6 +1658,18 @@ class LLMExtractor:
                 to_extract.append(msg)
 
         BATCH_SIZE = LLM_BATCH_SIZE
+        # 本机小上下文：强制每批 1 条，避免 5 条合计远超 n_ctx=8704。
+        try:
+            from kl_graph.config import _is_loopback_url
+
+            if _is_loopback_url(str(self.base_url or "")):
+                BATCH_SIZE = 1
+        except Exception:  # noqa: BLE001, S110
+            pass
+        # 双保险：URL 字面量含 127.0.0.1/localhost 也强制 1（base_url 形态各异）
+        bu = (self.base_url or "").lower()
+        if "127.0.0.1" in bu or "localhost" in bu:
+            BATCH_SIZE = 1
         print(f"  Messages to extract via LLM: {len(to_extract)}")
         print(
             f"  Batches of {BATCH_SIZE}: "

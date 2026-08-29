@@ -9,7 +9,15 @@
  * 关键是**断言根因而不只是现象**：不是「跑完 dws 没新增文件」（那只说明这次没触发），
  * 而是「相对路径的 dwsConfigDir 直接抛错」（那是唯一的触发条件）。
  */
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -75,46 +83,71 @@ describe("DWS 配置目录必须是绝对路径（凭据泄漏的根因）", () 
   })
 
   /**
-   * ★★ 自备 dws 优先，随包那份兜底。
+   * ★★ 解析顺序：override → PATH → npm 启动器 → bundled。
    *
-   * 随包分发的是开源版；闭源版由用户自己装好再指路径（UI 上填、落设置库）。
-   * 两条断言分别对应「设了就用」与「设的失效就退回」——
-   * 后者是关键：用户换机器 / 卸载闭源包之后，**静默退回随包版**
-   * 比让渠道整个不可用好得多（后者表现是 onboarding 直接走不下去，
-   * 而用户不知道是路径的问题）。
+   * 闭源版由用户自己装好再指路径（UI 上填、落设置库）。
+   * 「设了就用」与「设的失效就退回下一档」—— 后者是关键：用户换机器 /
+   * 卸载闭源包之后，**静默退回**比让渠道整个不可用好得多。
    */
-  it("★★ dwsBinOverride 指向真实文件时优先于随包那份", () => {
+  it("★★ dwsBinOverride 指向真实文件时优先于 PATH/npm/bundled", () => {
     const custom = join(root, "package.json") // 只要是个真实存在的文件即可
     const resolved = new RuntimeEnv({
       binDir: join(root, "apps/desktop/resources/bin"),
       dwsChannel: "",
       dwsConfigDir: join(root, ".tmp-dws-config"),
       dwsBinOverride: custom,
+      env: { PATH: "" },
     }).resolve("dws")
     expect(resolved.path).toBe(custom)
     expect(resolved.source).toBe("env")
   })
 
-  it("★★ override 指向不存在的文件 → 退回随包那份（不是抛错）", () => {
+  it("★★ override 指向不存在的文件 → 退回下一档（不是抛错）", () => {
     const resolved = new RuntimeEnv({
       binDir: join(root, "apps/desktop/resources/bin"),
       dwsChannel: "",
       dwsConfigDir: join(root, ".tmp-dws-config"),
       dwsBinOverride: "/nonexistent/definitely/not/here/dws",
+      // 空 PATH：跳过本机全局 dws，落到 npm 启动器或 bundled
+      env: { PATH: "" },
     }).resolve("dws")
-    expect(resolved.source).toBe("bundled")
-    expect(resolved.path).toContain("resources/bin")
+    expect(["path", "bundled"]).toContain(resolved.source)
+    if (resolved.source === "path") {
+      expect(resolved.path).toMatch(/dingtalk-workspace-cli.*dws\.js$/)
+    } else {
+      expect(resolved.path).toContain("resources/bin")
+    }
   })
 
-  it("★ override 为空串/undefined 视为没设", () => {
+  it("★★ PATH 上的 dws 优先于 npm/bundled", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mycontext-dws-path-"))
+    const fake = join(dir, process.platform === "win32" ? "dws.exe" : "dws")
+    writeFileSync(fake, "#!/bin/sh\necho fake\n")
+    chmodSync(fake, 0o755)
+    try {
+      const resolved = new RuntimeEnv({
+        binDir: join(root, "apps/desktop/resources/bin"),
+        dwsChannel: "",
+        dwsConfigDir: join(root, ".tmp-dws-config"),
+        env: { PATH: dir },
+      }).resolve("dws")
+      expect(resolved.path).toBe(fake)
+      expect(resolved.source).toBe("path")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("★ override 为空串/undefined 视为没设（仍能从 PATH/npm/bundled 解析）", () => {
     for (const override of ["", undefined]) {
       const resolved = new RuntimeEnv({
         binDir: join(root, "apps/desktop/resources/bin"),
         dwsChannel: "",
         dwsConfigDir: join(root, ".tmp-dws-config"),
         dwsBinOverride: override,
+        env: { PATH: "" },
       }).resolve("dws")
-      expect(resolved.source).toBe("bundled")
+      expect(["path", "bundled"]).toContain(resolved.source)
     }
   })
 

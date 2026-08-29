@@ -533,6 +533,27 @@ def _hot_swap_graph(update: ServingIndexUpdate | None = None):
     )
 
 
+def _format_exc(exc: BaseException) -> str:
+    """Human-readable exception text for /status.error.
+
+    Some exceptions (e.g. bare ``Exception()``, certain cancelled futures) have
+    an empty ``str()``; surfacing them as "" made the desktop UI show
+    「未知错误」while the real cause only lived in a debug-level traceback.
+    """
+    text = str(exc).strip()
+    if text:
+        return text
+    if isinstance(exc, BaseExceptionGroup):
+        parts = [_format_exc(sub) for sub in exc.exceptions]
+        joined = "; ".join(p for p in parts if p)
+        head = (exc.message or type(exc).__name__).strip()
+        return f"{head}: {joined}" if joined else head or repr(exc)
+    rendered = repr(exc).strip()
+    if rendered and rendered not in {type(exc).__name__, f"{type(exc).__name__}()"}:
+        return rendered
+    return type(exc).__name__
+
+
 def _set_progress(
     state_str: str, phase: str, percent: float, detail: str = "", error: str = ""
 ):
@@ -698,7 +719,7 @@ async def _run_single_ingest_job(req: IngestRequest):
         logger.info("Background ingest complete.")
     except Exception as e:
         logger.exception("Background ingest failed")
-        _set_progress("error", "", 0.0, "", str(e))
+        _set_progress("error", "", 0.0, "", _format_exc(e))
 
 
 async def _run_single_improve_job(req: ImproveRequest) -> None:
@@ -726,7 +747,7 @@ async def _run_single_improve_job(req: ImproveRequest) -> None:
         logger.info("Background full improvement complete.")
     except Exception as e:
         logger.exception("Background full improvement failed")
-        _set_progress("error", "", 0.0, "", str(e))
+        _set_progress("error", "", 0.0, "", _format_exc(e))
 
 
 async def _run_ingest_queue(first: tuple[str, object]) -> None:

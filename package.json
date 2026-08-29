@@ -16,7 +16,10 @@
     "build:app": "node scripts/rebuild-electron.mjs && pnpm run prepare:bin && node scripts/build-python-bundle.mjs && pnpm --filter @mycontext/desktop exec electron-vite build",
     "dist:mac": "pnpm run build:app && electron-builder --mac --dir --config apps/desktop/electron-builder.yml",
     "dist:mac:dmg": "pnpm run build:app && electron-builder --mac dmg --config apps/desktop/electron-builder.yml",
+    "dist:win": "pnpm run build:app && electron-builder --publish never --win --x64 --config apps/desktop/electron-builder.windows.yml",
     "dist:repack": "electron-builder --mac --dir --config apps/desktop/electron-builder.yml",
+    "dist:win": "node scripts/dist-win.mjs",
+    "dist:win:repack": "electron-builder --win --x64 --dir --config apps/desktop/electron-builder.yml",
     "typecheck": "tsc -b --pretty false",
     "typecheck:tests": "tsc -p tests/tsconfig.json --noEmit --pretty false",
     "lint": "eslint apps packages scripts tests --max-warnings=0",
@@ -67,6 +70,7 @@
     "check:no-local-data": "node scripts/check-no-local-data.mjs"
   },
   "dependencies": {
+    "@cursor/sdk": "^1.0.30",
     "better-sqlite3": "12.11.1",
     "i18next": "26.3.6",
     "react-i18next": "17.0.11"
@@ -93,7 +97,6 @@
     "framer-motion": "12.43.0",
     "globals": "16.5.0",
     "jsdom": "29.1.1",
-    "opencode-ai": "1.18.11",
     "prettier": "3.5.3",
     "react": "19.2.1",
     "react-dom": "19.2.1",

@@ -31,7 +31,7 @@ const MODEL_ROLES = [
   "embedding.local",
 ] as const
 
-const HARNESS_OPTIONS = ["opencode-acp", "builtin-llm"] as const
+const HARNESS_OPTIONS = ["cursor-agent", "builtin-llm"] as const
 
 export function AdvancedAiPanel() {
   const { t } = useDynamicTranslation("settings")

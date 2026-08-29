@@ -436,3 +436,49 @@ describe("★★★ 监听范围里的会话：不在学习白名单里，也不
     vault.close()
   })
 })
+
+describe("★★★ 放宽学习范围：applyScopeChange 立刻晋升 learning_eligible（Critical #1）", () => {
+  it("B 只因监听入库标 0 → 加进学习白名单后，不经渠道重拉也变 1", () => {
+    /**
+     * 反证：applyScopeChange 不调 retagLearningEligible → 这条转红，
+     * B 的消息仍是 0，随后 export/rebuild 会静默缺语料。
+     */
+    const vault = openTestVault()
+    seed(vault)
+    // 学习只勾 A；B 在监听里（分身要它）—— 把 B 的消息标成 0
+    setScope(vault, [A])
+    const attention = new AttentionScopeRepository(vault.db)
+    attention.setMode(CHANNEL, "explicit", START)
+    attention.add(CHANNEL, [{ conversationExternalId: B, enabledAt: START }], START)
+    vault.db
+      .prepare(
+        `UPDATE messages SET learning_eligible = 0
+          WHERE conversation_id = ?`,
+      )
+      .run(`conv-${B}`)
+    vault.db
+      .prepare(
+        `UPDATE messages SET learning_eligible = 1
+          WHERE conversation_id = ?`,
+      )
+      .run(`conv-${A}`)
+
+    // 放宽：把 B 加进学习范围
+    setScope(vault, [A, B])
+    makeService(vault).applyScopeChange()
+
+    const rows = vault.db
+      .prepare<
+        [],
+        { conversation_id: string; learning_eligible: number | null }
+      >(`SELECT conversation_id, learning_eligible FROM messages ORDER BY conversation_id, id`)
+      .all()
+    const bTags = rows
+      .filter((r) => r.conversation_id === `conv-${B}`)
+      .map((r) => r.learning_eligible)
+    expect(bTags).toEqual([1, 1])
+    // 消息还在（采集面未收窄）
+    expect(countMessages(vault, B)).toBe(2)
+    vault.close()
+  })
+})

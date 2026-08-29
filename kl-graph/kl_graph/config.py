@@ -68,6 +68,32 @@ class EmbeddingServiceConfig(_ConfigModel):
     dim: int
     send_dimensions: bool
 
+    @model_validator(mode="after")
+    def _loopback_is_fixed_dim(self) -> EmbeddingServiceConfig:
+        """本机 embedding 口不是云 matryoshka：禁止 2048 + send_dimensions。
+
+        桌面端曾把 ``127.0.0.1:8020`` 当成远程兼容口注入 ``KL_EMBEDDING_DIM=2048``，
+        而本地 GGUF 固定出 4096 → zvec upsert dimension mismatch。这里做源头兜底。
+        """
+        if not _is_loopback_url(self.base_url):
+            return self
+        if self.dim == 2048 or self.send_dimensions:
+            return self.model_copy(update={"dim": 4096, "send_dimensions": False})
+        return self
+
+
+def _is_loopback_url(url: str) -> bool:
+    raw = (url or "").strip()
+    if raw == "":
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(raw if "://" in raw else f"http://{raw}").hostname or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return host in {"127.0.0.1", "localhost", "::1"}
+
 
 class LLMFlashServiceConfig(_ConfigModel):
     provider: str

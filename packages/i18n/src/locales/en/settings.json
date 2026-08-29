@@ -176,6 +176,7 @@
       "egress": "Network egress",
       "egressYes": "embedding/LLM call the remote gateway",
       "egressNo": "None",
+      "embedding": "Embedding model",
       "start": "Start",
       "stop": "Stop",
       "retry": "Retry",
@@ -261,7 +262,7 @@
     },
     "harness": {
       "title": "Harness",
-      "description": "Each module can pick its own agent runtime. The built-in harness spawns no subprocess and is also the fallback when the external runtime is missing.",
+      "description": "Each module can pick its own agent runtime. The built-in harness spawns no subprocess and is also the fallback when Agent orchestration is unavailable.",
       "search": "Search",
       "persona": "Digital twin"
     },
@@ -411,11 +412,13 @@
       "apiKeyPlaceholder": "Leave blank to keep unchanged",
       "modelMain": "Main model",
       "embedModel": "Embedding model",
+      "embedHint": "Used for graph build Phase A — independent of Agent Key below. Put the embedding endpoint in Endpoint above (e.g. http://127.0.0.1:8100) and the model id here; use Other… to type a custom id.",
+      "embedPlaceholder": "e.g. Qwen/… or /data/models/….gguf",
       "protocol": "Protocol",
       "openai": "OpenAI-compatible",
       "anthropic": "Anthropic",
       "unsupported": "Testing didn't confirm this gateway supports the selected protocol — you can still save, but make sure the gateway actually supports it.",
-      "mainProtocolHint": "Which protocol the main model (digital-twin replies, search, distillation, direct calls) uses to reach the gateway. Auto-detected after testing; overridable."
+      "mainProtocolHint": "Only for OpenAI-compatible gateway fallback when Agent is unavailable. With local CLI / Agent Key, chat uses the Cursor subscription default model and ignores this main-model name."
     },
     "kl": {
       "title": "Use a different model for the knowledge base",
@@ -423,12 +426,32 @@
       "inherited": "Follows main settings",
       "protocolHint": "Which protocol the knowledge base uses to reach the gateway. Auto-detected after testing the connection; overridable."
     },
+    "embed": {
+      "title": "Custom embedding settings",
+      "hint": "Leave blank to reuse the main settings above. Fill only when embeddings run on a different service.",
+      "inherited": "Follows main settings",
+      "embeddingDim": "Embedding dimensions",
+      "sendDimensions": "Send dimensions parameter",
+      "sendDimensionsOn": "On",
+      "sendDimensionsOff": "Off",
+      "sendDimensionsHint": "DashScope-compatible gateways usually need this so matryoshka truncation matches the configured dimension."
+    },
+    "agent": {
+      "apiKey": "Agent API Key",
+      "apiKeyHint": "Primary: Agent chat. Paste a subscription key, or leave blank to use a local agent CLI login (cursor-agent login). If neither is available, falls back to the OpenAI-compatible gateway above; if that is missing too, chat is local recall only.",
+      "runtime": "Runtime",
+      "runtimeLocal": "Local",
+      "runtimeCloud": "Cloud",
+      "runtimeHint": "Defaults to local; cloud needs network access and a valid key."
+    },
     "save": "Save",
     "saveAndNext": "Save and continue",
     "saved": "Saved",
     "keyOn": "Configured",
     "keyOff": "Not configured",
     "keyTail": "Configured …{{tail}}",
+    "keyOnCli": "Local CLI login",
+    "keyTailCli": "Local CLI …{{tail}}",
     "other": "Other…",
     "probe": {
       "test": "Test connection",

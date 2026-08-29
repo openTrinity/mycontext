@@ -49,9 +49,9 @@ describe("★ 搜索降级的可见性", () => {
     const promptUsesRecallOnly = /this\.recallOnly\(/.test(source)
 
     if (!wiredFalse) {
-      // 声称接线了 → prompt 里必须有别的路径，不能只有 recallOnly
+      // 声称接线了 → prompt 里必须有 agent 路径（CursorSession / tryAgentTurn）
       expect(
-        /ensureSession|AcpSupervisor|acp\./i.test(source),
+        /tryAgentTurn|CursorSession|ensureSession|AcpSupervisor/i.test(source),
         "ACP_WIRED 为 true 但 prompt 里看不到任何 agent 调用 —— 二者必须同时改。",
       ).toBe(true)
     } else {

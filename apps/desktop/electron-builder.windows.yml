@@ -1,0 +1,88 @@
+# Windows x64 的独立打包配置。
+#
+# 不复用 macOS 配置：extraResources 中的 Python 运行时平台目录、图标格式和
+# target 都不同；独立文件也避免以后改 macOS 发布参数时静默影响 Windows CI。
+
+appId: com.mycontext.app
+productName: MyContext
+copyright: Copyright © 2026 MyContext
+
+extraMetadata:
+  main: apps/desktop/out/main/index.js
+  productName: MyContext
+
+directories:
+  output: apps/desktop/release
+  buildResources: apps/desktop/build
+
+files:
+  - apps/desktop/out/**
+  - package.json
+
+asarUnpack:
+  - node_modules/better-sqlite3/**
+  - node_modules/.pnpm/better-sqlite3@*/**
+
+win:
+  icon: apps/desktop/build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+portable:
+  artifactName: ${productName}-${version}-${arch}-portable.${ext}
+
+extraResources:
+  # 运行时渠道 CLI；prepare:bin 在 CI 中负责填充这里。
+  - from: apps/desktop/resources/bin
+    to: bin
+    filter:
+      - "**/*"
+      - "!.dws/**"
+      - "!workspace/**"
+      - "!.gitkeep"
+
+  - from: apps/desktop/resources/skills
+    to: skills
+    filter: ["**/*"]
+
+  - from: apps/desktop/resources/forge
+    to: forge
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+
+  # 图谱代码随包分发，但绝不把本机构建机的 data/、日志或 venv 带进包。
+  - from: kl-graph
+    to: kl-graph
+    filter:
+      - "**/*"
+      - "!.venv/**"
+      - "!**/*.log"
+      - "!data/**"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+
+  # build:app 通过 build-python-bundle.mjs 生成自包含 Windows Python。
+  - from: apps/desktop/resources/python/win32-x64
+    to: vendor/python/win32-x64
+    filter: ["**/*"]
+
+  - from: scripts/lib
+    to: scripts/lib
+    filter: ["**/*.mjs"]
+
+  - from: scripts/kl-extra-requirements.txt
+    to: scripts/kl-extra-requirements.txt

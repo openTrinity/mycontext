@@ -358,10 +358,9 @@ export function PersonaModule() {
         说明（"草稿是占位文本"），而顶栏是扫视区。
 
         ★★ 判据是 `degradedReason !== null`，**不是** `agentAvailable === false`。
-        后者只反映"LLM 配没配"，于是"模型配好了但 opencode 缺失/版本不对"
+        后者只反映"LLM 配没配"，于是"模型配好了但缺 Agent API Key"
         这一类（草稿实际走直连、没有工具与检索）**完全不显示横幅** ——
-        用户看到的是能力静默变差。实测同事就在这个状态里
-        （`opencode_version_unreadable`），而横幅一个字都没出现。
+        用户看到的是能力静默变差。
       */}
       {/*
         ★★ 渠道未连接的横幅 —— 与降级横幅**并列**，各说一件事。

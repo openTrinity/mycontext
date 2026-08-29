@@ -5,7 +5,7 @@
  * ## 为什么需要它
  *
  * kl（知识图谱）是 Python 写的，依赖约 280MB / 150+ 个包
- * （litellm、scipy、qdrant-client…）。而：
+ * （httpx、scipy、向量客户端…）。而：
  *
  * · 依赖装出来的目录不入 git（体积 + 里面的 `.so` 跟平台和 Python 小版本绑定，
  *   在别人机器上不通用）；

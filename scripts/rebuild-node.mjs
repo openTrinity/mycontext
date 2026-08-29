@@ -34,9 +34,19 @@ if (existsSync(stampPath) && readFileSync(stampPath, "utf8").trim() === stamp) {
   console.warn(`better-sqlite3 的 ABI 标记已失效（${stamp}），重新构建`)
 }
 
+/**
+ * ★ 清掉 Electron 重建留下的 npm_config_* —— 否则 `pnpm rebuild` 会继续
+ * 按 electron headers 编，产物仍是 ABI 148，Node 22（127）加载失败。
+ */
+const env = { ...process.env }
+for (const key of Object.keys(env)) {
+  if (key.startsWith("npm_config_")) delete env[key]
+}
+
 // pnpm rebuild 会在 .pnpm store 里就地重建，软链自动指向新产物。
 const result = spawnSync("pnpm", ["rebuild", "better-sqlite3"], {
   cwd: root,
+  env,
   stdio: "inherit",
 })
 if (result.error) throw result.error

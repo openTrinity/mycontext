@@ -66,3 +66,20 @@ export { buildKlSkillMarkdown, KL_SKILL_RELPATH } from "./kl-skill.js"
 
 export { installSkills, SKILLS_RELDIR } from "./workspace.js"
 export type { SkillSource, InstallSkillsResult } from "./workspace.js"
+
+export { CursorSession, DEFAULT_CURSOR_MODEL } from "./cursor/session.js"
+export type { CursorSessionOptions, CursorRuntimeMode } from "./cursor/session.js"
+export { mapSdkMessage } from "./cursor/map-sdk-message.js"
+export {
+  parseCursorAgentStatusJson,
+  ensureCursorApiKey,
+  readCursorCliAccessTokenFromKeychain,
+  mintUserApiKeyFromAccessToken,
+  tryReadSdkAuthApiKeySync,
+} from "./cursor/cli-auth.js"
+export type {
+  CursorCliAuthStatus,
+  CursorCredentialSource,
+  EnsuredCursorCredential,
+  EnsureCursorApiKeyOptions,
+} from "./cursor/cli-auth.js"

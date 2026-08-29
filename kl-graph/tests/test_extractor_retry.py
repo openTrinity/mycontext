@@ -77,7 +77,7 @@ def _typed(exc_cls, msg="xyzzy plugh"):
 
 
 def test_typed_transient_exceptions_classified_by_isinstance() -> None:
-    import litellm
+    from kl_graph.utils.litellm_config import litellm
 
     for cls in (
         litellm.Timeout,
@@ -90,7 +90,7 @@ def test_typed_transient_exceptions_classified_by_isinstance() -> None:
 
 
 def test_typed_permanent_exceptions_classified_by_isinstance() -> None:
-    import litellm
+    from kl_graph.utils.litellm_config import litellm
 
     # ContextWindowExceededError / ContentPolicyViolationError subclass
     # BadRequestError; the ladder must classify all permanent. (PermissionDenied
@@ -108,7 +108,7 @@ def test_typed_permanent_exceptions_classified_by_isinstance() -> None:
 def test_typed_ratelimit_without_keywords_is_transient() -> None:
     # A litellm RateLimitError whose message has no classification keyword and
     # whose status_code is stripped can ONLY read transient via the ladder.
-    import litellm
+    from kl_graph.utils.litellm_config import litellm
 
     assert _is_transient_llm_error(_typed(litellm.RateLimitError)) is True
 

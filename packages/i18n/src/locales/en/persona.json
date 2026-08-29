@@ -1,9 +1,10 @@
 {
   "degradedReasons": {
     "llmNotConfigured": "No model configured — listening and scheduling still run, but drafts are placeholder text rather than model output. Configure one under Settings → Model to get real drafts.",
-    "agentMissing": "The conversation agent is unavailable — drafts now come straight from the model, with no tool calls and no fact retrieval, so quality drops noticeably. Your model config is fine; don't change it. In development, run `pnpm prepare:bin`.",
-    "agentUnreadable": "Could not read the conversation agent's version — degraded to direct model generation (no tools, no retrieval). This is not a model problem, so leave the model config alone. Usually the binary was never prepared or the OS blocked it: run `pnpm prepare:bin`, which now executes it once and reports why it failed.",
-    "agentTooOld": "The conversation agent is too old — degraded to direct model generation (no tools, no retrieval). Run `pnpm install && pnpm prepare:bin` to get the pinned version."
+    "agentKeyMissing": "No Agent API Key and no local agent CLI login — drafts now come straight from the model, with no tool calls and no fact retrieval. Add the Agent key under Settings → Model, or run cursor-agent login.",
+    "agentMissing": "Conversation Agent unavailable — drafts now come straight from the model, with no tool calls and no fact retrieval. Your main model config is fine; check the Agent API Key under Settings → Model (separate from the gateway key).",
+    "agentUnreadable": "Conversation Agent status is unhealthy — degraded to direct model generation (no tools, no retrieval). This is not a main-model problem; verify the Agent API Key and that the Agent service is reachable.",
+    "agentTooOld": "Conversation Agent is incompatible — degraded to direct model generation (no tools, no retrieval). Update the app and confirm the Agent API Key under Settings → Model still works."
   },
   "killSwitchOn": "Global stop is on: every automatic send is blocked (drafts are still produced).",
   "tick": "Process now",

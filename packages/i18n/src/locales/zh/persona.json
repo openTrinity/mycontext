@@ -1,9 +1,10 @@
 {
   "degradedReasons": {
     "llmNotConfigured": "未配置模型 —— 仍会走完监听与调度，但草稿是占位文本而不是模型生成的。去「设置 → 模型」配好后即可正常生成。",
-    "agentMissing": "会话 agent 不可用 —— 草稿改由模型直接生成，没有工具调用与事实检索，质量会明显差一截。模型本身是好的，不用去改模型配置。开发态跑一次 `pnpm prepare:bin` 即可。",
-    "agentUnreadable": "会话 agent 读不出版本 —— 已降级成模型直接生成（没有工具与检索）。这不是模型的问题，别去动模型配置。常见原因是那个二进制没准备好或被系统拦了：开发态跑 `pnpm prepare:bin`，它会真跑一次并在失败时报出原因。",
-    "agentTooOld": "会话 agent 版本过低 —— 已降级成模型直接生成（没有工具与检索）。跑一次 `pnpm install && pnpm prepare:bin` 升到钉住的版本。"
+    "agentKeyMissing": "未配置 Agent API Key，且本机 agent CLI 未登录 —— 草稿改由模型直接生成，没有工具调用与事实检索。可在「设置 → 模型」填密钥，或先运行 cursor-agent login。",
+    "agentMissing": "会话 Agent 不可用 —— 草稿改由模型直接生成，没有工具调用与事实检索。模型本身是好的；请到「设置 → 模型」检查 Agent API Key（与主网关密钥分开）。",
+    "agentUnreadable": "会话 Agent 侧状态异常 —— 已降级成模型直接生成（没有工具与检索）。这不是主模型配置的问题；请检查 Agent API Key 是否有效、本机能否访问 Agent 服务。",
+    "agentTooOld": "会话 Agent 侧不兼容 —— 已降级成模型直接生成（没有工具与检索）。请更新应用，并确认「设置 → 模型」里的 Agent API Key 仍可用。"
   },
   "killSwitchOn": "全局停摆已开启：所有自动发送都被拦住（草稿仍会产生）。",
   "tick": "立即处理",

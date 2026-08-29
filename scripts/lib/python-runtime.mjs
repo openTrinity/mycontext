@@ -95,8 +95,8 @@ export function platformKey() {
 }
 
 /** 内置 Python 的根（**入 git**，见文件头）。 */
-export function pythonCacheDir(repoRoot) {
-  return join(repoRoot, "vendor", "python", platformKey())
+export function pythonCacheDir(repoRoot, key = platformKey()) {
+  return join(repoRoot, "vendor", "python", key)
 }
 
 /**

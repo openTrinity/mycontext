@@ -355,20 +355,45 @@ describe("★ ego 图找不到「我」时说人话", () => {
   })
 
   /**
-   * ★★ 「真的没共现」与「读不到关系」要说不同的话。
+   * ★★ 「真的没共现、也没直连边」与「读不到关系」要说不同的话。
    *
    * 关系边在默认后端（ladybug）下不在 SQLite 里，所以"读 edges 得到空"
-   * **不等于**"没有关系"。这条走的是**问过 kl 仍然空**那一档 ——
-   * 那时指向「优化图谱」才是对的。
+   * **不等于**"没有关系"。这条走的是**问过 kl（fact + 邻居）仍然空**那一档。
    */
-  it("★ 问过 kl 仍然没有共现 → 提示跑「优化图谱」", async () => {
+  it("★ 问过 kl 仍然没有关联 → 说明身份/覆盖面，不催「优化图谱」", async () => {
     const reason = (
       await egoService(
         { entitiesByName: () => [{ id: "me", name: "小周", type: "Person", mentions: 100 }] },
-        { factsOfEntity: () => Promise.resolve(new Set<string>()) },
+        {
+          factsOfEntity: () => Promise.resolve(new Set<string>()),
+          neighborsOfEntity: () => Promise.resolve([]),
+        },
       ).ego()
     ).reason
-    expect(reason).toContain("还没抽到")
+    expect(reason).toMatch(/没有和别人的关联|认出你/)
+    expect(reason).not.toContain("优化图谱")
+  })
+
+  /**
+   * ★★★ fact 交集空、但有直连边 → 必须画出邻居（否则「数据都有、图谱却失败」）。
+   */
+  it("★★★ fact 空但有直连邻居 → ego 可用", async () => {
+    const HIM = { id: "him", name: "小李", type: "Person", mentions: 20 }
+    const ME = { id: "me", name: "小周", type: "Person", mentions: 100 }
+    const view = await egoService(
+      {
+        entitiesByName: () => [ME],
+        allEntities: () => [ME, HIM],
+        entitiesByIds: (ids) => [ME, HIM].filter((e) => ids.includes(e.id)),
+      },
+      {
+        factsOfEntity: () => Promise.resolve(new Set<string>()),
+        neighborsOfEntity: () =>
+          Promise.resolve([{ id: "him", type: "AUTHORED_BY", label: "小李" }]),
+      },
+    ).ego()
+    expect(view.available).toBe(true)
+    expect(view.nodes.map((n) => n.name)).toContain("小李")
   })
 
   /**

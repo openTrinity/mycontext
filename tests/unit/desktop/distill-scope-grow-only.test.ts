@@ -247,7 +247,7 @@ describe("接线：save 用 merged，派生链的判据也用 merged", () => {
      */
     const { readFileSync } = await import("node:fs")
     const src = readFileSync("apps/desktop/src/main/services/distill-source.service.ts", "utf8")
-    expect(src).toContain("onScopeChanged?.(input.channelId)")
+    expect(src).toMatch(/onScopeChanged\?\.\(input\.channelId,\s*\{\s*narrowed:/)
     const startup = readFileSync("apps/desktop/src/main/bootstrap/startup.ts", "utf8")
     expect(startup).toContain("applyScopeChange")
   })

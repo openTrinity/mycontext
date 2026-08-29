@@ -1,0 +1,41 @@
+name: Build and Release Desktop App
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-14]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Rebuild Native Modules (SQLite)
+        run: pnpm --filter @mycontext/desktop exec electron-builder install-app-deps --arch=arm64
+
+      - name: Build Web Frontend Assets
+        run: pnpm --filter @mycontext/desktop build
+
+      - name: Package Desktop Application
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm --filter @mycontext/desktop exec electron-builder --mac --arm64 --publish always

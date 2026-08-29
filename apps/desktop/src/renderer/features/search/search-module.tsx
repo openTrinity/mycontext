@@ -90,8 +90,8 @@ export function SearchModule({ userName, activeSessionId, onSessionCreated }: Se
    * 降级提示。
    *
    * 判据**跟本轮实际走的路**走：优先用 stream 带下来的运行时 `degradedReason`
-   * （agent 起不来落回召回时非空），退回静态判断（装没装 opencode）。
-   * opencode 缺失是常态（102MB，不随包），所以这不是错误 —— 但必须明示，
+   * （Agent / 网关都不可用落回召回时非空），退回静态 `agentAvailable`。
+   * 未配 Agent Key 是常态，所以这不是错误 —— 但必须明示，
    * 因为"答案质量突然变差"比"明确告知能力降级"难排查得多。
    */
   const degradedNotice =

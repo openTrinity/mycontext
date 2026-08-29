@@ -22,10 +22,11 @@
  *
  * ## 两条路，产出同形
  *
- * ACP（opencode，每会话一个 session）优先；起不来 / 超时 / 0-token 就落回
- * `LlmClient` 直连。**两条路返回同一个 `ReplyProposal`** —— 于是"用哪条路"
- * 不改变下游任何判断。降级必须明示（`provenance.degradedReason`），
- * 因为静默降级是这个项目里反复出现的那类失效。
+ * **主路**：Cursor 订阅（`PersonaAcp` / `@cursor/sdk`）；起不来 / 超时 / 0-token /
+ * 带图 → **Fallback**：`LlmClient` 直连 OpenAI 兼容网关。
+ * **两条路返回同一个 `ReplyProposal`** —— 于是"用哪条路"不改变下游任何判断。
+ * 降级必须明示（`provenance.degradedReason`），因为静默降级是这个项目里
+ * 反复出现的那类失效。
  */
 import type { Clock, Logger } from "@mycontext/kernel"
 import type { LlmProvider } from "@mycontext/llm"

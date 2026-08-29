@@ -1,19 +1,21 @@
-"""Shared LiteLLM transport configuration."""
+"""Shared LLM transport configuration（不再依赖 litellm）。
+
+历史文件名保留：调用方大量 ``from kl_graph.utils.litellm_config import …``。
+``litellm`` 名字现在指向 ``http_llm`` 兼容模块。
+"""
+
+from __future__ import annotations
 
 import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-import litellm
+from kl_graph.utils import http_llm as litellm
 
 # Trailing runs of the OpenAI version segment, e.g. the doubled suffix a
 # caller produces when it appends /v1 to a base URL that already ends in /v1.
 _TRAILING_V1_RUN = re.compile(r"(/v1)+$")
-
-
-# httpx tolerates non-ASCII gateway response headers that break aiohttp.
-litellm.disable_aiohttp_transport = True
 
 
 @dataclass(frozen=True)
@@ -26,8 +28,9 @@ class LLMConnection:
     timeout: float
     api_key: str | None
 
+
 def provider_model(provider: str, model: str) -> str:
-    """Return a LiteLLM model identifier without duplicating its provider."""
+    """Return a provider/model identifier without duplicating its provider."""
     provider = provider.strip().rstrip("/")
     if not provider or model.startswith(f"{provider}/"):
         return model
@@ -35,7 +38,7 @@ def provider_model(provider: str, model: str) -> str:
 
 
 def provider_api_key(provider: str, explicit: str | None = None) -> str | None:
-    """Resolve legacy Anthropic auth while letting other providers use LiteLLM."""
+    """Resolve legacy Anthropic auth while letting other providers use the key env."""
     if explicit:
         return explicit
     if provider.strip().lower() == "anthropic":
@@ -44,32 +47,14 @@ def provider_api_key(provider: str, explicit: str | None = None) -> str | None:
 
 
 def litellm_base_url(provider: str, base_url: str) -> str:
-    """Normalize a base URL to the shape litellm's transport for it expects.
+    """Normalize a base URL to the shape each transport expects.
 
-    Both litellm transports treat the configured base URL as a root and
-    append the endpoint path, but they disagree about where the ``/v1``
-    segment lives, so the same gateway URL pasted by a user works for one
-    transport and 404s on the other unless normalized:
+    - **OpenAI-compatible** — client appends ``/chat/completions`` /
+      ``/embeddings``; base must end in **exactly one** ``/v1``.
+    - **Anthropic** — we append ``/v1/messages`` ourselves; base must be a
+      **bare host** (no trailing ``/v1``).
 
-    - **OpenAI-compatible** — the SDK hands ``base_url`` to the OpenAI
-      client, whose own default root is ``https://api.openai.com/v1``; the
-      client appends only ``/chat/completions`` / ``/embeddings``. The base
-      must therefore end in **exactly one** ``/v1``: missing → gateway 404
-      (e.g. DashScope serves only ``…/compatible-mode/v1/...``); doubled
-      (``…/v1/v1``, produced by a launcher that appends /v1 to an
-      already-versioned URL) 404s identically.
-    - **Anthropic** — litellm appends ``/v1/messages`` itself, so the base
-      must be a **bare host**: a pasted versioned URL doubles the segment
-      (``POST /v1/v1/messages`` → 404, observed live).
-
-    Empty values pass through so provider/litellm defaults still apply.
-
-    Args:
-        provider: LiteLLM provider name from config (e.g. ``openai``).
-        base_url: Configured endpoint base URL, possibly empty.
-
-    Returns:
-        The base URL safe to pass as ``api_base`` for that provider.
+    Empty values pass through.
     """
     url = (base_url or "").strip().rstrip("/")
     if not url:
@@ -78,6 +63,10 @@ def litellm_base_url(provider: str, base_url: str) -> str:
         return _TRAILING_V1_RUN.sub("", url)
     url = _TRAILING_V1_RUN.sub("/v1", url)
     return url if url.endswith("/v1") else f"{url}/v1"
+
+
+# 新名字：与实现一致；旧名 ``litellm_base_url`` 保留作别名。
+api_base_url = litellm_base_url
 
 
 def connection_from_service(service: Any, api_key: str | None = None) -> LLMConnection:
@@ -94,6 +83,7 @@ def connection_from_service(service: Any, api_key: str | None = None) -> LLMConn
 
 __all__ = [
     "LLMConnection",
+    "api_base_url",
     "connection_from_service",
     "litellm",
     "litellm_base_url",

@@ -1,0 +1,2 @@
+# Forge 完整性清单按字节校验；Windows checkout 不能把它转换成 CRLF。
+vendor/forge/** text eol=lf

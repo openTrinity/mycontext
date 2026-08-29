@@ -35,8 +35,14 @@ import {
   parseScopedChannelId,
   seedChannelProfile,
 } from "@mycontext/channels"
-import { ProcessRunner, RuntimeEnv } from "@mycontext/runtime-env"
+import {
+  ProcessRunner,
+  RuntimeEnv,
+  type EmbedModelProbeResult,
+  type ResolvedEmbedGateway,
+} from "@mycontext/runtime-env"
 import { LlmHolder } from "@mycontext/llm"
+import { DEFAULT_CURSOR_MODEL } from "@mycontext/agent-runtime"
 import { IPC_EVENTS } from "@mycontext/ipc-contract"
 import type { KlGraphOverview, KlServerStatus } from "@mycontext/ipc-contract"
 import { bootstrapConfig } from "./config.js"
@@ -72,6 +78,12 @@ import { PersonaGate } from "../services/persona-gate.js"
 import { SearchService } from "../services/search.service.js"
 import { KlServerService } from "../services/kl-server.service.js"
 import { MultiKlServerService } from "../services/multi-kl-server.service.js"
+import {
+  probeEmbedSidecar,
+  resolveEmbedGateway,
+  formatEmbedGatewayStatus,
+} from "../services/embed-model.service.js"
+import { EmbedServerService } from "../services/embed-server.service.js"
 import { ensurePythonEnv } from "../services/python-env.js"
 import { GraphQueryService } from "../services/graph-query.service.js"
 import { DashboardTrendsService } from "../services/dashboard-trends.service.js"
@@ -207,6 +219,24 @@ export function resolveKlCredentials(runtimeConfig: RuntimeConfigService): {
   return { base: base.trim(), key: key.trim() }
 }
 
+/** 向量（embedding）网关凭证 —— 留空时回退主配置。 */
+export function resolveEmbedCredentials(runtimeConfig: RuntimeConfigService): {
+  base: string
+  key: string
+  model: string
+  embeddingDim: number
+  sendDimensions: boolean
+} {
+  const r = runtimeConfig.resolved()
+  return {
+    base: r.embedBaseUrl.trim(),
+    key: r.embedApiKey.trim(),
+    model: r.embedModel,
+    embeddingDim: r.embeddingDim,
+    sendDimensions: r.embedSendDimensions,
+  }
+}
+
 /**
  * 自动建图**能不能开** —— 纯判据，导出成函数好测（与 `resolveKlCredentials` 同一个
  * 理由：真正会漂的是判据本身，闭包要整套装配才能测）。
@@ -227,20 +257,73 @@ export function autoBuildAllowed(base: string, key: string, identityBound: boole
 /**
  * embedding 网关 base 规整成 OpenAI 兼容形态：**恰好以一个 `/v1` 结尾**。
  *
- * litellm 把 base 原样交给 OpenAI SDK，SDK 视其为 API 根并拼 `/embeddings`；
- * SDK 自己的默认根是 `https://api.openai.com/v1` —— `/v1` 属于根本身。
+ * HTTP 客户端把 base 当作 API 根并拼 `/embeddings`；OpenAI 兼容口的默认根
+ * 是 `https://api.openai.com/v1` —— `/v1` 属于根本身。
  * DashScope 只提供 `…/compatible-mode/v1/embeddings`，所以：
- * - 缺 `/v1` → 404（litellm.NotFoundError: OpenAIException - Error code: 404）
+ * - 缺 `/v1` → 404
  * - 用户配的 URL 已带 `/v1` 而这里再拼一个 → `/v1/v1` 同样 404（实测事故）
  *
  * 于是把结尾任意个 `/v1` 收敛成一个，缺则补一个。与 kl 侧
- * `kl_graph/utils/litellm_config.py` 的 `openai_base_url` 同口径
+ * `kl_graph/utils/litellm_config.py` 的 `litellm_base_url`（OpenAI 分支）同口径
  * （kl 侧对一切入口做防御性兜底，这里是源头修正）。
  */
 export function openAiEmbedBaseUrl(base: string): string {
   const trimmed = base.trim().replace(/\/+$/, "")
   if (trimmed === "") return ""
   return `${trimmed.replace(/(\/v1)+$/, "")}/v1`
+}
+
+/**
+ * embedding 回落网关：优先向量专用 URL / 主配置，**不要**用 KL 聊天口。
+ *
+ * 常见拆分：主接口或 embed 专用 = embedding（如 `:8100`），「知识库单独」= 聊天（如 `:8020`）。
+ * 若把 KL base 传进 `decideEmbedGateway`，向量会打到 chat-only 口 → 501
+ * `This server does not support embeddings`。
+ */
+export function resolveEmbedGatewayBaseUrl(input: {
+  /** 向量专用接口（设置里 embedLlmBaseUrl；可已含回退主配置） */
+  embedBaseUrl?: string
+  /** 主配置接口地址（设置页「接口地址」） */
+  llmBaseUrl: string
+  /** KL 有效 base（仅作前两者皆空时的兜底） */
+  klBaseUrl: string
+}): string {
+  const embed = input.embedBaseUrl?.trim() ?? ""
+  if (embed !== "") return embed
+  const main = input.llmBaseUrl.trim()
+  if (main !== "") return main
+  return input.klBaseUrl.trim()
+}
+
+/**
+ * 本地向量服务优先；起不来 / 未起 → OpenAI 兼容网关（设置里的主接口 + embed 模型）。
+ * loopback 的 `KL_EMBED_BASE_URL` 只有服务真 ready 时才认，避免钉死端口。
+ */
+export function decideEmbedGateway(input: {
+  probe: EmbedModelProbeResult
+  gatewayBaseUrl: string
+  gatewayEmbedModel: string
+  /** EmbedServerService.baseUrl()；非 null = 本机已 ready */
+  liveLocalBaseUrl: string | null
+  envOverride?: string | undefined
+  envPort?: string | undefined
+}): ResolvedEmbedGateway {
+  const live = input.liveLocalBaseUrl
+  const envOverride = input.envOverride?.trim() ?? ""
+  return resolveEmbedGateway(
+    {
+      probe: input.probe,
+      gatewayEmbedBaseUrl: openAiEmbedBaseUrl(input.gatewayBaseUrl),
+      gatewayEmbedModel: input.gatewayEmbedModel,
+      localServing: live !== null,
+      ...(live !== null
+        ? { overrideEmbedBaseUrl: live }
+        : envOverride !== ""
+          ? { overrideEmbedBaseUrl: envOverride }
+          : {}),
+    },
+    input.envPort !== undefined && input.envPort !== "" ? { embedPort: input.envPort } : {},
+  )
 }
 
 export function bootstrapApp(mainDir: string): AppContext {
@@ -261,6 +344,25 @@ export function bootstrapApp(mainDir: string): AppContext {
     dotenvPath,
     logLevel: config.values.logLevel,
   })
+
+  /**
+   * 旁路向量模型探测（B2）。权重不进 git；缺失 / 无加速器必须明示，禁止静默空跑。
+   * 进程在 `processes` 就绪后由 `EmbedServerService.ensureReady` 拉起。
+   */
+  const embedSidecar = probeEmbedSidecar({ packaged, repoRoot: paths.repoRoot })
+  if (embedSidecar.localUsable) {
+    logger.info("embed sidecar probe", {
+      ready: true,
+      accelerator: embedSidecar.probe.accelerator,
+      hasModelDir: embedSidecar.probe.modelDir !== null,
+    })
+  } else {
+    logger.warn("embed sidecar not ready", {
+      reason: embedSidecar.probe.reason,
+      accelerator: embedSidecar.probe.accelerator,
+      detail: embedSidecar.statusText,
+    })
+  }
 
   // 装配阶段只开控制库：此时还不知道是哪个账号登录，也就没有 vault 可开。
   const store = openStore({ path: paths.controlDatabase, logger: logger.child("Store") })
@@ -288,7 +390,17 @@ export function bootstrapApp(mainDir: string): AppContext {
    * 都在**登录后**才 spawn，所以这里 seed 一定早于它们，让用户存的覆盖值
    * 从第一次起子进程就生效。
    */
-  const secretStore = new SecretStore({ settings, logger: logger.child("Secret") })
+  const secretStore = new SecretStore({
+    settings,
+    logger: logger.child("Secret"),
+    /**
+     * 显式不用 Electron `safeStorage`（系统钥匙串）。
+     * 未签名 / 钥匙串搜索列表异常时，`encryptString` 会弹
+     * 「找不到用于储存「MyContext Key」的钥匙串」，阻塞引导。
+     * 密钥改明文落 `app_settings`（仍只在本机 control 库），并打 warn。
+     */
+    storage: null,
+  })
   const runtimeConfig = new RuntimeConfigService({
     settings,
     logger: logger.child("RuntimeConfig"),
@@ -296,6 +408,22 @@ export function bootstrapApp(mainDir: string): AppContext {
     defaults: config,
   })
   runtimeConfig.seedProcessEnv()
+  // 同步采纳已有 SDK auth；若仍空则异步用本机 cursor-agent 登录铸造。
+  if (runtimeConfig.adoptLocalCursorAuthSync()) {
+    logger.info("cursor agent credential adopted from ~/.cursor/sdk/auth.json")
+  }
+  void runtimeConfig
+    .ensureCliCursorAuth()
+    .then((cred) => {
+      if (cred.source === "cli-login") {
+        logger.info("cursor agent credential minted from local cursor-agent CLI login")
+      }
+    })
+    .catch((error: unknown) => {
+      logger.warn("cursor CLI auth bridge failed; Agent Key stays unset", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
 
   /**
    * 高级 AI 配置：落 control 库（应用级）而不是 vault。
@@ -409,6 +537,30 @@ export function bootstrapApp(mainDir: string): AppContext {
     dwsProfile: () => activeIdentity.currentProfile("dingtalk"),
   })
   const processes = new ProcessRunner(logger.child("Process"))
+
+  /**
+   * 本地 embedding 旁路服务：模型+加速器就位时自动拉起；失败明示，不假装 ready。
+   * gateway() 现读 `baseUrl()`，所以 kl 下次 spawn 会打到本机口。
+   */
+  const embedServer = new EmbedServerService({
+    clock: systemClock,
+    logger: logger.child("EmbedServer"),
+    processes,
+    klRoot: paths.klRoot,
+    modelDir: embedSidecar.localUsable ? embedSidecar.probe.modelDir : null,
+    preparePython: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
+  })
+  if (embedSidecar.localUsable) {
+    void embedServer.ensureReady().catch((error: unknown) => {
+      logger.warn(
+        "embed server ensureReady failed; will fall back to OpenAI-compatible embed API",
+        {
+          detail: error instanceof Error ? error.message : String(error),
+        },
+      )
+    })
+  }
+
   const dingtalk = createDingTalkPlugin({
     runtime,
     processes,
@@ -456,12 +608,14 @@ export function bootstrapApp(mainDir: string): AppContext {
     logger: logger.child("Pipeline"),
     // ★ 网关配置全部从 runtimeConfig 现读（函数）：用户在设置里改了之后，
     // 下次 attach（登录）写出的 handoff.json 就反映新值，不必重启。
-    embedding: () => ({
-      baseUrl: runtimeConfig.resolved().llmBaseUrl,
-      model: runtimeConfig.resolved().embedModel,
-      // 算法侧写死 2048（改了要重建两套向量库）——这是外部约束不是我们的选择
-      dim: 2048,
-    }),
+    embedding: () => {
+      const embed = resolveEmbedCredentials(runtimeConfig)
+      return {
+        baseUrl: embed.base,
+        model: embed.model,
+        dim: embed.embeddingDim,
+      }
+    },
     // 本地索引自用 1024 维，**不作为共享产物**（维度不同，给了也用不了）
     localEmbedding: { model: runtimeConfig.resolved().embedModel, dim: 1024 },
     // LLM 网关与模型名（图谱侧的抽取阶段用同一个）。
@@ -630,22 +784,22 @@ export function bootstrapApp(mainDir: string): AppContext {
     /** 主渠道 id —— `save()` 用它判"写主库还是某个渠道库"。 */
     primaryChannelId: dingtalk.meta.id,
     /**
-     * ★★ 用户改了采集范围 → 立刻把三层派生物对齐到新范围。
+     * ★★ 用户改了采集范围 → 立刻把派生物对齐到新范围。
      *
-     * 这条链是「勾选实时生效」的全部实现，四步的顺序都有理由：
+     * 这条链是「勾选实时生效」的实现。顺序有理由：
      *
-     * 1. `dataPlane.applyScopeChange()` —— 删越界消息（连带 FTS/向量/媒体行，
-     *    见 `purgeOutOfScopeMessages`）+ 重置回填下界让放宽后的范围能往回挖。
-     *    必须**最先**：下面两步的产物都派生自库里的消息。
-     * 2. `feed.export()` —— 重导出四件套。导出物是"库的投影"，
-     *    库变了它就过期了，而它正是建图的输入。
-     * 3. `klServer.rebuildGraph(fresh = true)` —— **必须 fresh**。
-     *    增量建图只会往图里加，删掉的会话留在图里的实体与事实**不会消失**
-     *    —— 而数字人检索记忆时读的正是它们。也就是说不 fresh 的话，
-     *    用户取消勾选一个群之后，数字人**仍然会引用那个群里的事情**，
-     *    而界面上完全看不出来。这是这一整轮修复里最容易漏的一环。
-     * 4. `distill.reset()` —— 让画像重蒸（含清 forge 自己的增量水位）。
-     *    不清的话它会从上次蒸到的位置续跑，而"已删掉的语料"已经进过画像了。
+     * 1. `dataPlane.applyScopeChange()` —— 删采集面越界消息 + **bulk 重打标**
+     *    （放宽后 0→1，见 `retagLearningEligible`）+ 重置回填下界。
+     *    必须**最先**：下面 export 的产物派生自库里的消息与标签。
+     * 2. `feed.export()` —— 重导出四件套（此时标签已齐）。
+     * 3. 重建图谱 —— ★★★ **按是否收窄分叉**（v4 §3.2 B，Critical #2）：
+     *    · 收窄：`narrowed === true` → **不**自动 rebuild。孤儿 fact 需
+     *      fresh wipe；设计否决「保存即 50 min 重建」。出路是面板上的
+     *      「现在重建图谱」按钮（`rebuild.mutate({ fresh: true })`）。
+     *      「知道了，暂不重建」必须真能不做 —— 否则文案说谎。
+     *    · 放宽：增量 `rebuildGraph(false)`。retag 已让新语料进四件套，
+     *      增量只会往图里加，正是放宽要的。
+     * 4. `distill.reset()` —— 提到最前（见回调体内注释）：让画像重蒸。
      *
      * ## 为什么整条链是 `void`（不 await、不阻塞保存）
      *
@@ -661,22 +815,11 @@ export function bootstrapApp(mainDir: string): AppContext {
      *
      * ## ★★★ 每一步都必须打在**保存范围的那个渠道**上
      *
-     * 这个回调原来是无参的，而三个动作全都不带渠道：
-     * `dataPlane.applyScopeChange()` / `feed.export()` /
-     * `klServer.rebuildGraph(true)` —— 而这里的 `klServer` 与 `feed` 是
-     * **主渠道那两个裸实例**（应用级单例，见它们的构造处）。
-     *
-     * 于是"在飞书面板保存范围"会：清主渠道的越界语料、重导出主渠道的四件套、
-     * **删掉并重建主渠道的图**。实测日志坐实：
-     * `[Main:KlServer] graph build started`（没有 `:feishu` 前缀）+
-     * `kl graph data wiped for fresh rebuild {dataDir: …/kl}` ——
-     * 而飞书的图在 `…/kl/feishu`。
-     *
-     * 现在按渠道取那一套服务：主渠道用单例，其余渠道从 `pipelines` 里取它
+     * 按渠道取那一套服务：主渠道用单例，其余渠道从 `pipelines` 里取它
      * 自己的 `feed` / `klServer`。取不到就**明确记错并返回** ——
-     * 而不是顺手拿主渠道的（那正是这次事故的形状）。
+     * 而不是顺手拿主渠道的（那正是飞书保存删钉钉图那次事故的形状）。
      */
-    onScopeChanged: (channelId: string) => {
+    onScopeChanged: (channelId: string, detail: { narrowed: boolean }) => {
       /**
        * ★★ `distill.reset()` 必须**最先**执行，不能排在建图之后。
        *
@@ -688,8 +831,8 @@ export function bootstrapApp(mainDir: string): AppContext {
        * 13:16:21  distill reset {clearedTasks: 36}       ← 才轮到 reset，把刚建的一起清了
        * ```
        *
-       * 原因是它原来排在第 4 步，而第 3 步 `rebuildGraph(true)` 要**停 server +
-       * 删图库**，那要好几秒。于是 reset 落地时用户已经点过按钮了 ——
+       * 原因是它原来排在第 4 步，而第 3 步 `rebuildGraph` 要**停 server +
+       * （fresh 时）删图库**，那要好几秒。于是 reset 落地时用户已经点过按钮了 ——
        * 任务建好又被清空，界面归零，看起来就是"点了没反应"。
        *
        * ★ 提到最前面是安全的：`reset` 是同步且快的（一条 DELETE + 清内存态），
@@ -714,19 +857,7 @@ export function bootstrapApp(mainDir: string): AppContext {
       }
       void (async () => {
         /**
-         * 这个渠道自己的那套服务。
-         *
-         * ★ 主渠道走单例（`feed` / `klServer`），其余渠道走它的管线 ——
-         * 这个差异是既有装配决定的（主渠道那两个是应用级 + rebind，
-         * 非主渠道是每次挂载新建），这里只是按渠道选对象。
-         */
-        /**
          * ★★★ 从注册表取**那个渠道自己的**一套服务。
-         *
-         * 这里原来是一段手写的三分支（`channelId === primaryId ? 单例 :
-         * pipelines.find(...)`），而那个形状在这个仓库里出现过 **6 次** ——
-         * 每一处都要自己记得"主渠道走单例、其余走管线、找不到别落回主渠道"。
-         * 漏任何一条的表现都是静默做错对象（详见 `channel-runtime.ts` 文件头）。
          *
          * `find()` 而不是 `require()`：这条链是 fire-and-forget 的
          * （保存范围不等它跑完），抛出去没人接 —— 所以显式判 null 并记 error。
@@ -739,7 +870,10 @@ export function bootstrapApp(mainDir: string): AppContext {
         }
         const channelFeed = runtime.feed
         const channelKl = runtime.klServer
-        logger.info("scope change pipeline start", { channelId })
+        logger.info("scope change pipeline start", {
+          channelId,
+          narrowed: detail.narrowed,
+        })
         try {
           const report = dataPlane.applyScopeChange(channelId)
           if (report !== null && report.messages > 0) {
@@ -776,9 +910,22 @@ export function bootstrapApp(mainDir: string): AppContext {
             detail: error instanceof Error ? error.message : String(error),
           })
         }
+        /**
+         * ★★★ 收窄 → 知情可选重建（v4 §3.2 B）。
+         *
+         * 自动 fresh 全量重建是设计否决的 C：50 min 且不可续传被一次
+         * 保存触发，且让 UI「暂不重建」变成谎言。出路在
+         * `collection-scope-panel` 的「现在重建图谱」按钮。
+         */
+        if (detail.narrowed) {
+          logger.info("scope narrowed; graph rebuild left to user confirmation", {
+            channelId,
+          })
+          return
+        }
         try {
-          // fresh = true：见上面第 3 步（增量建图删不掉图里已有的实体/事实）
-          await channelKl.rebuildGraph(true)
+          // 放宽：增量即可 —— retag 已让新语料进四件套，fresh wipe 是浪费
+          await channelKl.rebuildGraph(false)
         } catch (error) {
           logger.warn("scope change graph rebuild failed", {
             channelId,
@@ -1072,14 +1219,14 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     llmProvider: llmHolder,
     /**
-     * ★ ACP 那条路的模型 —— 与 `llmProvider` 用的是**同一个值**。
-     *
-     * 统一之前这两条路是两个不同的模型（ACP 读那个只存在于真实 env 的旧变量、
-     * 直连读 `modelMain`），而用户在设置页一个都改不动 —— 于是"常态回复"
-     * 与"降级回复"风格不同，且查不到原因。
+     * 网关直连 Fallback 用的模型（OpenAI 兼容）。Cursor Agent 主路另走
+     * `getCursorModel`，避免把 embedding 模型名误塞进订阅 Agent。
      */
     getModel: () => runtimeConfig.resolved().modelMain,
     getProvider: () => runtimeConfig.resolved().mainProvider,
+    getCursorApiKey: () => runtimeConfig.resolved().cursorApiKey,
+    getCursorModel: () => DEFAULT_CURSOR_MODEL,
+    getCursorRuntime: () => runtimeConfig.resolved().cursorRuntime,
     getWindow: () => window,
     /**
      * 授权用的 CLI。
@@ -1205,20 +1352,14 @@ export function bootstrapApp(mainDir: string): AppContext {
      */
     getPythonEnv: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
     /**
-     * ★ 搜索 agent 用哪个模型 —— 显式给，不靠 env 透传。
-     *
-     * `save()` 确实会 re-seed `process.env`（见 `seedProcessEnv`），所以 env
-     * 那条路**在设置页改完之后也是新的**。显式传的价值在别处：
-     *
-     * · env 是进程级的全局可写状态,谁都能改;而这里要的是"这一次 spawn
-     *   用哪个模型"这个明确的输入。显式传让它成为签名的一部分,
-     *   而不是一个隐式约定;
-     * · `resolved()` 是三层解析（存的 > `.env` > 内置）的唯一真源,直接读它
-     *   就不必依赖"seed 过了"这个前提 —— 而那个前提一旦哪天被破坏
-     *   （少一次 re-seed、或 seed 顺序变了）,表现是静默用错模型。
+     * ★ 搜索 Agent 用 Cursor 订阅默认模型；网关 `modelMain` 只给
+     * OpenAI 兼容 Fallback（无 Agent Key / CLI 时）。
      */
-    getModel: () => runtimeConfig.resolved().modelMain,
+    getCursorModel: () => DEFAULT_CURSOR_MODEL,
     getProvider: () => runtimeConfig.resolved().mainProvider,
+    getCursorApiKey: () => runtimeConfig.resolved().cursorApiKey,
+    getCursorRuntime: () => runtimeConfig.resolved().cursorRuntime,
+    llmProvider: llmHolder,
     getWindow: () => window,
   })
 
@@ -1271,6 +1412,24 @@ export function bootstrapApp(mainDir: string): AppContext {
     gateway: () => {
       const { base, key } = resolveKlCredentials(runtimeConfig)
       const r = runtimeConfig.resolved()
+      const embedCreds = resolveEmbedCredentials(runtimeConfig)
+      /**
+       * embedding：本机服务 ready → 本地；否则回落 OpenAI 兼容网关
+       * （`text-embedding-v4` 等）。loopback 覆盖仅在服务真 ready 时生效。
+       * 向量 URL 优先 embed 专用 / 主接口，勿用 KL 聊天口。
+       */
+      const embed = decideEmbedGateway({
+        probe: embedSidecar.probe,
+        gatewayBaseUrl: resolveEmbedGatewayBaseUrl({
+          embedBaseUrl: embedCreds.base,
+          llmBaseUrl: r.llmBaseUrl,
+          klBaseUrl: base,
+        }),
+        gatewayEmbedModel: embedCreds.model,
+        liveLocalBaseUrl: embedServer.baseUrl(),
+        envOverride: process.env["KL_EMBED_BASE_URL"],
+        envPort: process.env["KL_EMBED_PORT"],
+      })
       return {
         // ★ LLM 传输由 kl 侧 provider 决定（anthropic 拼 /v1/messages、openai 拼
         // /chat/completions），base 照原样传 —— 带不带 /v1 都行，kl 的
@@ -1283,17 +1442,41 @@ export function bootstrapApp(mainDir: string): AppContext {
         // ★ kl 抽取模型：默认回退主模型（glm-5.2）。想给 kl 单独指一个模型就在设置里
         // 填 KL 模型，或用 KL_LLM_MODEL env 覆盖。
         llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-        // ★ embedding 走 OpenAI 兼容：base 要带恰好一个 /v1（litellm 直接 POST
-        // {base}/embeddings；用户配好带 /v1 的 URL 时不能再拼，否则 /v1/v1 → 404）。
-        embedBaseUrl: openAiEmbedBaseUrl(base),
-        embedModel: r.embedModel,
+        embedBaseUrl: embed.config.embedBaseUrl,
+        embedModel: process.env["KL_EMBED_MODEL"] ?? embed.config.embedModel,
+        ...(embed.mode === "local" && embedSidecar.probe.modelDir !== null
+          ? { localEmbedModelDir: embedSidecar.probe.modelDir }
+          : {}),
         apiKey: key,
-        // ★ 网关（DashScope 兼容）的 text-embedding-v4 默认返回 1024 维，而 kl 默认
-        // 建 4096 维集合 —— 维度对不上会在 Qdrant upsert 时崩。配 2048 + 带 dimensions
-        // 参数（matryoshka 截断），与 kl 侧实跑验证过的口径一致。
-        embeddingDim: 2048,
-        sendDimensions: true,
+        embedApiKey: embedCreds.key,
+        // 本地旁路用 decide 给出的 4096/false；远程保留用户配置的维度与 dimensions。
+        embeddingDim:
+          embed.mode === "local" ? embed.config.embeddingDim : embedCreds.embeddingDim,
+        sendDimensions:
+          embed.mode === "local" ? embed.config.sendDimensions : embedCreds.sendDimensions,
       }
+    },
+    embeddingStatus: () => {
+      const { base } = resolveKlCredentials(runtimeConfig)
+      const r = runtimeConfig.resolved()
+      const embedCreds = resolveEmbedCredentials(runtimeConfig)
+      const decided = decideEmbedGateway({
+        probe: embedSidecar.probe,
+        gatewayBaseUrl: resolveEmbedGatewayBaseUrl({
+          embedBaseUrl: embedCreds.base,
+          llmBaseUrl: r.llmBaseUrl,
+          klBaseUrl: base,
+        }),
+        gatewayEmbedModel: embedCreds.model,
+        liveLocalBaseUrl: embedServer.baseUrl(),
+        envOverride: process.env["KL_EMBED_BASE_URL"],
+        envPort: process.env["KL_EMBED_PORT"],
+      })
+      return formatEmbedGatewayStatus({
+        decided,
+        probe: embedSidecar.probe,
+        localServerText: embedServer.statusText(),
+      })
     },
     /**
      * 自动建图的调度快照 → `graphOverview().buildSchedule`（界面上
@@ -1386,16 +1569,35 @@ export function bootstrapApp(mainDir: string): AppContext {
       r.klApiKey.trim() !== ""
         ? r.klApiKey
         : (process.env["ANTHROPIC_AUTH_TOKEN"] ?? process.env["ANTHROPIC_API_KEY"] ?? "")
+    const embedCreds = resolveEmbedCredentials(runtimeConfig)
+    const embed = decideEmbedGateway({
+      probe: embedSidecar.probe,
+      gatewayBaseUrl: resolveEmbedGatewayBaseUrl({
+        embedBaseUrl: embedCreds.base,
+        llmBaseUrl: r.llmBaseUrl,
+        klBaseUrl: base,
+      }),
+      gatewayEmbedModel: embedCreds.model,
+      liveLocalBaseUrl: embedServer.baseUrl(),
+      envOverride: process.env["KL_EMBED_BASE_URL"],
+      envPort: process.env["KL_EMBED_PORT"],
+    })
     return {
       llmBaseUrl: base,
       // ★ 协议与主 gateway() 同源（改一处两边都变）：默认 openai，修那个 404 报错。
       llmProvider: r.klProvider,
       llmModel: process.env["KL_LLM_MODEL"] ?? r.klModel,
-      embedBaseUrl: openAiEmbedBaseUrl(base),
-      embedModel: r.embedModel,
+      embedBaseUrl: embed.config.embedBaseUrl,
+      embedModel: process.env["KL_EMBED_MODEL"] ?? embed.config.embedModel,
+      ...(embed.mode === "local" && embedSidecar.probe.modelDir !== null
+        ? { localEmbedModelDir: embedSidecar.probe.modelDir }
+        : {}),
       apiKey: key,
-      embeddingDim: 2048,
-      sendDimensions: true,
+      embedApiKey: embedCreds.key,
+      embeddingDim:
+        embed.mode === "local" ? embed.config.embeddingDim : embedCreds.embeddingDim,
+      sendDimensions:
+        embed.mode === "local" ? embed.config.sendDimensions : embedCreds.sendDimensions,
     }
   }
 
@@ -1486,11 +1688,14 @@ export function bootstrapApp(mainDir: string): AppContext {
           const profile = registry.get(spec.channelId).exportProfile
           return profile === undefined ? {} : { exportProfile: profile }
         })(),
-        embedding: () => ({
-          baseUrl: runtimeConfig.resolved().llmBaseUrl,
-          model: runtimeConfig.resolved().embedModel,
-          dim: 2048,
-        }),
+        embedding: () => {
+          const embed = resolveEmbedCredentials(runtimeConfig)
+          return {
+            baseUrl: embed.base,
+            model: embed.model,
+            dim: embed.embeddingDim,
+          }
+        },
         localEmbedding: { model: runtimeConfig.resolved().embedModel, dim: 1024 },
         llm: () => ({
           baseUrl: runtimeConfig.resolved().klBaseUrl,
@@ -1546,6 +1751,29 @@ export function bootstrapApp(mainDir: string): AppContext {
         getWindow: () => null,
         preparePython: () => ensurePythonEnv(paths.klRoot, logger.child("Python")),
         gateway: klGateway,
+        embeddingStatus: () => {
+          const r = runtimeConfig.resolved()
+          const base =
+            r.klBaseUrl.trim() !== "" ? r.klBaseUrl : (process.env["ANTHROPIC_BASE_URL"] ?? "")
+          const embedCreds = resolveEmbedCredentials(runtimeConfig)
+          const decided = decideEmbedGateway({
+            probe: embedSidecar.probe,
+            gatewayBaseUrl: resolveEmbedGatewayBaseUrl({
+              embedBaseUrl: embedCreds.base,
+              llmBaseUrl: r.llmBaseUrl,
+              klBaseUrl: base,
+            }),
+            gatewayEmbedModel: embedCreds.model,
+            liveLocalBaseUrl: embedServer.baseUrl(),
+            envOverride: process.env["KL_EMBED_BASE_URL"],
+            envPort: process.env["KL_EMBED_PORT"],
+          })
+          return formatEmbedGatewayStatus({
+            decided,
+            probe: embedSidecar.probe,
+            localServerText: embedServer.statusText(),
+          })
+        },
         buildSchedule: (): KlGraphOverview["buildSchedule"] => channelFeed.graphBuildSchedule(),
         resetBuildWatermark: (): boolean => channelFeed.resetGraphBuildWatermark(),
       })
@@ -2599,7 +2827,12 @@ export function bootstrapApp(mainDir: string): AppContext {
   const auth = new AuthService({
     accounts,
     sessions,
-    signingKey: new SigningKeyStore({ settings, logger: logger.child("SigningKey") }),
+    signingKey: new SigningKeyStore({
+      settings,
+      logger: logger.child("SigningKey"),
+      // 与 SecretStore 同口径：不走系统钥匙串，避免「MyContext Key」弹窗。
+      storage: null,
+    }),
     hasher: new ScryptPasswordHasher(),
     logger: logger.child("Auth"),
     /**
@@ -2981,6 +3214,7 @@ export function bootstrapApp(mainDir: string): AppContext {
       distillSources.detach()
       media.detach()
       // 先优雅收掉 opencode（撤 token + kill 进程，无孤儿），再 detach。
+      await runShutdownStep(runner, "embedServer", () => embedServer.stop())
       await runShutdownStep(runner, "search", () => search.shutdown())
       search.detach()
       await runShutdownStep(runner, "distill", () => distill.detach())

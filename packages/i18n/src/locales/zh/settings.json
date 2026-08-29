@@ -176,6 +176,7 @@
       "egress": "出网",
       "egressYes": "embedding/LLM 需连远端网关",
       "egressNo": "无",
+      "embedding": "向量模型",
       "start": "启动",
       "stop": "停止",
       "retry": "重试",
@@ -261,7 +262,7 @@
     },
     "harness": {
       "title": "Harness 选择",
-      "description": "每个模块可独立选择 Agent 运行方式。内置 harness 不起子进程，也是外部运行时缺失时的降级目标。",
+      "description": "每个模块可独立选择 Agent 运行方式。内置 harness 不起子进程，也是 Agent 编排不可用时的降级目标。",
       "search": "搜索模块",
       "persona": "数字分身模块"
     },
@@ -411,11 +412,13 @@
       "apiKeyPlaceholder": "留空表示不修改",
       "modelMain": "主模型",
       "embedModel": "向量模型",
+      "embedHint": "建图 Phase A 用，与下方 Agent Key 无关。在上方「接口地址」填 embedding 服务（如 http://127.0.0.1:8100），这里填该服务的模型 id；列表没有时点「其它」手输。",
+      "embedPlaceholder": "如 Qwen/… 或 /data/models/….gguf",
       "protocol": "协议",
       "openai": "OpenAI 兼容",
       "anthropic": "Anthropic",
       "unsupported": "测试连接时没验到这个网关支持所选协议 —— 仍可保存，但请确认网关确实支持。",
-      "mainProtocolHint": "主模型（数字分身回消息、搜索、蒸馏、直连）访问网关用哪种协议；测试连接后自动识别，也可手动改。"
+      "mainProtocolHint": "仅用于无 Agent 时的网关回落（直连归纳）。有本机 CLI / Agent Key 时，对话走 Cursor 订阅默认模型，不读这里的主模型名。"
     },
     "kl": {
       "title": "知识库单独用别的模型",
@@ -423,12 +426,32 @@
       "inherited": "跟随主配置",
       "protocolHint": "知识库抽取用哪种协议访问网关；测试连接后自动识别，也可手动改。"
     },
+    "embed": {
+      "title": "向量模型自定义",
+      "hint": "留空则和上面主配置一样。只有向量服务与主模型不在同一网关时才需要单独填。",
+      "inherited": "跟随主配置",
+      "embeddingDim": "向量维度",
+      "sendDimensions": "发送 dimensions 参数",
+      "sendDimensionsOn": "开启",
+      "sendDimensionsOff": "关闭",
+      "sendDimensionsHint": "DashScope 等兼容网关通常需要开启，以便 matryoshka 截断到指定维度。"
+    },
+    "agent": {
+      "apiKey": "Agent API Key",
+      "apiKeyHint": "主用：Agent 对话。可填订阅密钥；留空时自动使用本机已登录的 agent CLI（cursor-agent login）。都没有则回退上方 OpenAI 兼容网关；网关也没有则只做本地召回。",
+      "runtime": "运行方式",
+      "runtimeLocal": "本地",
+      "runtimeCloud": "云端",
+      "runtimeHint": "默认本地；云端需可用的网络与有效密钥。"
+    },
     "save": "保存",
     "saveAndNext": "保存并继续",
     "saved": "已保存",
     "keyOn": "已配置",
     "keyOff": "未配置",
     "keyTail": "已配置 …{{tail}}",
+    "keyOnCli": "本机 CLI 登录",
+    "keyTailCli": "本机 CLI …{{tail}}",
     "other": "其它…",
     "probe": {
       "test": "测试连接",

@@ -244,18 +244,17 @@ export interface PersonaServiceOptions {
   /** 生成回复用的 LLM。provider.get() 为 null 时降级成"只出占位草稿" */
   llmProvider: LlmProvider
   /**
-   * agent（ACP）路用哪个模型 —— `runtimeConfig.resolved().modelMain`。
-   *
-   * ★ 与 `llmProvider` 是**两条路各自的模型**，而现在统一到同一个值：
-   * 常态走 ACP 子进程（读这个），起不来时降级走 `llmProvider` 直连
-   * （`LlmHolder` 用的也是 `modelMain`）。统一之前这两条路是两个不同的模型，
-   * 而用户一个都改不动 —— "回复风格突然变了"就是那时的症状。
-   *
-   * 不给 = ACP 侧退回 env（`MYCONTEXT_MODEL_MAIN`）再退回内置默认。
+   * OpenAI 兼容网关直连（Agent 不可用时的 Fallback）用哪个模型 ——
+   * `runtimeConfig.resolved().modelMain`。与 Cursor Agent 模型无关。
    */
   getModel?: () => string
-  /** 主模型协议 —— 透传给 `PersonaAcp`（见 `PersonaAcpOptions.getProvider`）。 */
   getProvider?: () => string
+  getCursorApiKey?: () => string
+  /**
+   * Cursor 订阅模型。缺省 `composer-2.5`。不要把网关 embedding 模型名塞进来。
+   */
+  getCursorModel?: () => string
+  getCursorRuntime?: () => "local" | "cloud"
   getWindow: () => BrowserWindow | null
   /**
    * 合并窗口。只在测试里传（要用假时钟压缩等待），生产用缺省值。
@@ -358,20 +357,14 @@ export interface PersonaSnapshot {
    * ## ★ 为什么这个字段必须存在
    *
    * 缺了它，UI 只有一个布尔值可看，于是横幅永远说同一句话
-   * （"未配置模型 —— 去设置里配好 LLM"）。而真实的降级原因至少三类：
+   * （"未配置模型 —— 去设置里配好 LLM"）。而真实的降级原因至少两类：
    *
    * · LLM 没配（那句话是对的）；
-   * · **opencode 缺失 / 版本太老 / 版本读不出来**（配 LLM 一点用没有）；
-   * · agent 起来了但这一轮 0-token。
+   * · **Agent API Key 缺失**（配主模型一点用没有；草稿走直连、无工具）。
    *
-   * 真实故障：同事的日志里是 `opencode_version_unreadable`，
-   * 而他看到的横幅让他去配模型 —— 他的模型本来就配好了
-   * （`llm holder reconfigured, model: gpt-5.6-sol`）。那不是"信息不足"，
-   * 是**主动误导**：把用户推向一个不可能修好问题的地方。
-   *
-   * 值取自 `PersonaAcp.degradedReason()`（那里本来就有，只进了日志），
-   * 加上 `llm_not_configured` 这一档。UI 按值选文案，未登记的值原样显示
-   * —— 显示一个陌生的枚举串仍然好过显示一句错话。
+   * 把"缺 Agent 密钥"说成"去配模型"是主动误导。值取自
+   * `PersonaAcp.degradedReason()` 加上 `llm_not_configured`；UI 按值选文案，
+   * 未登记的值原样显示 —— 显示一个陌生串仍然好过显示一句错话。
    */
   degradedReason: string | null
   killSwitch: boolean
@@ -562,14 +555,18 @@ export class PersonaService {
              */
             getSkillPaths: () => this.personaSkillPaths(),
             /**
-             * ★ 用哪个模型 —— 同样是回调（见 `PersonaAcpOptions.getModel`）：
-             * opencode 懒启动，传值会锁死在构造那一刻，而设置页改完模型后
-             * 应当"下次起 agent 就生效"。
-             *
-             * 不给（单测）时退回 env 再退回内置默认。
+             * Cursor Agent 模型 —— 与网关 `getModel`（直连 Fallback）分开。
              */
-            ...(options.getModel === undefined ? {} : { getModel: options.getModel }),
+            ...(options.getCursorModel === undefined
+              ? {}
+              : { getCursorModel: options.getCursorModel }),
             ...(options.getProvider === undefined ? {} : { getProvider: options.getProvider }),
+            ...(options.getCursorApiKey === undefined
+              ? {}
+              : { getCursorApiKey: options.getCursorApiKey }),
+            ...(options.getCursorRuntime === undefined
+              ? {}
+              : { getCursorRuntime: options.getCursorRuntime }),
             /**
              * agent 的过程（thinking / 正文 / tool 调用）—— 两个去处：
              * ① 实时推给 UI（「正在处理」那个 tab 里滚动显示）；
@@ -1763,9 +1760,8 @@ export class PersonaService {
     /**
      * ★ 蒸馏产物**不再** cpSync 到 workspace 里。
      *
-     * 现在 skill 目录通过 `PersonaAcp`（→ `buildOpencodeSpawn` 的 `skillPaths`）
-     * 直接指进 opencode 的 `skills.paths` 配置，agent 从共享目录扫 SKILL.md。
-     * 好处：61 个会话不再有 61 份 kl 副本；蒸馏更新一改就是所有会话都改。
+     * skill 目录由 `PersonaAcp` / Cursor Agent 从共享路径发现，
+     * 不再拷进每会话 cwd。好处：N 个会话不再有 N 份 kl 副本；蒸馏一改全会话生效。
      *
      * 这里只留一件事：判断有没有派生的 persona-persona 目录 —— 用来给
      * `AGENTS.md` 里"这次能不能引用测量画像"那一行做条件。判据是**目录存在**，
@@ -1779,16 +1775,16 @@ export class PersonaService {
      *
      * ## 判据是 `available()` 而不是 `this.acp !== null`
      *
-     * `acp` 非 null 只说明装配层给了 runtime/processes；opencode 二进制
-     * 没装时 `turn()` 会返回 null，`PersonaComposer.compose` 落回 `LlmClient` 直连 ——
+     * `acp` 非 null 只说明装配层给了 runtime/processes；Agent API Key
+     * 没配时 `turn()` 会返回 null，`PersonaComposer.compose` 落回 `LlmClient` 直连 ——
      * 那时说"你能跑 kl"就又是一次谎报（正是这次要修的 bug）。
-     * `available()` 查的是二进制在不在，与 `PersonaComposer.compose` 的选路同源。
+     * `available()` 查的是密钥在不在，与 `PersonaComposer.compose` 的选路同源。
      *
      * ## 残余的误报窗口（不可能完全消除，所以写清）
      *
      * `AGENTS.md` 是**文件**，措辞在 createAgent 这一刻定下；而"这一轮
-     * 到底走哪条路"要到 `PersonaComposer.compose` 才知道（ACP 可能装了却起不来/超时）。
-     * 于是"装了 opencode 但本轮落回直连"时，模型会以为自己能查图谱。
+     * 到底走哪条路"要到 `PersonaComposer.compose` 才知道（Agent 可能配了却起不来/超时）。
+     * 于是"有密钥但本轮落回直连"时，模型会以为自己能查图谱。
      *
      * 那个方向是**保守**的：它去查、查不到（工具不存在），然后按指引说
      * 不确定 —— 而不是编一个答案。反过来（真有 kl 却说没有）才是我们
@@ -1841,18 +1837,13 @@ export class PersonaService {
   }
 
   /**
-   * 数字分身要用的 skill 目录列表（透给 opencode 的 `skills.paths`）。
+   * 数字分身要用的 skill 目录列表（共享父目录，不再 cpSync 进会话 cwd）。
    *
    * ## ★ 从 cpSync 改成"指目录"
    *
-   * 曾经这里叫 `installForgeSkills`，每建一个会话就把 bundled kl 与
-   * derived persona-persona 拷进 `<cwd>/.opencode/skills/`。副作用是
-   * 61 个会话 = 61 份 kl 副本；蒸馏更新要等下次 createAgent 才生效。
-   *
-   * 现在返回**父目录**列表，`PersonaAcp` 透给 `buildOpencodeSpawn` 的
-   * `skillPaths`，最后合进 `OPENCODE_CONFIG_CONTENT` 的 `skills.paths`。
-   * opencode 二进制里 `strings ... | grep '"paths"'` 明确写着这个字段的形态
-   * （`[".opencode/skills", "/abs/path/to/skills"]`）。
+   * 曾经每建一个会话就把 bundled kl 与 derived persona-persona 拷进
+   * `<cwd>/.opencode/skills/`。副作用是 N 会话 = N 份副本。
+   * 现在返回父目录列表给 Agent 编排层发现 SKILL.md。
    *
    * ## 两类来源的生命周期不同，所以是两个路径而不是拼一个
    *

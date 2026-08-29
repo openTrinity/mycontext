@@ -6,6 +6,9 @@ name: verify
 #
 # 刻意只跑 hermetic 的那部分：test:externals 需要 opencode / dws / kl，
 # 在 CI 上必然不可用，把它放进来只会得到一条长期红的流水线（然后所有人忽略它）。
+#
+# 双平台：macos-14（与本机 darwin-arm64 开发线对齐）+ windows-latest（AMD64，
+# 覆盖 win 路径/原生模块/prepare:bin）。fail-fast:false —— 一边红不该淹没另一边。
 
 on:
   push:
@@ -14,28 +17,31 @@ on:
 
 jobs:
   verify:
-    # macOS runner：本仓库内置的是 darwin-arm64 二进制，
-    # 且 better-sqlite3 的原生编译路径与开发机一致才有意义。
-    runs-on: macos-14
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        # Windows runner 默认 pwsh；统一 bash 避免 $GITHUB_OUTPUT / 路径写法分叉。
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read Node version
-        id: node
-        run: echo "version=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
-
       - uses: pnpm/action-setup@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: ${{ steps.node.outputs.version }}
+          node-version-file: .nvmrc
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
 
-      # 二进制内置的验收之一：新克隆零配置就能准备好。
+      # 二进制内置的验收之一：新克隆零配置就能准备好（按 runner 平台解析）。
       - run: pnpm prepare:bin
 
       - run: pnpm verify

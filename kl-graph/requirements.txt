@@ -1,7 +1,7 @@
 # Core
 zvec>=0.6.0
 aiosqlite>=0.19.0
-litellm>=1.0,<1.90
+httpx>=0.27
 jieba>=0.42
 numpy>=2.0
 pydantic>=2.0
@@ -16,7 +16,6 @@ graspologic-native==1.3.1
 # Utilities
 tqdm>=4.60
 nltk>=3.9
-httpx>=0.27
 tiktoken>=0.7        # token-budget chunking (naive_merge), cl100k_base
 filelock>=3.0        # cross-platform process lock for concurrent-ingest guard
 

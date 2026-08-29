@@ -182,7 +182,15 @@ describe("★ 超时后继续，且晚到的结果要留痕", () => {
 
 describe("★ 超时预算本身", () => {
   it("每一步都有预算（漏配会让那一步无超时 = 回到首版的卡死）", () => {
-    for (const step of ["search", "klServer", "persona", "distill", "dataPlane", "db"] as const) {
+    for (const step of [
+      "embedServer",
+      "search",
+      "klServer",
+      "persona",
+      "distill",
+      "dataPlane",
+      "db",
+    ] as const) {
       expect(SHUTDOWN_STEP_TIMEOUTS[step]).toBeGreaterThan(0)
     }
   })

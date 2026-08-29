@@ -180,7 +180,8 @@ try {
    * 而"永远红的门禁"和没有门禁一样会被忽略。
    */
   const failures = []
-  if (!report.acpAvailable) failures.push("ACP 不可用 —— 这一轮什么都没验到（装 opencode 再来）")
+  if (!report.acpAvailable)
+    failures.push("Agent 不可用 —— 这一轮什么都没验到（配好 Agent API Key 再来）")
   if (report.via.length === 0) failures.push("一条草稿都没生成（准入闸拒了？看 run）")
   else if (!report.via.includes("acp")) {
     failures.push(`走的是 ${report.via.join("/")} 而不是 acp —— 验的不是要验的那条路`)

@@ -162,7 +162,7 @@ export class SearchSessionRepository {
         input.id,
         input.title ?? null,
         input.acpCwd,
-        input.harnessId ?? "opencode-acp",
+        input.harnessId ?? "cursor-agent",
         input.modelRole ?? "harness.search",
         input.createdAt,
         input.createdAt,

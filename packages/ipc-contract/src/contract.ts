@@ -1281,14 +1281,12 @@ export const personaSnapshotSchema = z.object({
    * 降级的**真实原因**（没降级 → null）。
    *
    * ★ 为什么必须带这个而不是只带 `agentAvailable`：只有布尔值时横幅
-   * 只能说一句话，而那句话对 opencode 那几类原因是**错的** ——
-   * 实测同事的日志是 `opencode_version_unreadable`，而横幅让他去配模型，
-   * 他的模型本来就配好了。那是主动把用户推向修不好问题的地方。
+   * 只能说一句话，而那句话对「缺 Agent 密钥 / Agent 不可用」是**错的** ——
+   * 会把用户推去改本来就配好了的主模型。
    *
-   * 取值：`llm_not_configured` / `opencode_missing` /
-   * `opencode_version_unreadable` / `opencode_too_old:<found><<required>`。
-   * 不用 enum：`opencode_too_old` 带具体版本号，而 UI 对未登记的值
-   * 走兜底文案（显示一个陌生串也好过显示一句错话）。
+   * 取值：`llm_not_configured` / `cursor_api_key_missing`。
+   * 历史库可能仍有 `opencode_*`；UI 将其映射为 Agent 密钥类文案。
+   * 不用 enum：未登记的值走兜底（显示原串也好过显示一句错话）。
    */
   degradedReason: z.string().nullable(),
   killSwitch: z.boolean(),
@@ -3208,8 +3206,16 @@ export const klServerStatusSchema = z.object({
    *
    * kl 的数据留在本机，但它的 embedding 与 LLM 调用会打到远端网关 ——
    * 这是 local-first 的边界，UI 要明示（沿用"降级必须可见"）。
+   * 本地旁路 embedding 就绪时仍可能因 LLM 而出网。
    */
   networkEgress: z.boolean(),
+  /**
+   * 旁路向量模型探测结果（一行人类可读说明）。
+   *
+   * optional：旧主进程没有该字段时渲染层忽略即可。
+   * 模型缺失 / 无 GPU 时也必须有字 —— 禁止静默空跑（B2）。
+   */
+  embeddingStatus: z.string().optional(),
   /**
    * 建图进度（phase / percent / startedAt）。null = 没在建图。
    *
@@ -3984,19 +3990,23 @@ export const runtimeConfigFieldSchema = z.object({
 })
 
 /**
- * 模型网关协议（litellm 传输）。
+ * 模型网关协议（OpenAI / Anthropic HTTP 传输）。
  *
  * · `openai` —— `/chat/completions`（LLM）/ `/embeddings`（向量），`Authorization: Bearer`；
  * · `anthropic` —— `/v1/messages`，`x-api-key` + `anthropic-version`。
  *
- * ★ 只有**知识库抽取**（kl-graph）这一路真能切协议 —— 它由 kl 侧的 litellm 按 provider
- * 规整 base（anthropic 剥 `/v1`、openai 补一个 `/v1`）。主模型走 opencode 子进程，
- * 那条路**只能** openai 兼容（见 agent-runtime/spawn-hardening.ts：anthropic provider
- * 依赖被墙的 models.dev、静默 0 token），所以主模型没有这个选项。embedding 恒 openai。
+ * ★ 只有**知识库抽取**（kl-graph）这一路真能切协议 —— 它由 kl 侧 HTTP 客户端按 provider
+ * 规整 base（anthropic 剥 `/v1`、openai 补一个 `/v1`）。主模型走 Agent 运行时，
+ * 历史路径曾只能 openai 兼容；embedding 恒 openai。
  */
 export const modelProviderSchema = z.enum(["openai", "anthropic"])
 
 export type ModelProvider = z.infer<typeof modelProviderSchema>
+
+/** Agent 运行时落点：本地进程 / 云端。默认 local（见 kernel `MYCONTEXT_CURSOR_RUNTIME`）。 */
+export const cursorRuntimeSchema = z.enum(["local", "cloud"])
+
+export type CursorRuntime = z.infer<typeof cursorRuntimeSchema>
 
 /** 协议字段的展示形态（值 + 来源标记）。主模型与知识库各有一个。 */
 export const runtimeConfigProviderFieldSchema = z.object({
@@ -4004,10 +4014,26 @@ export const runtimeConfigProviderFieldSchema = z.object({
   source: z.enum(["user", "env", "dotenv", "default"]),
 })
 
+/** Agent 运行时落点字段（值 + 来源标记）。 */
+export const runtimeConfigCursorRuntimeFieldSchema = z.object({
+  value: cursorRuntimeSchema,
+  source: z.enum(["user", "env", "dotenv", "default"]),
+})
+
 export const runtimeConfigSecretFieldSchema = z.object({
   configured: z.boolean(),
   /** 已配置时给后 4 位，未配置为 null */
   tail: z.string().nullable(),
+  /**
+   * `cli`：本机 `cursor-agent login` / SDK auth 存储桥接来的 Agent Key
+   * （用户未在设置里粘贴，但运行时可用）。
+   */
+  source: z.enum(["user", "env", "dotenv", "default", "cli"]),
+})
+
+/** 布尔配置项的展示形态（值 + 来源标记）。 */
+export const runtimeConfigBooleanFieldSchema = z.object({
+  value: z.boolean(),
   source: z.enum(["user", "env", "dotenv", "default"]),
 })
 
@@ -4017,20 +4043,26 @@ export const runtimeConfigSecretFieldSchema = z.object({
  * 主配置（`llm*` / `modelMain` / `embedModel`）+ KL 专用三项。
  * KL 三项留空表示「回退主配置」，所以视图里额外给 `klEffective*`
  * （真正会用到的值，已解析回退），让 UI 能显示「当前实际用的是 X」。
+ * 另含 Agent 运行时凭据（`cursorApiKey`）与落点（`cursorRuntime`）。
  */
 export const runtimeConfigViewSchema = z.object({
   llmBaseUrl: runtimeConfigFieldSchema,
   llmApiKey: runtimeConfigSecretFieldSchema,
   modelMain: runtimeConfigFieldSchema,
   /**
-   * 主模型访问网关用的协议（litellm 传输）。
+   * 主模型访问网关用的协议（OpenAI / Anthropic HTTP 传输）。
    *
-   * ★ 现在**可切**：opencode 子进程按它选 `@ai-sdk/anthropic` / `@ai-sdk/openai-compatible`
-   * 内联 provider，直连 `LlmClient` 按它走 `/v1/messages` / `/v1/chat/completions`。
+   * ★ 现在**可切**：Agent 运行时 / 直连 `LlmClient` 按它走
+   * `/v1/messages` 或 `/v1/chat/completions`。
    * 有默认层（kernel 的 `MYCONTEXT_MODEL_PROVIDER`，默认 openai）。
    */
   mainProvider: runtimeConfigProviderFieldSchema,
   embedModel: runtimeConfigFieldSchema,
+  /** 向量专用网关三项。留空表示「回退主配置」。 */
+  embedLlmBaseUrl: runtimeConfigFieldSchema,
+  embedLlmApiKey: runtimeConfigSecretFieldSchema,
+  embeddingDim: runtimeConfigFieldSchema,
+  embedSendDimensions: runtimeConfigBooleanFieldSchema,
   klLlmBaseUrl: runtimeConfigFieldSchema,
   klLlmApiKey: runtimeConfigSecretFieldSchema,
   klModelMain: runtimeConfigFieldSchema,
@@ -4048,6 +4080,23 @@ export const runtimeConfigViewSchema = z.object({
     /** 实际生效的协议（默认层 ?? 用户覆盖） */
     provider: modelProviderSchema,
   }),
+  /** 向量配置回退解析后**实际生效**的值 */
+  embedEffective: z.object({
+    baseUrl: z.string(),
+    model: z.string(),
+    apiKeyConfigured: z.boolean(),
+    embeddingDim: z.number().int(),
+    sendDimensions: z.boolean(),
+  }),
+  /**
+   * Agent 运行时 API Key（敏感）。空 = Agent 对话降级。
+   * 形状与 `llmApiKey` 相同：只给 configured + 后 4 位。
+   */
+  cursorApiKey: runtimeConfigSecretFieldSchema,
+  /**
+   * Agent 运行时落点（local / cloud）。有默认层（kernel 默认 local）。
+   */
+  cursorRuntime: runtimeConfigCursorRuntimeFieldSchema,
 })
 
 export type RuntimeConfigView = z.infer<typeof runtimeConfigViewSchema>
@@ -4067,11 +4116,19 @@ export const saveRuntimeConfigInputSchema = z.object({
   /** 主模型协议。undefined = 不改；两个枚举值之一 = 覆盖 */
   mainProvider: modelProviderSchema.optional(),
   embedModel: z.string().max(200).optional(),
+  embedLlmBaseUrl: z.string().max(2000).optional(),
+  embedLlmApiKey: z.string().max(500).nullable().optional(),
+  embeddingDim: z.number().int().min(1).max(8192).optional(),
+  embedSendDimensions: z.boolean().optional(),
   klLlmBaseUrl: z.string().max(2000).optional(),
   klLlmApiKey: z.string().max(500).nullable().optional(),
   klModelMain: z.string().max(200).optional(),
   /** 知识库协议。undefined = 不改；两个枚举值之一 = 覆盖 */
   klProvider: modelProviderSchema.optional(),
+  /** Agent API Key。三态同 llmApiKey */
+  cursorApiKey: z.string().max(500).nullable().optional(),
+  /** Agent 运行时落点。undefined = 不改 */
+  cursorRuntime: cursorRuntimeSchema.optional(),
 })
 
 export type SaveRuntimeConfigInput = z.infer<typeof saveRuntimeConfigInputSchema>

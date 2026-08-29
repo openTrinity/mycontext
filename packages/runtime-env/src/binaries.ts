@@ -9,20 +9,21 @@
  * 解析逻辑不用改。
  */
 import { accessSync, chmodSync, constants, existsSync, statSync } from "node:fs"
+import { createRequire } from "node:module"
 import { homedir } from "node:os"
-import { delimiter, isAbsolute, join } from "node:path"
+import { delimiter, dirname, isAbsolute, join } from "node:path"
 import { AppError } from "@mycontext/kernel"
 import { resolvePython, type PythonVersionProbe, type ResolvedPython } from "./python.js"
 
 /**
  * 需要解析的可执行文件。
  *
- * 两者现在**都随包分发到 resources/bin**（见 scripts/prepare-bin.mjs）：
- * - `dws`：vendor 内置 → resources/bin，**必需**，缺失即错误
- * - `opencode`：npm 平台包（`opencode-ai` 精确钉版本）→ resources/bin。
- *   `bundled` 档优先，从而 dev 与打包共用一套解析、且**不受用户本机
- *   那份 opencode 影响**。仍保留 env/home/path 三档作兜底与逃生阀。
- *   运行时缺失仍是**降级**（内置 harness），不是错误。
+ * - `dws`：运行时顺序 override → PATH → npm `dingtalk-workspace-cli` 启动器 →
+ *   `resources/bin` 随包兜底（可选）。缺失才 `RUNTIME_BINARY_MISSING`，
+ *   提示 `npm install -g dingtalk-workspace-cli`。
+ * - `opencode`：**已退役打包**（对话改 `@cursor/sdk`；不再钉 `opencode-ai`、
+ *   不再 `prepare-bin` / electron-builder 进包）。解析仍留 env/home/path，
+ *   仅供外部实测 / 遗留 harness；生产路径不依赖。缺失是常态。
  *
  * Python 解释器是第三类，解析逻辑在 ./python.ts —— 它要**执行**候选来读版本，
  * 而这个文件因为提到 opencode 而受 spawn 门禁约束（见那边的注释）。
@@ -59,13 +60,14 @@ export interface RuntimeEnvOptions {
    * 这一条就是那个入口（UI 上填、落设置库；`MYCONTEXT_DWS_SOURCE` 环境变量
    * 是脚本侧的同义物，见 scripts/lib/dws-resolver.mjs）。
    *
-   * ## ★ 解析顺序：这一条 > `binDir` 里那份
+   * ## ★ 解析顺序：override > PATH > npm 启动器 > `binDir` 随包兜底
    *
-   * "我明确指了一个"必须盖过默认。而**兜底永远是**随包的开源版 ——
-   * 用户把路径清空、或指的文件不见了（换了台机器、卸载了闭源包），
-   * 都自动退回随包那份，而不是让渠道整个不可用。
+   * "我明确指了一个"必须盖过默认。下一档是本机 PATH / 全局 CLI，再是
+   * workspace 的 `dingtalk-workspace-cli` 启动器；**最后**才是 prepare:bin
+   * 可选拷进 `resources/bin` 的那份。用户把路径清空、或指的文件不见了，
+   * 都自动退回下一档，而不是让渠道整个不可用。
    *
-   * 缺省 undefined = 没设，只用随包那份。
+   * 缺省 undefined = 没设，从 PATH/npm/bundled 里解析。
    */
   dwsBinOverride?: string | undefined
   /**
@@ -150,6 +152,31 @@ function fileName(name: BinaryName): string {
 
 /** opencode 官方安装器不带平台后缀；我们的 bundled 那份带后缀（与 dws 同规则）。 */
 const OPENCODE_EXE = process.platform === "win32" ? "opencode.exe" : "opencode"
+const DWS_EXE = process.platform === "win32" ? "dws.exe" : "dws"
+
+function findOnPath(exe: string, pathEnv: string | undefined): string | null {
+  for (const dir of (pathEnv ?? "").split(delimiter)) {
+    if (dir === "") continue
+    const candidate = join(dir, exe)
+    if (isFile(candidate)) return candidate
+  }
+  return null
+}
+
+/**
+ * workspace 依赖 `dingtalk-workspace-cli` 的 Node 启动器（`bin/dws.js`）。
+ * 它会再 spawn 包内真正的平台二进制 —— 比自己解包 assets 更贴近官方安装路径。
+ */
+function resolveDwsNpmLauncher(): string | null {
+  try {
+    const req = createRequire(import.meta.url)
+    const pkgJson = req.resolve("dingtalk-workspace-cli/package.json")
+    const launcher = join(dirname(pkgJson), "bin", "dws.js")
+    return isFile(launcher) ? launcher : null
+  } catch {
+    return null
+  }
+}
 
 /**
  * 允许的最低 opencode 版本。
@@ -264,10 +291,10 @@ export class RuntimeEnv {
     }
 
     /**
-     * ★ dws：用户自备那份优先，随包的开源版兜底。
+     * ★ dws：override → PATH → npm 启动器 → 随包 bundled。
      *
      * 判据是「文件真的在」而不是「设了这个值」—— 用户换机器 / 卸了闭源包
-     * 之后那条路径会失效，此时**静默退回随包版**比让渠道整个不可用好得多
+     * 之后那条路径会失效，此时**静默退回下一档**比让渠道整个不可用好得多
      * （后者的表现是 onboarding 直接走不下去，而用户并不知道是路径的问题）。
      *
      * 可执行位与"真的能跑"由落地那一侧保证：随包那份走 `prepare:bin` 的
@@ -281,6 +308,21 @@ export class RuntimeEnv {
         ensureExecutable(override)
         return { name, path: override, platform: platformSuffix(), source: "env" }
       }
+
+      const env = this.options.env ?? process.env
+      // PATH / 全局安装（官方：`npm install -g dingtalk-workspace-cli`）
+      const fromPath = findOnPath(DWS_EXE, env["PATH"])
+      if (fromPath !== null) {
+        ensureExecutable(fromPath)
+        return { name, path: fromPath, platform: platformSuffix(), source: "path" }
+      }
+
+      // workspace 依赖里的 npm 包启动器（仍会调出真正的 dws 二进制）
+      const fromNpm = resolveDwsNpmLauncher()
+      if (fromNpm !== null) {
+        ensureExecutable(fromNpm)
+        return { name, path: fromNpm, platform: platformSuffix(), source: "path" }
+      }
     }
 
     const path = join(this.options.binDir, fileName(name))
@@ -291,12 +333,20 @@ export class RuntimeEnv {
     } catch {
       throw new AppError(
         "RUNTIME_BINARY_MISSING",
-        `缺少预置可执行文件 ${fileName(name)}。\n` +
-          `期望位置：${path}\n` +
-          `请运行 pnpm prepare:bin 准备（当前平台：${platformSuffix()}）`,
+        name === "dws"
+          ? `未找到 dws。请安装：npm install -g dingtalk-workspace-cli\n` +
+            `或设置 MYCONTEXT_DWS_SOURCE=<可执行文件路径>\n` +
+            `（也可 pnpm prepare:bin 把二进制拷进 resources/bin）`
+          : `缺少预置可执行文件 ${fileName(name)}。\n` +
+            `期望位置：${path}\n` +
+            `请运行 pnpm prepare:bin 准备（当前平台：${platformSuffix()}）`,
         {
           messageKey: "errors:runtime.binaryMissing",
-          messageParams: { file: fileName(name), path, command: "pnpm prepare:bin" },
+          messageParams: {
+            file: fileName(name),
+            path,
+            command: name === "dws" ? "npm install -g dingtalk-workspace-cli" : "pnpm prepare:bin",
+          },
           context: { name, path, platform: platformSuffix() },
         },
       )
@@ -321,22 +371,17 @@ export class RuntimeEnv {
     return { name, path, platform: platformSuffix(), source: "bundled" }
   }
   /**
-   * opencode 的四档解析。返回 null 表示「没找到」。
+   * opencode 的解析（打包已退役；仅外部实测 / 遗留 harness）。
    *
-   * 用 `tryResolve` 而不是让 `resolve` 抛错：opencode 缺失是**预期状态**，
-   * 不是异常 —— 应用要能在没有它的情况下降级到内置 harness 继续工作。
-   * 把预期状态做成异常，会让调用方到处写 try/catch 来表达「正常情况」。
+   * 用 `tryResolve` 而不是让 `resolve` 抛错：缺失是**预期状态**。
    *
-   * ★ 档位顺序（`bundled` 最优先是关键）：
-   *   1. `bundled` —— `binDir/opencode-<plat>-<arch>`，prepare-bin 从 npm 平台包
-   *      拷来的那份。dev 与打包共用它，从而**不受用户本机 opencode 影响**。
-   *   2. `env` —— `MYCONTEXT_OPENCODE_BIN`，逃生阀（联调换版本）。
-   *   3. `home` / `path` —— 本机装的那份，仅当上面都没有时的兜底。
+   * 档位：`binDir` 里若还有手动落盘的副本 → env → home → PATH。
+   * `prepare-bin` / electron-builder **不再**往这里拷。
    */
   tryResolveOpencode(): ResolvedBinary | null {
     const env = this.options.env ?? process.env
 
-    // 1. bundled：prepare-bin 从 npm 平台包拷进 binDir 的那份（dev 与打包同源）。
+    // 1. binDir 兜底（历史落盘 / 手工拷贝；打包链路已不再写入）。
     const bundled = join(this.options.binDir, fileName("opencode"))
     if (isFile(bundled)) {
       // asar/extraResources 解出的文件可能丢可执行位（与 dws 同一处理）。

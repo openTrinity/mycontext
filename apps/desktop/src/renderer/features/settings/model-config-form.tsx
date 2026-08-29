@@ -50,6 +50,7 @@
 import { useState } from "react"
 import { Button, Disclosure, Field, Input, Tag, cn } from "@mycontext/design"
 import type {
+  CursorRuntime,
   ModelProvider,
   RuntimeConfigProbe,
   RuntimeConfigView,
@@ -87,6 +88,12 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const [llmBaseUrl, setLlmBaseUrl] = useState<string | null>(null)
   const [modelMain, setModelMain] = useState<string | null>(null)
   const [embedModel, setEmbedModel] = useState<string | null>(null)
+  const [embedLlmBaseUrl, setEmbedLlmBaseUrl] = useState<string | null>(null)
+  const [embedLlmApiKey, setEmbedLlmApiKey] = useState("")
+  const [embeddingDim, setEmbeddingDim] = useState<string | null>(null)
+  const [embedSendDimensions, setEmbedSendDimensions] = useState<boolean | null>(null)
+  /** 向量模型名手输模式（探测列表里没有想要的那个时） */
+  const [customEmbed, setCustomEmbed] = useState(false)
   const [apiKey, setApiKey] = useState("")
   /** 主模型协议草稿。null = 未编辑（用探测识别值或已存值）。 */
   const [mainProvider, setMainProvider] = useState<ModelProvider | null>(null)
@@ -95,6 +102,10 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const [klApiKey, setKlApiKey] = useState("")
   /** 知识库协议草稿。null = 未编辑（用探测识别值或已存值）。 */
   const [klProvider, setKlProvider] = useState<ModelProvider | null>(null)
+  /** Agent API Key 草稿（空串 = 不改，与 llmApiKey 同语义）。 */
+  const [cursorApiKey, setCursorApiKey] = useState("")
+  /** Agent 运行时落点草稿。null = 未编辑。 */
+  const [cursorRuntime, setCursorRuntime] = useState<CursorRuntime | null>(null)
   /** 模型名手输模式（探测列表里没有想要的那个时） */
   const [customModel, setCustomModel] = useState(false)
   /**
@@ -115,6 +126,9 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
   const baseUrlValue = llmBaseUrl ?? current.llmBaseUrl.value
   const modelValue = modelMain ?? current.modelMain.value
   const embedValue = embedModel ?? current.embedModel.value
+  const embedDimValue = embeddingDim ?? String(current.embeddingDim.value)
+  const embedSendDimensionsValue =
+    embedSendDimensions ?? current.embedSendDimensions.value
 
   /**
    * 有没有未保存的改动。
@@ -127,11 +141,17 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     modelMain !== null ||
     mainProvider !== null ||
     embedModel !== null ||
+    embedLlmBaseUrl !== null ||
+    embedLlmApiKey !== "" ||
+    embeddingDim !== null ||
+    embedSendDimensions !== null ||
     klBaseUrl !== null ||
     klModel !== null ||
     klProvider !== null ||
+    cursorRuntime !== null ||
     apiKey !== "" ||
-    klApiKey !== ""
+    klApiKey !== "" ||
+    cursorApiKey !== ""
 
   const submit = (): void => {
     const patch: SaveRuntimeConfigInput = {}
@@ -139,24 +159,39 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
     if (modelMain !== null) patch.modelMain = modelMain
     if (mainProvider !== null) patch.mainProvider = mainProvider
     if (embedModel !== null) patch.embedModel = embedModel
+    if (embedLlmBaseUrl !== null) patch.embedLlmBaseUrl = embedLlmBaseUrl
+    if (embedLlmApiKey !== "") patch.embedLlmApiKey = embedLlmApiKey
+    if (embeddingDim !== null) {
+      const parsed = Number.parseInt(embeddingDim, 10)
+      if (!Number.isNaN(parsed)) patch.embeddingDim = parsed
+    }
+    if (embedSendDimensions !== null) patch.embedSendDimensions = embedSendDimensions
     // 空串 = 不改（UI 不回显旧 key）
     if (apiKey !== "") patch.llmApiKey = apiKey
     if (klBaseUrl !== null) patch.klLlmBaseUrl = klBaseUrl
     if (klModel !== null) patch.klModelMain = klModel
     if (klApiKey !== "") patch.klLlmApiKey = klApiKey
     if (klProvider !== null) patch.klProvider = klProvider
+    if (cursorApiKey !== "") patch.cursorApiKey = cursorApiKey
+    if (cursorRuntime !== null) patch.cursorRuntime = cursorRuntime
     save.mutate(patch, {
       onSuccess: () => {
         // 草稿清空 → dirty 回到 false（保存后按钮自然禁掉）
         setApiKey("")
         setKlApiKey("")
+        setCursorApiKey("")
         setLlmBaseUrl(null)
         setModelMain(null)
         setMainProvider(null)
         setEmbedModel(null)
+        setEmbedLlmBaseUrl(null)
+        setEmbedLlmApiKey("")
+        setEmbeddingDim(null)
+        setEmbedSendDimensions(null)
         setKlBaseUrl(null)
         setKlModel(null)
         setKlProvider(null)
+        setCursorRuntime(null)
         onSaved?.()
       },
     })
@@ -245,6 +280,8 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
    */
   const supportedProviders: readonly ModelProvider[] =
     result?.ok === true && result.providers.length > 0 ? result.providers : ["openai", "anthropic"]
+
+  const effectiveCursorRuntime: CursorRuntime = cursorRuntime ?? current.cursorRuntime.value
 
   return (
     <div className="flex flex-col gap-[var(--gap-section-lg)]">
@@ -352,8 +389,7 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
 
         {/*
           ★ 主模型协议选择器 —— 现在可切（去掉了原来那句"不可切换"）。
-          opencode 子进程按它选 @ai-sdk/anthropic / @ai-sdk/openai-compatible 内联
-          provider，直连 LlmClient 按它走 /v1/messages / /v1/chat/completions。
+          直连 LlmClient 按它走 /v1/messages 或 /v1/chat/completions。
           两个 chip 亮不亮由**所选模型**的 supported_endpoint_types 决定（不是网关整体）——
           选了只支持 openai 的模型时 anthropic chip 就标灰。
         */}
@@ -367,20 +403,168 @@ export function ModelConfigForm({ onSaved, saveLabel }: ModelConfigFormProps) {
           anthropicLabel={t("model.provider.anthropic")}
           unsupportedLabel={t("model.provider.unsupported")}
         />
+      </section>
+
+      {/*
+        Agent 运行时凭据 + 落点。
+        主用订阅密钥；上方「模型网关」是 OpenAI 兼容 Fallback（搜索归纳 / 分身直连）。
+        文案刻意不堆第三方产品名（商标门禁）—— 说「Agent API Key」「本地 / 云端」。
+      */}
+      <section className="flex flex-col gap-[var(--gap-section-sm)]">
+        <div className="flex flex-col gap-[var(--gap-component-sm)]">
+          <div className="flex items-center gap-2">
+            <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+              {t("model.agent.apiKey")}
+            </span>
+            <KeyTag field={current.cursorApiKey} />
+          </div>
+          <Input
+            type="password"
+            aria-label={t("model.agent.apiKey")}
+            value={cursorApiKey}
+            onChange={(event) => setCursorApiKey(event.target.value)}
+            placeholder={t("model.provider.apiKeyPlaceholder")}
+          />
+          <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("model.agent.apiKeyHint")}
+          </span>
+        </div>
 
         <div className="flex flex-col gap-[var(--gap-component-sm)]">
           <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
-            {t("model.provider.embedModel")}
+            {t("model.agent.runtime")}
           </span>
-          <ChipPicker
-            options={
-              embedOptions.length > 0 ? embedOptions : (SUGGESTED_EMBED as readonly string[])
-            }
-            value={embedValue}
-            onPick={(next) => setEmbedModel(next)}
-          />
+          <div className="flex flex-wrap gap-1.5">
+            <Chip
+              selected={effectiveCursorRuntime === "local"}
+              onClick={() => setCursorRuntime("local")}
+            >
+              {t("model.agent.runtimeLocal")}
+            </Chip>
+            <Chip
+              selected={effectiveCursorRuntime === "cloud"}
+              onClick={() => setCursorRuntime("cloud")}
+            >
+              {t("model.agent.runtimeCloud")}
+            </Chip>
+          </div>
+          <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+            {t("model.agent.runtimeHint")}
+          </span>
         </div>
       </section>
+
+      {/*
+        向量模型自定义。
+        · `hint` 说「留空 = 用上面的」—— 折叠标题下一行，正是帮人决定要不要展开；
+        · `summary` 给当前**实际生效**值 —— 收起时也看得见。
+      */}
+      <Disclosure
+        title={t("model.embed.title")}
+        hint={t("model.embed.hint")}
+        summary={`${current.embedEffective.model || "—"} · ${current.embedEffective.embeddingDim}d${
+          current.embedEffective.sendDimensions ? " · dimensions" : ""
+        }`}
+      >
+        <div className="flex flex-col gap-[var(--gap-section-sm)]">
+          <Field label={t("model.provider.baseUrl")}>
+            {(attributes) => (
+              <Input
+                {...attributes}
+                value={embedLlmBaseUrl ?? current.embedLlmBaseUrl.value}
+                onChange={(event) => setEmbedLlmBaseUrl(event.target.value)}
+                placeholder={baseUrlValue || "https://…"}
+              />
+            )}
+          </Field>
+
+          <div className="flex flex-col gap-[var(--gap-component-sm)]">
+            <div className="flex items-center gap-2">
+              <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+                {t("model.provider.apiKey")}
+              </span>
+              <KeyTag field={current.embedLlmApiKey} fallbackLabel={t("model.embed.inherited")} />
+            </div>
+            <Input
+              type="password"
+              aria-label={t("model.provider.apiKey")}
+              value={embedLlmApiKey}
+              onChange={(event) => setEmbedLlmApiKey(event.target.value)}
+              placeholder={t("model.provider.apiKeyPlaceholder")}
+            />
+          </div>
+
+          <div className="flex flex-col gap-[var(--gap-component-sm)]">
+            <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+              {t("model.provider.embedModel")}
+            </span>
+            <ChipPicker
+              options={
+                embedOptions.length > 0 ? embedOptions : (SUGGESTED_EMBED as readonly string[])
+              }
+              value={embedValue}
+              onPick={(next) => {
+                setEmbedModel(next)
+                setCustomEmbed(false)
+              }}
+              otherLabel={t("model.other")}
+              custom={customEmbed || !embedOptions.includes(embedValue)}
+              onCustom={() => setCustomEmbed(true)}
+            />
+            {(customEmbed || !embedOptions.includes(embedValue)) && (
+              <Input
+                aria-label={t("model.provider.embedModel")}
+                value={embedValue}
+                onChange={(event) => setEmbedModel(event.target.value)}
+                placeholder="text-embedding-v4"
+              />
+            )}
+            {result?.ok === true &&
+              result.models.length > 0 &&
+              embedValue.trim() !== "" &&
+              !result.models.includes(embedValue) && (
+                <span className="typography-caption-400 text-[var(--status-warning)]">
+                  {t("model.probe.modelNotListed")}
+                </span>
+              )}
+          </div>
+
+          <Field label={t("model.embed.embeddingDim")}>
+            {(attributes) => (
+              <Input
+                {...attributes}
+                inputMode="numeric"
+                value={embedDimValue}
+                onChange={(event) => setEmbeddingDim(event.target.value)}
+                placeholder={String(current.embedEffective.embeddingDim)}
+              />
+            )}
+          </Field>
+
+          <div className="flex flex-col gap-[var(--gap-component-sm)]">
+            <span className="typography-body-small-400 text-[var(--text-base-secondary)]">
+              {t("model.embed.sendDimensions")}
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              <Chip
+                selected={embedSendDimensionsValue}
+                onClick={() => setEmbedSendDimensions(true)}
+              >
+                {t("model.embed.sendDimensionsOn")}
+              </Chip>
+              <Chip
+                selected={!embedSendDimensionsValue}
+                onClick={() => setEmbedSendDimensions(false)}
+              >
+                {t("model.embed.sendDimensionsOff")}
+              </Chip>
+            </div>
+            <span className="typography-caption-400 text-[var(--text-base-tertiary)]">
+              {t("model.embed.sendDimensionsHint")}
+            </span>
+          </div>
+        </div>
+      </Disclosure>
 
       {/*
         KL 专用网关。
@@ -493,9 +677,12 @@ function KeyTag({
 }) {
   const { t } = useDynamicTranslation("settings")
   if (field.configured) {
+    const fromCli = field.source === "cli"
     return (
       <Tag size="sm" status="success" showIndicator>
-        {field.tail === null ? t("model.keyOn") : t("model.keyTail", { tail: field.tail })}
+        {field.tail === null
+          ? t(fromCli ? "model.keyOnCli" : "model.keyOn")
+          : t(fromCli ? "model.keyTailCli" : "model.keyTail", { tail: field.tail })}
       </Tag>
     )
   }

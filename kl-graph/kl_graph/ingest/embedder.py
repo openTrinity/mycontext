@@ -1,4 +1,4 @@
-"""Embedding client (text-embedding-v4 via litellm)."""
+"""Embedding client（OpenAI 兼容 HTTP，经 http_llm）。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from kl_graph.utils.litellm_config import litellm, litellm_base_url
 
 # Service-level constants (endpoint identity, not behavioral params)
 EMBED_API_KEY = cfg.services.embedding.api_key or ""
-# Embeddings always ride litellm's OpenAI-compatible transport (see Embedder
+# Embeddings always ride the OpenAI-compatible transport (see Embedder
 # below), so the base URL is normalized to the OpenAI contract regardless of
 # which provider serves chat completions.
 EMBED_BASE_URL = litellm_base_url("openai", cfg.services.embedding.base_url or "")
@@ -29,12 +29,10 @@ logger = logging.getLogger(__name__)
 class Embedder:
     """Synchronous embedding client over an OpenAI-compatible endpoint.
 
-    Routed through litellm (``openai/<model>`` provider prefix). Points at
-    whatever OpenAI-compatible embedding server ``KL_EMBED_*`` configures
-    (e.g. a self-hosted Qwen3-Embedding-8B at 4096 dims). Anthropic has no
-    embedding API,
-    so embeddings always use the OpenAI-compatible transport regardless of
-    which provider serves chat completions.
+    Points at whatever OpenAI-compatible embedding server ``KL_EMBED_*``
+    configures (e.g. a self-hosted Qwen3-Embedding-8B at 4096 dims). Anthropic
+    has no embedding API, so embeddings always use the OpenAI-compatible
+    transport regardless of which provider serves chat completions.
     """
 
     def __init__(
@@ -46,10 +44,11 @@ class Embedder:
         concurrency: int = 10,
         max_retries: int = 3,
         timeout: float = 60.0,
+        *,
+        max_input_tokens: int | None = None,
     ):
-        # litellm selects the OpenAI-compatible transport from the provider
-        # prefix; the bare model name is sent on the wire via api_base.
-        self.model = f"openai/{model}"
+        # Bare model name on the wire; ``openai/`` prefix is for our client routing.
+        self.model = f"openai/{model}" if not str(model).startswith("openai/") else str(model)
         self.base_url = base_url
         self.api_key = EMBED_API_KEY or "not-needed"
         self.batch_size = batch_size
@@ -57,6 +56,11 @@ class Embedder:
         self.concurrency = max(1, concurrency)
         self.max_retries = max_retries
         self.timeout = timeout
+        # Soft budget for packing / pre-split. None = only react when the server
+        # returns exceed_context_size (self-hosted llama.cpp often ~8k).
+        self.max_input_tokens = (
+            int(max_input_tokens) if max_input_tokens is not None and max_input_tokens > 0 else None
+        )
         # Embedding token tracking
         self.usage = {
             "prompt_tokens": 0,
@@ -65,7 +69,7 @@ class Embedder:
         }
 
     def _embed_kwargs(self, texts: list[str]) -> dict:
-        """Build the litellm (a)embedding kwargs shared by sync + async paths."""
+        """Build (a)embedding kwargs shared by sync + async paths."""
         # ``dimensions`` is only sent when the server supports matryoshka
         # truncation (text-embedding-v4). The self-hosted
         # Qwen3-Embedding-8B (vLLM) rejects it with a 400, so it is omitted by
@@ -97,9 +101,128 @@ class Embedder:
             pass
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed one wire batch; split on context-window errors instead of aborting."""
+        if not texts:
+            return []
+        # 主动拆：中文会话块常按 ≈1 token/字，不能等 400 再拆（旧进程/异常包装会漏捕）。
+        budget = self.max_input_tokens
+        if budget is not None and len(texts) == 1 and self._estimate_tokens(texts[0]) > budget:
+            return [self._embed_long_text(texts[0])]
+        try:
+            return self._embed_raw(texts)
+        except Exception as exc:
+            if not self._is_context_overflow(exc):
+                raise
+            if len(texts) > 1:
+                mid = max(1, len(texts) // 2)
+                logger.warning(
+                    "embedding context overflow on batch of %d; splitting %d+%d",
+                    len(texts),
+                    mid,
+                    len(texts) - mid,
+                )
+                return self._embed(texts[:mid]) + self._embed(texts[mid:])
+            return [self._embed_long_text(texts[0])]
+
+    def _embed_raw(self, texts: list[str]) -> list[list[float]]:
+        """Single HTTP embedding call (no proactive split)."""
         resp = self._embed_with_retry(self._embed_kwargs(texts))
         self._track_usage(resp)
         return [d["embedding"] for d in resp.data]
+
+    @staticmethod
+    def _is_context_overflow(exc: BaseException) -> bool:
+        name = type(exc).__name__
+        if name in {"ContextWindowExceededError", "BadRequestError"}:
+            msg = str(exc).lower()
+            if (
+                "exceed_context_size" in msg
+                or "exceeds the available context" in msg
+                or "context size" in msg
+            ):
+                return True
+            if name == "ContextWindowExceededError":
+                return True
+        msg = str(exc).lower()
+        return "exceed_context_size" in msg or "exceeds the available context" in msg
+
+    def _embed_long_text(self, text: str) -> list[float]:
+        """Split to ≤8192-token windows and mean-pool (no content dropped).
+
+        Self-hosted llama often runs ``-c 8192`` (n_ctx≈8704). Oversized chat
+        slices (~15k tokens) must be windowed on the client; truncating is wrong.
+        """
+        text = text or ""
+        budget = int(self.max_input_tokens or 8192)
+        budget = max(512, min(budget, 8192))
+        # estimate = len(text)（见下），所以 char 窗宽 = token 预算。
+        char_budget = budget
+        if len(text) <= char_budget:
+            return self._embed_raw([text])[0]
+
+        parts: list[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            j = min(n, i + char_budget)
+            if j < n:
+                # 尽量在换行处切开，避免把一行汉字从中间撕开
+                window = text[i:j]
+                cut = window.rfind("\n")
+                if cut >= max(64, char_budget // 4):
+                    j = i + cut + 1
+            piece = text[i:j]
+            if not piece:
+                piece = text[i : i + 1]
+                j = i + 1
+            parts.append(piece)
+            i = j
+
+        logger.warning(
+            "embedding long text chars=%d budget=%d → %d windows (mean-pool)",
+            len(text),
+            budget,
+            len(parts),
+        )
+        vectors = [self._embed_raw([p])[0] for p in parts]
+        dim = len(vectors[0])
+        scale = 1.0 / len(vectors)
+        return [sum(v[d] for v in vectors) * scale for d in range(dim)]
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        # Qwen 中文会话实测常接近 1 token/字；用 len 做上界，宁可多拆。
+        return max(1, len(text or ""))
+
+    def _pack_batches(self, texts: list[str]) -> list[list[str]]:
+        """Pack by count and optional token budget so wire batches fit n_ctx."""
+        if self.max_input_tokens is None:
+            return [
+                texts[i : i + self.batch_size]
+                for i in range(0, len(texts), self.batch_size)
+            ]
+        batches: list[list[str]] = []
+        cur: list[str] = []
+        cur_tok = 0
+        budget = self.max_input_tokens
+        for text in texts:
+            est = self._estimate_tokens(text)
+            if est > budget:
+                if cur:
+                    batches.append(cur)
+                    cur, cur_tok = [], 0
+                batches.append([text])
+                continue
+            if cur and (
+                len(cur) >= self.batch_size or cur_tok + est > budget
+            ):
+                batches.append(cur)
+                cur, cur_tok = [], 0
+            cur.append(text)
+            cur_tok += est
+        if cur:
+            batches.append(cur)
+        return batches
 
     def _embed_with_retry(self, kwargs: dict):
         """Call ``litellm.embedding`` with bounded exponential backoff.
@@ -170,15 +293,13 @@ class Embedder:
     async def _aembed(self, texts: list[str]) -> list[list[float]]:
         """Async single-request embed with the same retry policy as ``_embed``.
 
-        Uses ``litellm.aembedding`` so the caller (the async query engine) can
-        ``await`` the network round-trip and free the event loop while the
-        embedding endpoint works. The bounded exponential backoff mirrors
-        ``_embed_with_retry`` but ``await``s ``asyncio.sleep`` instead of
+        Uses ``litellm.aembedding``（http_llm）so the caller (the async query
+        engine) can ``await`` the network round-trip and free the event loop
+        while the embedding endpoint works. The bounded exponential backoff
+        mirrors ``_embed_with_retry`` but ``await``s ``asyncio.sleep`` instead of
         blocking. Only the query path uses this; bulk ingestion keeps the
         synchronous thread-pool path (``_embed_all``).
         """
-        import litellm
-
         kwargs = self._embed_kwargs(texts)
         attempt = 0
         while True:
@@ -227,10 +348,7 @@ class Embedder:
         if not texts:
             return []
 
-        batches = [
-            texts[i : i + self.batch_size]
-            for i in range(0, len(texts), self.batch_size)
-        ]
+        batches = self._pack_batches(texts)
         results: list[list[list[float]]] = [[] for _ in batches]
 
         bar = tqdm(total=len(batches), desc=desc) if desc else None

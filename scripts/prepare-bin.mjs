@@ -2,31 +2,19 @@
 /**
  * 准备随包分发/本地可用的可执行文件。
  *
- * 两类 binary，策略刻意不同：
- *
- * · **dws（必需，走 npm）**：开源版 `dingtalk-workspace-cli`（Apache-2.0）作为
- *   npm 依赖，版本由 lockfile 钉住，`pnpm install && pnpm prepare:bin` 零配置命中。
- *   二进制从包内 `assets/dws-<platform>.tar.gz` 解出（解包前按包内 checksums.txt
- *   校验 sha256），落到 gitignore 的缓存目录再拷进 resources/bin。
- *   **闭源版**由内部同学自行安装，用 `MYCONTEXT_DWS_SOURCE` 指路径（最高优先级）。
+ * · **dws（可选随包，运行时多档解析）**：优先用本机 PATH / npm
+ *   `dingtalk-workspace-cli`。能从 npm 解出平台归档时仍**可选**拷进
+ *   resources/bin；解不出但 PATH/npm 启动器可用 → **软跳过**，不 exit 1。
+ *   **闭源版**用 `MYCONTEXT_DWS_SOURCE` 指路径（最高优先级）。
  *   详见 scripts/lib/dws-resolver.mjs 与 vendor/dws/README.md。
  *
- * · **opencode（可选，不内置）**：实测 102MB，且发版频率远高于 dws。
- *   入 git 会让仓库从 24MB 涨到 126MB，「低频更新的单文件可接受」这个结论
- *   在这个体积下不成立。缺失**不是错误**：应用降级到内置 harness，
- *   状态页明示「Agent 能力降级」。
- *
- * dws 的解析顺序：MYCONTEXT_DWS_SOURCE（闭源/显式覆盖）→ npm 包（开源版，默认）
- * → 报错并给可操作提示。不硬编码第三方发布目录名——那既会把商标带进代码库，
- * 也会在别人机器上必然失效。
+ * · **opencode**：已退役（对话改 `@cursor/sdk`）；不再拷进 resources/bin。
  *
  * ## ★ 「准备好」的判据是**它真的能跑**，不是"文件在那儿"
  *
- * 每个落地的二进制都经 `installExecutable()`：unlink → copy → chmod → 重签 →
- * **spawn 一次 `--version`**。跑不起来就 exit 1。理由见那个函数的注释：
- * 这条链路的失效方式是"看起来一切正常"（文件在、有可执行位、签名 valid），
- * 只在真正执行时被内核杀掉，而症状会跑到几百行之外
- * （onboarding 说「未检测到有效登录态」、persona 静默降级成直连 LLM）。
+ * 每个**落地到 resources/bin**的二进制都经 `installExecutable()`：unlink → copy →
+ * chmod → 重签 → **spawn 一次 `--version`**。跑不起来就 exit 1。
+ * dws 若只走 PATH/npm、不拷进 bin，则不做这条落地探测。
  */
 import {
   chmodSync,
@@ -43,8 +31,12 @@ import {
 import { spawnSync } from "node:child_process"
 import { join, resolve } from "node:path"
 import { verifyVendorIntegrity } from "./lib/vendor-integrity.mjs"
-import { resolveDwsFromEnv, resolveDwsFromNpm } from "./lib/dws-resolver.mjs"
-import { resolveOpencodeNpmBinary, resolveOpencodeBinary } from "./lib/opencode-resolver.mjs"
+import {
+  resolveDwsFromEnv,
+  resolveDwsFromNpm,
+  resolveDwsOnPath,
+  isDwsNpmPackagePresent,
+} from "./lib/dws-resolver.mjs"
 
 const root = resolve(import.meta.dirname, "..")
 const binDir = join(root, "apps/desktop/resources/bin")
@@ -86,7 +78,7 @@ function binaryFileName(name) {
  * 对它执行 `codesign --force --sign -` 之后立刻恢复正常
  * （`dws auth status` 返回 `authenticated: true`）。
  *
- * 根因在 macOS 那侧：dws / opencode 都是 `adhoc, linker-signed` 的 Mach-O
+ * 根因在 macOS 那侧：渠道 CLI 等是 `adhoc, linker-signed` 的 Mach-O
  * （`codesign -dv` 的 flags=0x20002）。这类签名的哈希只覆盖文件内容，
  * 而内核 AMFI 按 vnode 缓存验证结果。往一个**已存在**的目标路径 copy 会
  * 复用同一个 inode（实测 ino 不变），于是缓存的签名与新内容对不上 ——
@@ -136,8 +128,8 @@ function installExecutable({ source, target, label }) {
  *
  * ## ★ 为什么记 manifest 而不是直接比源与产物的大小
  *
- * 因为**重签会改变文件大小**（实测 dws 22144066 → 22033488，
- * opencode 138608738 → 137821040：`codesign --force` 重排签名段）。
+ * 因为**重签会改变文件大小**（实测 dws 22144066 → 22033488：
+ * `codesign --force` 重排签名段）。
  * 于是"源与产物大小相同"这个直觉判据**永远不成立**，跳过永远不生效。
  * 所以记的是**来源的大小**，与下次的来源比。
  *
@@ -147,7 +139,7 @@ function installExecutable({ source, target, label }) {
  * 来源没变（就是从它拷来的）。所以三条缺一不可，顺序按"便宜的先"：
  * manifest 命中 → 产物在 → spawn 一次。
  *
- * 不比 hash：138MB 算一遍 sha256 比直接重拷还慢。而"大小相同但内容不同"
+ * 不比 hash：大文件算一遍 sha256 比直接重拷还慢。而"大小相同但内容不同"
  * 由 `verifyVendorIntegrity` 管（它校验 vendor 源，是拷贝的**上游**）。
  */
 function alreadyGood({ source, target }) {
@@ -263,14 +255,27 @@ function prepareDws() {
   const source = resolveDwsSource(fileName)
 
   if (source === null) {
+    /**
+     * ★ 软跳过：运行时仍可走 PATH / npm 启动器（见 binaries.ts）。
+     * 打包态若既没拷进 bin、目标机也没装全局 dws，渠道鉴权时再报缺失。
+     */
+    if (resolveDwsOnPath() !== null || isDwsNpmPackagePresent()) {
+      console.warn(
+        [
+          `⚠ 未把 ${fileName} 拷进 resources/bin（当前平台：${platformSuffix()}）。`,
+          "  本机 PATH 或 npm `dingtalk-workspace-cli` 可用 → 开发态可继续。",
+          "  需要随包兜底时：pnpm install 后重跑，或设 MYCONTEXT_DWS_SOURCE。",
+        ].join("\n"),
+      )
+      return
+    }
     console.error(
       [
         `未找到 ${fileName}（当前平台：${platformSuffix()}）。`,
         "",
-        "开源版随 npm 依赖分发，正常 `pnpm install` 后即可用。二选一：",
-        "  1. 装依赖后重跑：pnpm install && pnpm prepare:bin",
-        "  2. 用自己安装的 dws（含闭源版）：",
-        "     MYCONTEXT_DWS_SOURCE=<可执行文件或其所在目录> pnpm prepare:bin",
+        "请安装：npm install -g dingtalk-workspace-cli",
+        "或：pnpm install && pnpm prepare:bin",
+        "或：MYCONTEXT_DWS_SOURCE=<可执行文件或其所在目录> pnpm prepare:bin",
       ].join("\n"),
     )
     process.exit(1)
@@ -399,68 +404,8 @@ function readForgeVersion() {
   return readFileSync(path, "utf8").trim()
 }
 
-// ---------------------------------------------------------------
-// opencode：从 npm 平台包拷进 resources/bin（与 dws 同一条路径逻辑）
-// ---------------------------------------------------------------
-
-/**
- * 把 npm 平台包里的 opencode 真二进制拷进 `resources/bin/opencode-<plat>-<arch>`。
- *
- * ## ★ 为什么走 resources/bin 而不是运行时直接读 node_modules
- *
- * 打包态没有 `node_modules`（electron-vite 把 JS bundle 了，pnpm 的软链
- * 布局也进不了 asar）。而 `dws` / `forge` / `kl` 全都走
- * `resources/bin`（`process.resourcesPath/bin`）—— opencode 跟上同一条，
- * dev 与打包就共用一套解析（见 `binaries.ts` 的 `bundled` 档）。
- *
- * ## ★ 为什么"没装"是硬失败，不再是"可选"
- *
- * 版本已经钉进 `package.json`，`pnpm install` 必然把当前平台那份装上。
- * 走到这里还找不到，只有两种可能：装的时候带了 `--no-optional`
- * （静默跳过平台包，只剩 8KB 启动器），或平台包安装脚本被别的东西拦了。
- * 两种都会让打出来的包**没有 Agent 能力却看起来正常**，所以在准备阶段
- * 就 exit 1 —— 与 dws 缺失同等对待。
- */
-function prepareOpencode() {
-  const target = join(binDir, binaryFileName("opencode"))
-  const source = resolveOpencodeNpmBinary()
-
-  if (source === null) {
-    console.error(
-      [
-        `未找到 opencode 平台二进制（期望产物：${target}）。`,
-        `当前平台：${platformSuffix()}`,
-        "opencode 走 npm 依赖（package.json 已钉版本），排查：",
-        "  1. 是否跑过 `pnpm install`（不带 --no-optional）？",
-        "     平台包（opencode-<plat>-<arch>）是 optionalDependency，",
-        "     --no-optional 会**静默**跳过它，只留 8KB 启动器。",
-        "  2. 联调换版本可用：MYCONTEXT_OPENCODE_BIN=<path> 跳过 bundle 直接指向本机二进制。",
-      ].join("\n"),
-    )
-    process.exit(1)
-  }
-
-  const outcome = installExecutable({ source, target, label: "opencode" })
-  // 与 dws 同理：来源两种 outcome 都印（见 prepareDws 的注释）。
-  console.log(
-    `${outcome === "skipped" ? "已就位" : "已准备"}（npm opencode-ai）：${target}\n  来源：${source}`,
-  )
-}
-
-// ---------------------------------------------------------------
-// opencode：诊断（本机是否另有一份，仅信息，不影响 bundle）
-// ---------------------------------------------------------------
-
-function reportOpencode() {
-  const resolved = resolveOpencodeBinary()
-  if (resolved === null) return
-  if (resolved.kind !== "npm") {
-    console.log(`（另检测到 opencode，来源：${resolved.kind}）：${resolved.path}`)
-  }
-}
+// opencode：已退役，不再 prepare（Agent 改 Cursor SDK）。
 
 prepareDws()
 prepareLarkCli()
 prepareForge()
-prepareOpencode()
-reportOpencode()

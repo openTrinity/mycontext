@@ -304,6 +304,12 @@ export interface KlServerServiceOptions {
    */
   gateway?: () => KlGatewayConfig | undefined
   /**
+   * 旁路向量模型状态文案（给 `status().embeddingStatus`）。
+   *
+   * ★ 惰性：与 gateway 同模式；探测结果在启动时算好，这里只是读快照。
+   */
+  embeddingStatus?: () => string | undefined
+  /**
    * 自动建图的调度快照提供者（给 `graphOverview().buildSchedule`）。
    *
    * ★ **惰性**（函数而非值），与 `gateway` / `FeedService.autoBuild` 同一个理由：
@@ -338,7 +344,7 @@ export interface KlGatewayConfig {
   llmBaseUrl?: string
   llmModel?: string
   /**
-   * LLM 抽取访问网关用的协议（litellm 传输）。**唯一真能切的 provider** ——
+   * LLM 抽取访问网关用的协议（HTTP 传输）。**唯一真能切的 provider** ——
    * kl 侧按它规整 base（anthropic 剥 `/v1` 发 `/v1/messages`；openai 补一个 `/v1`
    * 发 `/chat/completions`）。不给时 kl 用它自己的默认 `anthropic`，对 OpenAI 兼容
    * 网关会 404（同事踩过）。见 `buildEnv` 里 KL_LLM_PROVIDER 的注释。
@@ -346,16 +352,23 @@ export interface KlGatewayConfig {
   llmProvider?: "openai" | "anthropic"
   embedBaseUrl?: string
   embedModel?: string
-  /** 出网密钥（embedding + LLM 共用网关时同一个）。 */
+  /**
+   * 本地旁路模型目录（有则注入 `KL_LOCAL_EMBED_MODEL_PATH`）。
+   * 仅本机路径，不进日志。
+   */
+  localEmbedModelDir?: string | undefined
+  /** LLM 抽取用的出网密钥。embedding 可单独指 embedApiKey。 */
   apiKey?: string
+  /** 向量专用密钥；缺省回退 apiKey。 */
+  embedApiKey?: string
   /**
    * embedding 维度。**必须与网关实际返回的维度一致** —— kl 的 Qdrant 集合按
-   * 这个数建，向量维度对不上会在 upsert 时崩（实测网关 text-embedding-v4 默认
-   * 返回 1024，而 kl 默认建 4096 集合 → shape mismatch）。走 DashScope 兼容
-   * 网关时配 2048 + sendDimensions:true（matryoshka 截断到 2048）。
+   * 这个数建，向量维度对不上会在 upsert 时崩。
+   * · 本地旁路 Qwen3-Embedding-8B：4096，且 `sendDimensions:false`
+   * · 远程兼容口（matryoshka）：历史上 2048 + `sendDimensions:true`
    */
   embeddingDim?: number
-  /** 是否给 embedding 请求带 `dimensions` 参数（DashScope 兼容网关要 true）。 */
+  /** 是否给 embedding 请求带 `dimensions` 参数（远程 matryoshka 要 true；本地 8B 必须 false）。 */
   sendDimensions?: boolean
 }
 
@@ -534,6 +547,7 @@ export class KlServerService {
 
   /** 当前状态快照（IPC 查询 + 推送共用）。 */
   status(): KlServerStatus {
+    const embeddingStatus = this.options.embeddingStatus?.()
     return {
       state: this.state,
       reason: this.reason,
@@ -541,6 +555,7 @@ export class KlServerService {
       building: this.building,
       networkEgress: this.hasGatewayEgress(),
       buildProgress: this.buildProgress,
+      ...(embeddingStatus !== undefined && embeddingStatus !== "" ? { embeddingStatus } : {}),
     }
   }
 
@@ -601,7 +616,7 @@ export class KlServerService {
    * 16:19:27 kl-server 起来（env 里只有 KL_LLM_MODEL，没有 base/key）
    * ── 用户随后在设置里填了网关 ──          ← LlmHolder 立刻生效，kl 不知道
    * 16:39:34 auto graph build failed
-   *          {"reason":"litellm.InternalServerError: OpenAIException - Connection error."}
+   *          {"reason":"InternalServerError: Connection error."}
    * ```
    * 实测确认那个进程的环境里**真的没有** `KL_LLM_BASE_URL` / `KL_EMBED_API_KEY`。
    * 后果特别难查：Phase A（切块+向量化）照常跑完（`chunks: 3847`），
@@ -733,6 +748,26 @@ export class KlServerService {
     }
 
     /**
+     * ★★ embedding 后端不可用时**直接拒绝**——禁止静默空跑（B2）。
+     *
+     * 本地旁路未就位且没有远程 `KL_EMBED_*` / 网关 URL 时，Phase A 只会得到
+     * 空向量或连接失败，却可能被记成「建图完成」。见 `embeddingStatus`。
+     */
+    if (!this.hasEmbedBackend()) {
+      const hint = this.options.embeddingStatus?.()
+      return this.logBuildOutcome(fresh, {
+        ok: false,
+        reason:
+          hint !== undefined && hint !== ""
+            ? `向量后端不可用：${hint}`
+            : "向量后端不可用（本地旁路未就位且未配置远程 embedding）—— 已取消，禁止静默空跑",
+        entities: 0,
+        facts: 0,
+        edges: 0,
+      })
+    }
+
+    /**
      * ★★ `fresh=true` 的前置校验必须在**清库之前** —— 它是不可逆的。
      *
      * 原来的顺序是 `stop → wipe → ensureReady → postIngest`，而 wipe 之后
@@ -742,7 +777,7 @@ export class KlServerService {
      * 这里只查两件**清库前就能知道**的事：
      * · 导出目录里有没有数据 —— 没有的话清完也建不出东西来；
      * · 网关配了没有 —— Phase B 要调 LLM 抽实体，没网关必然抽出 0 个
-     *   （那正是打包态那个真实故障：`litellm … Connection error`）。
+     *   （那正是打包态那个真实故障：`HTTP … Connection error`）。
      *
      * 增量建图（`fresh=false`）**不做**这个校验：它不删任何东西，失败的代价
      * 只是白跑一趟，而多一道闸反而可能挡住合理的重试。
@@ -1088,6 +1123,9 @@ export class KlServerService {
     if (!this.hasGatewayEgress()) {
       return "还没配模型网关 —— 清空重建后无法抽取实体（图会是空的），已取消。请先在设置里配好网关"
     }
+    if (!this.hasEmbedBackend()) {
+      return "向量后端不可用 —— 清空重建后无法写 embedding（图会是空的），已取消"
+    }
     return null
   }
 
@@ -1104,7 +1142,7 @@ export class KlServerService {
    *   而**不是**改网关（网关可能已经是好的）。
    * · 有输入、`chunks` 也写进去了 → Phase A 成功、Phase B（LLM 抽取）没产出。
    *   处置是去填/修网关（这正是打包态那个故障：kl 带着空 `KL_LLM_BASE_URL`
-   *   起来，litellm `Connection error`）。
+   *   起来，HTTP `Connection error`）。
    * · 有输入但 `chunks` 是 0 → 连切块都没做成，多半 embedding 网关不通
    *   （Phase A 要调 embedding）。
    *
@@ -1698,8 +1736,22 @@ export class KlServerService {
         }
         if (snapshot.state === "error") {
           this.buildProgress = null
+          let error = snapshot.error === "" ? "未知错误" : snapshot.error
+          // /status.error 为空时（部分异常 str() 为空），从 stderr 尾巴捞真实原因
+          if (snapshot.error === "") {
+            const fromStderr = [...this.stderrTail]
+              .reverse()
+              .find(
+                (line) =>
+                  /\w+(Error|Exception):\s*\S/.test(line) ||
+                  /dimension mismatch|incompatible embedding dimension/i.test(line),
+              )
+            if (fromStderr !== undefined && fromStderr.trim() !== "") {
+              error = fromStderr.trim()
+            }
+          }
           return {
-            error: snapshot.error === "" ? "未知错误" : snapshot.error,
+            error,
             cancelled: false,
             ...counts,
             volume,
@@ -2122,7 +2174,7 @@ export class KlServerService {
            * 4 小时涨到 1.7MB，人根本读不动。
            *
            * 所以走同一个分级函数（`klLogLevelFor`）：它已经能挑出
-           * `LLM errors: <非零>` / ERROR / Traceback / litellm.*Error。
+           * `LLM errors: <非零>` / ERROR / Traceback / HTTP 客户端 *Error。
            * 剩下的按 debug —— 打包态看不见，但那正是我们想要的。
            *
            * ★ 兜底级别与 stdout 一致（debug）而不是 info：区分 stdout/stderr
@@ -2601,7 +2653,7 @@ export class KlServerService {
    *
    * ★ 为什么要探 klRoot/.venv：mycontext 的 dotenv 只灌进它自己的 config，不写
    * process.env，所以 `.env` 里的 KL_PYTHON 到不了这里；而系统 python3 多半没装
-   * kl 的依赖（qdrant/litellm/…）→ 一起来就 exit 3。约定：kl 依赖装在
+   * kl 的依赖（qdrant/httpx/…）→ 一起来就 exit 3。约定：kl 依赖装在
    * `klRoot/.venv`（build venv 就在那），优先用它，省掉 env 布线。
    */
   /**
@@ -2679,7 +2731,7 @@ export class KlServerService {
     const gw = this.options.gateway?.()
     if (gw !== undefined) {
       // LLM：传**裸模型名**与 base，协议由 KL_LLM_PROVIDER 声明 —— kl 侧的
-      // litellm_config.py 按 provider 规整 base（anthropic 剥 /v1、openai 补一个 /v1）
+      // litellm_config.py (http_llm) 按 provider 规整 base（anthropic 剥 /v1、openai 补一个 /v1）
       // 并拼出对的 provider 前缀。见下面 KL_LLM_PROVIDER 的注释。
       if (gw.llmBaseUrl !== undefined && gw.llmBaseUrl !== "")
         env["KL_LLM_BASE_URL"] = gw.llmBaseUrl
@@ -2699,27 +2751,39 @@ export class KlServerService {
       if (gw.embedBaseUrl !== undefined && gw.embedBaseUrl !== "")
         env["KL_EMBED_BASE_URL"] = gw.embedBaseUrl
       if (gw.embedModel !== undefined && gw.embedModel !== "") env["KL_EMBED_MODEL"] = gw.embedModel
+      if (gw.localEmbedModelDir !== undefined && gw.localEmbedModelDir !== "") {
+        env["KL_LOCAL_EMBED_MODEL_PATH"] = gw.localEmbedModelDir
+        env["MYCONTEXT_EMBED_MODEL_DIR"] = gw.localEmbedModelDir
+      }
       /**
-       * ★★ 出网密钥。embedding 走 `KL_EMBED_API_KEY`；LLM 侧的 key 名**按协议不同**：
+       * ★★ 出网密钥。embedding 走 `KL_EMBED_API_KEY`（可独立于 LLM）；LLM 侧的 key 名**按协议不同**：
        *
        * kl 的 `llm_flash` 配置块里**没有** api_key 字段（见 config.default.yaml），
-       * 它靠 `litellm_config.py` 的 `provider_api_key(provider)` 解析：
+       * 它靠 `litellm_config.py (http_llm)` 的 `provider_api_key(provider)` 解析：
        * · `anthropic` → 读 `ANTHROPIC_AUTH_TOKEN`；
-       * · 其它(含 openai) → 返回 None，于是 litellm 的 openai 传输去读 `OPENAI_API_KEY`。
+       * · 其它(含 openai) → 返回 None，于是 openai 传输去读 `OPENAI_API_KEY`。
        *
        * ★ 这就是"改默认协议为 openai 后 kl 恒报 Missing credentials / OPENAI_API_KEY"
        * 那个刷屏的根因：以前默认 anthropic 时 key 走 ANTHROPIC_AUTH_TOKEN（process.env
        * 里 seed 过），翻成 openai 后没人塞 OPENAI_API_KEY。所以这里按协议把**同一把
        * 出网 key**塞到对应的名下 —— embedding 那把与 LLM 那把是同一个网关的同一把。
        */
+      const embedKey =
+        gw.embedApiKey !== undefined && gw.embedApiKey !== ""
+          ? gw.embedApiKey
+          : gw.apiKey
+      if (embedKey !== undefined && embedKey !== "") {
+        env["KL_EMBED_API_KEY"] = embedKey
+      }
       if (gw.apiKey !== undefined && gw.apiKey !== "") {
-        env["KL_EMBED_API_KEY"] = gw.apiKey
         if (gw.llmProvider === "anthropic") env["ANTHROPIC_AUTH_TOKEN"] = gw.apiKey
         else env["OPENAI_API_KEY"] = gw.apiKey
       }
       // ★ 维度必须与网关实际返回一致，否则 Qdrant 集合维度对不上会崩（见字段注释）。
       if (gw.embeddingDim !== undefined) env["KL_EMBEDDING_DIM"] = String(gw.embeddingDim)
+      // 本地 8B 必须显式关掉 dimensions（服务端会 400）；远程 matryoshka 才开。
       if (gw.sendDimensions === true) env["KL_EMBED_SEND_DIMENSIONS"] = "1"
+      else if (gw.sendDimensions === false) env["KL_EMBED_SEND_DIMENSIONS"] = "0"
     }
     return env
   }
@@ -2731,6 +2795,22 @@ export class KlServerService {
       (gw.llmBaseUrl !== undefined && gw.llmBaseUrl !== "") ||
       (gw.embedBaseUrl !== undefined && gw.embedBaseUrl !== "")
     )
+  }
+
+  /** embedding 是否有可用后端（本地旁路或远程 URL）。空 URL = 禁止建图。 */
+  private hasEmbedBackend(): boolean {
+    /**
+     * 没接 `gateway` = 单测夹具不关心 embedding → 不拦。
+     * 有 `embedBaseUrl` 或仅有 `llmBaseUrl`（同网关常兼 embeddings）→ 放行。
+     * 两者皆空（本地旁路也未就位）→ 拒绝，禁止静默空跑。
+     */
+    const getter = this.options.gateway
+    if (getter === undefined) return true
+    const gw = getter()
+    if (!gw) return false
+    const embed = gw.embedBaseUrl?.trim() ?? ""
+    const llm = gw.llmBaseUrl?.trim() ?? ""
+    return embed !== "" || llm !== ""
   }
 
   /**
@@ -3101,8 +3181,8 @@ export function klLogLevelFor(line: string): "warn" | "info" | "debug" {
    *
    * 实测（用户日志 2026-08-09）：一次建图里
    * `LiteLLM.Info: If you need to debug this error, use litellm._turn_on_debug()`
-   * 刷了**几十行连续 WARN**，而它一个字的信息量都没有 —— 它只是 litellm 在
-   * 每次调用失败后追加的一句固定提示。
+   * 刷了**几十行连续 WARN**，而它一个字的信息量都没有 —— 旧传输层在
+   * 每次调用失败后追加的一句固定提示（现已去掉该依赖，过滤仍保留以兼容旧日志）。
    *
    * 它被提成 warn 是因为句中带 "error"，命中了下面那条宽松规则。后果不是
    * "日志有点吵"，而是**真正的那行被埋掉**：同一批日志里
@@ -3123,9 +3203,14 @@ export function klLogLevelFor(line: string): "warn" | "info" | "debug" {
    */
   if (/LLM errors:\s*(?!0\b)\d+/.test(line)) return "warn"
 
-  // Python 与 litellm 的错误征兆。`Traceback` 单独列：它的下一行才是原因，
+  // Python / HTTP 客户端的错误征兆。`Traceback` 单独列：它的下一行才是原因，
   // 但那些行不带关键词 —— 至少要让人知道"这里炸过"，然后去开 debug 重跑。
+  // `litellm.*Error` 前缀保留：兼容迁移前旧日志。
+  // `ValueError:` / `RuntimeError:` 等堆栈末行：建图失败时真正原因常在这里，
+  // 以前整段落在 debug，UI 只剩「未知错误」。
   if (/\b(ERROR|CRITICAL|Traceback|Exception|litellm\.\w*Error)\b/.test(line)) return "warn"
+  if (/^\s*\w*(Error|Exception|Exit):\s/.test(line)) return "warn"
+  if (/dimension mismatch|incompatible embedding dimension/i.test(line)) return "warn"
   // "failed"/"error" 出现在句中（kl 用小写打了不少这类）。
   if (/\b(failed|error)\b/i.test(line) && !/0 error/i.test(line)) return "warn"
 
@@ -3274,10 +3359,12 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
       units_processed?: number
       chunks_created?: number
     }
+    /** 当前 kl `/status` 用 knowledge；旧字段 sqlite 保留兼容 */
+    knowledge?: { entities?: number; facts?: number; edges?: number }
     sqlite?: { entities?: number; facts?: number; edges?: number }
   }
   const ingest = body.ingest ?? {}
-  const sqlite = body.sqlite ?? {}
+  const countsSrc = body.knowledge ?? body.sqlite ?? {}
   const state = ingest.state
   return {
     state:
@@ -3288,9 +3375,9 @@ async function defaultReadStatus(port: number): Promise<KlIngestSnapshot | null>
     percent: ingest.percent ?? 0,
     error: ingest.error ?? "",
     counts: {
-      entities: sqlite.entities ?? 0,
-      facts: sqlite.facts ?? 0,
-      edges: sqlite.edges ?? 0,
+      entities: countsSrc.entities ?? 0,
+      facts: countsSrc.facts ?? 0,
+      edges: countsSrc.edges ?? 0,
     },
     /**
      * ★ 上游是 snake_case（`units_discovered`），这里转成我们的 camelCase。

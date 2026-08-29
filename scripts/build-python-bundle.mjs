@@ -43,11 +43,19 @@
  * **零环境变量、零改写文件。** 体积还小一点（437M vs 443M —— 少一份
  * site-packages）。
  *
- * ## 全程零联网
+ * ## 全程零联网（本机平台）
  *
  * 依赖包（400M / 154 项）已经入 git，这里只是把它们从
  * `venv/lib/pythonX/site-packages/` 拷到 `python/lib/pythonX/site-packages/`。
  * 一个字节都不下载 —— 这是刻意的约束（用户机器上不该有网络依赖）。
+ *
+ * ## ★ 交叉打包（`--target win32-x64`）
+ *
+ * 本机跑不了目标平台的解释器，也没有入 git 的 win32 venv。路径改成：
+ *   1. 要求 `vendor/python/<target>/python` 已由 `pnpm vendor:python --target` 落地；
+ *   2. 用 `uv pip install --python-platform … --target <site-packages>` 拉
+ *      **预编译 wheel**（不执行目标 python）；
+ *   3. 跳过 spawn 自检（PE 在 mac 上跑不了）—— 只验目录里有关键包。
  *
  * ## ★ 为什么要校验完整性（而不是拷完就算）
  *
@@ -62,7 +70,12 @@ import { isPythonEnvReady, requirementFiles, venvDir } from "./lib/python-env.mj
 import { platformKey, pythonCacheDir } from "./lib/python-runtime.mjs"
 
 const root = resolve(import.meta.dirname, "..")
-const plat = platformKey()
+const targetArg = process.argv.indexOf("--target")
+const plat =
+  targetArg >= 0 && process.argv[targetArg + 1] ? process.argv[targetArg + 1] : platformKey()
+const hostPlat = platformKey()
+const isCross = plat !== hostPlat
+const isWin = plat.startsWith("win32")
 
 /** 产出目录：`resources/python/<platform>`（extraResources 的 `from`）。 */
 const outRoot = join(root, "apps/desktop/resources/python", plat)
@@ -84,9 +97,136 @@ function sizeMb(dir) {
   return Number.isFinite(n) ? n : 0
 }
 
-// ── ① 前置：开发态环境必须就绪 ─────────────────────────────────────
-//
-// 不就绪就产出，等于打一个缺依赖的包 —— 而那要到同事机器上才暴露。
+/**
+ * site-packages 位置随小版本变（python3.12 → 3.13），所以扫出来而不是写死。
+ *
+ * Unix venv: `lib/pythonX.Y/site-packages`;
+ * Windows venv: `Lib/site-packages`（没有 pythonX.Y 这一层）。
+ *
+ * 不能只按当前进程的 `process.platform` 猜路径：这个函数同时查开发态
+ * venv 与刚复制出的裸解释器，且 Windows 的大小写目录名也不同。
+ */
+function findSitePackages(base) {
+  for (const libName of ["lib", "Lib"]) {
+    const libDir = join(base, libName)
+    if (!existsSync(libDir)) continue
+
+    const direct = join(libDir, "site-packages")
+    if (existsSync(direct)) return direct
+
+    for (const entry of readdirSync(libDir)) {
+      if (!entry.toLowerCase().startsWith("python")) continue
+      const candidate = join(libDir, entry, "site-packages")
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return null
+}
+
+function prunePyc(dir) {
+  let pruned = 0
+  function walk(d) {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === "__pycache__") {
+          rmSync(full, { recursive: true, force: true })
+          pruned += 1
+          continue
+        }
+        walk(full)
+      } else if (entry.name.endsWith(".pyc")) {
+        rmSync(full, { force: true })
+        pruned += 1
+      }
+    }
+  }
+  walk(dir)
+  return pruned
+}
+
+function uvPythonPlatform(key) {
+  // uv 的 --python-platform 用的是 rustc/llvm 风格 triple，不是 node 的 plat-arch。
+  const map = {
+    "win32-x64": "x86_64-pc-windows-msvc",
+    "darwin-arm64": "aarch64-apple-darwin",
+    "darwin-x64": "x86_64-apple-darwin",
+    "linux-x64": "x86_64-unknown-linux-gnu",
+  }
+  return map[key]
+}
+
+// ── 交叉：用 uv 往目标解释器的 site-packages 装 wheel ────────────────
+if (isCross) {
+  log(`交叉构建 ${plat}（宿主 ${hostPlat}）`)
+  const srcInterpreter = join(pythonCacheDir(root, plat), "python")
+  if (!existsSync(srcInterpreter)) {
+    fail(
+      `找不到目标平台解释器：${srcInterpreter}\n` + `  先跑：pnpm vendor:python --target ${plat}`,
+    )
+  }
+  const uvPlat = uvPythonPlatform(plat)
+  if (uvPlat === undefined) fail(`未知交叉平台 ${plat}（无对应 uv --python-platform）`)
+
+  const reqFiles = requirementFiles(root)
+  if (reqFiles.length === 0) fail("找不到任何 requirements 文件")
+
+  rmSync(outRoot, { recursive: true, force: true })
+  mkdirSync(outRoot, { recursive: true })
+  log(`拷解释器 ${srcInterpreter} → ${outPython}`)
+  cpSync(srcInterpreter, outPython, { recursive: true, verbatimSymlinks: true })
+
+  // Windows 布局：确保 Lib/site-packages 存在；Unix 用 findSitePackages。
+  let dstSite = findSitePackages(outPython)
+  if (dstSite === null && isWin) {
+    dstSite = join(outPython, "Lib", "site-packages")
+    mkdirSync(dstSite, { recursive: true })
+  }
+  if (dstSite === null) fail(`产物解释器里找不到 / 建不出 site-packages：${outPython}`)
+
+  // 清掉解释器自带的空/半空 site-packages，再让 uv 写入。
+  rmSync(dstSite, { recursive: true, force: true })
+  mkdirSync(dstSite, { recursive: true })
+
+  const uvArgs = [
+    "pip",
+    "install",
+    "--python-version",
+    "3.12",
+    "--python-platform",
+    uvPlat,
+    "--target",
+    dstSite,
+    "--no-compile",
+  ]
+  for (const f of reqFiles) {
+    uvArgs.push("-r", f)
+  }
+  log(`uv ${uvArgs.join(" ")}`)
+  const install = spawnSync("uv", uvArgs, { stdio: "inherit", cwd: root })
+  if (install.status !== 0) {
+    fail(`uv pip install 交叉安装失败（exit ${String(install.status)}）`)
+  }
+
+  const pruned = prunePyc(outPython)
+  log(`剔掉 ${String(pruned)} 处 __pycache__/*.pyc`)
+
+  // 交叉无法 spawn PE：用目录探针验关键包（与 hasFlattenedPython 同口径）。
+  const probePkg = join(dstSite, "qdrant_client")
+  const probeAlt = join(dstSite, "fastapi")
+  if (!existsSync(probePkg) && !existsSync(probeAlt)) {
+    fail(
+      `交叉安装后 site-packages 里找不到 qdrant_client / fastapi：${dstSite}\n` +
+        `  说明 uv 没把依赖写进去，或路径布局不对。`,
+    )
+  }
+  log(`目录探针 OK（site-packages 含关键包）`)
+  log(`产物：${outRoot}（${String(sizeMb(outRoot))}MB）· ★ 未在本机执行解释器（交叉）`)
+  if (!statSync(outPython).isDirectory()) fail("产物结构异常")
+  process.exit(0)
+}
+
+// ── 本机平台：从入 git 的 venv 压平 ─────────────────────────────────
 if (!isPythonEnvReady(root)) {
   fail(
     "内置 Python 环境还没就绪（venv 缺失或依赖指纹不匹配）。\n" +
@@ -99,71 +239,27 @@ if (!isPythonEnvReady(root)) {
 const srcInterpreter = join(pythonCacheDir(root), "python")
 if (!existsSync(srcInterpreter)) fail(`找不到内置解释器：${srcInterpreter}`)
 
-// site-packages 的位置随小版本变（python3.12 → 3.13），所以扫出来而不是写死。
-function findSitePackages(base) {
-  const libDir = join(base, "lib")
-  if (!existsSync(libDir)) return null
-  for (const entry of readdirSync(libDir)) {
-    if (!entry.startsWith("python")) continue
-    const candidate = join(libDir, entry, "site-packages")
-    if (existsSync(candidate)) return candidate
-  }
-  return null
-}
-
 const srcSitePackages = findSitePackages(venvDir(root))
 if (srcSitePackages === null) fail(`venv 里找不到 site-packages：${venvDir(root)}`)
 
-// ── ② 拷解释器 ───────────────────────────────────────────────────
 rmSync(outRoot, { recursive: true, force: true })
 mkdirSync(outRoot, { recursive: true })
 log(`拷解释器 ${srcInterpreter} → ${outPython}`)
-// dereference:false —— 解释器内部有相对软链（bin/python3 → python3.12），
-// 解开会把同一个二进制复制多份（+40MB）而且失去"改一处即生效"的语义。
 cpSync(srcInterpreter, outPython, { recursive: true, verbatimSymlinks: true })
 
-// ── ③ 把 venv 的 site-packages 压平进解释器自己那份 ────────────────
 const dstSitePackages = findSitePackages(outPython)
 if (dstSitePackages === null) fail(`产物解释器里找不到 site-packages：${outPython}`)
 log(`压平依赖 ${srcSitePackages} → ${dstSitePackages}`)
 cpSync(srcSitePackages, dstSitePackages, { recursive: true, verbatimSymlinks: true })
 
-// ── ④ 剔掉 __pycache__ / *.pyc ────────────────────────────────────
-//
-// 它们是**路径相关**的编译缓存（.pyc 里烧着源文件的绝对路径），拷到别的机器
-// 上无效还占体积。而且仓库有一条门禁（check:vendor-clean）盯着 vendor 里的
-// __pycache__ —— 产物目录不在它管辖范围，但同一个理由成立。
-let pruned = 0
-function prune(dir) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) {
-      if (entry.name === "__pycache__") {
-        rmSync(full, { recursive: true, force: true })
-        pruned += 1
-        continue
-      }
-      prune(full)
-    } else if (entry.name.endsWith(".pyc")) {
-      rmSync(full, { force: true })
-      pruned += 1
-    }
-  }
-}
-prune(outPython)
+const pruned = prunePyc(outPython)
 log(`剔掉 ${String(pruned)} 处 __pycache__/*.pyc`)
 
-// ── ⑤ ★ 自包含性验证：不设任何环境变量,能不能自己跑起来 ────────────
-//
-// 这是"去掉 venv"这个决定的**唯一**验收点。base_prefix 必须落在产物目录里 ——
-// 落在仓库里就说明还在依赖构建机（正是我们要消灭的那件事）。
 const exe = join(outPython, process.platform === "win32" ? "python.exe" : "bin/python3")
 if (!existsSync(exe)) fail(`产物里没有解释器可执行文件：${exe}`)
 
 const selfCheck = spawnSync(exe, ["-c", "import sys; print(sys.base_prefix); print(sys.prefix)"], {
   encoding: "utf8",
-  // ★ 显式清掉这三个：构建机的 shell 里可能有它们，而我们要验的恰恰是
-  // "什么都不给的情况下它自己知道自己在哪"。
   env: { ...process.env, PYTHONHOME: undefined, PYTHONPATH: undefined, VIRTUAL_ENV: undefined },
   timeout: 30_000,
 })
@@ -180,9 +276,6 @@ if (!basePrefix.startsWith(outPython) && !resolve(basePrefix).startsWith(resolve
 }
 log(`自包含性 OK（base_prefix=${basePrefix}）`)
 
-// ── ⑥ ★ 依赖完整性：按 requirements 逐项验 ────────────────────────
-//
-// 少一个包时应用照样起、界面照样正常,只是 kl 一调就崩 —— 见文件头。
 const reqFiles = requirementFiles(root)
 if (reqFiles.length === 0) fail("找不到任何 requirements 文件")
 
@@ -195,7 +288,9 @@ import importlib.metadata as md, pathlib, sys
 files = sys.argv[1:]
 want = []
 for f in files:
-    for line in pathlib.Path(f).read_text().splitlines():
+    # requirements 文件统一按 UTF-8 读取；Windows 默认编码可能是 cp1252，
+    # 会在包含非 ASCII 注释的清单上把构建误判为失败。
+    for line in pathlib.Path(f).read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if not line or line.startswith("-"):
             continue

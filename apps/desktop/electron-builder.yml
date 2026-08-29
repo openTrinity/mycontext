@@ -112,6 +112,15 @@ asarUnpack:
   - node_modules/better-sqlite3/**
   - node_modules/.pnpm/better-sqlite3@*/**
 
+# ─── 各平台共用的 extraResources 片段（mac / win 各自再挂平台专属项）───
+# ① bin / ⑤ python 因平台路径不同，写在各自块里。
+# ②–④、⑥ 与平台无关，两边各写一份（electron-builder 不支持 YAML 锚点合并
+# 进不同 key，复制比引入自定义预处理便宜）。
+#
+# ★ 旁路向量模型（Qwen3-Embedding-8B）**不**进 extraResources：体积 GB 级、
+# 不入 git。发版另带旁路包，运行时探测 `resources/models/` 或安装目录旁
+# `models/`（见 vendor/models/README.md 与 probeEmbedSidecar）。
+
 mac:
   category: public.app-category.productivity
   # 应用图标（源图与重新生成的命令见文件上半部分那段注释）。
@@ -132,12 +141,12 @@ mac:
   gatekeeperAssess: false
 
   extraResources:
-    # ── ① 预置二进制（170M）─────────────────────────────────────
+    # ── ① 预置二进制（dws 可选；opencode 已退役）────────────────
     #
-    # dws-darwin-arm64（22M）+ opencode-darwin-arm64（138M）。
-    # dws 是**必需**的（缺了直接 RUNTIME_BINARY_MISSING）；opencode 缺失只是
-    # 降级到本地召回，但既然 prepare:bin 已经钉了版本就一起进包 ——
-    # 那也是版本闸（MIN_OPENCODE_VERSION）能生效的前提。
+    # **dws 不再必需随包**：运行时 `resolve("dws")` 顺序为
+    # override → PATH → npm `dingtalk-workspace-cli` 启动器 → bundled 兜底。
+    # `prepare:bin` 若从 npm 解出归档仍可能写入 `dws-darwin-arm64`（可选缓存）；
+    # 没有这份文件时打包照常，用户本机装 CLI 即可用钉钉渠道。
     #
     # ★★ 两条排除是**安全要求**，不是优化：
     # extraResources 从**工作树**拷，**不受 .gitignore 约束**。
@@ -151,6 +160,9 @@ mac:
         - "!.dws/**"
         - "!workspace/**"
         - "!.gitkeep"
+        # ★ opencode 已退役：工作树里若还有旧拷贝，禁止再打进包。
+        - "!opencode-*"
+        - "!opencode-*.exe"
 
     # ── ② 随包分发的 skill（20K）──────────────────────────────────
     # `kl` 等。agent 按 cwd/skills.paths 发现它们，不放进去就等于没有。
@@ -215,6 +227,68 @@ mac:
     CFBundleDisplayName: MyContext
     CFBundleLocalizations: [zh_CN, en]
     NSHumanReadableCopyright: Copyright © 2026 MyContext
+
+# ─── Windows（x64）───────────────────────────────────────────────
+#
+# 可在 macOS 上交叉打 `dir`（unpacked）。本机无 Wine 时必须关
+# `signAndEditExecutable`，否则 rcedit 会失败。
+#
+# ★ 打包前必须先：
+#   pnpm vendor:python --target win32-x64
+#   node scripts/prepare-bin.mjs --target win32-x64
+#   node scripts/build-python-bundle.mjs --target win32-x64
+# （`pnpm dist:win` 会按这个顺序跑。）
+#
+# 产物：`apps/desktop/release/win-unpacked/`。NSIS 安装包可后续加；
+# 日常验包用 dir 就够，且交叉时更稳。
+win:
+  icon: apps/desktop/build/icon.png
+  target:
+    - target: dir
+      arch: [x64]
+  # 无 Wine / 无证书时改 PE 资源会失败；关掉后图标可能仍是 Electron 默认，
+  # 但可执行文件能出。真机签名留给 Windows CI。
+  signAndEditExecutable: false
+  signExecutable: false
+  forceCodeSigning: false
+  extraResources:
+    # bin：lark；**dws 可选**；opencode 已退役不再进包。
+    - from: apps/desktop/resources/bin
+      to: bin
+      filter:
+        # ★ 只进 Windows 二进制 —— 别把本机构建时残留的 darwin-* 打进包。
+        # dws 用 glob：文件不存在时匹配为空，不要求必须有这份。
+        - "dws-win32-x64.exe"
+        - "lark-cli-win32-x64.exe"
+        - "!.dws/**"
+        - "!workspace/**"
+        - "!.gitkeep"
+    - from: apps/desktop/resources/skills
+      to: skills
+      filter: ["**/*"]
+    - from: apps/desktop/resources/forge
+      to: forge
+      filter:
+        - "**/*"
+        - "!**/__pycache__/**"
+        - "!**/*.pyc"
+    - from: kl-graph
+      to: kl-graph
+      filter:
+        - "**/*"
+        - "!**/__pycache__/**"
+        - "!**/*.pyc"
+        - "!.venv/**"
+        - "!**/*.log"
+        - "!data/**"
+    - from: apps/desktop/resources/python/win32-x64
+      to: vendor/python/win32-x64
+      filter: ["**/*"]
+    - from: scripts/lib
+      to: scripts/lib
+      filter: ["**/*.mjs"]
+    - from: scripts/kl-extra-requirements.txt
+      to: scripts/kl-extra-requirements.txt
 
 dmg:
   sign: false
