@@ -45,6 +45,7 @@ const ALL_KEYS: readonly (keyof VaultPaths)[] = [
   "agentHome",
   "dwsHome",
   "feishuAuthRoot",
+  "codexAuthRoot",
 ]
 
 describe("每个落点都在 vault 目录内", () => {

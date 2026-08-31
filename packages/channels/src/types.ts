@@ -9,7 +9,7 @@
  */
 import type { Clock } from "@mycontext/kernel"
 
-export type ChannelId = "dingtalk" | "feishu"
+export type ChannelId = "dingtalk" | "feishu" | "codex"
 
 /**
  * 渠道元信息。
@@ -161,6 +161,8 @@ export interface AuthContext {
 }
 
 export interface ChannelAuth {
+  /** 渠道实际支持的授权入口；缺省保持历史行为（loopback + device）。 */
+  supportedModes?(): AuthMode[]
   /** 供 UI 展示的授权步骤说明的 i18n key（各渠道方式不同，由插件自己描述） */
   describeStepKeys(): string[]
   status(): Promise<AuthStatus>

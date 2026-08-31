@@ -18,6 +18,14 @@
       "backToApp": "授权完成后回到应用，飞书内容会进入本地数据库和知识图谱"
     }
   },
+  "codex": {
+    "label": "本地 Codex",
+    "description": "只读接入你在本机 Codex 中主动输入的内容，用于本地建图与检索。",
+    "steps": {
+      "review": "确认仅采集你主动输入的文字，不读取模型推理、工具输出或系统提示",
+      "enable": "点击「开始授权」后，为当前 MyContext 账号开启本地只读采集"
+    }
+  },
   "state": {
     "authorized": "已连接",
     "expired": "已过期",
@@ -93,14 +101,16 @@
     "machineSessionHint": "这台电脑上已有钉钉登录态（同一台电脑的登录会共用）。为当前账号授权一次，才能确定「你」是谁 —— 否则学习会用错身份。",
     "accountTitle": "已连接的账号",
     "scopeTitle": "授权范围",
-    "machineSessionHintFeishu": "已在本应用完成飞书授权。为当前账号确认一次身份，才能确定「你」是谁 —— 否则学习会用错身份。"
+    "machineSessionHintFeishu": "已在本应用完成飞书授权。为当前账号确认一次身份，才能确定「你」是谁 —— 否则学习会用错身份。",
+    "machineSessionHintCodex": "已允许读取当前账号的本地 Codex 记录。"
   },
   "settings": {
     "expiredHint": "授权已过期，需要重新扫码",
     "expiryWarning": "授权将在 {{days}} 天后过期，建议现在重新授权。",
     "identityMismatch": "身份配置异常：这份数据绑定的是「{{boundCorp}}」，而渠道配置目录里当前生效的是「{{channelCorp}}」。正常情况下两者应当一致（每个身份有自己独立的一份数据与配置）—— 请重新授权到「{{boundCorp}}」把它恢复，或切换到「{{channelCorp}}」自己的那份数据。",
     "sharedCredentialNote": "授权凭据由钉钉官方 CLI 保存在系统钥匙串，与你在终端里的登录态共用。如需彻底清除，请在终端执行 <1>{{command}}</1>。",
-    "feishuCredentialNote": "飞书凭据隔离保存在本应用用户目录，不复用你终端的默认 CLI 登录态。如需清除，请在应用对应的隔离环境执行 <1>{{command}}</1>。"
+    "feishuCredentialNote": "飞书凭据隔离保存在本应用用户目录，不复用你终端的默认 CLI 登录态。如需清除，请在应用对应的隔离环境执行 <1>{{command}}</1>。",
+    "codexCredentialNote": "只读权限按当前 MyContext 账号隔离保存；退出授权只会停止读取，不会修改或删除任何 Codex 记录。"
   },
   "progress": {
     "browserOpened": "已打开{{channel}}登录页，请扫码确认",
@@ -115,6 +125,14 @@
     "noSpeakDescription": "飞书数据不会进入自动回复或发消息链路，也不申请任何写权限。",
     "credentialsTitle": "授权目录独立隔离",
     "credentialsDescription": "授权由飞书官方 CLI 完成，凭据只保存在本应用的独立用户目录。"
+  },
+  "codexScope": {
+    "readTitle": "只读用户输入",
+    "readDescription": "仅读取你在本机 Codex 任务中主动提交的文字，并遵守所选时间与任务范围。",
+    "noSpeakTitle": "排除生成与执行记录",
+    "noSpeakDescription": "模型回答、推理、系统提示、工具调用、命令输出和附件不会进入 MyContext。",
+    "credentialsTitle": "按账号显式开启",
+    "credentialsDescription": "未授权时不会扫描正文；授权标记保存在当前账号自己的 vault 中。"
   },
   "avatarMiss": {
     "notPermitted": "当前渠道客户端没有通讯录权限，取不到头像 —— 在下面「自备客户端」里换一份有权限的即可。",

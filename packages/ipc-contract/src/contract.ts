@@ -2167,6 +2167,8 @@ export const channelSummarySchema = z.object({
   available: z.boolean(),
   /** 授权步骤说明的 i18n key 列表，各渠道自述 */
   stepKeys: z.array(z.string()),
+  /** 渠道支持的授权入口；旧主进程缺失时 UI 保持原来的双入口。 */
+  authModes: z.array(authModeSchema).optional(),
   status: authStatusSchema,
   /** 是否正在授权中（用于 UI 禁用按钮与显示进度） */
   loginInProgress: z.boolean(),
@@ -2202,6 +2204,8 @@ export const channelSummarySchema = z.object({
      * 那一档（保守方向 —— 宁可少个入口，也不要在共用登录态的渠道上误退）。
      */
     isolatedCredentials: z.boolean().optional(),
+    /** 是否真的实现头像读取；缺省 false，避免新渠道出现一个必失败的刷新按钮。 */
+    avatars: z.boolean().optional(),
   }),
 })
 

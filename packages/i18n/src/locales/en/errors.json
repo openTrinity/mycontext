@@ -11,7 +11,10 @@
     "authInProgress": "This channel is already being authorized",
     "authFailed": "Authorization failed: {{detail}}",
     "authNotDetected": "The authorization flow finished but no valid session was found — please try again",
-    "authLegacyTokenSlot": "This machine already has a legacy session that the channel CLI refuses to overwrite (it may be the only copy of a login you use in your terminal). Run a one-time login with your identity in a terminal to migrate it: dws auth login --profile <your org corpId>"
+    "authLegacyTokenSlot": "This machine already has a legacy session that the channel CLI refuses to overwrite (it may be the only copy of a login you use in your terminal). Run a one-time login with your identity in a terminal to migrate it: dws auth login --profile <your org corpId>",
+    "localRecordsUnavailable": "No readable local Codex records directory was found. Use Codex locally first or set CODEX_HOME correctly.",
+    "localRecordsNeedLogin": "Sign in to MyContext before enabling local Codex records for this account.",
+    "localRecordsReadFailed": "Local Codex records could not be read. Check directory permissions and try again."
   },
   "process": {
     "spawnFailed": "Could not start the required program",
@@ -69,6 +72,7 @@
     "INTERNAL": "Something unexpected went wrong",
     "CHANNEL_CLIENT_NOT_AUTHORIZED": "The current channel client is not authorized for this enterprise (not a login problem — re-scanning will not help). Switch clients in Settings: the bundled one and your own have different capabilities.",
     "CHANNEL_NOT_READY": "Channel is not ready yet; sign in and try again",
+    "CHANNEL_LOCAL_RECORDS_UNAVAILABLE": "The local Codex records directory is missing or unreadable",
     "CHANNEL_PIPELINE_NO_PORT": "No free local port available to start the graph service"
   }
 }

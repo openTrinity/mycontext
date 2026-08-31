@@ -42,6 +42,8 @@ export const ERROR_CODES = [
   "CHANNEL_UNSUPPORTED",
   /** 渠道的资源还没就绪（如凭据目录尚未随 vault 挂载）。接线漏了，不是用户错误。 */
   "CHANNEL_NOT_READY",
+  /** 用户显式开启的本地记录目录不存在、不可读或读取失败。 */
+  "CHANNEL_LOCAL_RECORDS_UNAVAILABLE",
   /** 找不到可用的 kl 端口（本机端口被占满）。 */
   "CHANNEL_PIPELINE_NO_PORT",
   // 数据面：解析与身份

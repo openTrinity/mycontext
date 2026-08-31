@@ -81,4 +81,9 @@ describe("★★★ 来源作用域：内置不加后缀、自备按路径分流
   it("★ 换渠道 → 前缀跟着换", () => {
     expect(scopedChannelIdFor("feishu", "/opt/x/dws")).toMatch(/^feishu@src-/)
   })
+
+  /** Codex 是本地记录目录，不应被无关的 DWS 二进制路径拆成多个身份。 */
+  it("★ Codex 不继承 DWS 来源后缀", () => {
+    expect(scopedChannelIdFor("codex", "/opt/x/dws")).toBe("codex")
+  })
 })

@@ -175,7 +175,8 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
     selfExternalId === null
       ? null
       : (selfAvatars.data?.find((e) => e.externalId === selfExternalId)?.path ?? null)
-  const scopePrefix = channel.id === "feishu" ? "feishuScope" : "scope"
+  const scopePrefix =
+    channel.id === "feishu" ? "feishuScope" : channel.id === "codex" ? "codexScope" : "scope"
   /**
    * 「本机已有登录态」这句话的 i18n key —— **按渠道分**。
    *
@@ -190,7 +191,9 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
   const machineSessionKey =
     channel.id === "feishu"
       ? "onboarding.machineSessionHintFeishu"
-      : "onboarding.machineSessionHint"
+      : channel.id === "codex"
+        ? "onboarding.machineSessionHintCodex"
+        : "onboarding.machineSessionHint"
 
   /**
    * 渠道侧的昵称（钉钉叫花名）。
@@ -458,11 +461,13 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         */}
         {t(accountConnected ? "actions.reauthorize" : "actions.start")}
       </Button>
-      <Tooltip content={t("actions.useCodeHint")} placement="top">
-        <Button size="md" variant="secondary" disabled={running} onClick={() => begin("device")}>
-          {t("actions.useCode")}
-        </Button>
-      </Tooltip>
+      {(channel.authModes ?? ["loopback", "device"]).includes("device") ? (
+        <Tooltip content={t("actions.useCodeHint")} placement="top">
+          <Button size="md" variant="secondary" disabled={running} onClick={() => begin("device")}>
+            {t("actions.useCode")}
+          </Button>
+        </Tooltip>
+      ) : null}
       {/*
         ── 退出授权 / 切换账号 ──────────────────────────────────
 
@@ -542,7 +547,7 @@ export function ChannelAuthPanel({ channel, variant = "settings" }: ChannelAuthP
         `useFetchSelfAvatar` —— 后者会连账号级头像一起写，那会让"在飞书点
         刷新、切回钉钉看到飞书那张"（已修，见那个 hook 的说明）。
       */}
-      {accountConnected ? (
+      {accountConnected && channel.capabilities?.avatars === true ? (
         <Tooltip content={t("actions.refreshAvatarHint")} placement="top">
           <Button
             size="md"
@@ -1301,7 +1306,11 @@ function SharedCredentialNote({ channelId }: { channelId: string }) {
       <Trans
         ns="channels"
         i18nKey={
-          channelId === "feishu" ? "settings.feishuCredentialNote" : "settings.sharedCredentialNote"
+          channelId === "feishu"
+            ? "settings.feishuCredentialNote"
+            : channelId === "codex"
+              ? "settings.codexCredentialNote"
+              : "settings.sharedCredentialNote"
         }
         values={{
           command: channelId === "feishu" ? "lark-cli auth logout --json" : "dws auth logout",

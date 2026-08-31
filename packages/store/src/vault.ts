@@ -63,6 +63,8 @@ export interface VaultPaths {
    * 关在这个目录里（见 `LarkCli.env()` 里那套 HOME/XDG 重定向）。
    */
   feishuAuthRoot: string
+  /** 本地编码助手记录的按 vault 授权标记；只存同意状态，不复制外部记录。 */
+  codexAuthRoot: string
 }
 
 export class VaultStore {
@@ -244,6 +246,7 @@ export class VaultStore {
        */
       dwsHome: join(root, "channels", "dingtalk", "dws-home"),
       feishuAuthRoot: join(root, "channels", "feishu"),
+      codexAuthRoot: join(root, "channels", "codex"),
     }
   }
 
