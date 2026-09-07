@@ -1546,6 +1546,9 @@ export class DistillService {
       this.options.logger.info("work layer written", {
         included: rendered.included,
         droppedLowConfidence: rendered.droppedLowConfidence,
+        // 未决矛盾被挡掉的条数 —— 与低置信度分开记：那是"等人裁决"，
+        // 不是"证据不够"（见 renderWorkLayer 里 issue #13 的注释）。
+        droppedConflicted: rendered.droppedConflicted,
         // `null` 内容是一个正常状态（还没抽出够格的结论），不是失败 ——
         // 但要能在日志里区分它与"写了 0 条"。
         removed: rendered.content === null,

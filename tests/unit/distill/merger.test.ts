@@ -174,6 +174,28 @@ describe("★ 三态：矛盾（保留双结论并降置信）", () => {
       expect(result.conflict?.existing).toBe("old")
     }
   })
+
+  it("★ 二次矛盾：保留**最初**那一方，不被 value 列覆盖丢", () => {
+    // 第一轮矛盾后的真实行形状：value 列 = candidate 单方的 "formal"，
+    // 原始 existing "casual" 只躺在 conflict_json 里。
+    const alreadyConflicted = row({
+      key: "formality",
+      valueJson: JSON.stringify("formal"),
+      confidence: 0.6,
+      conflictJson: JSON.stringify({ existing: "casual", candidate: "formal" }),
+    })
+    const result = mergeFacet(
+      alreadyConflicted,
+      candidate({ key: "formality", value: "文艺腔", confidence: 0.7 }),
+    )
+    if (result.action === "update") {
+      expect(result.relation).toBe("conflict")
+      // ★ 关键：existing 仍是最初的 "casual"，而不是 value 列的 "formal" ——
+      // 否则审阅页上矛盾的"原始一方"就被静默覆盖丢了。
+      expect(result.conflict?.existing).toBe("casual")
+      expect(result.conflict?.candidate).toBe("文艺腔")
+    }
+  })
 })
 
 describe("关系判定（结构化比较，不让 LLM 判断）", () => {

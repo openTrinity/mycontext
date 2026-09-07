@@ -186,12 +186,22 @@ export function mergeFacet(existing: FacetRow | null, candidate: FacetCandidate)
    * 确实表现不同（或者我们的抽取粒度太粗）。自动挑一个会丢掉这个信息，
    * 而降置信 + 展示双方让用户能一眼看出"这里需要人来判断"。
    */
+  /**
+   * 二次矛盾时优先保留**最初**那一方：`conflict.existing` 取自上一轮
+   * `conflict_json` 里的 existing（那才是矛盾的"原始方"），而不是当前 value
+   * 列 —— value 列在上一次矛盾后存的是 candidate 单方的值，拿它当 existing
+   * 会把原始那一方覆盖丢（审阅页就只剩"新对更新"）。首条矛盾时
+   * `conflict_json` 为 null，退到当前 value 列（它当时就是那一方）。
+   */
+  const priorExisting = existing.conflictJson
+    ? ((JSON.parse(existing.conflictJson) as { existing?: unknown }).existing ?? existingValue)
+    : existingValue
   return {
     action: "update",
     relation,
     value: candidate.value,
     confidence: Math.max(0.2, Math.min(existing.confidence, candidate.confidence) - 0.15),
     evidence,
-    conflict: { existing: existingValue, candidate: candidate.value },
+    conflict: { existing: priorExisting, candidate: candidate.value },
   }
 }
