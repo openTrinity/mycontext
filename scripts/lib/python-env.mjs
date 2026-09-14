@@ -570,7 +570,12 @@ export function relocateVenv(repoRoot) {
    * 走到这里说明布局非常规 —— 典型是 `bin/python3` 那个相对软链被解引用成了
    * 实体文件（`cp -Rc` 会这样，实测踩过），那时 CPython 没法自己找到解释器。
    */
-  const interpreterBin = join(pythonCacheDir(repoRoot), "python", "bin")
+  // Windows 版 python-build-standalone 解压器在 `python\python.exe`（无 bin）；
+  // 写 `python\bin` 会让 venv 启动器的 trampoline 指向不存在的路径（win32 实测）。
+  const interpreterBin =
+    process.platform === "win32"
+      ? join(pythonCacheDir(repoRoot), "python")
+      : join(pythonCacheDir(repoRoot), "python", "bin")
   const desired = `home = ${interpreterBin}`
   if (homeLine.test(current)) {
     const already = current.match(homeLine)?.[0]
