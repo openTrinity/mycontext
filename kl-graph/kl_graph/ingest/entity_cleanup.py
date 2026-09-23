@@ -137,6 +137,8 @@ async def review_cleanup_candidates(
                 temperature=0,
                 max_tokens=400,
                 timeout=connection.timeout,
+                # ★ StepFun 推理模型：低思考档，避免小预算被思考烧空导致 content 为空。
+                extra_body={"reasoning_effort": "low"},
             )
             content = (response.choices[0].message.content or "{}").strip()
             if content.startswith("```"):
